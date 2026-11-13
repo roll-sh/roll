@@ -367,7 +367,7 @@ export function EnvView({ env }: { env: Environment }) {
                     onWrite={write}
                     onHistory={() => setDrawer({ kind: "versions", key: s.key, type: s.type })}
                     onShare={() => setSharing({ kind: "secret", env: env.slug, key: s.key, path })}
-                    onSource={(src) => (src.kind === "import" ? setImportsOpen({ highlight: { environment: src.environment, path: src.path } }) : go({ env: src.environment, path: p, key: s.key }))}
+                    onSource={(src) => (src.kind === "import" ? setImportsOpen({ highlight: { ...(src.project && { project: src.project }), environment: src.environment, path: src.path } }) : go({ env: src.environment, path: p, key: s.key }))}
                   />
                 ))}
                 {list.data && shown.length === 0 && secrets.length > 0 && <p className="px-2 py-6 text-center text-[12px] text-subtle">{unread && !query ? "Every key here was read in the last 90 days." : `Nothing matches "${query}".`}</p>}
@@ -557,7 +557,7 @@ function SecretRow({
             title={onSelect ? undefined : "Read-only here: it comes from elsewhere"}
             className={`shrink-0 accent-[var(--accent)] transition-opacity ${selected ? "" : "opacity-40 group-hover/row:opacity-100 focus-visible:opacity-100"} disabled:opacity-0`}
           />
-          <span className={`truncate font-mono text-[12px] ${own ? "text-fg" : "text-muted"}`} title={s.key}>
+          <span className={`max-w-[70%] shrink-0 truncate font-mono text-[12px] ${own ? "text-fg" : "text-muted"}`} title={s.key}>
             {s.key}
           </span>
           {personal && <PersonalMark title="Your personal value: only you see it" />}

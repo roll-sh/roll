@@ -1,4 +1,5 @@
 import { AtSign, Braces, Check, Copy, CornerDownRight, Eye, EyeOff, Import as ImportIcon, Link2, MessageSquare, User } from "lucide-react";
+import { useWorkspace } from "@/lib/workspace-store";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { Cell, Link, Problem, Secret } from "@/lib/secrets-api";
 import { KIND_ICON } from "../workspace/kind";
@@ -151,22 +152,24 @@ export function LinkChip({ link, name, compact = false }: { link: Link; name?: s
 /** Where a key comes from when it isn't the folder's own. */
 /** Where an inherited key comes from; with `onOpen`, a button to that import (or the base). */
 export function SourceMark({ source, onOpen }: { source: Secret["source"] | Cell["source"]; onOpen?: () => void }) {
+  const ws = useWorkspace();
   const kind = typeof source === "string" ? source : source.kind;
   if (kind === "own") return null;
-  const from = typeof source === "string" ? "" : source.kind === "import" ? `${source.environment}${source.path === "/" ? "" : source.path}` : source.kind === "base" ? source.environment : "";
+  const other = typeof source !== "string" && source.kind === "import" && source.project ? `${ws.projects.find((p) => p.id === source.project)?.name ?? source.project} · ` : "";
+  const from = typeof source === "string" ? "" : source.kind === "import" ? `${other}${source.environment}${source.path === "/" ? "" : source.path}` : source.kind === "base" ? source.environment : "";
   const title = kind === "import" ? `Imported${from ? ` from ${from}` : ""}: read-only here` : `Inherited from the base environment${from ? ` ${from}` : ""}`;
   const body = (
     <>
-      {kind === "import" ? <ImportIcon className="size-3" /> : <CornerDownRight className="size-3" />}
-      {from || kind}
+      {kind === "import" ? <ImportIcon className="size-3 shrink-0" /> : <CornerDownRight className="size-3 shrink-0" />}
+      <span className="truncate">{from || kind}</span>
     </>
   );
   return onOpen ? (
-    <button type="button" onClick={onOpen} title={title} aria-label={kind === "import" ? `Show the import from ${from}` : `Open the base, ${from}`} className="inline-flex shrink-0 items-center gap-1 rounded text-[11px] text-subtle transition-colors hover:text-accent hover:underline">
+    <button type="button" onClick={onOpen} title={title} aria-label={kind === "import" ? `Show the import from ${from}` : `Open the base, ${from}`} className="inline-flex min-w-0 items-center gap-1 rounded text-[11px] text-subtle transition-colors hover:text-accent hover:underline">
       {body}
     </button>
   ) : (
-    <span title={title} className="inline-flex items-center gap-1 text-[11px] text-subtle">
+    <span title={title} className="inline-flex min-w-0 items-center gap-1 text-[11px] text-subtle">
       {body}
     </span>
   );

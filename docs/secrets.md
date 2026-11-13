@@ -248,6 +248,38 @@ imports in the order listed, and then the base environment (for an ephemeral env
 are followed up to 8 deep, and cycles are ignored and reported. Imported keys are marked with where
 they come from.
 
+#### Sharing across projects
+
+An organisation-wide value (an error tracker's DSN, a shared API key) lives in one project and is
+shared with the others, with both sides' consent:
+
+1. The owning project's admin **exports** a folder to a project: `PUT …/environments/{env}/exports?path=`
+   `[{project}]` (admin on that folder; audited `exports.set`). `roll secrets exports add <project>`.
+2. That project's admin **imports** it like any folder, naming the project:
+   `{"project": "<id>", "environment": "production", "path": "/shared"}` (admin on the importing
+   folder, since every reader of it will read the shared values; refused with 403 unless the folder
+   is shared with this project). `GET …/shared` lists what other projects share with this one,
+   ready to import. `roll secrets imports add production:/shared --from-project <id>`.
+
+Readers of the importing folder then see the shared values as part of their project, a token
+scoped to it too: the export stands in for access to the other project, the one exception to
+"nothing reaches an environment its caller can't read", made explicit by the other project's admin.
+Values stay encrypted with their own project's data key and are opened with it. The export is
+checked on every read, so removing it cuts every import of it off at once. Changes to a shared
+value move the importing folder's digest (`roll run --watch` and syncs follow it).
+
+What crosses is stored values only: plain values and managed credentials, never personal values,
+the other folder's own imports, a value with a reference, or a live or dynamic link (those would
+resolve against the other project's environments and resources).
+
+In the dashboard the imports panel has "From another project" and, under it, "Shared with other
+projects" for the folder's own exports; an imported key names the project it comes from.
+
+A protected environment's shared folder never reaches an untrusted consumer (a check, sandbox or
+preview), as its own never does. Promotion copies only the folder's own keys (a shared one is the
+target's to import, or not). A shared value's fingerprint is its own project's, so compare and the
+grid show it apart from a copy of the same value here, and its cell has no fingerprint here.
+
 ### Required keys
 
 A project can list keys every standard environment must define, each in a folder
@@ -477,6 +509,12 @@ the change`. The blocker names keys and environments, never the value or the lin
   `?history=N` (at most 1,000) it also reads what each of the last N first-parent commits added
   and lists the commits that added a value, `{key, environment, folder, changeset, path}`: a value removed
   since is still in the history anyone with the repo can read, so it's out and needs rotating.
+- **Bounds.** A scan reads at most 256 MiB (files for the head, patches for history) and keeps at
+  most 32 MiB of candidates, then says `truncated`; two scans run at once per server. It names
+  keys and environments of the projects with the repo on their canvas to the repo's managers, as
+  a blocker does on a change. A project's check also covers the values other projects share with
+  it, each fingerprinted with its own project's key and named by that project
+  (`platform/production`).
 - **What it tells.** A blocker says a value is a secret's, so a writer of the repo could confirm a
   guess at a value they may not reveal by pushing it. That's accepted: they confirm a guess they
   already hold (never learn a value), only credential-like guesses count, every guess is a pushed
@@ -716,14 +754,21 @@ long-lived sits in a CI system's settings, and a leaked log or fork can't reuse 
 minutes.
 
 - **An identity** (`…/identities`, admin) names an `issuer` (the token's `iss`), an `audience`
-  (`aud`, default `roll` from the CLI), a `subject` (`sub`, or a pattern of it where `*` stands for
+  (`aud`, default this server's URL from the CLI and the dashboard, so a token minted for one roll
+  server isn't good at another), a `subject` (`sub`, or a pattern of it where `*` stands for
   any run of characters), up to ten other `claims` that must match (`ref`, `environment`,
   `repository_owner_id`…), and the scope of what a login gets: environments, folders and actions
   like a token's (never more than its creator has) for `ttl_minutes`, 5–60 (default 15).
-- **Shared issuers.** GitHub Actions (`https://token.actions.githubusercontent.com`) and GitLab
-  (`https://gitlab.com`) sign for every repo they host, so an identity of theirs must name one repo
-  in its subject (`repo:acme/web:…`, `project_path:group/project:…`): `repo:*` would let anyone's
-  workflow in. Narrow further with claims (`ref=refs/heads/main`, or GitHub's `environment`).
+- **Shared issuers.** GitHub Actions, GitLab.com, Terraform Cloud, Buildkite and Google sign for
+  every tenant they host, so an identity of theirs must name one tenant literally in its subject
+  (`repo:acme/web:…`, `project_path:group/project:…`, `organization:acme:…`, a Google service
+  account's numeric id exactly): `repo:*` would let anyone's job in. Narrow further with claims
+  (`ref=refs/heads/main`, or GitHub's `environment`). A token that lives longer than a day is
+  refused. Key fetches are one at a time per issuer, and a failed one isn't retried for 30 s.
+  Logins are capped at 120 a minute per identity and 240 per client address (429 `rate_limited`),
+  counted per node before any work.
+- **Who makes them.** Identities are made by people (or the operator), never by a token or a
+  login; a login can't create tokens either, so nothing it makes outlives it.
 - **Login.** `POST /v1/secrets/login {identity, token}` (public: the token is the credential)
   checks the signature against the issuer's keys (RS256 or ES256; its discovery document's
   `jwks_uri`, fetched over the guarded client: HTTPS, public addresses, no redirects, bounded reads;
@@ -737,7 +782,7 @@ minutes.
 - **The CLI.** With `ROLL_IDENTITY=idn_…` and no `ROLL_TOKEN`, `roll secrets …` and `roll run` log
   in by themselves, with the token from `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes
   projected service account token) or GitHub Actions' own endpoint (`permissions: id-token: write`;
-  audience `ROLL_OIDC_AUDIENCE`, default `roll`):
+  audience `ROLL_OIDC_AUDIENCE`, default the server's URL):
 
   ```sh
   roll secrets identities add deploy --github acme/web --claim ref=refs/heads/main --for-env production
@@ -824,6 +869,9 @@ isn't in the workspace is 404.
 | `DELETE /environments/{env}/folders?path=` | | `{change: Change \| null}` |
 | `GET /environments/{env}/imports?path=` | | `Import[]` |
 | `PUT /environments/{env}/imports?path=` | `Import[]` | `Import[]` |
+| `GET /environments/{env}/exports?path=` | | `Export[]` |
+| `GET /shared` | | `Import[]`: the folders other projects share with this one |
+| `PUT /environments/{env}/exports?path=` | `{project}[]` | `Export[]` (admin) |
 | `GET /environments/{env}/secrets?path=` | | `Secret[]` (own, imported, inherited; no values) |
 | `GET /environments/{env}/secrets/{key}?path=&type=` | | `Secret` |
 | `PUT /environments/{env}/secrets/{key}?path=` | `SetSecret` | `Written` |
@@ -900,7 +948,8 @@ type NewEnvironment = {
   expires_at?: number; ttl_minutes?: number; secrets?: Op[]; // ephemeral: created in one call with its overrides
 };
 type Folder = { path: string; name: string; secrets: number; folders: number };
-type Import = { environment: string; path: string };
+type Import = { project?: string; environment: string; path: string }; // project: another project's shared folder
+type Export = { project: string; created_at: number; created_by: string };
 type Link = { kind: string; ref: string; field: string; mode: "live" | "managed" | "dynamic"; options?: Record<string, unknown> };
 type Secret = {
   id: string; key: string; path: string; type: "shared" | "personal"; version: number;
@@ -1006,7 +1055,8 @@ checks and sandboxes, leaked secrets don't land, required keys, one-time sharing
 sealed webhooks, deploy notifications, Vercel, Cloudflare Workers, AWS Parameter Store), audit
 sinks, purge and retention, insights, the dashboard's Secrets surface, untrusted consumers for
 previews, workload identities (OIDC logins for CI), scanning a repo's default branch and history
-for stored values, typed keys, and the fixes from two security reviews.
+for stored values, typed keys, sharing across projects, and the fixes from a third security review (of identities, sharing,
+typed keys and scans) and a phone-width pass from two security reviews.
 Reviewed on 2026-11-13 against Infisical, Doppler, Vault, Vercel and 1Password Developer, and
 against the apps, previews, MCP and search branches (previews resolves untrusted; apps refuses
 dynamic links for services and uses the digest for `needs_deploy`). Ranked:
@@ -1023,9 +1073,8 @@ dynamic links for services and uses the digest for `needs_deploy`). Ranked:
 3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed `reveal` on a protected environment, an
    approver grants it for minutes (Infisical's access requests), audited; built on the change
    request approvals.
-4. **Shared values across projects**: an import from another project's environment and folder
-   (`{project, environment, path}`), allowed only where the caller may read it there and audited
-   on both sides, so an organisation-wide value (an error tracker's DSN, a shared API key) lives
-   once; cycles across projects are caught like imports'; the grid marks where a value comes from.
+4. **Kubernetes as a sync target**: push an environment into a cluster's Secret (its API server and
+   a service account token kept sealed, like the other platforms' credentials), so workloads that
+   don't run `roll run` read roll secrets without an operator to install.
 5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
    so the roll-access swap is ready the day #19 lands.

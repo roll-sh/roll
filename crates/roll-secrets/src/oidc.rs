@@ -29,6 +29,7 @@ const TTL: Duration = Duration::from_secs(3600);
 const STALE_OK: Duration = Duration::from_secs(86_400);
 const REFETCH_MIN: Duration = Duration::from_secs(30);
 const LEEWAY_S: i64 = 60;
+const LIFETIME_MAX_S: i64 = 86_400;
 const MAX_CACHED: usize = 1000;
 
 /// A public key from a JWKS.
@@ -171,6 +172,11 @@ struct Cached {
 #[derive(Default)]
 pub(crate) struct Keys {
     cache: Mutex<HashMap<String, Cached>>,
+    /// One fetch per issuer at a time: logins that need it wait for its answer.
+    fetching: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// When an issuer's last fetch failed: none is tried again for [`REFETCH_MIN`], so a login
+    /// flood while it's down costs no fetches.
+    failed: Mutex<HashMap<String, Instant>>,
 }
 
 impl Keys {
@@ -191,6 +197,16 @@ impl Keys {
         if let Some(c) = self.cache.lock().unwrap().get(issuer).filter(|c| fresh(c)) {
             return Ok(c.keys.clone());
         }
+        let stale = || self.cache.lock().unwrap().get(issuer).filter(|c| c.fetched.elapsed() < STALE_OK).map(|c| c.keys.clone());
+        let lock = self.fetching.lock().unwrap().entry(issuer.to_string()).or_default().clone();
+        let _one = lock.lock().unwrap();
+        // Someone else may just have fetched, or failed to.
+        if let Some(c) = self.cache.lock().unwrap().get(issuer).filter(|c| c.fetched.elapsed() < REFETCH_MIN) {
+            return Ok(c.keys.clone());
+        }
+        if self.failed.lock().unwrap().get(issuer).is_some_and(|at| at.elapsed() < REFETCH_MIN) {
+            return stale().ok_or_else(|| Error::Link(format!("{issuer}'s keys are unavailable just now: try again shortly")));
+        }
         match self.download(get, issuer) {
             Ok(keys) => {
                 let keys = Arc::new(keys);
@@ -199,15 +215,24 @@ impl Keys {
                     cache.clear();
                 }
                 cache.insert(issuer.to_string(), Cached { keys: keys.clone(), fetched: Instant::now() });
+                self.failed.lock().unwrap().remove(issuer);
                 Ok(keys)
             }
-            Err(e) => match self.cache.lock().unwrap().get(issuer).filter(|c| c.fetched.elapsed() < STALE_OK) {
-                Some(c) => {
-                    tracing::warn!(issuer, "refreshing an OIDC issuer's keys failed; using the cached ones: {e}");
-                    Ok(c.keys.clone())
+            Err(e) => {
+                let mut failed = self.failed.lock().unwrap();
+                if failed.len() >= MAX_CACHED {
+                    failed.clear();
                 }
-                None => Err(e),
-            },
+                failed.insert(issuer.to_string(), Instant::now());
+                drop(failed);
+                match stale() {
+                    Some(k) => {
+                        tracing::warn!(issuer, "refreshing an OIDC issuer's keys failed; using the cached ones: {e}");
+                        Ok(k)
+                    }
+                    None => Err(e),
+                }
+            }
         }
     }
 
@@ -233,6 +258,10 @@ impl Keys {
         if now_s >= exp + LEEWAY_S {
             return Err(invalid("the identity token has expired"));
         }
+        // A workload's token is short-lived; one good for days is a credential in its own right.
+        if exp - now_s > LIFETIME_MAX_S {
+            return Err(invalid("the identity token lives longer than a day"));
+        }
         if jwt.time("nbf")?.is_some_and(|nbf| now_s + LEEWAY_S < nbf) {
             return Err(invalid("the identity token isn't valid yet"));
         }
@@ -240,6 +269,31 @@ impl Keys {
             return Err(invalid(format!("the identity token isn't for audience {audience}")));
         }
         Ok(())
+    }
+}
+
+/// Attempts per key in a sliding minute (in memory, per node: a cap on work, not an audit).
+#[derive(Default)]
+pub(crate) struct Window {
+    hits: Mutex<HashMap<String, (Instant, u32)>>,
+}
+
+impl Window {
+    /// Count an attempt for `key`; false past `max` in the current minute.
+    pub fn allow(&self, key: &str, max: u32) -> bool {
+        let mut hits = self.hits.lock().unwrap();
+        if hits.len() >= 10_000 {
+            hits.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(60));
+            if hits.len() >= 10_000 {
+                hits.clear();
+            }
+        }
+        let e = hits.entry(key.to_string()).or_insert((Instant::now(), 0));
+        if e.0.elapsed() >= Duration::from_secs(60) {
+            *e = (Instant::now(), 0);
+        }
+        e.1 += 1;
+        e.1 <= max
     }
 }
 
@@ -269,7 +323,14 @@ pub(crate) fn wildcard(pattern: &str, text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::wildcard;
+    use super::{Window, wildcard};
+
+    #[test]
+    fn a_window_counts_each_key_apart() {
+        let w = Window::default();
+        assert!(w.allow("identity:a", 2) && w.allow("identity:a", 2) && !w.allow("identity:a", 2));
+        assert!(w.allow("identity:b", 2), "another key has its own count");
+    }
 
     #[test]
     fn wildcards_match_any_run_and_nothing_else() {

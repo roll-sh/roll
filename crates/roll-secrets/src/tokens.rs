@@ -182,6 +182,10 @@ impl Secrets {
     /// A new token; the second value is the token itself, shown once.
     pub fn create_token(&self, project: &str, n: NewToken, caller: &Caller) -> Result<(Token, String)> {
         caller.need(Action::Admin, &Scope::project(project))?;
+        // A login lasts minutes: what it makes mustn't outlive it.
+        if caller.principal.starts_with("identity:") {
+            return Err(Error::Forbidden("a workload identity's login can't create tokens".into()));
+        }
         let name = n.name.trim().to_string();
         if name.is_empty() || name.chars().count() > 64 {
             return Err(Error::BadRequest("a token's name is 1–64 characters".into()));

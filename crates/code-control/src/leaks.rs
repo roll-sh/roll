@@ -30,6 +30,54 @@ const SCAN_CANDIDATES: usize = 200_000;
 const SCAN_BATCH: usize = 20_000;
 /// Places reported per value.
 const SCAN_PLACES: usize = 5;
+/// The most a scan reads (file bytes for the head, patch bytes for history) and keeps as
+/// candidates, whatever a repo holds.
+const SCAN_BYTES: usize = 256 << 20;
+const SCAN_CANDIDATE_BYTES: usize = 32 << 20;
+/// Scans running at once on a server: each reads a lot.
+static SCANS: std::sync::LazyLock<tokio::sync::Semaphore> = std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(2));
+
+/// Candidates once each, with the first few places each is at, within the byte budgets.
+struct Candidates<P> {
+    index: HashMap<String, usize>,
+    places: Vec<Vec<P>>,
+    read: usize,
+    kept: usize,
+}
+
+impl<P> Candidates<P> {
+    fn new() -> Self {
+        Candidates { index: HashMap::new(), places: Vec::new(), read: 0, kept: 0 }
+    }
+
+    /// Note `bytes` read; false once a budget is spent.
+    fn read(&mut self, bytes: usize) -> bool {
+        self.read += bytes;
+        self.read <= SCAN_BYTES && self.kept <= SCAN_CANDIDATE_BYTES && self.index.len() < SCAN_CANDIDATES
+    }
+
+    fn add(&mut self, c: String, at: impl FnOnce() -> P) {
+        let n = self.index.len();
+        let len = c.len();
+        let i = *self.index.entry(c).or_insert_with(|| n);
+        if i == n {
+            self.kept += len;
+            self.places.push(Vec::new());
+        }
+        if self.places[i].len() < SCAN_PLACES {
+            self.places[i].push(at());
+        }
+    }
+
+    /// The candidates in index order (moved, not copied).
+    fn candidates(&mut self) -> Vec<String> {
+        let mut out = vec![String::new(); self.index.len()];
+        for (c, i) in self.index.drain() {
+            out[i] = c;
+        }
+        out
+    }
+}
 /// The most first-parent commits a history scan walks.
 pub const SCAN_HISTORY_MAX: usize = 1000;
 
@@ -129,29 +177,36 @@ impl Code {
         let secrets = self.secret_env.get().cloned().ok_or_else(|| crate::Error::Invalid("roll secrets isn't on this server".into()))?;
         let Some(head) = self.head(r)? else { return Ok(LeakScan::default()) };
         let mut scan = LeakScan { head: Some(head.to_string()), ..Default::default() };
-        let mut files = Vec::new();
-        let mut dirs = vec![String::new()];
-        'walk: while let Some(d) = dirs.pop() {
-            for e in self.store.list_tree(&r.id, &head, &d)?.unwrap_or_default() {
-                match e.kind {
-                    EntryKind::Dir => dirs.push(e.path),
-                    EntryKind::File if files.len() >= SCAN_FILES => {
-                        scan.truncated = true;
-                        break 'walk;
+        let _turn = SCANS.acquire().await.map_err(|e| crate::Error::Invalid(e.to_string()))?;
+        // The walk is the store's synchronous reads: off the async threads.
+        let (store, repo, cs) = (self.store.clone(), r.id.clone(), head);
+        let (files, truncated) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let mut files = Vec::new();
+            let mut dirs = vec![String::new()];
+            while let Some(d) = dirs.pop() {
+                for e in store.list_tree(&repo, &cs, &d)?.unwrap_or_default() {
+                    match e.kind {
+                        EntryKind::Dir => dirs.push(e.path),
+                        EntryKind::File if files.len() >= SCAN_FILES => return Ok((files, true)),
+                        EntryKind::File => files.push(e),
+                        _ => {}
                     }
-                    EntryKind::File => files.push(e),
-                    _ => {}
                 }
             }
-        }
-        // Each candidate once, with the first few places it's at.
-        let mut index: HashMap<String, usize> = HashMap::new();
-        let mut places: Vec<Vec<(String, usize)>> = Vec::new();
-        let mut cands: Vec<String> = Vec::new();
+            Ok((files, false))
+        })
+        .await
+        .map_err(|e| crate::Error::Invalid(e.to_string()))??;
+        scan.truncated |= truncated;
+        let mut acc: Candidates<(String, usize)> = Candidates::new();
         'files: for f in &files {
             if f.size.unwrap_or(u64::MAX) > MAX_FILE {
                 scan.skipped.push(format!("{}: over 1 MiB", f.path));
                 continue;
+            }
+            if !acc.read(f.size.unwrap_or(0) as usize) {
+                scan.truncated = true;
+                break;
             }
             let Some(data) = self.store.get_blob(&r.id, &f.oid).await? else { continue };
             if data.contains(&0) {
@@ -162,24 +217,18 @@ impl Code {
                 let mut found = HashSet::new();
                 candidates(line, &mut found);
                 for c in found {
-                    let i = *index.entry(c.clone()).or_insert_with(|| {
-                        cands.push(c);
-                        places.push(Vec::new());
-                        cands.len() - 1
-                    });
-                    if places[i].len() < SCAN_PLACES {
-                        places[i].push((f.path.clone(), n + 1));
-                    }
+                    acc.add(c, || (f.path.clone(), n + 1));
                 }
-                if cands.len() >= SCAN_CANDIDATES {
+                if !acc.read(0) {
                     scan.truncated = true;
                     break 'files;
                 }
             }
         }
+        let cands = acc.candidates();
         for (b, chunk) in cands.chunks(SCAN_BATCH).enumerate() {
             for (i, key, environment, folder) in secrets.leaks(&r.full_name(), chunk.to_vec()).await? {
-                for (path, line) in places.get(b * SCAN_BATCH + i).into_iter().flatten() {
+                for (path, line) in acc.places.get(b * SCAN_BATCH + i).into_iter().flatten() {
                     scan.found.push(Found { key: key.clone(), environment: environment.clone(), folder: folder.clone(), path: path.clone(), line: *line });
                 }
             }
@@ -195,45 +244,46 @@ impl Code {
     /// What `n` first-parent commits from `head` added, each matched like a change's lines.
     async fn scan_history(&self, r: &RepoRow, head: &ChangesetId, n: usize, scan: &mut LeakScan) -> Result<()> {
         let secrets = self.secret_env.get().cloned().ok_or_else(|| crate::Error::Invalid("roll secrets isn't on this server".into()))?;
-        let mut commits = Vec::new();
-        let mut cursor = None;
-        while commits.len() < n {
-            let q = code_store::LogQuery { path: None, limit: (n - commits.len()).min(1000), cursor };
-            let page = self.store.log(&r.id, head, &q)?;
-            let Some(last) = page.last() else { break };
-            cursor = Some(last.id);
-            commits.extend(page.into_iter().map(|c| (c.id, c.short)));
-        }
-        let mut index: HashMap<String, usize> = HashMap::new();
-        let mut places: Vec<Vec<(String, String)>> = Vec::new();
-        let mut cands: Vec<String> = Vec::new();
-        'commits: for (id, short) in &commits {
+        // The log and each commit's file list are the store's synchronous reads: off the async threads.
+        let (store, repo, from) = (self.store.clone(), r.id.clone(), *head);
+        let commits = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, Vec<code_store::FileDiff>)>> {
+            let mut out = Vec::new();
+            let mut cursor = None;
+            while out.len() < n {
+                let q = code_store::LogQuery { path: None, limit: (n - out.len()).min(1000), cursor };
+                let page = store.log(&repo, &from, &q)?;
+                let Some(last) = page.last() else { break };
+                cursor = Some(last.id);
+                for c in page {
+                    out.push((c.short, store.diff(&repo, &c.id)?));
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| crate::Error::Invalid(e.to_string()))??;
+        let mut acc: Candidates<(String, String)> = Candidates::new();
+        'commits: for (short, diffs) in &commits {
             scan.commits += 1;
-            for d in self.store.diff(&r.id, id)? {
-                let Some(patch) = self.added_patch(r, &d).await? else { continue };
+            for d in diffs {
+                let Some(patch) = self.added_patch(r, d).await? else { continue };
+                if !acc.read(patch.len()) {
+                    scan.truncated = true;
+                    break 'commits;
+                }
                 let mut found = HashSet::new();
                 for line in added_lines(&patch) {
                     candidates(line, &mut found);
                 }
                 for c in found {
-                    let i = *index.entry(c.clone()).or_insert_with(|| {
-                        cands.push(c);
-                        places.push(Vec::new());
-                        cands.len() - 1
-                    });
-                    if places[i].len() < SCAN_PLACES {
-                        places[i].push((short.clone(), d.path.as_str().to_string()));
-                    }
-                }
-                if cands.len() >= SCAN_CANDIDATES {
-                    scan.truncated = true;
-                    break 'commits;
+                    acc.add(c, || (short.clone(), d.path.as_str().to_string()));
                 }
             }
         }
+        let cands = acc.candidates();
         for (b, chunk) in cands.chunks(SCAN_BATCH).enumerate() {
             for (i, key, environment, folder) in secrets.leaks(&r.full_name(), chunk.to_vec()).await? {
-                for (changeset, path) in places.get(b * SCAN_BATCH + i).into_iter().flatten() {
+                for (changeset, path) in acc.places.get(b * SCAN_BATCH + i).into_iter().flatten() {
                     scan.history.push(InHistory { key: key.clone(), environment: environment.clone(), folder: folder.clone(), changeset: changeset.clone(), path: path.clone() });
                 }
             }

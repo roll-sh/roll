@@ -739,7 +739,8 @@ impl Secrets {
         let mut items = vec![];
         let shared: std::collections::HashMap<&str, &crate::read::Entry> = target.iter().filter(|t| t.row.owner.is_empty()).map(|t| (t.row.key.as_str(), t)).collect();
         let wanted: Option<BTreeSet<&str>> = keys.map(|k| k.iter().map(String::as_str).collect());
-        for e in source.iter().filter(|e| e.row.owner.is_empty()) {
+        // A folder another project shares isn't this project's to copy: the target imports it too, or not.
+        for e in source.iter().filter(|e| e.row.owner.is_empty() && e.row.project_id == project) {
             if wanted.as_ref().is_some_and(|w| !w.contains(e.row.key.as_str())) {
                 continue;
             }

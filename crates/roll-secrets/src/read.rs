@@ -20,6 +20,8 @@ pub const DEPTH: usize = 8;
 #[derive(Clone, Debug)]
 pub(crate) struct Row {
     pub id: String,
+    /// Its project: the one asked about, or another that shares the folder (exports.rs).
+    pub project_id: String,
     pub env_id: String,
     pub path: String,
     pub key: String,
@@ -47,7 +49,7 @@ impl Row {
     }
 }
 
-const ROW_COLUMNS: &str = "id, env_id, path, key, owner, version, value, fp, comment, tags, link, updated_at, updated_by, refs";
+const ROW_COLUMNS: &str = "id, env_id, path, key, owner, version, value, fp, comment, tags, link, updated_at, updated_by, refs, project_id";
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     Ok(Row {
@@ -65,6 +67,7 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
         updated_at: r.get(11)?,
         updated_by: r.get(12)?,
         refs: r.get::<_, Option<String>>(13)?.and_then(|s| serde_json::from_str(&s).ok()),
+        project_id: r.get(14)?,
     })
 }
 
@@ -72,7 +75,13 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Source {
     Own,
-    Import { environment: String, path: String },
+    Import {
+        environment: String,
+        path: String,
+        /// Another project that shares the folder.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
     Base { environment: String },
 }
 
@@ -180,7 +189,8 @@ type Through<'a> = &'a dyn Fn(&str, &str) -> bool;
 /// The effective entries of `env`/`path` for `principal` (`None`: shared values only). Imports
 /// and the base count only where `through(environment, path)` allows: a caller never reads an
 /// environment through another that it couldn't read itself.
-fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, depth: usize, seen: &mut HashSet<(String, String)>) -> Result<Vec<Entry>> {
+#[allow(clippy::too_many_arguments)]
+fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, untrusted: bool, depth: usize, seen: &mut HashSet<(String, String)>) -> Result<Vec<Entry>> {
     if depth > DEPTH || !seen.insert((env.id.clone(), path.to_string())) {
         return Ok(vec![]);
     }
@@ -200,14 +210,34 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
     }
     let mut have: HashSet<String> = out.iter().map(|e| e.row.key.clone()).collect();
     for imp in envs::imports_of(c, &env.id, path)? {
-        let Ok(from) = envs::by_slug(c, &env.project_id, &imp.environment) else { continue };
-        if !through(&from.slug, &imp.path) {
-            continue;
-        }
-        for mut e in view_in(c, &from, &imp.path, principal, through, depth + 1, seen)? {
+        let entries = match &imp.project {
+            None => {
+                let Ok(from) = envs::by_slug(c, &env.project_id, &imp.environment) else { continue };
+                if !through(&from.slug, &imp.path) {
+                    continue;
+                }
+                view_in(c, &from, &imp.path, principal, through, untrusted, depth + 1, seen)?
+            }
+            // Another project's folder, while it's shared with this one: its own stored values
+            // (no personal ones, nothing it imports, no reference or live link, which would
+            // resolve against that project). The share stands in for the caller's access there.
+            Some(p) => {
+                let Ok(from) = envs::by_slug(c, p, &imp.environment) else { continue };
+                // An untrusted consumer never reads a protected environment, shared or not.
+                if (untrusted && from.protected) || !crate::exports::exported(c, &from.id, &imp.path, &env.project_id)? {
+                    continue;
+                }
+                c.query(&format!("SELECT {ROW_COLUMNS} FROM secrets WHERE env_id = ? AND path = ? AND owner = '' ORDER BY key"), [&from.id, &imp.path], row)?
+                    .into_iter()
+                    .filter(|r| r.refs.as_ref().is_some_and(|x| x.is_empty()) && r.link.as_ref().is_none_or(|l| l.mode == Mode::Managed))
+                    .map(|r| Entry { row: r, env: from.slug.clone(), source: Source::Own, overridden: false })
+                    .collect()
+            }
+        };
+        for mut e in entries {
             if have.insert(e.row.key.clone()) {
                 if e.source == Source::Own {
-                    e.source = Source::Import { environment: imp.environment.clone(), path: imp.path.clone() };
+                    e.source = Source::Import { environment: imp.environment.clone(), path: imp.path.clone(), project: imp.project.clone() };
                 }
                 out.push(e);
             }
@@ -215,7 +245,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
     }
     if let Some(base) = &env.base_id {
         let base = envs::by_id(c, base)?;
-        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, depth + 1, seen)? } else { vec![] };
+        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, untrusted, depth + 1, seen)? } else { vec![] };
         for mut e in inherited {
             if have.insert(e.row.key.clone()) {
                 if e.source == Source::Own {
@@ -237,7 +267,7 @@ impl Secrets {
         let through = |e: &str, p: &str| caller.allows(action, &Scope::at(project, e, p));
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            view_in(c, &env, path, principal, &through, 0, &mut HashSet::new())
+            view_in(c, &env, path, principal, &through, caller.grants.untrusted(), 0, &mut HashSet::new())
         })
     }
 
@@ -470,7 +500,7 @@ impl Secrets {
             let mut folders = BTreeSet::new();
             for e in &envs {
                 let through = |x: &str, p: &str| caller.allows(Action::Read, &Scope::at(project, x, p));
-                views.push(view_in(c, e, &path, principal, &through, 0, &mut HashSet::new())?);
+                views.push(view_in(c, e, &path, principal, &through, caller.grants.untrusted(), 0, &mut HashSet::new())?);
                 for f in c.query("SELECT path FROM folders WHERE env_id = ?", [&e.id], |r| r.get::<_, String>(0))? {
                     if f != path && names::parents(&f).last() == Some(&path) {
                         folders.insert(f);
@@ -485,7 +515,7 @@ impl Secrets {
         }
         let all_required: Vec<crate::Required> = self.db.read(|c| crate::required::of(c, project))?.into_iter().filter(|r| r.path == path).collect();
         let required: BTreeSet<String> = all_required.iter().map(|r| r.key.clone()).collect();
-        let typed: HashMap<&str, &crate::Required> = all_required.iter().filter(|r| r.kind.is_some() || r.pattern.is_some()).map(|r| (r.key.as_str(), r)).collect();
+        let typed: HashMap<&str, crate::required::Rule<'_>> = all_required.iter().filter(|r| r.kind.is_some() || r.pattern.is_some()).map(|r| (r.key.as_str(), r.rule())).collect();
         // Each environment's entries by key: a row looks each environment up once, not by scanning.
         let by_key: Vec<HashMap<&str, &Entry>> = views.iter().map(|v| v.iter().map(|e| (e.row.key.as_str(), e)).collect()).collect();
         keys.extend(required.iter().cloned());
@@ -500,7 +530,9 @@ impl Secrets {
                     let found = view.get(key.as_str()).copied();
                     fps.push(found.map(|e| e.row.fp.as_str()));
                     let cell = found.map(|e| {
-                        let reveal = caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path));
+                        // A row another project shares: its fingerprint is that project's, and its
+                        // value its key's, so neither shows here.
+                        let reveal = e.row.project_id == project && caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path));
                         let refs = e.row.references(&dek, project);
                         let misfit = match (typed.get(key.as_str()), &e.row.value) {
                             (Some(r), Some(ct)) if reveal && e.row.link.is_none() && refs.is_empty() => {
@@ -618,6 +650,8 @@ pub(crate) struct Resolver<'a> {
     s: &'a Secrets,
     project: &'a str,
     dek: &'a Dek,
+    /// Sharing projects' data keys, by project.
+    deks: HashMap<String, Dek>,
     caller: &'a Caller,
     resolve: bool,
     consumer: String,
@@ -636,7 +670,7 @@ pub(crate) struct Resolver<'a> {
 
 impl<'a> Resolver<'a> {
     pub fn new(s: &'a Secrets, project: &'a str, dek: &'a Dek, caller: &'a Caller, resolve: bool, consumer: &str) -> Self {
-        Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], members: None, issued: BTreeMap::new(), no_dynamic: false }
+        Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], members: None, issued: BTreeMap::new(), no_dynamic: false, deks: HashMap::new() }
     }
 
     fn env(&mut self, slug: &str) -> Option<EnvRow> {
@@ -659,7 +693,9 @@ impl<'a> Resolver<'a> {
     /// An entry's value and the first problem resolving it (the value then keeps the
     /// unresolved reference's text).
     pub fn entry(&mut self, e: &Entry) -> (Value, Option<String>) {
-        let id = format!("{}:{}:{}", e.env, e.row.path, e.row.key);
+        // By the environment's id, not its slug: a folder another project shares may have the same
+        // slug and path as one of this project's.
+        let id = format!("{}:{}:{}", e.row.env_id, e.row.path, e.row.key);
         if let Some(d) = self.done.get(&id) {
             return d.clone();
         }
@@ -722,10 +758,23 @@ impl<'a> Resolver<'a> {
                 }
             }
             _ => match &e.row.value {
-                Some(ct) => self.dek.open(&value_aad(self.project, &e.row.id, e.row.version), ct).map_err(|_| "the stored value doesn't decrypt".to_string()),
+                Some(ct) => self.dek_of(&e.row.project_id).and_then(|dek| dek.open(&value_aad(&e.row.project_id, &e.row.id, e.row.version), ct).map_err(|_| "the stored value doesn't decrypt".to_string())),
                 None => Ok(Value::default()),
             },
         }
+    }
+
+    /// The data key of `project`: this resolve's, or a sharing project's (cached).
+    fn dek_of(&mut self, project: &str) -> std::result::Result<Dek, String> {
+        if project == self.project {
+            return Ok(self.dek.clone());
+        }
+        if let Some(d) = self.deks.get(project) {
+            return Ok(d.clone());
+        }
+        let d = self.s.project(project).map_err(|_| format!("project {project}'s key isn't available"))?;
+        self.deks.insert(project.to_string(), d.clone());
+        Ok(d)
     }
 
     fn text(&mut self, env: &str, path: &str, raw: &Value) -> (Value, Option<String>) {

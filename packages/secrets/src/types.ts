@@ -40,9 +40,13 @@ export type NewEnvironment = {
 /** `history_days`: how long old values are kept (null: for good). */
 export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null };
 export type Folder = { path: string; name: string; secrets: number; folders: number };
-export type Import = { environment: string; path: string };
+/** `project`: a folder another project shares with this one (it exported it). */
+export type Import = { project?: string; environment: string; path: string };
+/** A project this folder is shared with. */
+export type Export = { project: string; created_at: number; created_by: string };
 export type Link = { kind: string; ref: string; field: string; mode: LinkMode; options?: Record<string, unknown> };
-export type Source = { kind: "own" } | { kind: "import"; environment: string; path: string } | { kind: "base"; environment: string };
+/** `project` on an import: another project that shares the folder. */
+export type Source = { kind: "own" } | { kind: "import"; environment: string; path: string; project?: string } | { kind: "base"; environment: string };
 export type Secret = {
   id: string;
   key: string;
