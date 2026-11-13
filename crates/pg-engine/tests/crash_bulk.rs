@@ -191,6 +191,12 @@ fn deletes_child() {
 /// short all or nothing, and the indexes agree with the rows.
 #[test]
 fn kill_during_compactions_after_deletes() {
+    // (The engine's statements on a thread with the stack a server's sessions have: a debug
+    // build's frames overflow a test thread's.)
+    std::thread::Builder::new().stack_size(64 << 20).spawn(compactions_after_deletes).unwrap().join().unwrap();
+}
+
+fn compactions_after_deletes() {
     let tmp = tempfile::tempdir().unwrap();
     let exe = std::env::current_exe().unwrap();
     for (round, ms) in [800u64, 2100, 3500].into_iter().enumerate() {
@@ -225,11 +231,16 @@ fn kill_during_compactions_after_deletes() {
         let sum: i64 = (1..=last).map(|k| if k == last { k * DEL_ROWS } else { k * DEL_ROWS / 2 }).sum();
         let want = format!("[[Int8({n}), Int8({sum})]]");
         assert_eq!(one(&mut s, "SELECT count(*), sum(k) FROM d"), want, "round {round}");
-        assert_eq!(one(&mut s, "SELECT count(*) FROM d WHERE id % 2 = 0 AND k < (SELECT max(k) FROM d)"), "[[Int8(0)]]", "round {round}");
-        // (c's rows of the batches logged are updated; one cut short may not be.)
-        let logged = done.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
-        let cs = one(&mut s, &format!("SELECT count(*), count(*) FILTER (WHERE n = k) FROM c WHERE k IN ({logged})"));
-        assert_eq!(cs, format!("[[Int8({}), Int8({})]]", done.len(), done.len()), "round {round}");
+        assert_eq!(one(&mut s, &format!("SELECT count(*) FROM d WHERE id % 2 = 0 AND k < {last}")), "[[Int8(0)]]", "round {round}");
+        // (c has a row per batch committed, every logged one's updated; only one cut short may
+        // not be. Read the rows not updated, a few: an IN list of every logged batch overflowed
+        // a debug build's stack.)
+        assert_eq!(one(&mut s, "SELECT count(*) FROM c"), format!("[[Int8({last})]]"), "round {round}");
+        let r = s.query("SELECT k FROM c WHERE n <> k").unwrap();
+        for row in &r.last().unwrap().rows {
+            let pg_engine::types::Value::Int4(k) = row[0] else { panic!("round {round}: {row:?}") };
+            assert!(!done.contains(&(k as i64)), "round {round}: batch {k} logged, its update not there");
+        }
         s.query("SET enable_seqscan = off").unwrap();
         s.query("SET enable_bitmapscan = off").unwrap();
         assert_eq!(one(&mut s, "SELECT count(*), sum(k) FROM d WHERE k >= 0"), want, "round {round}");
