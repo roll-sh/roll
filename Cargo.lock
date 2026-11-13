@@ -6593,6 +6593,7 @@ dependencies = [
  "s3-store",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "tempfile",
  "tokio",
  "tokio-rustls 0.26.6",

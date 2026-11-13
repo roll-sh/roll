@@ -693,6 +693,7 @@ root = "apps/web"          # uploaded by roll up; its own roll.toml [app] still 
 links = ["db", "cache"]
 [apps.proxy]
 image = "nginx:1.27"
+port = 80                  # and [apps.<name>.variables]: both set when the service is made
 [databases.db]
 kind = "postgres"
 [databases.cache]
@@ -709,7 +710,11 @@ uploads each `root`, and redeploys an image service whose image changed. Names a
 running it again only does what changed. Nothing is ever deleted: a service or database removed
 from the file stays until removed by hand. The file is checked before anything is made: one of
 `root` or `image`, a root inside the directory, links to declared databases, kinds `postgres`
-or `redis`. The plan and the checks are unit-tested in roll-cli. The calls are the API's routes
+or `redis`. `roll apps import-compose [file] [--write]` turns a Compose file into these entries
+(Railway's Compose import): image and build services become `[apps]` (the container's port,
+its environment as variables), Postgres and Redis containers become roll databases linked from
+what `depends_on` them, and what isn't carried over (volumes, networks, commands, health checks)
+is said. The plan, the checks and the import are unit-tested in roll-cli. The calls are the API's routes
 as documented and haven't run against a live rolld yet: that needs Postgres and Redis up.
 
 ## A service and its database
@@ -978,22 +983,20 @@ Reviewed on 2026-11-13 against the heads feature/roll-mcp bfaa9bffb, feature/rol
 926e6bb83, feature/roll-previews 8890f61f4 and feature/roll-search a59b01088 (pairwise
 `git merge-tree` too). Ours are done or in `## Next`; theirs have been told.
 
-- **roll-mcp**: every route in `api::router` resolves to a catalogue row, and http-api.md's
+- **roll-mcp** (#19 merged into main at 11:15; #24, feature/roll-mcp-next, follows): every route
+  in `api::router` resolves to a catalogue row, and http-api.md's
   classes follow the catalogue (restore is `delete`, a domain's PATCH `deploy*`, a job's logs
   `reveal`, hooks `admin`, wake `write`, all of a shell session `admin`). Ours on merge:
-  - `crates/rolld/tests/auth.rs`: add `("/v1/apps/hooks", "deploy hooks: the secret in the
-    URL")` to `UNSCOPED` (mcp's version fails any API route classed "none" not listed there).
-  - Leaked hook URLs: rolld registers `Access::on_leaked("rlk_", …)`, parsing the service and
-    environment from the URL around the secret, calling `Apps::delete_hook`. The prefix is
-    `rlk_` (`rlh_` is main's automations' webhook prefix); mcp's `SECRET_PREFIXES`, its product
-    mapping and the GitHub partner pattern `rlk_[a-z2-7]{40}` follow it.
+  - `/v1/apps/hooks` is in rolld's `UNSCOPED`, and `rlk_` (not `rlh_`, main's automations'
+    prefix) in `SECRET_PREFIXES` and the product mapping, on #24; the GitHub partner pattern is
+    `rlk_[a-z2-7]{40}`. Ours on merge: rolld registers `Access::on_leaked("rlk_", …)`, parsing
+    the service and environment from the URL around the secret, calling `Apps::delete_hook`.
   - An environment resolver for `"apps"` in rolld/src/access.rs answering `Some("preview")` for
     an ephemeral environment; `api::actor` reads `roll_auth::Grant::on(ext)`'s name before the
     operator's; `put_link` (and create's `links`) checks `Grant::allows(<resource>, reveal)`.
   - `net.rs` and `model::private_ip` move onto mcp's `roll-net`.
-  - Theirs (MCP tools): `apps_deploy` could take `no_traffic`; a tool for `PUT
-    …/environments/{env}` (run, follow_tag, wait_for_ci); `apps_get_service` doesn't return
-    deploys (a Service has environment summaries).
+  - MCP tools (#24): `apps_deploy` takes `no_traffic`; `apps_set_environment` covers `PUT
+    …/environments/{env}` but `access` (a person sets an environment's token, not an agent).
 - **roll-previews** (`RollApps`): new Environment fields are ignored safely, `ready` falls into
   its success branch (it never sends `no_traffic`), and apps no longer runs canaries in
   ephemeral environments. Theirs: `unset` the variables it set before and no longer wants (an
@@ -1049,9 +1052,8 @@ platform branches".
 
 1. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
    its stream consumer group's lag, which only roll can do natively.
-2. **A project in one file, imported**: done: `roll up --all` from `[apps]` and `[databases]`;
-   next, importing a Compose file's image services (Railway's) and an end-to-end run against a
-   live rolld with Postgres and Redis.
+2. **`roll up --all` against a live rolld**: done: the file, the plan and the Compose import
+   (unit-tested); next, an end-to-end run with Postgres and Redis up.
 3. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
