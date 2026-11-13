@@ -534,6 +534,18 @@ writes a policy from activity:
   while counts for a rule with the same product and action, which can keep an action that rule
   didn't need; it never widens one.
 
+### New networks
+
+A token used from a network it hasn't been used from before is told where approvals go (GitHub
+and Google mail a sign-in from somewhere new): a leaked token is used from somewhere new.
+
+- A network is an address's /24 (IPv4) or /48 (IPv6), so one office or one pool of runners is one.
+- Its first network is where it starts, and isn't news. Once a token has been used from five
+  (`ROAMING`: CI runners, phones), it roams; the message about the fifth says that's the last.
+- Each node writes a token's use at most once a minute per network, so a new network is seen on its
+  first request. The token's page lists its networks with when each was first and last seen
+  (`GET /v1/access/tokens/{id}/networks`).
+
 ## Leaked tokens
 
 A token pasted into a file is a token anyone who reads that file holds. roll revokes one as soon as
@@ -607,6 +619,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
 | `DELETE /v1/access/tokens/{id}/temporary/{approval}` | operator | take back what an approval allowed it for a while, and the approval if its request hasn't used it |
 | `POST /v1/access/tokens/{id}/tighten` | operator | `{from, days?}`: apply the proposal, made again now, if its rules are still `from` (else 409) → the grant |
+| `GET /v1/access/tokens/{id}/networks` | access read | the networks it's been used from: `[{network, first_at, last_at}]`, newest first ("New networks") |
 | `GET /v1/access/tokens/{id}/tighten` | access read | `?days=` (1-90, 30): `{since, days, used: [{product, action, resource, count, last_at}], rules, narrower}`: its rules narrowed to what it used ("Tighten to what it used") |
 | `POST /v1/access/tokens/{id}/rotate` | access admin | a new secret with the same rules (the old one stops at once) → `{grant, token}`; not for OAuth connections |
 | `GET /v1/access/approvals` | access read | newest first; `?state=pending`, `?grant=<id>` (one token's), `?limit=` (at most 500) |

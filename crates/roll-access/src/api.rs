@@ -26,6 +26,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/tokens/{id}", get(get_one).patch(update).delete(revoke))
         .route("/v1/access/tokens/{id}/rotate", post(rotate))
         .route("/v1/access/tokens/{id}/tighten", get(tighten).post(apply_tighten))
+        .route("/v1/access/tokens/{id}/networks", get(networks))
         .route("/v1/access/tokens/{id}/temporary/{approval}", axum::routing::delete(forget))
         .route("/v1/access/approvals", get(approvals))
         .route("/v1/access/approvals/{id}", get(approval))
@@ -217,6 +218,12 @@ async fn list(State(a): S) -> crate::Result<Json<Value>> {
 
 async fn get_one(State(a): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
     Ok(Json(json!(blocking(a, move |a| a.store.get(&id)).await?)))
+}
+
+/// The networks a token has been used from (its /24 or /48), with when first and last.
+async fn networks(State(a): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    let list = blocking(a, move |a| a.store.networks(&id)).await?;
+    Ok(Json(json!(list.into_iter().map(|(network, first_at, last_at)| json!({ "network": network, "first_at": first_at, "last_at": last_at })).collect::<Vec<_>>())))
 }
 
 #[derive(Deserialize)]
