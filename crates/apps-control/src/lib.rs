@@ -796,7 +796,7 @@ impl Apps {
             instances,
             domains,
             port: r.port,
-            tcp: r.tcp_port.filter(|_| svc.run.tcp).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
+            tcp: r.tcp_port.filter(|_| svc.run.tcp && svc.run.public && !private).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
             needs_deploy,
             private,
             next_run_at,

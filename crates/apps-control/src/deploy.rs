@@ -1095,14 +1095,21 @@ impl Apps {
         let Some(tpl) = l.template().filter(|t| t.run.rollback_on_crash) else { return };
         let id = tpl.deployment.clone();
         let Ok(d) = self.db(move |s| s.deployment(&id)).await else { return };
-        let recent = d.finished_at.is_some_and(|t| code_sql::now_ms() - t <= 10 * 60_000);
-        if !recent || d.rollback_of.is_some() {
+        let Some(live_at) = d.finished_at.filter(|t| code_sql::now_ms() - t <= 10 * 60_000) else { return };
+        // Its own crashes since it went live, not another deploy's failed checks or older ones.
+        if d.rollback_of.is_some() || l.crashes_of(&d.id, live_at) < 3 {
+            return;
+        }
+        // A deploy on its way (a fix, say) decides instead.
+        let (sid, en) = (l.service.clone(), l.env.clone());
+        if self.db(move |s| s.pending_deployments(&sid)).await.map_or(true, |p| p.iter().any(|x| x.environment == en)) {
             return;
         }
         l.log.stream(Stream::System).line(format!("{} is crash-looping within ten minutes of going live: rolling back to the deployment before it", d.id));
         let (this, sid, e) = (self.clone(), l.service.clone(), l.env.clone());
         tokio::spawn(async move {
-            if let Err(err) = this.rollback_previous(&sid, &e, Some("crash loop".into()), false).await {
+            // The image only: today's variables stay (a credential rotated since isn't undone).
+            if let Err(err) = this.rollback_previous(&sid, &e, Some("crash loop".into()), true).await {
                 this.logs.sink(format!("env:{sid}/{e}"), Stream::System).line(format!("couldn't roll back: {err}"));
             }
         });

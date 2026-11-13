@@ -18,10 +18,16 @@ impl Apps {
         let Some(range) = self.cfg.tcp_ports else { return Vec::new() };
         let Ok(services) = self.db(|s| s.services(None)).await else { return Vec::new() };
         let mut out = Vec::new();
-        for svc in services.into_iter().filter(|s| s.run.tcp && s.run.kind == RunType::Web && self.owns(&s.id)) {
+        // Public only: a private service, or an environment behind an access token (a preview),
+        // has no TCP port (TCP carries no token); the private network and a tunnel reach it.
+        for svc in services.into_iter().filter(|s| s.run.tcp && s.run.kind == RunType::Web && s.run.public && self.owns(&s.id)) {
             let sid = svc.id.clone();
             let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
             for e in envs {
+                let (sid, en) = (svc.id.clone(), e.name.clone());
+                if !matches!(self.db(move |s| s.access(&sid, &en)).await, Ok(None)) {
+                    continue;
+                }
                 let (sid, en) = (svc.id.clone(), e.name.clone());
                 match self.db(move |s| s.assign_tcp_port(&sid, &en, range)).await {
                     Ok(Some(p)) => out.push((p, svc.id.clone(), e.name.clone())),

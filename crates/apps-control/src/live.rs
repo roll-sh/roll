@@ -318,7 +318,8 @@ pub struct EnvLive {
     /// 30 s. A canary's failures don't hold back the active deployment's wakes.
     failed: Mutex<Option<(String, Instant, String, u32)>>,
     /// Crashes of the last ten minutes: when, when in unix ms, why.
-    crashes: Mutex<std::collections::VecDeque<(Instant, i64, String)>>,
+    /// Recent crashes: when, unix ms, why, and the deployment the instance ran.
+    crashes: Mutex<std::collections::VecDeque<(Instant, i64, String, String)>>,
     seq: AtomicU64,
     pub log: LogSink,
     pub meter: Mutex<Meter>,
@@ -975,8 +976,8 @@ impl EnvLive {
         let entered = {
             let mut c = self.crashes.lock();
             let was = Self::looping(&c);
-            c.push_back((Instant::now(), now_ms(), why.to_string()));
-            while c.len() > 20 || c.front().is_some_and(|(at, _, _)| at.elapsed() > CRASH_WINDOW) {
+            c.push_back((Instant::now(), now_ms(), why.to_string(), inst.deployment.clone()));
+            while c.len() > 20 || c.front().is_some_and(|(at, ..)| at.elapsed() > CRASH_WINDOW) {
                 c.pop_front();
             }
             !was && Self::looping(&c)
@@ -986,8 +987,13 @@ impl EnvLive {
         }
     }
 
-    fn looping(c: &std::collections::VecDeque<(Instant, i64, String)>) -> bool {
-        c.iter().filter(|(at, _, _)| at.elapsed() <= CRASH_WINDOW).count() >= 3
+    fn looping(c: &std::collections::VecDeque<(Instant, i64, String, String)>) -> bool {
+        c.iter().filter(|(at, ..)| at.elapsed() <= CRASH_WINDOW).count() >= 3
+    }
+
+    /// How many of `deployment`'s instances crashed at or after `since` (unix ms).
+    pub fn crashes_of(&self, deployment: &str, since: i64) -> usize {
+        self.crashes.lock().iter().filter(|(_, at, _, d)| d == deployment && *at >= since).count()
     }
 
     /// The environment's crashes of the last ten minutes when they're a loop (three or more).
@@ -996,8 +1002,8 @@ impl EnvLive {
         if !Self::looping(&c) {
             return None;
         }
-        let recent: Vec<_> = c.iter().filter(|(at, _, _)| at.elapsed() <= CRASH_WINDOW).collect();
-        let (_, at, why) = recent.last()?;
+        let recent: Vec<_> = c.iter().filter(|(at, ..)| at.elapsed() <= CRASH_WINDOW).collect();
+        let (_, at, why, _) = recent.last()?;
         Some(crate::model::CrashLoop { crashes: recent.len() as u32, last_at: *at, last_error: why.clone() })
     }
 

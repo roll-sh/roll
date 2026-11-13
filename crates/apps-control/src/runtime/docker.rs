@@ -448,6 +448,8 @@ impl Runtime for Docker {
         let (o, e) = (log.stream(Stream::Stdout), log.stream(Stream::Stderr));
         if let Some(engine) = &self.engine {
             self.quiet_waker(engine, name).await;
+            // Running: its own connections aren't callers; the next sleep marks it again.
+            self.known.lock().marks.remove(name);
             engine.start(name).await?;
             let (_, port) = self.id_and_port(name).await?;
             // Follow its output until it stops (the logs request ends with the container).

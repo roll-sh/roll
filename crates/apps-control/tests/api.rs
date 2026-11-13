@@ -2349,6 +2349,10 @@ async fn a_tcp_service_answers_on_its_own_port() {
     conn.read_to_string(&mut got).await.unwrap();
     assert!(got.starts_with("HTTP/1.1 200") && got.contains(r#""path":"/raw""#), "spliced to the app: {got}");
     assert_eq!(visit(&w, &host(&svc["environments"][0]["url"]), "/").await.0, StatusCode::NOT_FOUND, "not over HTTP");
+    // Private, it has no public port (TCP carries no token): the private network reaches it.
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"public": false}}))).await;
+    assert!(call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["tcp"].is_null());
+    assert!(w.apps.tcp_endpoints().await.is_empty());
 }
 
 /// An environment's metrics as a scraper reads them (Prometheus' text format).

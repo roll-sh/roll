@@ -255,6 +255,9 @@ impl Runtime for Fake {
 
     async fn start(&self, name: &str, log: LogSink) -> anyhow::Result<Option<SocketAddr>> {
         self.counts.starts.fetch_add(1, Ordering::SeqCst);
+        if let Some(a) = self.accepted.lock().get_mut(name) {
+            a.0 = 0;
+        }
         let spec = {
             let m = self.instances.lock();
             let i = m.get(name).ok_or_else(|| anyhow::anyhow!("no instance {name}"))?;
