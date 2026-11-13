@@ -867,18 +867,23 @@ Ranked by what a person notices first. Done so far:
    environment built at its commit with the branched Redis, a preview's own variable reaching it
    and, removed, leaving it (`ROLL_PREVIEW_SET`), all gone after landing. Written; it runs once
    the shared disk has room for a build again.
-2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+   (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
+   `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
+   (`wip/roll-apps-next`) to reach this branch: today's apps refuses an unknown field, which would
+   fail every link-access deploy.
+3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables; and `catalog()` should read `[app.previews.run]` and
    per-environment `run` overrides, not only the service's `memory_mb`.
-3. **A visual change per push**: the screenshot at each head compared with the previous head's,
+4. **A visual change per push**: the screenshot at each head compared with the previous head's,
    and the share of pixels that changed in the pull request comment ("the page changed 12%",
    with both images), as Percy and Chromatic do for visual review, from screenshots roll already
    takes.
-4. **Feedback shown on the page** (Vercel's comment pins): the button lists the change's
+5. **Feedback shown on the page** (Vercel's comment pins): the button lists the change's
    feedback for that page. That needs a read path the preview's origin can use without a
    credential (a signed, expiring list per page), which is why it waits.
-5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+6. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
