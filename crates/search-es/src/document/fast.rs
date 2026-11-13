@@ -45,6 +45,10 @@ enum Kind {
     Short,
     Byte,
     Double,
+    /// `float`, or `half_float` (rounded to half precision).
+    Float { half: bool },
+    /// A `scaled_float` with its scaling factor.
+    ScaledFloat(f64),
     Boolean,
     Date { fmt: Arc<crate::time::DateFormatter>, nanos: bool },
     GeoPoint,
@@ -96,6 +100,9 @@ fn kind_of(f: &FieldMapper, ctx: &MappingCtx) -> Option<Kind> {
         "short" => Kind::Short,
         "byte" => Kind::Byte,
         "double" => Kind::Double,
+        "float" => Kind::Float { half: false },
+        "half_float" => Kind::Float { half: true },
+        "scaled_float" => Kind::ScaledFloat(super::values::scaling_factor(f, ctx)),
         "boolean" => Kind::Boolean,
         "date" | "date_nanos" => Kind::Date { fmt: f.date_formatter(ctx).ok()?, nanos: f.ty == "date_nanos" },
         // A `position` metric takes one point per document (checked by the general path).
@@ -295,6 +302,22 @@ fn push(t: &Target, tok: &Tok<'_>, out: &mut ParsedDocument, ignored: &mut Vec<A
         (Kind::Byte, Tok::Int(i, _)) => FieldValue::Long(i8::try_from(*i).ok()? as i64),
         (Kind::Double, Tok::Int(i, _)) => FieldValue::Double(*i as f64),
         (Kind::Double, Tok::Float(d, _)) if d.is_finite() => FieldValue::Double(*d),
+        // `XParser::float_value`: the number as a double, then a float.
+        (Kind::Float { half }, Tok::Int(..) | Tok::Float(..)) => {
+            let v = tok.number()? as f32;
+            let stored = if *half { super::values::half_float(v) } else { v };
+            if !stored.is_finite() {
+                return None;
+            }
+            FieldValue::Float(stored)
+        }
+        (Kind::ScaledFloat(factor), Tok::Int(..) | Tok::Float(..)) => {
+            let d = tok.number()?;
+            if !d.is_finite() {
+                return None;
+            }
+            FieldValue::Long(super::values::scale(d, *factor)?)
+        }
         (Kind::Boolean, Tok::Bool(b)) => FieldValue::Boolean(*b),
         (Kind::Ip, Tok::Str(s)) => FieldValue::Ip(super::values::parse_ip(s)?),
         (Kind::Date { fmt, nanos }, Tok::Str(_) | Tok::Int(..) | Tok::Float(..)) => {
@@ -342,6 +365,15 @@ enum Tok<'a> {
 }
 
 impl Tok<'_> {
+    /// A number token's value as a double (`XParser::double_value`).
+    fn number(&self) -> Option<f64> {
+        match self {
+            Tok::Int(i, _) => Some(*i as f64),
+            Tok::Float(d, _) => Some(*d),
+            _ => None,
+        }
+    }
+
     /// `XParser::text`: strings as they are, numbers and booleans as Jackson renders them.
     /// Jackson's `text()`: numbers as written.
     fn text(&self) -> String {

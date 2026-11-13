@@ -106,6 +106,41 @@ fn http_logs_documents_take_the_fast_path() {
     }
 }
 
+const NYC_TAXIS: &str = r#"{"dynamic":"strict","properties":{
+    "total_amount":{"type":"scaled_float","scaling_factor":100},
+    "trip_distance":{"type":"scaled_float","scaling_factor":100},
+    "fare_amount":{"type":"double"},
+    "pickup_datetime":{"type":"date","format":"yyyy-MM-dd HH:mm:ss"},
+    "pickup_location":{"type":"geo_point"},
+    "passenger_count":{"type":"integer"},
+    "vendor_id":{"type":"keyword"},
+    "f":{"type":"float"},
+    "h":{"type":"half_float","fields":{"raw":{"type":"keyword"}}},
+    "s":{"type":"scaled_float","scaling_factor":10,"fields":{"f":{"type":"float"}}}
+}}"#;
+
+/// Rally's `nyc_taxis` documents: `scaled_float`, `float` and `half_float` values take the
+/// fast path and come out as the general path's (Java rounding, float narrowing); values the
+/// general path refuses stay with it.
+#[test]
+fn nyc_taxis_documents_take_the_fast_path() {
+    let idx = index(NYC_TAXIS, &[]);
+    let plan = FastPlan::new(&idx).expect("plan");
+    for doc in [
+        r#"{"total_amount": 6.3, "pickup_location": [-73.92259216308594, 40.7545280456543], "pickup_datetime": "2015-01-01 00:34:42", "passenger_count": 1, "fare_amount": 5.0, "trip_distance": 0.88, "vendor_id": "2"}"#,
+        r#"{"total_amount": -22.5, "trip_distance": 0.005, "s": 2.25, "f": 0.1, "h": 0.1}"#,
+        r#"{"total_amount": 1e-300, "s": -0.05, "f": 16777217, "h": 65504, "trip_distance": [1, 2.675, -0.0]}"#,
+        r#"{"f": 3.4028235e38, "h": 1e-8, "s": 9.2e15}"#,
+    ] {
+        assert!(agree(&idx, &plan, doc), "not taken: {doc}");
+    }
+    // Past a long, past a float or a half float, or a string: the general path's errors (or
+    // coercion).
+    for doc in [r#"{"total_amount": 1e300}"#, r#"{"f": 1e39}"#, r#"{"h": 65520}"#, r#"{"total_amount": "6.3"}"#] {
+        assert!(plan.parse(doc.as_bytes()).is_none(), "taken: {doc}");
+    }
+}
+
 #[test]
 fn everything_else_takes_the_general_path() {
     let idx = index(GEONAMES, &[]);

@@ -185,6 +185,19 @@ pub fn geo_point_of(v: &Value) -> Option<GeoPoint> {
     crate::query::geo::parse_point(&mut p).ok()
 }
 
+/// A `scaled_float`'s scaling factor.
+pub(crate) fn scaling_factor(f: &FieldMapper, ctx: &MappingCtx) -> f64 {
+    f.effective("scaling_factor", ctx).as_f64().unwrap_or(1.0)
+}
+
+/// A finite `scaled_float` value as the long it's indexed as: Java's `Math.round(d * factor)`
+/// (ties go up: -22.5 is -22); `None` past a long's range.
+pub(crate) fn scale(d: f64, factor: f64) -> Option<i64> {
+    let x = d * factor;
+    let scaled = if x - x.floor() >= 0.5 { x.floor() + 1.0 } else { x.floor() };
+    (scaled <= i64::MAX as f64 && scaled >= i64::MIN as f64).then_some(scaled as i64)
+}
+
 pub(crate) fn half_float(v: f32) -> f32 {
     // Round to the nearest half-precision value.
     let bits = v.to_bits();
@@ -575,18 +588,14 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
                 "scaled_float" => {
                     let d = w.p.double_value()?;
                     finite_check("scaled_float", d, crate::json::write::java_double(d))?;
-                    let factor = f.effective("scaling_factor", ctx).as_f64().unwrap_or(1.0);
-                    // Java's `Math.round`: ties go up (-22.5 is -22).
-                    let x = d * factor;
-                    let scaled = if x - x.floor() >= 0.5 { x.floor() + 1.0 } else { x.floor() };
-                    if scaled > i64::MAX as f64 || scaled < i64::MIN as f64 {
+                    let Some(scaled) = scale(d, scaling_factor(f, ctx)) else {
                         return Err(EsError::illegal_argument(format!(
                             "[scaled_float] exceeds the maximum value of long: [{}]",
                             crate::json::write::java_double(d)
                         ))
                         .into());
-                    }
-                    vec![FieldValue::Long(scaled as i64)]
+                    };
+                    vec![FieldValue::Long(scaled)]
                 }
                 ty => {
                     let v = w.p.float_value()?;
