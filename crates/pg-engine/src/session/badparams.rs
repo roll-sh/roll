@@ -116,7 +116,7 @@ impl Walk<'_> {
         // FROM: a sub-select's columns as `*` reads them.
         let mut from = Vec::new();
         for f in &s.from_clause {
-            self.from_item(f, &mut from);
+            self.range_item(f, &mut from);
         }
         self.scope.push(from.iter().any(|t| matches!(t, Ty::Missing(_))));
         let cols = self.select_rest(s, &from);
@@ -219,7 +219,7 @@ impl Walk<'_> {
         cols
     }
 
-    fn from_item(&mut self, f: &Node, cols: &mut Vec<Ty>) {
+    fn range_item(&mut self, f: &Node, cols: &mut Vec<Ty>) {
         match inner(f) {
             Some(NodeEnum::RangeVar(_)) => cols.push(Ty::Other),
             Some(NodeEnum::RangeSubselect(r)) => match r.subquery.as_deref().and_then(inner) {
@@ -238,7 +238,7 @@ impl Walk<'_> {
             }
             Some(NodeEnum::JoinExpr(j)) => {
                 for a in [&j.larg, &j.rarg].into_iter().flatten() {
-                    self.from_item(a, cols);
+                    self.range_item(a, cols);
                 }
                 if let Some(q) = &j.quals {
                     let t = self.expr(q);
