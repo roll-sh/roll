@@ -993,3 +993,29 @@ async fn a_link_needs_reveal_on_what_it_links() {
     let (s, _) = d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "1h" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
+
+/// What the gate costs a request: a token's request against the same one by the operator (no
+/// evaluator), on a list and on one resource. Run by hand, in release:
+/// `cargo test --release -p roll-access --test access gate_latency -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn gate_latency() {
+    let d = Daemon::new(50);
+    let (token, _) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "delete": "allow" } }]), json!({})).await;
+    let (narrow, _) = d.token(json!([{ "product": "postgres", "resources": [{ "id": "pa" }, { "id": "pb" }], "actions": { "read": "allow", "delete": "allow" } }]), json!({})).await;
+    for (what, method, path) in [("list", Method::GET, "/v1/projects"), ("one", Method::DELETE, "/v1/projects/pa")] {
+        for (who, t) in [("operator", OPERATOR), ("token *", token.as_str()), ("token ids", narrow.as_str())] {
+            let mut lat = Vec::new();
+            for i in 0..2200 {
+                let start = std::time::Instant::now();
+                let (s, _) = d.call(t, method.clone(), path, None).await;
+                assert!(s.is_success(), "{who} {what}: {s}");
+                if i >= 200 {
+                    lat.push(start.elapsed().as_micros() as u64);
+                }
+            }
+            lat.sort_unstable();
+            println!("{what:5} {who:10} p50 {:>5} µs  p99 {:>5} µs", lat[lat.len() / 2], lat[lat.len() * 99 / 100]);
+        }
+    }
+}
