@@ -134,7 +134,7 @@ impl Secrets {
                     }
                 }
                 if !self.members(project)?.contains(&(kind.to_string(), name.to_string())) {
-                    return Err(Error::BadRequest(format!("{name} isn't a {kind} on this project's canvas")));
+                    return Err(Error::BadRequest(self.not_linkable(project, kind, name)));
                 }
                 self.deliver()?;
             }

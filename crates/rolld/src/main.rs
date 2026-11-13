@@ -450,7 +450,7 @@ async fn run() -> anyhow::Result<()> {
     // evaluator joins the gate: setting sessions makes the gate anew.)
     let accounts = accounts::open(&args, &home, code.as_ref().map(|c| c.code.clone()), !auth.enforcing()).await?;
     auth.sessions(accounts.sessions(), &accounts.config().api_url);
-    router = router.merge(roll_accounts::router(accounts));
+    router = router.merge(roll_accounts::router(accounts.clone()));
     // Scoped tokens, approvals, audit and OAuth (access.rs): the evaluator joins the gate.
     let secrets_envs = access::SecretsEnvs::default();
     let access = access::open(
@@ -474,7 +474,7 @@ async fn run() -> anyhow::Result<()> {
     // Grants from roll-access are looked up when a sync made by one pushes.
     let products_api = secrets::Api::default();
     let grants: std::sync::Arc<dyn roll_auth::Grants> = access.clone();
-    let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), Some(grants))?;
+    let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), Some(grants), secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()) })?;
     code_secrets.set(secrets.clone(), workspace.clone());
     let _ = secrets_envs.0.set(secrets.clone());
     if let Some(c) = &code {

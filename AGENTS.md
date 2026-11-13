@@ -319,6 +319,10 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     Anything that touches a second environment (a reference, an import, a base, a promote's
     source) checks the caller through `Caller::allows`; checks, sandboxes and previews resolve
     untrusted (`Secrets::untrusted`, `"untrusted": true`): never a protected environment.
+  - Signed-in people manage their own projects' secrets (`OwnProjects`; others' projects 404). A
+    person's canvas proves nothing: `members` gives a person's project no product resources, and
+    roll code counts it only for the person's own repos (`Secrets::counts_for_repo`). What a
+    person made (tokens, identities, syncs) acts only while `People` says they can sign in.
   - Workload identities (`identities.rs`) log CI in with its own OIDC token: an issuer is a URL a
     tenant chose, fetched only through rolld's guarded client (`Deliver::get`), and a shared issuer
     (GitHub, GitLab) needs a subject that names one repo.

@@ -206,10 +206,12 @@ impl crate::Secrets {
     pub fn link_targets(&self, project: &str, caller: &crate::Caller) -> Result<Vec<Target>> {
         caller.need(crate::Action::Read, &crate::Scope::project(project))?;
         self.project(project)?;
+        let members = self.members(project)?;
         let p = self.workspace.get(roll_workspace::Scope::All, project).map_err(|e| Error::Internal(e.to_string()))?;
         let mut out: Vec<Target> = p
             .resources
             .into_iter()
+            .filter(|r| members.contains(&(r.kind.as_str().to_string(), r.r#ref.clone())))
             .filter_map(|r| {
                 let provider = self.links.0.get(r.kind.as_str())?;
                 Some(Target { kind: r.kind.as_str().into(), name: provider.name(&r.r#ref).unwrap_or_else(|| r.r#ref.clone()), r#ref: r.r#ref, fields: provider.fields().to_vec() })

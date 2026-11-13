@@ -153,8 +153,21 @@ fn b64(b: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }
 
+/// People's accounts: `ada` until disabled.
+#[derive(Default)]
+struct People {
+    disabled: std::sync::Mutex<bool>,
+}
+
+impl roll_secrets::People for People {
+    fn person(&self, user: &str) -> Option<roll_secrets::Person> {
+        (user == "usr_ada" && !*self.disabled.lock().unwrap()).then(|| roll_secrets::Person { admin: false, code_owner: Some("ada".into()) })
+    }
+}
+
 struct Api {
     sent: Arc<Sent>,
+    people: Arc<People>,
     router: Router,
     secrets: Arc<Secrets>,
     db: code_sql::Db,
@@ -177,10 +190,11 @@ impl Api {
         let mut syncs = Syncs::default();
         syncs.register(sync.clone());
         let sent = Arc::new(Sent::default());
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: None };
+        let people = Arc::new(People::default());
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: None, people: Some(people.clone()) };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets.clone()));
-        let mut api = Api { sent, router, secrets, db, fake, sync, project: String::new(), _dir: dir };
+        let mut api = Api { sent, people, router, secrets, db, fake, sync, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -197,6 +211,16 @@ impl Api {
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into())))
+    }
+
+    /// As `usr_ada`, signed in and not an admin (the gate put her session on the request).
+    async fn as_ada(&self, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+        let mut req = Request::builder().method(method).uri(path).header("content-type", "application/json").body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).unwrap();
+        req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: false, code_owner: None, session: "ses_ada".into() });
+        let resp = self.router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
 
     async fn call(&self, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -1010,6 +1034,34 @@ async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
     assert_eq!(call("/environments/production/values".into()).await.0, StatusCode::FORBIDDEN);
     let audit = api.ok(Method::GET, "/audit?actor=token:tok_ci", None).await;
     assert_eq!(audit[0]["action"], "secrets.export");
+}
+
+#[tokio::test]
+async fn a_signed_in_person_manages_only_their_own_projects_secrets() {
+    let api = Api::new().await;
+    api.set("development", "STRIPE_KEY", "the operator's").await;
+    let (s, mine) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "ada-shop" }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{mine}");
+    let mine = mine["id"].as_str().unwrap().to_string();
+    let at = |p: &str, rest: &str| format!("/v1/secrets/projects/{p}{rest}");
+    let (s, _) = api.as_ada(Method::PUT, &at(&mine, "/environments/development/secrets/STRIPE_KEY"), Some(json!({ "value": "ada's" }))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, v) = api.as_ada(Method::GET, &at(&mine, "/environments/development/values"), None).await;
+    assert_eq!(v["values"]["STRIPE_KEY"], "ada's");
+    // Anyone else's project doesn't exist for her, and searching finds only hers.
+    assert_eq!(api.as_ada(Method::GET, &at(&api.project, "/environments"), None).await.0, StatusCode::NOT_FOUND);
+    let (_, found) = api.as_ada(Method::GET, "/v1/secrets/search?key=STRIPE_KEY", None).await;
+    assert_eq!(found.as_array().map(|a| a.iter().all(|f| f["project"] == mine.as_str()) && a.len() == 1), Some(true), "{found}");
+    // Her canvas proves nothing about who owns what's on it: no sink or link to a product there.
+    api.as_ada(Method::PUT, &format!("/v1/workspace/projects/{mine}/resources/bucket/someone-elses"), Some(json!({ "x": 0, "y": 0 }))).await;
+    let (s, e) = api.as_ada(Method::POST, &at(&mine, "/audit/sinks"), Some(json!({ "url": "bucket:someone-elses" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    // A token she made works while her account can sign in.
+    let (_, t) = api.as_ada(Method::POST, &at(&mine, "/tokens"), Some(json!({ "name": "ci", "actions": ["read"] }))).await;
+    let token = t["token"].as_str().expect("a token").to_string();
+    assert_eq!(api.req(Method::GET, &at(&mine, "/environments"), None, Some(&token)).await.0, StatusCode::OK);
+    *api.people.disabled.lock().unwrap() = true;
+    assert_eq!(api.req(Method::GET, &at(&mine, "/environments"), None, Some(&token)).await.0, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

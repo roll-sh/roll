@@ -43,7 +43,7 @@ pub mod syncs;
 mod tokens;
 mod write;
 
-pub use access::{Action, Caller, Scope};
+pub use access::{Action, Caller, People, Person, Scope};
 pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter};
@@ -295,6 +295,9 @@ pub struct Options {
     pub deliver: Option<std::sync::Arc<dyn sinks::Deliver>>,
     /// roll-access's grants, looked up when a sync made by one pushes (never cached).
     pub grants: Option<std::sync::Arc<dyn roll_auth::Grants>>,
+    /// People's accounts, looked up when what a person made acts (never cached). `None`: nothing a
+    /// person made acts later.
+    pub people: Option<std::sync::Arc<dyn access::People>>,
     /// rolld has no operator token (loopback development): a request without a token is the
     /// operator's.
     pub open: bool,
@@ -315,6 +318,7 @@ pub struct Secrets {
     syncs: Syncs,
     deliver: Option<Arc<dyn sinks::Deliver>>,
     grants: Option<Arc<dyn roll_auth::Grants>>,
+    people: Option<Arc<dyn access::People>>,
     open: bool,
     trust_forwarded_for: bool,
     web_url: Option<String>,
@@ -387,7 +391,7 @@ impl Secrets {
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
             links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), deliver: deliver.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
     }
 
     pub fn links(&self) -> &Links {

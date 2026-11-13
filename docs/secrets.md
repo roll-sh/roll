@@ -1148,7 +1148,7 @@ It is the operator (`Everything`), a roll-access grant (`GrantGrants`, for `rlt_
 `rlo_…` OAuth connections: `ask` inside the product is a no), or one of the project's own tokens.
 
 Secrets accepts the operator (`roll_auth::Operator`, or any request when rolld has no operator
-token), roll-access's grants, and its own **scoped tokens** (`rlst_…`, created under `…/tokens`) for one project, a list of
+token), signed-in people on their own projects (below), roll-access's grants, and its own **scoped tokens** (`rlst_…`, created under `…/tokens`) for one project, a list of
 environments (or all), a list of path prefixes (or all), the actions above and an optional expiry.
 A token can be pinned to client addresses (`allowed_ips`: up to 20 addresses or CIDRs, IPv4 or
 IPv6): from anywhere else it's refused (403), checked on every request against the connection's
@@ -1159,6 +1159,31 @@ Tokens are stored as SHA-256 hashes, looked up on every request and never cached
 scoped tokens (`rlt_…`) and OAuth connections (`rlo_…`) reach secrets too: rolld's gate classifies
 the request, and secrets asks the same `Grant` for every second check (`GrantGrants`). The `rlst_`
 tokens are to become roll-access's (Next).
+
+#### People (signed-in accounts)
+
+Someone signed in to roll (docs/accounts.md) manages the secrets of the workspace projects they own:
+rolld's gate lets a session through `/v1/secrets` (`Access::UserOrCredential`: a session, or a
+request carrying a credential secrets checks), with `X-Roll-CSRF` on writes. Their caller is
+`OwnProjects`: everything on their own projects as the workspace has them on this request, nothing
+on anyone else's, which answers 404 as the workspace does. Search, findings and `health --all`
+keep only their projects. An admin's session is everything. Either way the audit log names the
+person by user id (`usr_…`), and their personal overrides are theirs.
+
+What a person made acts later only while they can sign in: their tokens, their identities' logins
+and their syncs stop when their account is disabled (rolld asks roll-accounts on every use,
+`People`). A sync a person made pushes as them, as they are then.
+
+Anyone may put any resource on their own canvas, so on a person's project the canvas proves
+nothing about who owns what's on it:
+
+- **Links, audit sinks and syncs to roll's products** (`members`) work only on the operator's
+  projects: a link reaches a resource's credentials as the operator. A person's project can link
+  its own rotators. This lifts per product once each says who owns a resource.
+- **roll code** (checks, previews and sandboxes getting values, leak blockers, missing-key
+  notices) counts a person's project only for repositories under the person's own roll code owner
+  (`ada/…`): otherwise anyone could hand a stranger's previews their variables (say, a
+  `DATABASE_URL` pointing at their own server), or watch a stranger's landings for their values.
 
 ### Workload identities (OIDC)
 
@@ -1557,19 +1582,17 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Signed-in people reach the secrets of their own projects.** Accounts (#18) made workspace
-   projects a user's; secrets is still the operator's and its tokens' only (403 with a session).
-   Let a session through `/v1/secrets` (`Access::User` in rolld's gate, `X-Roll-CSRF` on writes),
-   make its `Caller` from `roll_auth::SignedIn`: everything on projects the person owns (the
-   workspace's `Scope::Owner`), nothing on anyone else's. Cross-project routes (search, findings,
-   `health --all`) keep only their projects. An admin stays the operator.
-2. **One permission system.** `rlst_` tokens, and the tokens workload identities mint, become
+1. **One permission system.** `rlst_` tokens, and the tokens workload identities mint, become
    roll-access grants (secrets × project × environments × paths, `allowed_ips` as the grant's IP
    allowlist, the same expiry), with existing tokens migrated to the same reach; the built-in
    authority goes, `GrantGrants` stays. The routes and `roll secrets tokens` stay the same.
-3. **Access requests through roll-access's "ask"**: a person asks for time-boxed `reveal` on a
+2. **Access requests through roll-access's "ask"**: a person asks for time-boxed `reveal` on a
    protected environment, and an approver grants it for minutes (the approval names the
    environment and folder).
+3. **Products say who owns a resource**, so a person's project can link their own databases,
+   buckets and streams (today only the operator's projects link roll's products): a
+   `LinkProvider::owner(ref)` answered from each product's own records, checked at link time and
+   at every use, as canvas membership is.
 
 Waiting on other pull requests:
 
@@ -1583,7 +1606,8 @@ Waiting on other pull requests:
 - **roll apps' `SecretSource`** wired to `Secrets::values` as `app:<svc>`, whichever of #20 and
   #21 merges second.
 
-Done since the last review: main (roll MCP #19 and accounts #18) merged in. roll secrets asks the
+Done since the last review: signed-in people manage the secrets of their own projects (People,
+under Access), with the canvas guards. main (roll MCP #19 and accounts #18) merged in. roll secrets asks the
 caller's roll-access Grant (`GrantGrants`): a grant's request is checked inside the product too,
 health and leaks filter themselves, search and findings take any grant, ephemeral environments are
 roll-access's `preview` class, and a sync made by a grant pushes only while the grant may.

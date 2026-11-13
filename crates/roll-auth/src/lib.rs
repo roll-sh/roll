@@ -15,6 +15,9 @@
 //!   code's owners, tokens and public repositories; signed internal hops).
 //! - [`Access::User`] routes take the operator or any signed-in user; the product scopes what a
 //!   user sees (workspace projects).
+//! - [`Access::UserOrCredential`] routes take both: a signed-in user, whom the product scopes, or a
+//!   request with an `Authorization` header the product verifies (roll secrets: a person's own
+//!   projects, or a secrets token).
 //! - Everything else, and every path no route matches, is [`Access::Operator`]: the token or 401.
 //!
 //! People sign in with a session cookie (docs/accounts.md). The gate resolves it through
@@ -253,6 +256,9 @@ pub enum Access {
     Credential(&'static str),
     /// The operator or any signed-in user; the product scopes what each sees.
     User(&'static str),
+    /// [`Access::User`] and [`Access::Credential`] at once: a signed-in user, or the product's own
+    /// credential.
+    UserOrCredential(&'static str),
     Operator,
 }
 
@@ -263,6 +269,7 @@ impl fmt::Display for Access {
             Access::Product(why) => write!(f, "product: {why}"),
             Access::Credential(what) => write!(f, "operator or {what}"),
             Access::User(why) => write!(f, "user: {why}"),
+            Access::UserOrCredential(what) => write!(f, "user or {what}"),
             Access::Operator => f.write_str("operator"),
         }
     }
@@ -377,6 +384,7 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
         Access::Public(_) | Access::Product(_) => next.run(req).await,
         Access::Credential(_) if authorization => next.run(req).await,
         Access::User(_) if signed_in.is_some() => next.run(req).await,
+        Access::UserOrCredential(_) if authorization || signed_in.is_some() => next.run(req).await,
         _ if signed_in.is_some() => error(
             StatusCode::FORBIDDEN,
             "your account can use roll code, agents and projects; this API is for roll's admins for now",

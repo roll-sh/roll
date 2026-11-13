@@ -77,6 +77,66 @@ pub trait Grants: Send + Sync + std::fmt::Debug {
         let _ = (project, repo);
         false
     }
+    /// Whether the caller may know `project` exists: a person's own projects only, so anyone
+    /// else's answers 404, as the workspace does.
+    fn sees(&self, project: &str) -> bool {
+        let _ = project;
+        true
+    }
+}
+
+/// A signed-in person who isn't an admin (docs/accounts.md): everything on the projects they own,
+/// nothing on anyone else's. Looked up per request (`Secrets::caller`), never kept.
+#[derive(Debug)]
+pub struct OwnProjects {
+    pub projects: std::collections::BTreeSet<String>,
+    /// Their roll code owner's name: the repositories under it are theirs (`owner/…`).
+    pub code_owner: Option<String>,
+}
+
+impl OwnProjects {
+    /// Whether `repo` (`owner/name`) is under the person's own roll code owner.
+    pub fn owns_repo(code_owner: Option<&str>, repo: &str) -> bool {
+        code_owner.is_some_and(|o| repo.split_once('/').is_some_and(|(owner, _)| owner == o))
+    }
+}
+
+impl Grants for OwnProjects {
+    fn allows(&self, _: Action, at: &Scope<'_>) -> bool {
+        self.projects.contains(at.project)
+    }
+    fn project(&self) -> Option<&str> {
+        let mut it = self.projects.iter();
+        match (it.next(), it.next()) {
+            (Some(p), None) => Some(p),
+            _ => None,
+        }
+    }
+    fn reads_code(&self, project: &str, repo: &str) -> bool {
+        self.projects.contains(project) && OwnProjects::owns_repo(self.code_owner.as_deref(), repo)
+    }
+    fn sees(&self, project: &str) -> bool {
+        self.projects.contains(project)
+    }
+}
+
+/// People's accounts as they are now (docs/accounts.md; rolld asks roll-accounts). What a person
+/// made that acts later (a sync, a token, an identity) acts only while they can still sign in.
+pub trait People: Send + Sync {
+    /// `None` when the account is gone or disabled.
+    fn person(&self, user: &str) -> Option<Person>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Person {
+    pub admin: bool,
+    /// Their roll code owner's name, if they have one.
+    pub code_owner: Option<String>,
+}
+
+/// A person's user id (`usr_…`), as a principal.
+pub fn is_person(principal: &str) -> bool {
+    principal.starts_with("usr_")
 }
 
 /// The operator: everything.
@@ -119,6 +179,9 @@ impl Grants for Narrowed {
     }
     fn reads_code(&self, project: &str, repo: &str) -> bool {
         self.0.reads_code(project, repo)
+    }
+    fn sees(&self, project: &str) -> bool {
+        self.0.sees(project)
     }
 }
 
@@ -239,6 +302,9 @@ impl Caller {
     pub fn need(&self, action: Action, at: &Scope<'_>) -> crate::Result<()> {
         if self.allows(action, at) {
             return Ok(());
+        }
+        if !self.grants.sees(at.project) {
+            return Err(crate::Error::NotFound(format!("no project {}", at.project)));
         }
         let place = match (at.env, at.path) {
             (Some(e), Some(p)) if p != "/" => format!("{e}:{p}"),

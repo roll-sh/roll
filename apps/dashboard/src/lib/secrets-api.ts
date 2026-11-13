@@ -8,6 +8,7 @@
  */
 
 import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, Finding, ProjectFindings, SyncPreview, FileDiff } from "@roll/secrets/types";
+import { withSession } from "./code-token";
 import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 
 /** The API's shapes live in the `@roll/secrets` package, shared with services. */
@@ -33,12 +34,15 @@ export const needsApproval = (e: unknown): e is SecretsError => e instanceof Sec
 
 /** Like `call` in roll-api.ts, but keeps the error's `code`, which the approval flow needs. */
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${ROLL_API}${path}`, {
-    method,
-    headers: apiHeaders(body),
-    body: body === undefined ? undefined : JSON.stringify(body),
-    cache: "no-store",
-  });
+  const res = await fetch(
+    `${ROLL_API}${path}`,
+    withSession({
+      method,
+      headers: apiHeaders(body),
+      body: body === undefined ? undefined : JSON.stringify(body),
+      cache: "no-store",
+    }),
+  );
   onApiStatus(res.status);
   const text = await res.text();
   let data: unknown = null;
@@ -66,7 +70,7 @@ export function qs(q: Record<string, string | number | boolean | undefined | nul
 
 /** A route that answers a file (an export): its text, or the API's error. */
 async function text(url: string): Promise<string> {
-  const res = await fetch(`${ROLL_API}${url}`, { headers: apiHeaders(), cache: "no-store" });
+  const res = await fetch(`${ROLL_API}${url}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
   onApiStatus(res.status);
   const body = await res.text();
   if (!res.ok) {

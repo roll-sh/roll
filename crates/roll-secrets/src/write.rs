@@ -511,7 +511,7 @@ impl Secrets {
                 break;
             }
             if !resources.contains(&(link.kind.clone(), link.r#ref.clone())) {
-                result = Err(Error::BadRequest(format!("{} {} isn't in this project", link.kind, link.r#ref)));
+                result = Err(Error::BadRequest(self.not_linkable(project, &link.kind, &link.r#ref)));
                 break;
             }
             if link.mode != Mode::Managed || has_value {
@@ -569,13 +569,29 @@ impl Secrets {
         Ok(out)
     }
 
-    /// The project's resources on its canvas, as (kind, ref): what its links may reach, checked
-    /// on every write, read, issue and rotation (a resource can move to another project).
-    /// What this project may link: its canvas's resources and its own rotators.
+    /// What this project may link, sink to or sync to, as (kind, ref): its canvas's resources and
+    /// its own rotators, checked on every write, read, issue, rotation and delivery (a resource
+    /// can move to another project).
+    ///
+    /// A person's project (docs/accounts.md) has only its rotators: anyone may put any resource
+    /// on their own canvas, and a link reaches a resource as the operator, so a person's canvas
+    /// proves nothing about what's on it until products say who owns each resource.
     pub(crate) fn members(&self, project: &str) -> Result<BTreeSet<(String, String)>> {
-        let mut out: BTreeSet<(String, String)> = self.workspace.get(roll_workspace::Scope::All, project).map_err(|e| Error::Internal(e.to_string()))?.resources.into_iter().map(|r| (r.kind.as_str().to_string(), r.r#ref)).collect();
+        let p = self.workspace.get(roll_workspace::Scope::All, project).map_err(|e| Error::Internal(e.to_string()))?;
+        let canvas = if p.owner.is_empty() { p.resources } else { Vec::new() };
+        let mut out: BTreeSet<(String, String)> = canvas.into_iter().map(|r| (r.kind.as_str().to_string(), r.r#ref)).collect();
         out.extend(self.rotator_refs(project)?.into_iter().map(|(id, _)| (crate::rotators::KIND.to_string(), id)));
         Ok(out)
+    }
+
+    /// Why `kind ref` isn't something `project` may reach.
+    pub(crate) fn not_linkable(&self, project: &str, kind: &str, r#ref: &str) -> String {
+        let personal = self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| !p.owner.is_empty());
+        if personal && kind != crate::rotators::KIND {
+            format!("{kind} {ref}: links, sinks and syncs to roll's products work on the operator's projects for now (a person's canvas doesn't prove who owns what's on it); a rotator works here", ref = r#ref)
+        } else {
+            format!("{kind} {ref} isn't in this project", ref = r#ref)
+        }
     }
 
     /// Revoke what [`Secrets::prepare`] issued, after the write failed.

@@ -157,6 +157,14 @@ impl Secrets {
             caller.ip = ip;
             return Ok(caller);
         }
+        // A signed-in person (the gate resolved the session on this request): their own projects,
+        // or everything for an admin. Named by their user id in the audit log.
+        if let Some(u) = parts.extensions.get::<roll_auth::SignedIn>() {
+            let code_owner = self.people.as_ref().and_then(|p| p.person(&u.user)).and_then(|p| p.code_owner);
+            let mut caller = self.person_caller(&u.user, u.admin, code_owner)?;
+            caller.ip = ip;
+            return Ok(caller);
+        }
         if self.open || roll_auth::Operator::on(&parts.extensions) {
             let mut c = Caller::operator();
             c.ip = ip;
@@ -174,6 +182,36 @@ impl Secrets {
         if self.trust_forwarded_for { forwarded().or_else(peer) } else { peer() }
     }
 
+    /// A person as a caller: an admin is everything; anyone else, the projects they own as the
+    /// workspace has them now.
+    pub(crate) fn person_caller(&self, user: &str, admin: bool, code_owner: Option<String>) -> Result<Caller> {
+        let grants: Arc<dyn crate::access::Grants> = if admin {
+            Arc::new(crate::access::Everything)
+        } else {
+            let projects = self.workspace.list(roll_workspace::Scope::Owner(user)).map_err(|e| Error::Internal(e.to_string()))?.into_iter().map(|p| p.id).collect();
+            Arc::new(crate::access::OwnProjects { projects, code_owner })
+        };
+        Ok(Caller { principal: user.to_string(), grants, ip: None })
+    }
+
+    /// Whether `project`'s secrets may reach repository `repo` (`owner/name`) through roll code
+    /// (its checks and previews, leak blockers, missing-key notices): any repository on an
+    /// operator's project, only the person's own on a person's (anyone may put any repository on
+    /// their own canvas).
+    pub fn counts_for_repo(&self, project: &str, repo: &str) -> bool {
+        let Ok(p) = self.workspace.get(roll_workspace::Scope::All, project) else { return false };
+        if p.owner.is_empty() {
+            return true;
+        }
+        let person = self.people.as_ref().and_then(|people| people.person(&p.owner));
+        crate::access::OwnProjects::owns_repo(person.and_then(|p| p.code_owner).as_deref(), repo)
+    }
+
+    /// Whether what `by` made may still act: a person's only while their account can sign in.
+    pub(crate) fn maker_active(&self, by: &str) -> bool {
+        !crate::access::is_person(by) || self.people.as_ref().is_some_and(|p| p.person(by).is_some())
+    }
+
     fn token_caller(&self, token: &str, ip: Option<&str>) -> Result<Caller> {
         let h = hash(token);
         let now = self.db.now_ms()?;
@@ -185,6 +223,9 @@ impl Secrets {
         }
         if t.expires_at.is_some_and(|at| at <= now) {
             return Err(Error::Unauthorized("this secrets token expired".into()));
+        }
+        if !self.maker_active(&t.created_by) {
+            return Err(Error::Unauthorized("the person who made this secrets token can't sign in any more".into()));
         }
         if let Some(list) = &t.allowed_ips
             && !ip_allowed(list, ip)
