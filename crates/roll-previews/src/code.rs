@@ -121,6 +121,18 @@ impl CodeSource {
                     .iter()
                     .map(|x| code_control::model::PreviewPageCheck { path: x.path.clone(), errors: x.errors, percent: x.percent, base_percent: x.base_percent })
                     .collect(),
+                visual_review: p.visual_review.as_ref().map(|v| code_control::model::PreviewVisualReview {
+                    state: match v.state {
+                        crate::VisualState::Unchanged => "unchanged",
+                        crate::VisualState::Changed => "changed",
+                        crate::VisualState::Accepted => "accepted",
+                    }
+                    .into(),
+                    branch: v.branch.clone(),
+                    // As precise as the status says.
+                    percent: (v.percent * 10.0).round() / 10.0,
+                    by: v.by.clone(),
+                }),
                 page_a11y: p.page_a11y.as_ref().map(|a| code_control::model::PreviewPageA11y {
                     issues: a.issues.iter().map(|i| code_control::model::PreviewA11yIssue { kind: i.kind.clone(), count: i.count, first: i.first.clone() }).collect(),
                     lang: a.lang,

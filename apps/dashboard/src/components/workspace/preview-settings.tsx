@@ -369,6 +369,14 @@ function Form({
           />
         )}
         {s.github.screenshot && (
+          <Toggle
+            label="Visual review (roll/visual)"
+            note="A change whose pages differ from the default branch's waits for someone to accept it in roll, at each push."
+            checked={!!s.github.visual_review}
+            onChange={(v) => set("github", { ...s.github, visual_review: v })}
+          />
+        )}
+        {s.github.screenshot && (
           <Field label="Other pages" note="Taken with / at each push and compared the same way (up to 5 paths: /pricing, /login).">
             <input value={pages} onChange={(e) => setPages(e.target.value)} placeholder="/ only" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
           </Field>

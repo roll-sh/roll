@@ -131,6 +131,12 @@ CREATE TABLE IF NOT EXISTS page_shots (
     base_bp INTEGER,
     PRIMARY KEY (preview_id, path)
 );
+CREATE TABLE IF NOT EXISTS visual_accepts (
+    preview_id TEXT PRIMARY KEY,
+    head TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS budget_alerts (
     project_id TEXT NOT NULL,
     month INTEGER NOT NULL,
@@ -655,7 +661,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_accepts", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1130,6 +1136,45 @@ impl Store {
             .collect())
     }
 
+    /// `by` accepted how the preview's pages look at the latest screenshot's head (`None`: no
+    /// screenshot to accept).
+    pub fn accept_visual(&self, id: &str, by: &str) -> Result<Option<String>> {
+        let head: Option<String> = self.db.read(|c| c.query_row("SELECT head FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional())?;
+        let Some(head) = head else { return Ok(None) };
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO visual_accepts (preview_id, head, by, at) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, by = excluded.by, at = excluded.at",
+                params![id, head, by, now],
+            )?;
+            Ok::<_, Error>(())
+        })?;
+        Ok(Some(head))
+    }
+
+    /// The visual review of a change's preview (`github.visual_review`), once its pages were
+    /// compared with the baseline's: the most any of them differs, and who accepted that head.
+    fn visual_review(&self, r: &Row, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck]) -> Result<Option<crate::VisualReview>> {
+        if r.change_id.is_none() || !self.settings(&r.project_id)?.github.visual_review {
+            return Ok(None);
+        }
+        let Some(base) = base else { return Ok(None) };
+        let percent = [Some(base.percent), base.phone_percent].into_iter().chain(pages.iter().map(|p| p.base_percent)).flatten().fold(0.0_f64, f64::max);
+        let shot: Option<String> = self.db.read(|c| c.query_row("SELECT head FROM screenshots WHERE preview_id = ?", [&r.id], |x| x.get(0)).optional())?;
+        let accepted: Option<(String, String, i64)> = self.db.read(|c| c.query_row("SELECT head, by, at FROM visual_accepts WHERE preview_id = ?", [&r.id], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?))).optional())?;
+        let accepted = accepted.filter(|(h, _, _)| shot.as_deref() == Some(h.as_str()));
+        let state = match (&accepted, percent > 0.0) {
+            (_, false) => crate::VisualState::Unchanged,
+            (Some(_), true) => crate::VisualState::Accepted,
+            (None, true) => crate::VisualState::Changed,
+        };
+        let (by, at) = match accepted.filter(|_| state == crate::VisualState::Accepted) {
+            Some((_, by, at)) => (Some(by), Some(at)),
+            None => (None, None),
+        };
+        Ok(Some(crate::VisualReview { state, branch: base.branch.clone(), percent, by, at }))
+    }
+
     /// Another page's screenshot (`previous`: the one before it).
     pub fn page_screenshot(&self, id: &str, path: &str, previous: bool) -> Result<Option<Vec<u8>>> {
         use base64::Engine as _;
@@ -1445,6 +1490,7 @@ impl Store {
         let phone_screenshot = self.phone_screenshot(&r.id, false)?.is_some();
         let pages = self.page_checks(&r.id)?;
         let base_change = self.base_change(&r.id)?.map(|b| crate::BaseChange { branch: b.branch, percent: b.change_bp as f64 / 100.0, phone_percent: b.phone_bp.map(|p| p as f64 / 100.0) });
+        let visual_review = self.visual_review(&r, base_change.as_ref(), &pages)?;
         let page_speed = self.page_speed(&r.id)?;
         let page_health = self.page_health(&r.id)?;
         let page_a11y = self.page_a11y(&r.id)?;
@@ -1493,6 +1539,7 @@ impl Store {
             phone_screenshot,
             base_change,
             pages,
+            visual_review,
             page_speed,
             page_health,
             page_a11y,

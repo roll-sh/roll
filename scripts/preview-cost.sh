@@ -403,6 +403,12 @@ done
 PAGES=$(api GET "/v1/previews/$PV" | jq_ "'; '.join('%s: %d error(s), %s%% against main' % (x['path'], x['errors'], x['base_percent']) for x in d.get('pages', []))")
 case "$PAGES" in "/pricing: "[1-9]*" error(s), "*"% against main") ;; *) echo "/pricing should be taken, with its 404, and compared with main's: $PAGES"; exit 1;; esac
 [ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?page=%2Fpricing")" = image/png ] || { echo "/pricing's screenshot should be there"; exit 1; }
+# Visual review: the change's page differs from main's, so it waits for someone; accepted, it's done.
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"visual_review":true}}' >/dev/null
+REVIEW=$(api GET "/v1/previews/$PV" | jq_ "(d.get('visual_review') or {}).get('state')")
+[ "$REVIEW" = changed ] || { echo "a page that differs from main's should wait for a review: $REVIEW"; exit 1; }
+REVIEW=$(api POST "/v1/previews/$PV/visual/accept" | jq_ "'%s by %s' % (d['visual_review']['state'], d['visual_review']['by'])")
+[ "$REVIEW" = "accepted by operator" ] || { echo "accepting should settle the review: $REVIEW"; exit 1; }
 # Turned off, it goes.
 OFF=$(api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"baseline":false}}'); echo "$OFF" | grep -q "\"baseline\":false" || { echo "turning the baseline off: $OFF"; exit 1; }
 for _ in $(seq 1 120); do
@@ -471,6 +477,7 @@ cat <<EOF
 | The phone-width screenshot | $PHONE |
 | The change's page against main's preview | $BASE |
 | Another page (\`github.pages\`) | $PAGES |
+| Visual review: the change's page against main's, then accepted | changed, then $REVIEW |
 | Accessibility of the test page (it has no lang and no title) | $A11Y |
 | The first page's speed, timed with its screenshot | $SPEED |
 | The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |

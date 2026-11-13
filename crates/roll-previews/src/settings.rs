@@ -129,6 +129,10 @@ pub struct GithubRule {
     /// [`MAX_PAGES`], each compared with its own screenshot before and with the baseline's.
     #[serde(default)]
     pub pages: Vec<String>,
+    /// A `roll/visual` commit status (Chromatic's UI Review): pending while a change's pages
+    /// differ from the baseline's and nobody has accepted them at that head, in roll.
+    #[serde(default)]
+    pub visual_review: bool,
 }
 
 pub const MAX_PAGES: usize = 5;
@@ -181,7 +185,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new() }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), visual_review: false }
     }
 }
 

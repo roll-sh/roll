@@ -70,6 +70,9 @@ pub enum Preview {
         #[arg(long)]
         release: bool,
     },
+    /// Accept how a change's pages look at its latest screenshot (the `roll/visual` status,
+    /// `github.visual_review`); each new push is reviewed again.
+    Accept { preview: String },
     /// A link for someone outside the team, open for --hours (24 unless said; at most 720); the
     /// link is printed once. --list shows them, --revoke ends one.
     Share {
@@ -380,6 +383,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
         Preview::Sleep { preview } => api.post(&format!("/v1/previews/{preview}/sleep"), json!({})).await?,
         Preview::Wake { preview } => api.post(&format!("/v1/previews/{preview}/wake"), json!({})).await?,
         Preview::Refresh { preview } => api.post(&format!("/v1/previews/{preview}/refresh"), json!({})).await?,
+        Preview::Accept { preview } => api.post(&format!("/v1/previews/{preview}/visual/accept"), json!({})).await?,
         Preview::Keep { preview, hours, release } => api.post(&format!("/v1/previews/{preview}/keep"), json!({ "hours": if release { 0 } else { hours } })).await?,
         Preview::Share { preview, hours, list, revoke } => {
             let path = format!("/v1/previews/{preview}/shares");

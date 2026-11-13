@@ -219,6 +219,8 @@ pub struct Preview {
     pub base_change: Option<BaseChange>,
     /// The project's other pages (`github.pages`) at the latest screenshot.
     pub pages: Vec<PageCheck>,
+    /// Whether how its pages look against the baseline was accepted (`github.visual_review`).
+    pub visual_review: Option<VisualReview>,
     /// How fast the first service's page loaded at this head, and at the head before.
     pub page_speed: Option<PageSpeedView>,
     /// What went wrong while that page loaded (at the latest screenshot's head).
@@ -402,6 +404,27 @@ pub struct PageCheck {
     pub since: Option<String>,
     pub percent: Option<f64>,
     pub base_percent: Option<f64>,
+}
+
+/// A change's visual review (Chromatic's UI Review): `percent` is the most any of its pages
+/// differs from the baseline's, at either width.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct VisualReview {
+    pub state: VisualState,
+    pub branch: String,
+    pub percent: f64,
+    pub by: Option<String>,
+    pub at: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualState {
+    /// Its pages look like the baseline's: nothing to review.
+    Unchanged,
+    /// They differ, and nobody has accepted them at this head.
+    Changed,
+    Accepted,
 }
 
 /// How much a change's page differs from the default branch's (Chromatic's baseline).

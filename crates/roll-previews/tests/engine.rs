@@ -4,7 +4,7 @@ mod common;
 
 use common::*;
 use roll_previews::ports::ChangeInfo;
-use roll_previews::{Desired, Kind, ResourceState, State};
+use roll_previews::{Desired, Kind, ResourceState, State, VisualState};
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -172,6 +172,44 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     e.engine.pass().await.unwrap();
     assert!(e.engine.store.row(&base.id).map_or(true, |r| r.desired == Desired::Deleted));
     assert_eq!(e.engine.store.row(&chg.id).unwrap().desired, Desired::Active);
+}
+
+#[tokio::test]
+async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "visual_review": true } }));
+    let png = |v: u8| {
+        let mut out = Vec::new();
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([v, v, v, 255])).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        out
+    };
+    *e.apps.shot.lock() = Some(png(0));
+    e.code.open(change("chg_1", 1));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let review = || e.engine.store.preview(&e.engine.store.row_by_change("chg_1").unwrap().unwrap().id).unwrap().visual_review;
+    for _ in 0..500 {
+        if review().is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(review().map(|v| v.state), Some(VisualState::Unchanged), "the same as main: nothing to review");
+    // A push whose page looks different waits for someone.
+    let chg = e.engine.store.row_by_change("chg_1").unwrap().unwrap();
+    let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
+    let shoot = |head: &str| {
+        e.engine.store.set_screenshot(&chg.id, head, &png(255), None, None).unwrap();
+        e.engine.store.compare_with_base(&chg.id, &base.id, "main").unwrap();
+    };
+    shoot("cs_1b");
+    assert_eq!(review().map(|v| (v.state, v.percent)), Some((VisualState::Changed, 100.0)));
+    assert!(e.engine.accept_visual(&base.id, "ada").await.is_err(), "only a change's");
+    let p = e.engine.accept_visual(&chg.id, "ada").await.unwrap();
+    assert_eq!(p.visual_review.map(|v| (v.state, v.by)), Some((VisualState::Accepted, Some("ada".into()))));
+    assert_eq!(e.code.last_report("chg_1").visual_review.map(|v| v.state), Some(VisualState::Accepted), "the change is told at once");
+    // The next head is reviewed again.
+    shoot("cs_1c");
+    assert_eq!(review().map(|v| v.state), Some(VisualState::Changed));
 }
 
 #[tokio::test]

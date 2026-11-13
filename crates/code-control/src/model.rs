@@ -321,6 +321,18 @@ pub struct PreviewEnvironment {
     /// against the default branch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pages: Vec<PreviewPageCheck>,
+    /// The `roll/visual` status (the project's `github.visual_review`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_review: Option<PreviewVisualReview>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewVisualReview {
+    /// `unchanged`, `changed` (waiting for someone to accept it) or `accepted`.
+    pub state: String,
+    pub branch: String,
+    pub percent: f64,
+    pub by: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -230,6 +230,25 @@ export function PreviewSheet({
             )}
 
             {p.screenshot_at ? <Screenshot id={p.id} at={p.screenshot_at} change={p.visual_change} phone={p.phone_screenshot} base={p.base_change} pages={p.pages} /> : null}
+            {p.visual_review && p.visual_review.state !== "unchanged" && (
+              <div className="mt-1.5 flex items-center gap-2 text-[11.5px]">
+                {p.visual_review.state === "accepted" ? (
+                  <span className="text-subtle">Accepted by {p.visual_review.by ?? "someone"} at this push.</span>
+                ) : (
+                  <>
+                    <span className="text-soft">Differs from {p.visual_review.branch} by {Math.max(p.visual_review.percent, 0.1).toFixed(1)}%: waiting for a review.</span>
+                    <button
+                      type="button"
+                      disabled={busy !== null || gone}
+                      onClick={() => run("accept", () => previewsApi.acceptVisual(p.id))}
+                      className="ml-auto h-6 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
+                    >
+                      {busy === "accept" ? "Accepting…" : "Accept"}
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
             {p.page_health && (p.page_health.errors > 0 || p.page_health.failed > 0) && (
               <div className="mt-1.5 space-y-0.5 text-[11.5px] text-danger">
                 {p.page_health.errors > 0 && (

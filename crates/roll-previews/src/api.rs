@@ -24,6 +24,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}", get(one).delete(delete))
         .route("/v1/previews/{id}/refresh", post(refresh))
         .route("/v1/previews/{id}/keep", post(keep))
+        .route("/v1/previews/{id}/visual/accept", post(accept_visual))
         .route("/v1/previews/{id}/env", get(vars).put(put_vars))
         .route("/v1/previews/{id}/shares", get(shares).post(share))
         .route("/v1/previews/{id}/shares/{share}", axum::routing::delete(unshare))
@@ -209,6 +210,13 @@ async fn keep(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Result<
     check_id(&id)?;
     let k: KeepBody = body(&b)?;
     blocking(e, move |e| e.keep(&id, k.hours)).await.map(Json)
+}
+
+/// Accept how a change's pages look at its latest screenshot (the `roll/visual` status).
+async fn accept_visual(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>) -> crate::Result<Json<Preview>> {
+    check_id(&id)?;
+    let by = who.map(|axum::Extension(u)| u.handle).unwrap_or_else(|| "operator".into());
+    e.accept_visual(&id, &by).await.map(Json)
 }
 
 #[derive(Deserialize)]

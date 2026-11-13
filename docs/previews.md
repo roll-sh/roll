@@ -661,6 +661,7 @@ and admins see every project.
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each) | `{vars}`: the preview's own variables; its services redeploy with them |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
+| `POST /v1/previews/{id}/visual/accept` | | `Preview`: how a change's pages look at its latest screenshot is accepted (`visual_review`, `roll/visual`); 409 with no screenshot yet, 400 for a branch's preview |
 | `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}` |
 | `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come. `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s (2,000 lines wide after the first read) and only new lines are sent, with a line saying so when some were missed. Runs on the preview's holder; the stream ends when the client goes |
 | `GET /v1/previews/{id}/activity` | | `Activity[]`, newest first |
@@ -721,7 +722,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[] };   // all true but screenshot; pages: []
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; visual_review: boolean };   // all true but screenshot and visual_review; pages: []
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
@@ -783,6 +784,13 @@ type Settings = {
     went wrong while it loaded (`pages` on the preview, `GET …/screenshot?page=/pricing`, a page
     switcher on the sheet, "2 more pages, most changed /pricing by 40.0%" in the comment's
     checks). A path no longer listed is dropped at the next screenshot.
+    With `github.visual_review` (off by default) a change's pages are reviewed as Chromatic's UI
+    Review does: once compared with the baseline, the change has `visual_review` (the most any
+    page differs, at either width), and a `roll/visual` commit status that's pending while a page
+    differs and nobody has accepted it ("Differs from main by 8.0%: accept it in roll"), and
+    success once someone has (the sheet's Accept, `roll preview accept`, `POST …/visual/accept`;
+    "Accepted by ada"), or when the pages look the same. An acceptance is of one screenshot's
+    head: the next push is reviewed again. Branch protection can require `roll/visual`.
     The same session checks what a screen reader can't name (images without alt text, form
     fields without a label, buttons and links with no name) and whether the document has a
     language and a title (`page_a11y`, counts and the first one's markup, bounded; "**Accessibility:**
@@ -905,6 +913,7 @@ Ranked by what a person notices first. Done so far:
 - every change compared with the default branch, whose preview roll keeps itself (`github.baseline`);
 - the comment's page checks folded under one line of counts;
 - screenshots of the project's other pages (`github.pages`), each compared like the first;
+- a visual review per push (`github.visual_review`, the `roll/visual` status, Accept in roll);
 - a screenshot cut short by a redeploy or a sleep tried again once, and turning a project
   public or private restarting nothing on roll's runtime;
 - what went wrong while the page loaded (exceptions, console errors, failed requests);
@@ -942,20 +951,26 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+1. **Compared at the merge base** (Chromatic's ancestor builds): the baseline keeps its last few
+   heads' screenshots, and a change is compared with the one at its merge base, so a change
+   opened a while ago doesn't show main's own changes since as its own.
+2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-4. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+5. **A visual review that blocks landing in roll**: `roll/visual` gates GitHub merges through
+   branch protection; roll's own landing (`Code::blockers`, its rules from `roll.toml` on the
+   default branch) could ask for an accepted review the same way, for repos without GitHub.
+6. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

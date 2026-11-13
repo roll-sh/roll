@@ -194,9 +194,10 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
     let url = c.preview.as_ref().and_then(|p| p.url.clone());
     let log_url = env.and_then(|e| e.dashboard_url.clone());
     let (status, deploy, description) = preview_states(c.preview.as_ref());
+    let visual = env.and_then(|e| e.visual_review.as_ref()).map(visual_status);
     // Statuses go out when they change for this head, not on every wake and sleep.
     let state_key = format!("pv-state:{}", c.id);
-    let state_now = format!("{sha}:{status:?}:{deploy:?}:{description}");
+    let state_now = format!("{sha}:{status:?}:{deploy:?}:{description}:{visual:?}");
     if mark(code, &state_key)?.as_deref() == Some(state_now.as_str()) {
         return Ok(());
     }
@@ -220,6 +221,12 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
                 }
             }
         }
+    }
+    // The visual review (Chromatic's UI Review): pending until someone accepts it in roll.
+    if rules.status
+        && let Some((state, why)) = &visual
+    {
+        hub.client.create_status(l.installation_id, &l.owner, &l.repo, &sha, state, "roll/visual", Some(why), log_url.as_deref()).await.map_err(gh)?;
     }
     // The deployment: one per head, its status following the preview; the last one goes
     // inactive when the preview is removed.
@@ -349,6 +356,17 @@ fn speed_line(s: &crate::model::PreviewPageSpeed) -> String {
     };
     let paint = s.fcp_ms.map(|f| format!(", first paint {}", t(f))).unwrap_or_default();
     format!("Its first page loads in {}{moved}{paint}, {kb}, first byte {}.\n\n", t(s.load_ms), t(s.ttfb_ms))
+}
+
+/// The `roll/visual` status for a visual review: its state and description.
+fn visual_status(v: &crate::model::PreviewVisualReview) -> (&'static str, String) {
+    let branch = branch_name(&v.branch);
+    let by: String = v.by.as_deref().unwrap_or("someone").chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).take(40).collect();
+    match v.state.as_str() {
+        "accepted" => ("success", format!("Accepted by {by}: differs from {branch} by {:.1}%", v.percent.max(0.1))),
+        "changed" => ("pending", format!("Differs from {branch} by {:.1}%: accept it in roll", v.percent.max(0.1))),
+        _ => ("success", format!("Looks the same as {branch}")),
+    }
 }
 
 /// What the screenshot's browser found on the first page, folded under one line of counts
@@ -591,6 +609,7 @@ mod preview_tests {
             page_a11y: None,
             base_change: None,
             pages: Vec::new(),
+            visual_review: None,
         };
         let p = Preview { state: PreviewState::Running, url: Some(env.services[0].url.clone()), postgres: None, redis: None, error: None, created_at: 1, environment: Some(env) };
         let (status, deploy, _) = preview_states(Some(&p));
@@ -634,6 +653,10 @@ mod preview_tests {
         );
         let page = |path: &str, percent, base_percent, errors| crate::model::PreviewPageCheck { path: path.into(), errors, percent, base_percent };
         e.pages = vec![page("/pricing", Some(40.0), Some(2.0), 1), page("/about", Some(0.0), None, 0)];
+        let review = |state: &str, by: Option<&str>| crate::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.04, by: by.map(Into::into) };
+        assert_eq!(visual_status(&review("changed", None)), ("pending", "Differs from main by 8.0%: accept it in roll".into()));
+        assert_eq!(visual_status(&review("accepted", Some("ada"))), ("success", "Accepted by ada: differs from main by 8.0%".into()));
+        assert_eq!(visual_status(&review("unchanged", None)).0, "success");
         let comment = page_checks(&e).unwrap();
         assert!(comment.contains(" · 2 more pages, most changed /pricing by 40.0%, 1 error on them · "), "{comment}");
         assert!(comment.contains("`/pricing`: changed 40.0% since the push before, differs from `mainx` by 2.0%, 1 error while it loaded.\n\n`/about`: unchanged since the push before."), "{comment}");
