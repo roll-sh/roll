@@ -166,6 +166,12 @@ pub struct Apps {
     /// Bumped by every change to the access cache: a cold read caches what it read only if
     /// nothing changed meanwhile (a token rotated while it read would otherwise come back).
     access_gen: std::sync::atomic::AtomicU64,
+    /// Each environment's `needs_deploy` as last worked out (it decrypts every variable and asks
+    /// each linked product for its own): when, the settings generation and active deployment it
+    /// was for, and the answer. Good for a minute, or until either moves.
+    needs: Mutex<HashMap<String, (std::time::Instant, u64, String, bool)>>,
+    /// Bumped by every change a deployment's fingerprint reads (settings, variables, links).
+    settings_gen: std::sync::atomic::AtomicU64,
     /// Environments in a crash loop whose event is written (one per loop).
     looping: Mutex<std::collections::HashSet<String>>,
     /// For notification targets: public addresses only, no redirects.
@@ -233,6 +239,8 @@ impl Apps {
             drain_done: Arc::new(Mutex::new(Vec::new())),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
+            needs: Mutex::new(HashMap::new()),
+            settings_gen: std::sync::atomic::AtomicU64::new(0),
             sessions: Mutex::new(HashMap::new()),
             ws_shells: Mutex::new(HashMap::new()),
             notify_client: net::client(cfg_allow, Duration::from_secs(10)),
@@ -599,6 +607,38 @@ impl Apps {
         self.environment_view(row).await
     }
 
+    /// Whether the environment's settings, variables or links changed since its active
+    /// deployment `active`: cached ([`Apps::needs`]) since working it out is the expensive part of
+    /// an environment's read, and the dashboard reads it every few seconds.
+    async fn needs_deploy(self: &Arc<Self>, svc: &ServiceRow, r: &EnvRow, active: &str) -> Result<bool> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let key = env_key(&r.service, &r.name);
+        let seen = self.settings_gen.load(SeqCst);
+        if let Some((at, g, a, v)) = self.needs.lock().get(&key)
+            && *g == seen
+            && a == active
+            && at.elapsed() < Duration::from_secs(60)
+        {
+            return Ok(*v);
+        }
+        let a = active.to_string();
+        let dep = self.db(move |s| s.deployment(&a)).await?;
+        let v = match self.resolve_vars(svc, r, &dep.id).await {
+            Ok(v) => fingerprint(&v.vars_for_hash(), svc) != dep.vars_hash,
+            Err(_) => false,
+        };
+        // Kept only if nothing changed while it was worked out.
+        if self.settings_gen.load(SeqCst) == seen {
+            self.needs.lock().insert(key, (std::time::Instant::now(), seen, active.to_string(), v));
+        }
+        Ok(v)
+    }
+
+    /// Something a deployment's fingerprint reads changed: every cached `needs_deploy` is stale.
+    pub fn settings_changed(&self) {
+        self.settings_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
     async fn environment_view(self: &Arc<Self>, r: EnvRow) -> Result<Environment> {
         let summary = self.summary(&r).await?;
         let (instances, crash_loop, canary) = match self.lives.lock().get(&env_key(&r.service, &r.name)) {
@@ -618,14 +658,7 @@ impl Apps {
             _ => None,
         };
         let needs_deploy = match &r.active {
-            Some(a) => {
-                let a = a.clone();
-                let dep = self.db(move |s| s.deployment(&a)).await?;
-                match self.resolve_vars(&svc, &r, &dep.id).await {
-                    Ok(v) => fingerprint(&v.vars_for_hash(), &svc) != dep.vars_hash,
-                    Err(_) => false,
-                }
-            }
+            Some(a) => self.needs_deploy(&svc, &r, a).await?,
             None => false,
         };
         let private = self.access(&r.service, &r.name).await?.is_some();
@@ -740,6 +773,7 @@ impl Apps {
             svc.for_env(&row).map_err(|e| Error::BadRequest(e.to_string().replace("no longer fit", "don't fit")))?;
             let (sid, e, run) = (service.to_string(), env.to_string(), row.run);
             self.db(move |s| s.set_env_run(&sid, &e, &run)).await?;
+            self.settings_changed();
         }
         match o.get("wait_for_ci") {
             None | Some(Value::Null) => {}

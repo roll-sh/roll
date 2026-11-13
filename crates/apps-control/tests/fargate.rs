@@ -546,6 +546,13 @@ async fn a_web_service_builds_in_codebuild_runs_as_tasks_wakes_and_sleeps() {
     let base = format!("/v1/apps/services/{id}/environments/production");
     let (_, env) = call(&w.api, "GET", &base, None).await;
     assert_eq!(env["state"], "stopped", "{env}");
+    // The health-checked task stops right after the switch (the deploy reads as done first).
+    for _ in 0..200 {
+        if !w.fake.calls("StopTask").is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!((w.fake.calls("RunTask").len(), w.fake.calls("StopTask").len()), (1, 1));
 
     // A request wakes it: a new task, its variables from the environment file.

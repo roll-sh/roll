@@ -239,6 +239,7 @@ fn changed(v: &Value) -> Vec<String> {
 async fn patch_service(State(apps): S, Path(id): Path<String>, ext: Extensions, b: Bytes) -> R {
     let patch = body(&b)?;
     let s = apps.patch_service(&id, patch.clone()).await?;
+    apps.settings_changed();
     apps.audit("settings", &id, "", actor(&ext), json!({ "changed": changed(&patch) })).await;
     ok(s)
 }
@@ -258,12 +259,14 @@ async fn activity(State(apps): S, Path(id): Path<String>) -> R {
 
 async fn put_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
     let l = apps.put_link(&id, &kind, &r, body(&b)?).await?;
+    apps.settings_changed();
     apps.audit("link.added", &id, "", actor(&ext), json!({ "kind": kind, "ref": r })).await;
     ok(l)
 }
 
 async fn delete_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>, ext: Extensions) -> R {
     apps.delete_link(&id, &kind, &r).await?;
+    apps.settings_changed();
     apps.audit("link.removed", &id, "", actor(&ext), json!({ "kind": kind, "ref": r })).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -350,6 +353,7 @@ async fn get_env(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
 async fn put_env(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let put = body(&b)?;
     let e = apps.put_environment(&id, &env, put.clone()).await?;
+    apps.settings_changed();
     // The access token is a secret: the trail says it changed, never what it is.
     apps.audit("environment", &id, &env, actor(&ext), json!({ "changed": put.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() })).await;
     ok(e)
@@ -634,6 +638,7 @@ async fn reveal(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Ex
 async fn change_variables(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let change = body(&b)?;
     let v = apps.change_variables(&id, &env, change.clone()).await?;
+    apps.settings_changed();
     // Names only: a value never reaches the trail.
     let set: Vec<String> = change["set"].as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
     apps.audit("variables", &id, &env, actor(&ext), json!({ "set": set, "unset": change["unset"] })).await;

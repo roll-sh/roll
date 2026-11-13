@@ -755,6 +755,15 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
 - Idle cost: a service asleep (stopped) meters nothing: no CPU-seconds, no GB-seconds, $0.00.
   The only idle cost is the image on disk (roll's, not the user's). Suspended instances keep their
   memory on the host (roll's cost, not billed) for `sleep_after` (10 minutes by default).
+- An environment's read (the dashboard's every few seconds) worked out `needs_deploy` each
+  time: every variable decrypted and every link resolved, then the fingerprint. It's cached per
+  environment, keyed by the active deployment and a generation every settings, variables, link
+  or environment change bumps (after its write, so a read racing a change never caches the old
+  answer), and good for a minute so a linked database's own change still shows. With 40
+  variables and one link (debug build, the fake link resolver, which answers at once), 300 reads
+  took 6.06 ms each cold and 2.10 ms cached, median of five alternating pairs, 61–71% faster in
+  all five. Against a real pg-control, resolving a link is a network call, so the saving is
+  larger.
 
 ## Builds in detail (apps-build)
 
@@ -861,10 +870,9 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
 (security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
 
-1. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
-   the service page from the event log (SSE after a cursor) instead of three requests every
-   15 s, and an environment's `needs_deploy` from a stored digest instead of decrypting every
-   variable on each read (with roll secrets, `Secrets::digest`).
+1. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`), and
+   an environment's `needs_deploy` is cached (see "Measured"); next, the service page from the
+   event log (SSE after a cursor) instead of three requests every 15 s.
 2. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
