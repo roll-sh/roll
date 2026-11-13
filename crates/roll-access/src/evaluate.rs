@@ -351,7 +351,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             git_commands = Some(prefix);
         }
     }
-    let (mut outcome, action) = if matches!(row.target, Tgt::AnyGrant) { (Outcome::Allow, needs[0]) } else { weakest(&needs, |a| scope.outcome(&target, a)) };
+    let (mut outcome, mut action) = if matches!(row.target, Tgt::AnyGrant) { (Outcome::Allow, needs[0]) } else { weakest(&needs, |a| scope.outcome(&target, a)) };
     // Putting a resource in a workspace project (or taking it out) changes which tokens reach it:
     // it also needs `admin` on that resource, where it is now, allowed outright.
     if let Some((product, r#ref)) = catalog::placement(row, &params) {
@@ -360,6 +360,18 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         let ok = moved.is_some_and(|m| scope.outcome(&Target::One(m), Action::Admin) == Outcome::Allow);
         if !ok {
             outcome = Outcome::Deny;
+        }
+    }
+    // Copying another environment's values (apps' `variables_from`) is reading them: it needs
+    // reveal on the same resource there too, and the request gets the weaker of the two.
+    if let (Some(field), Target::One(r)) = (row.copies_from, &target)
+        && let Some(src) = json_body.as_ref().and_then(|b| b.get(field)).and_then(Value::as_str)
+    {
+        let mut from = r.clone();
+        from.environment = Some(access.resolvers.environment(row.product, r.id.as_deref().unwrap_or(""), src));
+        let copied = scope.outcome(&Target::One(from), Action::Reveal);
+        if rank(copied) < rank(outcome) {
+            (outcome, action) = (copied, Action::Reveal);
         }
     }
     let resource = describe(&target);
@@ -492,12 +504,16 @@ fn limit_headers(h: &mut axum::http::HeaderMap, rate: u32, remaining: u32, reset
 
 /// The decision on everything a request needs: the weakest outcome, and the action it's for
 /// (the strongest among equals).
-fn weakest(needs: &[Action], outcome: impl Fn(Action) -> Outcome) -> (Outcome, Action) {
-    let rank = |o: Outcome| match o {
+/// Outcomes from weakest to strongest.
+fn rank(o: Outcome) -> u8 {
+    match o {
         Outcome::Deny => 0,
         Outcome::Ask => 1,
         Outcome::Allow => 2,
-    };
+    }
+}
+
+fn weakest(needs: &[Action], outcome: impl Fn(Action) -> Outcome) -> (Outcome, Action) {
     let mut sorted = needs.to_vec();
     sorted.sort_by(|a, b| b.cmp(a));
     sorted.dedup();
