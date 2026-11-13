@@ -24,9 +24,9 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps` | | `Overview` | read |
 | `POST /v1/apps/plan` | `PlanRequest` | `Plan` | read |
 | `GET /v1/apps/services?project=` | | `Service[]` | read |
-| `POST /v1/apps/services` | `NewService` | 201 `Service` | write |
+| `POST /v1/apps/services` | `NewService` | 201 `Service` | deploy* (a repo or image source deploys production at once; write for an upload source) |
 | `GET /v1/apps/projects/{project}/services` | | `Service[]` | read |
-| `POST /v1/apps/projects/{project}/services` | `NewService` (`project` may be left out) | 201 `Service` | write |
+| `POST /v1/apps/projects/{project}/services` | `NewService` (`project` may be left out) | 201 `Service` | deploy* (as above) |
 | `GET /v1/apps/services/{id}` | | `Service` | read |
 | `PATCH /v1/apps/services/{id}` | `ServicePatch` | `Service` | write |
 | `DELETE /v1/apps/services/{id}` | | 204 | delete |
