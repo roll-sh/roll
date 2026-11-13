@@ -263,8 +263,12 @@ pub trait Apps: Send + Sync {
 /// A project's secrets, per environment (roll secrets; docs/secrets.md).
 #[async_trait]
 pub trait Secrets: Send + Sync {
-    /// Make environment `env` exist, inheriting `base`, with `vars` set on top.
-    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)]) -> anyhow::Result<()>;
+    /// Make environment `env` exist, inheriting `base`, with exactly `vars` as its own values
+    /// (one no longer wanted is deleted). `trusted`: it may read a protected base (the project
+    /// allows production and the change is trusted). It expires by itself `expires_at` (ms) at the
+    /// latest, so a teardown that never happened leaves nothing for long; each converge pushes
+    /// that out.
+    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], trusted: bool, expires_at: i64) -> anyhow::Result<()>;
     /// Every variable of `env`, inherited ones included.
     /// `untrusted`: nothing of a protected environment resolves (directly, by reference, by
     /// import or through the base): what the preview's code reads is its own overrides and links.
@@ -278,7 +282,7 @@ pub struct NoSecrets;
 
 #[async_trait]
 impl Secrets for NoSecrets {
-    async fn ensure(&self, _: &str, _: &str, _: &str, _: &[(String, String)]) -> anyhow::Result<()> {
+    async fn ensure(&self, _: &str, _: &str, _: &str, _: &[(String, String)], _: bool, _: i64) -> anyhow::Result<()> {
         Ok(())
     }
 

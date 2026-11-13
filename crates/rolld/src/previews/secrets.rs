@@ -11,28 +11,49 @@ use serde_json::{Value, json};
 /// secrets: every route 404s) gives its previews no environment and nothing to resolve.
 pub struct Secrets(pub Api);
 
+/// How far behind the expiry it would set an environment's may be before it's pushed out (so a
+/// converge every few minutes doesn't write each time).
+const EXPIRY_SLACK_MS: i64 = 12 * 3_600_000;
+
 fn set_ops(vars: &[(String, String)]) -> Value {
     json!(vars.iter().map(|(k, v)| json!({ "op": "set", "key": k, "value": v })).collect::<Vec<_>>())
 }
 
 #[async_trait]
 impl roll_previews::ports::Secrets for Secrets {
-    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)]) -> anyhow::Result<()> {
+    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], trusted: bool, expires_at: i64) -> anyhow::Result<()> {
         let envs = format!("/v1/secrets/projects/{}/environments", seg(project));
-        let body = json!({ "slug": env, "name": env, "kind": "ephemeral", "base": base, "labels": { "preview": env }, "secrets": set_ops(vars) });
-        match self.0.post(&envs, body).await {
+        let new = || json!({ "slug": env, "name": env, "kind": "ephemeral", "base": base, "labels": { "preview": env }, "trusted": trusted, "expires_at": expires_at, "secrets": set_ops(vars) });
+        match self.0.post(&envs, new()).await {
             Ok(_) => Ok(()),
-            // It exists. A changed base (the project's rules moved off production, say) means a new
-            // environment; otherwise bring its overrides up to date (one change).
+            // It exists. A changed base or trust (the project's rules moved off production, say)
+            // means a new environment; otherwise bring its own values to exactly `vars` (one
+            // change) and push its expiry out when it's getting close.
             Err(e) if conflict_is_ours(&e) => {
-                let current = self.0.get(&format!("{envs}/{}", seg(env))).await?;
-                if current["base"].as_str().is_some_and(|b| b != base) {
-                    self.0.delete(&format!("{envs}/{}?confirm={}", seg(env), seg(env))).await?;
-                    let body = json!({ "slug": env, "name": env, "kind": "ephemeral", "base": base, "labels": { "preview": env }, "secrets": set_ops(vars) });
-                    self.0.post(&envs, body).await?;
+                let path = format!("{envs}/{}", seg(env));
+                let current = self.0.get(&path).await?;
+                let moved = current["base"].as_str().is_some_and(|b| b != base) || current.get("trusted").and_then(Value::as_bool).is_some_and(|t| t != trusted);
+                if moved {
+                    self.0.delete(&format!("{path}?confirm={}", seg(env))).await?;
+                    self.0.post(&envs, new()).await?;
                     return Ok(());
                 }
-                self.0.post(&format!("{envs}/{}/changes", seg(env)), json!({ "message": "roll preview", "ops": set_ops(vars) })).await?;
+                let own = self.0.get(&format!("{path}/secrets?path=/")).await?;
+                let gone: Vec<Value> = own
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|x| x["source"]["kind"] == "own" && x["type"] != "personal")
+                    .filter_map(|x| x["key"].as_str())
+                    .filter(|k| !vars.iter().any(|(v, _)| v == k))
+                    .map(|k| json!({ "op": "delete", "key": k }))
+                    .collect();
+                let mut ops = set_ops(vars);
+                ops.as_array_mut().expect("an array").extend(gone);
+                self.0.post(&format!("{path}/changes"), json!({ "message": "roll preview", "ops": ops })).await?;
+                if current["expires_at"].as_i64().is_none_or(|t| t < expires_at - EXPIRY_SLACK_MS) {
+                    self.0.call(Method::PATCH, &path, Some(json!({ "expires_at": expires_at }))).await?;
+                }
                 Ok(())
             }
             Err(e) if is_404(&e) => Ok(()),

@@ -224,6 +224,10 @@ impl Engine {
 
 
 /// What a service is deployed with, as a digest (FNV-1a: change detection, not a secret).
+/// How long a preview's secrets environment outlives its last converge (roll secrets deletes it
+/// then, revoking its leases): a preview converges every few minutes while it exists.
+const SECRETS_ENV_MARGIN_MS: i64 = 24 * 3_600_000;
+
 /// The shares of `max_usd_month` (percent) a project is told about, once a month each.
 const BUDGET_LEVELS: [u32; 2] = [80, 100];
 

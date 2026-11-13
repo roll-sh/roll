@@ -254,6 +254,16 @@ default) with the project's `env` overrides and the branched resources' URLs on 
 - rolld's adapter talks to roll secrets' API (`feature/roll-secrets`). A project with no secrets,
   or a node without roll secrets, gives its previews no environment: a service then gets the
   overrides and resource URLs only.
+- **The environment is untrusted itself** unless the project allows production and the change is
+  trusted: it's made with `"trusted": true` only then (roll secrets refuses a protected base to
+  an untrusted environment whoever reads it, so roll apps deploying it as `app:<service>` gets no
+  more than the preview would). Turning `allow_production` on or off makes a new environment.
+- **Exactly the rules' values.** Each converge sets the overrides and branch URLs and deletes the
+  environment's own keys the rules no longer have (a removed override doesn't linger).
+- **It expires by itself.** It's made with `expires_at` 24 hours ahead, pushed out whenever less
+  than 12 hours are left (a preview converges every few minutes while it exists), so a teardown
+  that never happened leaves it for a day at most; roll secrets then deletes it and revokes its
+  leases.
 - The environment is deleted with the preview.
 
 ## Schema changes
