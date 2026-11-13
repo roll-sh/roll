@@ -35,9 +35,10 @@ jobs:
           # RESP and S3 auth and parsing.
           - name: protocols
             packages: -p redis-proto -p s3-proto
-          # roll search's segment format (doc values, points, postings, live docs) and analysis.
+          # roll search's segment format (doc values, points, postings, live docs); the rest of
+          # search runs in `pnpm test:search` and the on-demand `search` workflow.
           - name: search
-            packages: -p search-codec -p search-analysis
+            packages: -p search-codec
     name: rust (${{ matrix.name }})
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
