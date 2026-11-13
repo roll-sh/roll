@@ -5768,7 +5768,12 @@ impl Node for ScanNode {
         blocks.clear();
         *prune_next = 0;
         *nblocks = None;
-        *fetcher = None;
+        // (A fetcher with nothing to note stays for the restart, `Fetcher::keeps`: a new one
+        // per execution took the heap model's lock and cloned the database's, the id table's
+        // and the model's references, counts every session's scans write.)
+        if !matches!(fetcher, Some(Some(f)) if f.keeps()) {
+            *fetcher = None;
+        }
         fetched.clear();
         *batch = first_batch(plan);
         *ios_cols = None;

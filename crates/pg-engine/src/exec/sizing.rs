@@ -2565,6 +2565,15 @@ impl Fetcher {
         }
     }
 
+    /// Whether a kept plan's scan may keep this fetcher for its next execution: every page
+    /// is still all-visible (it notes nothing then; a page that stops being so is seen at its
+    /// next fetch, as within one execution), and it holds nothing of this transaction (a
+    /// temporary table's horizon is its transaction's). The table's database and id table
+    /// are the same for as long as the plan is.
+    pub fn keeps(&self) -> bool {
+        self.temp.is_none() && self.visible.as_ref().is_some_and(heapsim::VisWatch::holds)
+    }
+
     /// The scan starts over (a nested loop's rescan): the next fetch reaches its page anew.
     pub fn restart(&mut self) {
         self.last = None;
