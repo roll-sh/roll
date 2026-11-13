@@ -1001,7 +1001,7 @@ async fn a_link_needs_reveal_on_what_it_links() {
 #[ignore]
 async fn gate_latency() {
     let d = Daemon::new(50);
-    let (token, _) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "delete": "allow" } }]), json!({})).await;
+    let (token, token_id) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "delete": "allow" } }]), json!({})).await;
     let (narrow, _) = d.token(json!([{ "product": "postgres", "resources": [{ "id": "pa" }, { "id": "pb" }], "actions": { "read": "allow", "delete": "allow" } }]), json!({})).await;
     for (what, method, path) in [("list", Method::GET, "/v1/projects"), ("one", Method::DELETE, "/v1/projects/pa")] {
         for (who, t) in [("operator", OPERATOR), ("token *", token.as_str()), ("token ids", narrow.as_str())] {
@@ -1018,4 +1018,27 @@ async fn gate_latency() {
             println!("{what:5} {who:10} p50 {:>5} µs  p99 {:>5} µs", lat[lat.len() / 2], lat[lat.len() * 99 / 100]);
         }
     }
+    // Throughput: 32 callers at once, each request audited (a token's) or not (the operator's).
+    let d = Arc::new(d);
+    for (who, t) in [("operator", OPERATOR.to_string()), ("token *", token.clone())] {
+        let start = std::time::Instant::now();
+        let tasks: Vec<_> = (0..32)
+            .map(|_| {
+                let (d, t) = (d.clone(), t.clone());
+                tokio::spawn(async move {
+                    for _ in 0..300 {
+                        assert!(d.call(&t, Method::DELETE, "/v1/projects/pa", None).await.0.is_success());
+                    }
+                })
+            })
+            .collect();
+        for t in tasks {
+            t.await.unwrap();
+        }
+        println!("32 at once {who:10} {:>6.0} requests/s", 9600.0 / start.elapsed().as_secs_f64());
+    }
+    // Every request audited: none lost in the writer's queue.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let activity = d.access.store.activity().unwrap();
+    assert_eq!(activity.get(&token_id).map(|a| a.0), Some(2 * 2200 + 9600), "every request of the token is in the log");
 }

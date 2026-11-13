@@ -215,8 +215,10 @@ impl Ctx {
             ip: self.ip.map(|i| i.to_string()),
             duration_ms: self.started.elapsed().as_millis() as i64,
         };
-        let access = self.access.clone();
-        tokio::task::spawn_blocking(move || access.store.audit(&e));
+        if let Some(e) = self.access.store.queue_audit(e) {
+            let access = self.access.clone();
+            tokio::task::spawn_blocking(move || access.store.audit(&e));
+        }
     }
 }
 

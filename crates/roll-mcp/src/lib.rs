@@ -387,7 +387,9 @@ async fn call(ctx: &Arc<Ctx>, name: &str, args: Value) -> Option<Value> {
             duration_ms: started.elapsed().as_millis() as i64,
         };
         let access = access.clone();
-        let _ = tokio::task::spawn_blocking(move || access.store.audit(&e)).await;
+        if let Some(e) = access.store.queue_audit(e) {
+            let _ = tokio::task::spawn_blocking(move || access.store.audit(&e)).await;
+        }
     }
     Some(result)
 }
