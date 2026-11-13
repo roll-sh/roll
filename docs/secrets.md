@@ -588,7 +588,8 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
 - `roll secrets doctor` checks that setup in one go, each line ok or FAIL: who the token is (and
   the project it's bound to), the directory's project and environment and how many keys it can
   read there, anything there that needs fixing now (expired, missing or exposed keys, from health),
-  the keys a `.env.example` names that it lacks, and whether staged files hold any of
+  the keys a `.env.example` names that it lacks, whether a local `.env` still matches (the diff
+  above, by fingerprint), and whether staged files hold any of
   the project's values (the scan, names only). It fails when a check does: a first step when
   `roll run` doesn't see what it should.
 - `roll run --watch [--interval 5]` keeps the command as a child and restarts it (SIGTERM, then
@@ -1262,6 +1263,11 @@ days.
   sealed). Each sink keeps a cursor; the sweeper claims a sink in a write before delivering, so no
   two nodes send one batch, and a failed batch is sent again 5 minutes later. Deliveries go through
   the same `PublicOnly` client as syncs. At most 10 sinks a project.
+- **Into a roll bucket**: a sink whose URL is `bucket:<name>`, a bucket on the project's own canvas
+  (any other is refused), writes each batch as an object `roll-secrets/audit/<sink>/<delivery>.json`
+  there, through roll storage in process: a compliance archive with the bucket's own lifecycle,
+  versioning and Object Lock. A retried batch is the same delivery, so it writes the same object
+  again, never a second one.
 
 
 ## HTTP API
@@ -1350,7 +1356,7 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/shares/{id}` (public) | | `{note, views_left, expires_at}` |
 | `POST /v1/secrets/shares/{id}/open` (public) | | `{ciphertext}` (one open used) |
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
-| `POST /audit/sinks` | `{url, from_start?}` | 201 `Sink & {secret}` (shown once) |
+| `POST /audit/sinks` | `{url, from_start?}` (an HTTPS endpoint, or `bucket:<name>` on the canvas) | 201 `Sink & {secret}` (shown once) |
 | `DELETE /audit/sinks/{id}` | | 204 |
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
@@ -1532,9 +1538,8 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **The audit log into a roll bucket**: an audit sink that writes signed JSONL objects to a roll
-   storage bucket on the canvas (a compliance archive with the bucket's own retention and Object
-   Lock), not only an HTTPS endpoint.
+1. **The audit log into a roll stream**: a sink `stream:<id>/<topic>` producing each audit event
+   to a topic of a roll stream on the canvas, for consumers that react as it's written.
 
 Waiting on other pull requests:
 

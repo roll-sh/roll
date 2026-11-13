@@ -769,6 +769,12 @@ async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
     let actions: Vec<&str> = sent[0]["events"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
     assert_eq!(actions, ["sink.create", "secrets.write", "secrets.export"]);
     assert!(!serde_json::to_string(&sent).unwrap().contains("sk_live_never_sent"));
+    // Or a roll bucket: of the project's own canvas only.
+    let (s, _) = api.call(Method::POST, "/audit/sinks", Some(json!({ "url": "bucket:audit-archive" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let p = api.project.clone();
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{p}/resources/bucket/audit-archive"), Some(json!({ "x": 0, "y": 0 }))).await;
+    assert_eq!(api.ok(Method::POST, "/audit/sinks", Some(json!({ "url": "bucket:audit-archive" }))).await["url"], "bucket:audit-archive");
 
     let (_, csv) = api.call(Method::GET, "/audit?format=csv", None).await;
     let csv = csv.as_str().unwrap();
