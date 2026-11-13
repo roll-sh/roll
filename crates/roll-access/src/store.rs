@@ -806,13 +806,14 @@ impl Store {
         Ok(a)
     }
 
-    /// The approval a grant already has for exactly this request, still pending or approved and
-    /// unused: sending the request again waits on it or runs with it, as `X-Roll-Approval` would.
+    /// The approval a grant already has for exactly this request, still pending, approved and
+    /// unused, or denied (within its time): sending the request again waits on it, runs with it,
+    /// or is refused with the person's reason, as `X-Roll-Approval` would. Never asked again.
     pub fn open_approval(&self, grant: &str, request_hash: &str) -> Result<Option<Approval>> {
         let now = code_sql::now_ms();
         Ok(self.db.read(|c| {
             c.query_row(
-                &format!("SELECT {APPROVAL_COLUMNS} FROM approvals WHERE grant_id = ? AND request_hash = ? AND state IN ('pending', 'approved') AND expires_at > ? ORDER BY created_at DESC LIMIT 1"),
+                &format!("SELECT {APPROVAL_COLUMNS} FROM approvals WHERE grant_id = ? AND request_hash = ? AND state IN ('pending', 'approved', 'denied') AND expires_at > ? ORDER BY created_at DESC LIMIT 1"),
                 params![grant, request_hash, now],
                 approval_row,
             )

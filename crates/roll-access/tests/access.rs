@@ -382,6 +382,11 @@ async fn escalation_paths_are_shut() {
     assert_eq!(e["code"], "approval_pending", "{s} {e}");
     let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{}", e["approval"].as_str().unwrap()), None).await;
     assert_eq!(asked["args"]["updates"][0]["ref"], "refs/heads/old", "the approval shows the ref updates: {asked}");
+    // The same push again, its pack different (repacked, or split otherwise), finds that approval.
+    let repacked = push(&[format!("{c} {z} refs/heads/old\0report-status\n"), format!("{z} {c} refs/heads/new\n")]);
+    let repacked = Body::from(format!("{}MORE", String::from_utf8(axum::body::to_bytes(repacked, 1 << 20).await.unwrap().to_vec()).unwrap()));
+    let (_, again) = d.raw(&both, Method::POST, git, repacked, &[], None).await;
+    assert_eq!(again["approval"], e["approval"], "{again}");
     assert_eq!(d.raw(&cleaner, Method::POST, git, Body::from("garbage"), &[], None).await.0, StatusCode::FORBIDDEN);
 
     // A signed hop from a node that decided it for this grant: no second approval, and the
@@ -965,6 +970,8 @@ async fn approvals_can_be_remembered() {
     };
     let (s, e) = promote("production").await;
     assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("reveal")), "{e}");
+    // A parameter the decision reads is given once (secrets would read another copy of it).
+    assert_eq!(promote("development&from=production").await.0, StatusCode::BAD_REQUEST);
     assert_eq!(promote("development").await.0, StatusCode::OK);
     // Imports read each in-project source (reveal there); another project's folder is admin.
     let import = |list: Value| {
@@ -976,6 +983,19 @@ async fn approvals_can_be_remembered() {
     assert_eq!(import(json!([{ "environment": "development", "path": "/" }])).await.0, StatusCode::OK);
     let (s, e) = import(json!([{ "project": "prj_o", "environment": "development", "path": "/" }])).await;
     assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("admin")), "{e}");
+    // Asked about an import, the approval is about the folder imported; denied, asking again
+    // answers the denial instead of asking the person again.
+    let (asks, _) = d.token(json!([{ "product": "secrets", "resources": "*", "actions": { "write": "allow", "reveal": "ask" } }]), json!({})).await;
+    let put = || {
+        let (d, t) = (&d, asks.clone());
+        async move { d.call(&t, Method::PUT, "/v1/secrets/projects/prj_s/environments/staging/imports?path=/app", Some(json!([{ "environment": "production", "path": "/db" }]))).await }
+    };
+    let apr = put().await.1["approval"].as_str().unwrap().to_string();
+    let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{apr}"), None).await;
+    assert_eq!((asked["environment"].as_str(), asked["scope_path"].as_str()), (Some("production"), Some("/db")), "{asked}");
+    d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/deny"), Some(json!({ "reason": "not prod" }))).await;
+    let (_, again) = put().await;
+    assert_eq!((again["code"].as_str(), again["approval"].as_str()), (Some("denied"), Some(apr.as_str())), "{again}");
 
     // Remembered where it was asked: development's values, never production's.
     let (secrets, _) = d.token(json!([{ "product": "secrets", "resources": "*", "actions": { "reveal": "ask" } }]), json!({})).await;
