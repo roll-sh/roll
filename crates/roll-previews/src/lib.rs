@@ -20,6 +20,7 @@ pub mod ports;
 pub mod mail;
 pub mod mask;
 pub mod notes;
+pub mod openapi;
 pub mod runtime;
 pub mod schema;
 pub mod settings;
@@ -202,6 +203,10 @@ pub struct Preview {
     /// `release` (or seed) ran at `head`: `+ …` added, `- …` removed (`schema::diff`). `None`:
     /// not known (no Postgres branch, or not read yet).
     pub schema_changes: Option<Vec<String>>,
+    /// What in `schema_changes` would hurt production when the change lands (`schema::risks`:
+    /// a dropped table or column, a type change, a column made NOT NULL).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_risks: Vec<String>,
     /// The project's `release` (migrations) at its last head: how long it took on this
     /// preview's data, which is the parent's (PlanetScale's deploy requests show this before a
     /// merge: what's slow here locks production as long).
@@ -640,6 +645,12 @@ pub struct BaseChange {
     pub seo_added: Option<u32>,
     /// Broken links its first page has that the branch's didn't.
     pub links_added: Option<u32>,
+    /// Its API's operations against the branch's (`github.openapi`): added, and removed (what
+    /// a caller of main's would find gone).
+    pub api: Option<TextDiff>,
+    /// What it breaks inside the operations both keep (`openapi::breaking`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_breaking: Vec<String>,
 }
 
 /// The first page's own links that answered 4xx/5xx or nothing (`status` 0), of `checked`

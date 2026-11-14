@@ -5,7 +5,7 @@ import { Confirm } from "@/components/ui";
 import { a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
-import { FeedbackForm, type PreviewFeedback } from "./preview-feedback";
+import { FeedbackForm, replyBody, replyOf, type PreviewFeedback } from "./preview-feedback";
 import { errorText, host, money, previewOf, since, STATE_LABEL, StateDot } from "./previews-common";
 
 export const PREVIEW_KIND_ICON: Record<PreviewKind, LucideIcon> = {
@@ -131,7 +131,7 @@ export function PreviewSheet({
             )}
             {resolve && p.change && (
               <div className="mb-3">
-                <ResolveNote previewId={p.id} change={p.change} review={resolve} onDone={onFeedbackPosted} />
+                <NoteThread previewId={p.id} change={p.change} review={resolve} onDone={onFeedbackPosted} />
               </div>
             )}
             {p.state === "awaiting_approval" && (
@@ -257,6 +257,15 @@ export function PreviewSheet({
             {p.schema_changes && p.schema_changes.length > 0 && (
               <>
                 <Label>Schema changes</Label>
+                {p.schema_risks && p.schema_risks.length > 0 && (
+                  <ul className="mb-1.5 space-y-0.5 rounded-lg border border-danger/40 bg-danger/10 px-2.5 py-1.5 text-[11.5px] text-danger">
+                    {p.schema_risks.map((r, i) => (
+                      <li key={i} className="break-words">
+                        {r}
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 <pre className="max-h-48 overflow-auto rounded-lg border border-line-2 bg-raised px-2.5 py-1.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere] inset-shadow-highlight">
                   {p.schema_changes.map((l, i) => (
                     <div key={i} className={l.startsWith("- ") ? "text-danger" : l.startsWith("+ ") ? "text-fg" : "text-subtle"}>
@@ -269,6 +278,8 @@ export function PreviewSheet({
 
             {p.screenshot_at ? <Screenshot id={p.id} at={p.screenshot_at} change={p.visual_change} phone={p.phone_screenshot} base={p.base_change} pages={p.pages} /> : null}
             {p.base_change?.text && <TextAgainst diff={p.base_change.text} branch={p.base_change.branch} />}
+            {p.base_change?.api && <TextAgainst diff={p.base_change.api} branch={p.base_change.branch} what="api" />}
+            {p.base_change?.api_breaking && <ApiBreaking items={p.base_change.api_breaking} />}
             {p.visual_review && p.visual_review.state !== "unchanged" && (
               <div className="mt-1.5 flex items-center gap-2 text-[11.5px]">
                 {p.visual_review.state === "accepted" ? (
@@ -853,13 +864,14 @@ function PageChecks({ page, branch }: { page: PageCheck; branch: string }) {
 
 /** The first page's words against the default branch's (Chromatic's DOM snapshots, in words):
  * lines it lost and gained, as text. */
-export function TextAgainst({ diff, branch }: { diff: TextDiff; branch: string }) {
+export function TextAgainst({ diff, branch, what = "words" }: { diff: TextDiff; branch: string; what?: "words" | "api" }) {
   if (diff.added_n + diff.removed_n === 0) return null;
   const more = diff.added_n + diff.removed_n - diff.added.length - diff.removed.length;
+  const label = what === "api" ? `Its API against ${branch}` : `Its words against ${branch}`;
   return (
-    <div className="mt-1.5 text-[11.5px]" aria-label={`Its words against ${branch}`}>
-      <p className="text-muted">
-        Its words against {branch}: {diff.added_n} new, {diff.removed_n} gone
+    <div className="mt-1.5 text-[11.5px]" aria-label={label}>
+      <p className={what === "api" && diff.removed_n > 0 ? "text-danger" : "text-muted"}>
+        {what === "api" ? `${label}: ${diff.added_n} added, ${diff.removed_n} removed${diff.removed_n > 0 ? " (breaking for its callers)" : ""}` : `${label}: ${diff.added_n} new, ${diff.removed_n} gone`}
       </p>
       <ul className="mt-0.5 space-y-0.5 font-mono text-[11px] [overflow-wrap:anywhere]">
         {diff.removed.map((l, i) => (
@@ -878,29 +890,91 @@ export function TextAgainst({ diff, branch }: { diff: TextDiff; branch: string }
   );
 }
 
-/** A note from the preview's page, resolved by someone on the project (Vercel Comments): the
- * page's button stops listing it. Its words come from the change's review. */
-function ResolveNote({ previewId, change, review, onDone }: { previewId: string; change: string; review: string; onDone?: () => void }) {
+/** What a change breaks inside the API operations main's and its own both have (a parameter
+ * that becomes required, a response field that goes): the change's own document's words. */
+export function ApiBreaking({ items }: { items: string[] }) {
+  if (!items.length) return null;
+  return (
+    <div className="mt-1.5 text-[11.5px]" aria-label="What it breaks in the operations it keeps">
+      <p className="text-danger">It breaks callers of the operations it keeps:</p>
+      <ul className="mt-0.5 space-y-0.5 font-mono text-[11px] text-fg [overflow-wrap:anywhere]">
+        {items.map((b, i) => (
+          <li key={i}>{b}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** A note from the preview's page with its replies (Vercel Comments' threads): anyone on the
+ * project replies (a comment review naming the note, which the page lists under it) or resolves
+ * it (`POST …/notes/{review}/resolve`, kept by previews), and the page stops listing it. */
+function NoteThread({ previewId, change, review, onDone }: { previewId: string; change: string; review: string; onDone?: () => void }) {
   const [note, setNote] = useState<string | null>(null);
+  const [replies, setReplies] = useState<{ id: string; by: string; text: string }[]>([]);
+  const [reply, setReply] = useState("");
   const [state, setState] = useState<"idle" | "busy" | "done">("idle");
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
+  const load = () =>
     codeApi.reviews(change).then(
       (all) => {
         const r = all.find((x) => x.id === review);
         if (!r) return setError("That note isn't on this change.");
         setNote(r.body.split("\n\n")[1] ?? r.body);
+        setReplies(
+          all
+            .filter((x) => !x.dismissed && replyOf(x.body)?.note === review)
+            .sort((a, b) => a.created_at - b.created_at)
+            .map((x) => ({ id: x.id, by: x.reviewer.name, text: replyOf(x.body)?.text ?? "" })),
+        );
       },
       (e) => setError(errorText(e)),
     );
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [change, review]);
   if (error) return <p className="text-[11.5px] text-danger">{error}</p>;
   if (state === "done") return <p className="text-[11.5px] text-subtle">This note is resolved: the page no longer lists it.</p>;
+  const button = "h-6 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40";
   return (
     <div className="rounded-lg border border-line-2 bg-raised px-2.5 py-2 text-[11.5px] inset-shadow-highlight">
-      <p className="text-muted">Resolve this note from the preview's page?</p>
+      <p className="text-muted">A note on the preview's page</p>
       {note && <p className="mt-1 break-words text-fg">{note}</p>}
-      <div className="mt-2 flex justify-end">
+      {replies.map((r) => (
+        <div key={r.id} className="mt-1.5 border-l border-line-2 pl-2">
+          <p className="text-subtle">{r.by}</p>
+          <p className="break-words text-fg">{r.text}</p>
+        </div>
+      ))}
+      <textarea
+        aria-label="Reply"
+        value={reply}
+        onChange={(e) => setReply(e.target.value)}
+        placeholder="Reply…"
+        rows={2}
+        className="mt-2 w-full rounded-md border border-line-2 bg-canvas px-2 py-1.5 text-[11.5px] outline-none transition-colors placeholder:text-subtle focus:border-accent/60"
+      />
+      <div className="mt-1.5 flex justify-end gap-1.5">
+        <button
+          type="button"
+          disabled={state === "busy" || note === null || !reply.trim()}
+          onClick={async () => {
+            setState("busy");
+            try {
+              await codeApi.submitReview(change, { verdict: "comment", body: replyBody(review, reply) });
+              setReply("");
+              await load();
+            } catch (e) {
+              setError(errorText(e));
+            } finally {
+              setState("idle");
+            }
+          }}
+          className={button}
+        >
+          Reply
+        </button>
         <button
           type="button"
           disabled={state === "busy" || note === null}
@@ -914,9 +988,9 @@ function ResolveNote({ previewId, change, review, onDone }: { previewId: string;
               setError(errorText(e));
             }
           }}
-          className="h-6 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
+          className={button}
         >
-          {state === "busy" ? "Resolving…" : "Resolve"}
+          {state === "busy" ? "Working…" : "Resolve"}
         </button>
       </div>
     </div>

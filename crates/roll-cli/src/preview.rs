@@ -514,6 +514,8 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
         Preview::Mail { preview, read } => {
             if let Some(mail) = read {
                 let text = api.open_stream(&format!("/v1/previews/{preview}/mail/{mail}")).await?.text().await?;
+                // The preview's code wrote it: no escape sequence of its reaches the terminal.
+                let text: String = text.replace("\r\n", "\n").chars().map(|c| if c.is_control() && c != '\n' && c != '\t' { '\u{fffd}' } else { c }).collect();
                 print!("{text}");
                 return Ok(());
             }
@@ -544,6 +546,9 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                             None => s(&n["path"]),
                         };
                         println!("{}  {}  by {}: {}", s(&n["id"]), on, s(&n["by"]), s(&n["note"]));
+                        for r in n["replies"].as_array().into_iter().flatten() {
+                            println!("    ↳ {}: {}", s(&r["by"]), s(&r["note"]));
+                        }
                     }),
                     _ => println!("no open notes"),
                 }

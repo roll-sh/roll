@@ -300,6 +300,8 @@ struct Shots {
     text: Option<String>,
     /// Its broken links (`PageLinks` JSON).
     links: Option<String>,
+    /// The first service's API operations, a line each.
+    api: Option<String>,
     /// The other pages' reports by path (`PageReport` JSON).
     page_reports: std::collections::BTreeMap<String, String>,
 }
@@ -474,7 +476,7 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
-        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT"), ("base_preview", "TEXT"), ("base_branch", "TEXT"), ("base_change_bp", "INTEGER"), ("base_phone_bp", "INTEGER"), ("base_head", "TEXT"), ("base_speed", "TEXT"), ("base_a11y", "TEXT"), ("base_health", "TEXT"), ("text", "TEXT"), ("base_text", "TEXT"), ("links", "TEXT"), ("base_links", "TEXT")] {
+        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT"), ("base_preview", "TEXT"), ("base_branch", "TEXT"), ("base_change_bp", "INTEGER"), ("base_phone_bp", "INTEGER"), ("base_head", "TEXT"), ("base_speed", "TEXT"), ("base_a11y", "TEXT"), ("base_health", "TEXT"), ("text", "TEXT"), ("base_text", "TEXT"), ("links", "TEXT"), ("base_links", "TEXT"), ("api", "TEXT"), ("base_api", "TEXT"), ("base_api_breaking", "TEXT")] {
             if !db.has_column("screenshots", col)? {
                 db.add_column("screenshots", col, ty)?;
             }
@@ -487,7 +489,7 @@ impl Store {
         if !db.has_column("resources", "mask_digest")? {
             db.add_column("resources", "mask_digest", "TEXT")?;
         }
-        for col in ["text", "links", "page_reports"] {
+        for col in ["text", "links", "page_reports", "api"] {
             if !db.has_column("base_history", col)? {
                 db.add_column("base_history", col, "TEXT")?;
             }
@@ -510,7 +512,7 @@ impl Store {
                 db.add_column("previews", col, "INTEGER")?;
             }
         }
-        for col in ["released", "schema_head", "schema_changes", "runs"] {
+        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head", "teardown_error"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "TEXT")?;
             }
@@ -1041,6 +1043,32 @@ impl Store {
         })
     }
 
+    /// The last head a converge ran (its gate passed: trusted, or approved), where the project's
+    /// `teardown` runs; `None` once it has, or when nothing of the preview ever ran.
+    pub fn ran_head(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT ran_head FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    pub fn set_ran_head(&self, id: &str, head: Option<&str>) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE previews SET ran_head = ? WHERE id = ?", params![head, id])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// What the preview's `teardown` said when it failed, kept until the change is told it went.
+    pub fn teardown_error(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT teardown_error FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    pub fn set_teardown_error(&self, id: &str, error: &str) -> Result<()> {
+        let error: String = error.chars().take(4000).collect();
+        self.db.write(|c| {
+            c.execute("UPDATE previews SET teardown_error = ? WHERE id = ?", params![error, id])?;
+            Ok::<_, Error>(())
+        })
+    }
+
     /// The head the schema's changes were read at.
     pub fn schema_head(&self, id: &str) -> Result<Option<String>> {
         Ok(self.db.read(|c| c.query_row("SELECT schema_head FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
@@ -1101,11 +1129,12 @@ impl Store {
     }
 
     /// What went wrong while the latest screenshot's page loaded (after `set_screenshot`).
-    pub fn set_page_report(&self, id: &str, health: Option<&crate::PageHealth>, a11y: Option<&crate::PageA11y>, text: Option<&str>, links: Option<&crate::PageLinks>) -> Result<()> {
+    pub fn set_page_report(&self, id: &str, health: Option<&crate::PageHealth>, a11y: Option<&crate::PageA11y>, text: Option<&str>, links: Option<&crate::PageLinks>, api: Option<&[String]>) -> Result<()> {
         let health = health.and_then(|h| serde_json::to_string(h).ok());
         let a11y = a11y.and_then(|a| serde_json::to_string(a).ok());
         let links = links.and_then(|l| serde_json::to_string(l).ok());
-        self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE screenshots SET health = ?, a11y = ?, text = ?, links = ? WHERE preview_id = ?", params![health, a11y, text, links, id])?))?;
+        let api = api.map(|ops| ops.join("\n"));
+        self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE screenshots SET health = ?, a11y = ?, text = ?, links = ?, api = ? WHERE preview_id = ?", params![health, a11y, text, links, api, id])?))?;
         Ok(())
     }
 
@@ -1143,10 +1172,10 @@ impl Store {
         let now = self.now_ms()?;
         self.db.write(|c| {
             c.execute(
-                "INSERT INTO base_history (preview_id, head, png, phone_png, pages, at, speed, a11y, health, text, links, page_reports) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                "INSERT INTO base_history (preview_id, head, png, phone_png, pages, at, speed, a11y, health, text, links, page_reports, api) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT (preview_id, head) DO UPDATE SET png = excluded.png, phone_png = excluded.phone_png, pages = excluded.pages, at = excluded.at, speed = excluded.speed, \
-                 a11y = excluded.a11y, health = excluded.health, text = excluded.text, links = excluded.links, page_reports = excluded.page_reports",
-                params![id, head, shots.png, shots.phone, pages, now, shots.speed, shots.a11y, shots.health, shots.text, shots.links, page_reports],
+                 a11y = excluded.a11y, health = excluded.health, text = excluded.text, links = excluded.links, page_reports = excluded.page_reports, api = excluded.api",
+                params![id, head, shots.png, shots.phone, pages, now, shots.speed, shots.a11y, shots.health, shots.text, shots.links, page_reports, shots.api],
             )?;
             let old: Vec<String> = c.query(&format!("SELECT head FROM base_history WHERE preview_id = ? ORDER BY at DESC LIMIT -1 OFFSET {BASE_HISTORY}"), [id], |r| r.get(0))?;
             for h in &old {
@@ -1158,29 +1187,29 @@ impl Store {
 
     /// A preview's latest screenshots, base64: desktop, phone, and its other pages by path.
     fn latest_shots(&self, id: &str) -> Result<Option<Shots>> {
-        type Raw = (String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
+        type Raw = (String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
         let row: Option<Raw> = self.db.read(|c| {
-            c.query_row("SELECT head, png, phone_png, speed, a11y, health, text, links FROM screenshots WHERE preview_id = ?", [id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
-            })
-            .optional()
-        })?;
-        let Some((head, png, phone, speed, a11y, health, text, links)) = row else { return Ok(None) };
-        let pages: Vec<(String, String, Option<String>)> = self.db.read(|c| c.query("SELECT path, png, report FROM page_shots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
-        let page_reports = pages.iter().filter_map(|(p, _, r)| Some((p.clone(), r.clone()?))).collect();
-        Ok(Some(Shots { head, png, phone, pages: pages.into_iter().map(|(p, png, _)| (p, png)).collect(), speed, a11y, health, text, links, page_reports }))
-    }
-
-    /// Baseline `id`'s screenshots at `head`, from its history.
-    fn shots_at(&self, id: &str, head: &str) -> Result<Option<Shots>> {
-        type Raw = (String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
-        let row: Option<Raw> = self.db.read(|c| {
-            c.query_row("SELECT png, phone_png, pages, speed, a11y, health, text, links, page_reports FROM base_history WHERE preview_id = ? AND head = ?", [id, head], |r| {
+            c.query_row("SELECT head, png, phone_png, speed, a11y, health, text, links, api FROM screenshots WHERE preview_id = ?", [id], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
             })
             .optional()
         })?;
-        Ok(row.map(|(png, phone, pages, speed, a11y, health, text, links, page_reports)| Shots {
+        let Some((head, png, phone, speed, a11y, health, text, links, api)) = row else { return Ok(None) };
+        let pages: Vec<(String, String, Option<String>)> = self.db.read(|c| c.query("SELECT path, png, report FROM page_shots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
+        let page_reports = pages.iter().filter_map(|(p, _, r)| Some((p.clone(), r.clone()?))).collect();
+        Ok(Some(Shots { head, png, phone, pages: pages.into_iter().map(|(p, png, _)| (p, png)).collect(), speed, a11y, health, text, links, api, page_reports }))
+    }
+
+    /// Baseline `id`'s screenshots at `head`, from its history.
+    fn shots_at(&self, id: &str, head: &str) -> Result<Option<Shots>> {
+        type Raw = (String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
+        let row: Option<Raw> = self.db.read(|c| {
+            c.query_row("SELECT png, phone_png, pages, speed, a11y, health, text, links, page_reports, api FROM base_history WHERE preview_id = ? AND head = ?", [id, head], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?))
+            })
+            .optional()
+        })?;
+        Ok(row.map(|(png, phone, pages, speed, a11y, health, text, links, page_reports, api)| Shots {
             head: head.to_string(),
             png,
             phone,
@@ -1190,6 +1219,7 @@ impl Store {
             health,
             text,
             links,
+            api,
             page_reports: page_reports.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default(),
         }))
     }
@@ -1229,11 +1259,16 @@ impl Store {
             .collect();
         // The first page's words against the baseline's (Chromatic's DOM snapshots), when both were read.
         let text = ours.text.as_deref().zip(theirs.text.as_deref()).and_then(|(now, then)| serde_json::to_string(&crate::visual::text_diff(then, now)).ok());
+        // Its API against the baseline's (`github.openapi`), when both were read: the operations
+        // added and removed, and what breaks inside the ones both keep.
+        let both = ours.api.as_deref().zip(theirs.api.as_deref());
+        let api = both.and_then(|(now, then)| serde_json::to_string(&crate::visual::text_diff(&crate::openapi::operations(then), &crate::openapi::operations(now))).ok());
+        let api_breaking = both.and_then(|(now, then)| serde_json::to_string(&crate::openapi::breaking(then, now)).ok());
         self.db.write(|c| {
             c.execute(
                 "UPDATE screenshots SET base_preview = ?, base_branch = ?, base_change_bp = ?, base_phone_bp = ?, base_head = ?, base_speed = ?, base_a11y = ?, base_health = ?, base_text = ?, \
-                 base_links = ? WHERE preview_id = ?",
-                params![base, branch, change, phone, theirs.head, theirs.speed, theirs.a11y, theirs.health, text, theirs.links, id],
+                 base_links = ?, base_api = ?, base_api_breaking = ? WHERE preview_id = ?",
+                params![base, branch, change, phone, theirs.head, theirs.speed, theirs.a11y, theirs.health, text, theirs.links, api, api_breaking, id],
             )?;
             for (path, bp) in &page_bps {
                 c.execute("UPDATE page_shots SET base_bp = ? WHERE preview_id = ? AND path = ?", params![bp, id, path])?;
@@ -1281,7 +1316,7 @@ impl Store {
         let row = self.db.read(|c| {
             c.query_row(
                 "SELECT CASE WHEN png <> '' THEN at END, head, prev_head, change_bp, phone_change_bp, phone_png IS NOT NULL, speed, prev_speed, health, a11y, \
-                 base_preview, base_branch, base_change_bp, base_phone_bp, base_head, base_speed, base_a11y, base_health, base_text, links, base_links FROM screenshots WHERE preview_id = ?",
+                 base_preview, base_branch, base_change_bp, base_phone_bp, base_head, base_speed, base_a11y, base_health, base_text, links, base_links, base_api, base_api_breaking FROM screenshots WHERE preview_id = ?",
                 [id],
                 |r| {
                     let base = match (r.get::<_, Option<String>>(10)?, r.get::<_, Option<String>>(11)?, r.get::<_, Option<i64>>(12)?) {
@@ -1296,6 +1331,8 @@ impl Store {
                             health: json(r.get(17)?),
                             text: json(r.get(18)?),
                             links: json(r.get(20)?),
+                            api: json(r.get(21)?),
+                            api_breaking: json(r.get(22)?).unwrap_or_default(),
                         }),
                         _ => None,
                     };
@@ -1932,6 +1969,8 @@ impl Store {
             text: b.text,
             seo_added: page_a11y.as_ref().and_then(|a| a.seo.as_ref()).zip(b.a11y.as_ref().and_then(|a| a.seo.as_ref())).map(|(ours, main)| ours.added_since(main)),
             links_added: page_links.as_ref().zip(b.links.as_ref()).map(|(ours, main)| ours.added_since(main)),
+            api: b.api,
+            api_breaking: b.api_breaking,
         });
         let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, f.head)?;
         let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
@@ -1978,6 +2017,7 @@ impl Store {
                 })
                 .collect(),
             cost: cost.rounded(),
+            schema_risks: schema_changes.as_deref().map(crate::schema::risks).unwrap_or_default(),
             schema_changes,
             release,
             kept_until,
@@ -2040,6 +2080,10 @@ pub struct BaseRow {
     pub text: Option<crate::TextDiff>,
     /// Its first page's broken links there.
     pub links: Option<crate::PageLinks>,
+    /// Its API's operations against the change's (`visual::text_diff`).
+    pub api: Option<crate::TextDiff>,
+    /// What the change breaks inside the operations both keep.
+    pub api_breaking: Vec<String>,
 }
 
 /// Live share links a preview may have at once.
@@ -2103,7 +2147,7 @@ mod tests {
         store.set_screenshot(&main.id, "cs_m", &png(1), None, Some(&png(0))).unwrap();
         store.keep_base_history(&main.id, "cs_m").unwrap();
         store.compare_with_base(id, &main.id, "main", None).unwrap();
-        assert_eq!(store.base_change(id).unwrap(), Some(BaseRow { preview: main.id.clone(), branch: "main".into(), change_bp: 2000, phone_bp: Some(5000), head: Some("cs_m".into()), speed: None, a11y: None, health: None, text: None, links: None }));
+        assert_eq!(store.base_change(id).unwrap(), Some(BaseRow { preview: main.id.clone(), branch: "main".into(), change_bp: 2000, phone_bp: Some(5000), head: Some("cs_m".into()), speed: None, a11y: None, health: None, text: None, links: None, api: None, api_breaking: Vec::new() }));
         // Main moves on (to what the change's page looks like): a change that left it at cs_m is
         // still compared with cs_m's, and shown that one.
         store.set_screenshot(&main.id, "cs_m2", &png(3), Some(&speed(700)), Some(&png(5))).unwrap();

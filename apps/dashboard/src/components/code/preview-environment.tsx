@@ -2,7 +2,7 @@ import { ArrowUpRight, ExternalLink, Smartphone } from "lucide-react";
 import { useState } from "react";
 import type { PreviewEnvironment } from "@/lib/code-api";
 import type { PreviewKind } from "@/lib/previews-api";
-import { PhoneCode, PREVIEW_KIND_ICON, TextAgainst } from "../workspace/preview-sheet";
+import { ApiBreaking, PhoneCode, PREVIEW_KIND_ICON, TextAgainst } from "../workspace/preview-sheet";
 import { host, money, STATE_LABEL, StateDot } from "../workspace/previews-common";
 import { a11yWords, previewsApi, thanMain } from "@/lib/previews-api";
 import { errorText } from "../workspace/previews-common";
@@ -133,12 +133,35 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
         </p>
       )}
       {env.base_change?.text && <TextAgainst diff={env.base_change.text} branch={env.base_change.branch} />}
+      {env.base_change?.api && <TextAgainst diff={env.base_change.api} branch={env.base_change.branch} what="api" />}
+      {env.base_change?.api_breaking && <ApiBreaking items={env.base_change.api_breaking} />}
       {env.visual_review && env.visual_review.state !== "unchanged" && <VisualReview previewId={env.id} review={env.visual_review} />}
       {env.release_ms != null && (
         <p className="font-mono text-[11px] text-subtle tabular-nums" title="The project's release (migrations), run on the preview's data">
           release {env.release_ms < 1000 ? `${env.release_ms} ms` : `${(env.release_ms / 1000).toFixed(1)} s`}
           {env.release_before_ms != null && thanMain(env.release_ms, env.release_before_ms, "the push before") ? ` · ${thanMain(env.release_ms, env.release_before_ms, "the push before")}` : ""}
         </p>
+      )}
+      {env.schema_risks && env.schema_risks.length > 0 && (
+        <ul className="space-y-0.5 rounded-lg border border-danger/40 bg-danger/10 px-2.5 py-1.5 text-[12px] text-danger" aria-label="Migration risks">
+          {env.schema_risks.map((r, i) => (
+            <li key={i} className="break-words">
+              {r}
+            </li>
+          ))}
+        </ul>
+      )}
+      {env.schema_changes && env.schema_changes.length > 0 && (
+        <details className="text-[12px]">
+          <summary className="cursor-pointer text-muted hover:text-fg">Schema changes ({env.schema_changes.length})</summary>
+          <pre className="mt-1 max-h-48 overflow-auto rounded-lg border border-line-2 px-2.5 py-1.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]">
+            {env.schema_changes.map((l, i) => (
+              <div key={i} className={l.startsWith("- ") ? "text-danger" : l.startsWith("+ ") ? "text-fg" : "text-subtle"}>
+                {l}
+              </div>
+            ))}
+          </pre>
+        </details>
       )}
       {env.expires_at != null && (
         <p className="text-[12px] text-muted">

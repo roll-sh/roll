@@ -124,12 +124,15 @@ impl CodeSource {
                 github: PreviewGithub { comment: s.github.comment, status: s.github.status, deployment: s.github.deployment },
                 head: Some(p.head.clone()),
                 schema_changes: p.schema_changes.clone(),
+                schema_risks: p.schema_risks.clone(),
                 release_ms: p.release.as_ref().map(|x| x.ms),
                 release_before_ms: p.release.as_ref().and_then(|x| x.before_ms),
                 expires_at: p.goes_at,
                 base_change: p.base_change.as_ref().map(|b| code_control::model::PreviewBaseChange { branch: b.branch.clone(), percent: b.percent, phone_percent: b.phone_percent, load_ms: b.load_ms, lcp_ms: b.lcp_ms, a11y_added: b.a11y_added, errors_added: b.errors_added,
                     text: b.text.as_ref().map(|t| code_control::model::PreviewTextDiff { added: t.added.clone(), removed: t.removed.clone(), added_n: t.added_n, removed_n: t.removed_n }),
                     links_added: b.links_added,
+                    api: b.api.as_ref().map(|t| code_control::model::PreviewTextDiff { added: t.added.clone(), removed: t.removed.clone(), added_n: t.added_n, removed_n: t.removed_n }),
+                    api_breaking: b.api_breaking.clone(),
                     seo_added: b.seo_added }),
                 speed_budget: Some(code_control::model::PreviewSpeedBudget { load_ms: s.github.budget.load_ms, bytes: s.github.budget.bytes, lcp_ms: s.github.budget.lcp_ms, cls: s.github.budget.cls })
                     .filter(|b| b.load_ms > 0 || b.bytes > 0 || b.lcp_ms > 0 || b.cls > 0.0),
@@ -291,17 +294,14 @@ impl Source for CodeSource {
     }
 
     async fn feedback(&self, change: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
-        Ok(self
+        let comments = self
             .code
             .db
             .reviews(change)?
             .into_iter()
             .filter(|r| !r.dismissed && r.verdict == code_control::review::Verdict::Comment)
-            .filter_map(|r| {
-                let (path, selector, note) = crate::notes::parse(&r.body)?;
-                Some(crate::notes::Note { id: r.id, path, selector, note, by: r.reviewer.name, at: r.created_at })
-            })
-            .collect())
+            .map(|r| crate::notes::Comment { id: r.id, body: r.body, by: r.reviewer.name, at: r.created_at });
+        Ok(crate::notes::thread(comments))
     }
 
     async fn git_commit(&self, repo: &str, revision: &str) -> anyhow::Result<Option<String>> {
@@ -333,11 +333,11 @@ impl Source for CodeSource {
         Ok(())
     }
 
-    async fn forget(&self, p: &Preview) {
+    async fn forget(&self, p: &Preview, teardown: Option<&str>) {
         let Some(change) = &p.change else { return };
         // Only the change's preview environment, never roll code's own preview of it.
         let ours = self.code.db.change(change).ok().flatten().and_then(|c| c.preview).and_then(|x| x.environment).is_some_and(|e| e.id == p.id);
-        if ours && let Err(e) = self.code.report_environment(change, None) {
+        if ours && let Err(e) = self.code.report_environment_gone(change, teardown) {
             tracing::warn!(preview = %p.id, error = %e, "previews: clearing the change's preview");
         }
     }
@@ -406,7 +406,7 @@ impl PreviewBackend for Backend {
     async fn accept_visual(&self, change: &code_control::model::Change, by: &str, head: &str) -> anyhow::Result<()> {
         let engine = self.engine.get().and_then(Weak::upgrade).ok_or_else(|| anyhow::anyhow!("previews aren't running"))?;
         let row = engine.store.row_by_change(&change.id)?.ok_or_else(|| anyhow::anyhow!("the change has no preview"))?;
-        engine.accept_visual(&row.id, by, true, Some(head), None).await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
+        engine.accept_visual(&row.id, by, None, true, Some(head), None).await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     async fn delete(&self, repo: &RepoRow, change: &code_control::model::Change) -> anyhow::Result<()> {

@@ -155,9 +155,13 @@ describe("the Previews tab", () => {
     expect(posted).toHaveBeenCalledOnce();
   });
 
-  it("resolves a note from the preview page's Resolve, on the preview", async () => {
+  it("replies to and resolves a note from the preview page's buttons, on the preview", async () => {
     const u = userEvent.setup({ delay: null });
-    vi.mocked(codeApi.reviews).mockResolvedValue([{ id: "rv_1", body: "**Feedback on the preview** · `/`\n\nThe button is cut off", dismissed: false }] as never);
+    vi.mocked(codeApi.reviews).mockResolvedValue([
+      { id: "rv_1", body: "**Feedback on the preview** · `/`\n\nThe button is cut off", dismissed: false, created_at: 1, reviewer: { name: "ada" } },
+      { id: "rv_2", body: "**Reply on the preview** · `rv_1`\n\nWhich width?", dismissed: false, created_at: 2, reviewer: { name: "bo" } },
+    ] as never);
+    vi.mocked(codeApi.submitReview).mockResolvedValue({} as never);
     api.resolveNote.mockResolvedValue({ resolved: "rv_1" });
     const done = vi.fn();
     render(
@@ -166,6 +170,10 @@ describe("the Previews tab", () => {
       </MarkStateProvider>,
     );
     expect(await screen.findByText("The button is cut off")).toBeInTheDocument();
+    expect(screen.getByText("Which width?")).toBeInTheDocument();
+    await u.type(screen.getByRole("textbox", { name: "Reply" }), "At 768");
+    await u.click(screen.getByRole("button", { name: "Reply" }));
+    expect(codeApi.submitReview).toHaveBeenCalledWith("chg_1", { verdict: "comment", body: "**Reply on the preview** · `rv_1`\n\nAt 768" });
     await u.click(screen.getByRole("button", { name: "Resolve" }));
     expect(api.resolveNote).toHaveBeenCalledWith("pv_abc", "rv_1");
     expect(await screen.findByText(/This note is resolved/)).toBeInTheDocument();

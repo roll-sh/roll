@@ -725,11 +725,23 @@ impl Brancher for Tasks {
 
 // ── Search: a zero-copy branch of an Elasticsearch-compatible cluster (roll search) ──
 
-/// Masks one field (`params.path`, nested names) of a document: `redact`, `remove` or `email`.
-const SEARCH_MASK_SCRIPT: &str = "def m = ctx._source; def p = params.path; \
-for (int i = 0; i < p.length - 1; i++) { if (!(m instanceof Map) || !m.containsKey(p[i])) { return; } m = m.get(p[i]); } \
-def k = p[p.length - 1]; if (!(m instanceof Map) || !m.containsKey(k)) { return; } \
-if (params.rule == 'remove') { m.remove(k); } else if (params.rule == 'email') { m.put(k, 'user-' + ctx._id + '@example.invalid'); } else { m.put(k, '[masked]'); }";
+/// Masks one field (`params.path`) of a document: `redact`, `remove` or `email`. It goes through
+/// arrays at every step (an object field, `nested` ones included) and literal dotted keys
+/// (`{"user.email": …}`) as well as objects, and a document it changes nothing in is a `noop`.
+const SEARCH_MASK_SCRIPT: &str = "boolean mask(def m, List p, int i, String rule, String id) { \
+if (m instanceof List) { boolean c = false; for (def e : m) { if (mask(e, p, i, rule, id)) { c = true; } } return c; } \
+if (!(m instanceof Map)) { return false; } \
+boolean c = false; String key = ''; \
+for (int j = i; j < p.size(); j++) { \
+key = j == i ? p.get(j) : key + '.' + p.get(j); \
+if (!m.containsKey(key)) { continue; } \
+if (j == p.size() - 1) { \
+if (rule == 'remove') { m.remove(key); } else if (rule == 'email') { m.put(key, 'user-' + id + '@example.invalid'); } else { m.put(key, '[masked]'); } \
+c = true; \
+} else if (mask(m.get(key), p, j + 1, rule, id)) { c = true; } \
+} \
+return c; } \
+if (!mask(ctx._source, params.path, 0, params.rule, ctx._id)) { ctx.op = 'noop'; }";
 
 /// A `_mapping` answer as lines: each index (not the system ones, `.…`), and each field with its
 /// type, nested ones by path (`field users.address.city text`) and multi-fields too. Bounded.
@@ -854,8 +866,10 @@ impl Brancher for Search {
         for (spec, rule) in fields {
             let Some((index, path)) = spec.split_once('.') else { anyhow::bail!("{spec:?} isn't index.field") };
             let target = u.join(&format!("{}/_update_by_query?conflicts=proceed&refresh=true", seg(index)))?;
+            // Every document, not those `exists` finds: a field that isn't indexed (or has no doc
+            // values) is in `_source` all the same.
             let body = json!({
-                "query": { "exists": { "field": path } },
+                "query": { "match_all": {} },
                 "script": { "lang": "painless", "source": SEARCH_MASK_SCRIPT, "params": { "path": path.split('.').collect::<Vec<_>>(), "rule": rule } },
             });
             let res = send(http.post(target).json(&body)).send().await?;
@@ -865,8 +879,10 @@ impl Brancher for Search {
             if status.as_u16() == 404 {
                 continue;
             }
+            // A document skipped on a version conflict kept its value: masking isn't done.
             let failures = v["failures"].as_array().map_or(0, Vec::len);
-            anyhow::ensure!(status.is_success() && failures == 0, "masking {spec}: {status} {}", v.to_string().chars().take(300).collect::<String>());
+            let conflicts = v["version_conflicts"].as_u64().unwrap_or(0);
+            anyhow::ensure!(status.is_success() && failures == 0 && conflicts == 0, "masking {spec}: {status} {}", v.to_string().chars().take(300).collect::<String>());
             masked.insert(index);
         }
         // The documents as they were stay in the segments the branch shares with its parent,

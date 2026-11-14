@@ -75,6 +75,12 @@ pub struct Settings {
     /// and again after a reset): migrations, Heroku's release phase. A failure fails the preview,
     /// and its services stay on what they ran.
     pub release: Option<Seed>,
+    /// A command run once when the preview is deleted, before its services, secrets environment
+    /// and branches go (Heroku's `pr-predestroy`): what its code made outside roll (a test-mode
+    /// webhook, an OAuth redirect URI, a DNS record) cleaned up with the preview's own variables.
+    /// Only at a head the preview ran; a failure is logged and the deletion goes on. A crash
+    /// during it runs it again: it should be safe to repeat.
+    pub teardown: Option<Seed>,
     /// Column masks for NoSQL branches: `"nosql:<ref>"` → `{"keyspace.table.column": "mask_inner(1, 1)"}`
     /// (Cassandra 5's mask functions). Merged onto what the branch inherits from its parent,
     /// whenever it's made or reset: the preview reads masked values, the parent is untouched.
@@ -178,6 +184,11 @@ pub struct GithubRule {
     /// a run's five other pages with `pages`.
     #[serde(default)]
     pub widths: Vec<u32>,
+    /// A path of the first service's serving its OpenAPI document as JSON (`/openapi.json`,
+    /// `/v3/api-docs`): read with the screenshot, its operations are compared with main's (Optic's
+    /// and Bump's API diff), an operation main has and the change doesn't named as breaking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openapi: Option<String>,
 }
 
 /// The unix second `data_at` means at `now` (unix seconds): `-24h`/`-30m`/`-7d` back from now, or
@@ -283,6 +294,7 @@ impl Default for Settings {
             warm: true,
             seed: None,
             release: None,
+            teardown: None,
             masking: BTreeMap::new(),
         }
     }
@@ -296,7 +308,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new() }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None }
     }
 }
 
@@ -370,7 +382,7 @@ impl Settings {
         if is_production(base) && !self.secrets.allow_production {
             return bad(format!("secrets.base {base:?} is production's: set secrets.allow_production to inherit it"));
         }
-        for (name, job) in [("seed", &self.seed), ("release", &self.release)] {
+        for (name, job) in [("seed", &self.seed), ("release", &self.release), ("teardown", &self.teardown)] {
             let Some(job) = job else { continue };
             if job.image.trim().is_empty() || job.image.len() > 255 || job.image.contains(char::is_whitespace) {
                 return bad(format!("{name}.image: an image reference"));
@@ -459,6 +471,9 @@ impl Settings {
             return bad(format!(
                 "github.pages: at most {MAX_PAGES} different paths besides /, each starting with / or naming a service (admin:/users), up to 200 characters, no #, quotes or spaces"
             ));
+        }
+        if self.github.openapi.as_deref().is_some_and(|p| !page_path_ok(p)) {
+            return bad("github.openapi: a path of the first service's (/openapi.json), up to 200 characters, no #, quotes or spaces".into());
         }
         Ok(())
     }

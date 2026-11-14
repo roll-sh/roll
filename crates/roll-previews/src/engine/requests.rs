@@ -209,7 +209,8 @@ impl Engine {
     /// `page` only, or all of them; a new head needs its own. The change and its pull request
     /// say so at once.
     /// `person`: not a token's; only a person (or the operator) accepts a required one.
-    pub async fn accept_visual(&self, id: &str, by: &str, person: bool, seen: Option<&str>, page: Option<&str>) -> Result<Preview> {
+    /// `behind`: the signed-in person a token acts for, checked against the author as `by` is.
+    pub async fn accept_visual(&self, id: &str, by: &str, behind: Option<&str>, person: bool, seen: Option<&str>, page: Option<&str>) -> Result<Preview> {
         let r = self.store.row(id)?;
         if r.change_id.is_none() {
             return Err(Error::BadRequest("only a change's preview has a visual review".into()));
@@ -220,7 +221,7 @@ impl Engine {
         // Not by the change's own author, as approvals aren't (and as GitHub's button isn't).
         if let Some(change) = &r.change_id
             && let Ok(Some(c)) = self.source.change(change).await
-            && (by.eq_ignore_ascii_case(&c.author) || by.eq_ignore_ascii_case(c.author.trim_start_matches('@')))
+            && [Some(by), behind].into_iter().flatten().any(|who| who.eq_ignore_ascii_case(&c.author) || who.eq_ignore_ascii_case(c.author.trim_start_matches('@')))
         {
             return Err(Error::Forbidden("the change's own author can't accept its visual change: someone else looks at it".into()));
         }
@@ -244,8 +245,19 @@ impl Engine {
         if r.desired == Desired::Deleted {
             return Err(Error::Conflict("the preview is being deleted".into()));
         }
-        let vars = self.branch_vars(id).await.map_err(|e| Error::Internal(format!("{e:#}")))?;
-        Ok(vars.into_iter().map(|(kind, parent, vars)| crate::Connection { kind, parent, vars: vars.into_iter().collect() }).collect())
+        // Only a branch that's ready and masked with today's rules: one still being masked (or
+        // whose masking failed, or whose rules changed since) holds the parent's values.
+        let s = self.store.settings(&r.project_id)?;
+        let mut out = Vec::new();
+        for res in self.store.resources(id)? {
+            let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
+            if res.state != ResourceState::Ready || self.store.mask_digest(id, res.kind, &res.parent)?.unwrap_or_default() != mask_digest(&s, &res) {
+                continue;
+            }
+            let vars = b.connect(&res.parent, branch, res.kept.as_deref()).await.map_err(|e| Error::Internal(format!("connecting to the {} branch: {e:#}", res.kind.as_str())))?;
+            out.push(crate::Connection { kind: res.kind, parent: res.parent.clone(), vars: vars.into_iter().collect() });
+        }
+        Ok(out)
     }
 
     /// Set (`Some`) or remove (`None`) the preview's own variables, over the project's `env`

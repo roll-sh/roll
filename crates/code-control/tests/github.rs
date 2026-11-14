@@ -700,6 +700,7 @@ async fn connect_import_webhooks_and_mirror() {
             github: Default::default(),
             head: None,
             schema_changes: None,
+            schema_risks: Vec::new(),
             release_ms: None,
             release_before_ms: None,
             screenshot_url: None,
@@ -768,6 +769,16 @@ async fn connect_import_webhooks_and_mirror() {
     a.code.report_environment(c5_id, None).unwrap();
     until("the pending status settled", || async {
         preview_calls("/statuses/").iter().any(|(_, _, b)| b["state"] == "success" && b["description"] == "Preview removed before it was ready")
+    })
+    .await;
+    // Gone with its teardown failing: the comment says so, in a fence its output can't close.
+    a.code.report_environment(c5_id, Some(&env("ready"))).unwrap();
+    a.code.report_environment_gone(c5_id, Some("the teardown command failed with exit code 3\n\n```\nwebhook still registered")).unwrap();
+    until("the comment names the failed teardown", || async {
+        preview_calls("/issues/comments/").iter().any(|(_, _, b)| {
+            let body = b["body"].as_str().unwrap_or("");
+            body.starts_with("**roll preview**: deleted. Its teardown failed:") && body.contains("exit code 3") && body.matches("```").count() == 2
+        })
     })
     .await;
 

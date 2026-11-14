@@ -83,6 +83,7 @@ function Form({
   const [ignorePaths, setIgnorePaths] = useState(saved.ignore_paths.join(", "));
   const [pages, setPages] = useState((saved.github.pages ?? []).join(", "));
   const [widths, setWidths] = useState((saved.github.widths ?? []).join(", "));
+  const [openapi, setOpenapi] = useState(saved.github.openapi ?? "");
   // Selectors can hold commas: one per line.
   const [hide, setHide] = useState((saved.github.hide ?? []).join("\n"));
   const [env, setEnv] = useState<[string, string][]>(Object.entries(saved.env));
@@ -92,7 +93,7 @@ function Form({
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof PreviewSettings>(k: K, v: PreviewSettings[K]) => setS((x) => ({ ...x, [k]: v }));
 
-  useEffect(() => setError(null), [s, branches, paths, ignorePaths, pages, widths, hide, env, perBranch]);
+  useEffect(() => setError(null), [s, branches, paths, ignorePaths, pages, widths, openapi, hide, env, perBranch]);
 
   const next: PreviewSettings = {
     ...s,
@@ -103,6 +104,7 @@ function Form({
       ...s.github,
       pages: words(pages),
       widths: words(widths).map(Number),
+      openapi: openapi.trim() || null,
       hide: hide
         .split("\n")
         .map((x) => x.trim())
@@ -357,7 +359,7 @@ function Form({
         </Field>
       </Section>
 
-      <Section title="Seed and release">
+      <Section title="Seed, release and teardown">
         <Job
           label="Seed"
           note="Runs once on a preview's fresh data, before its services start: anonymise rows, load fixtures."
@@ -371,6 +373,13 @@ function Form({
           job={s.release ?? null}
           placeholder={["node:22", "npm ci && npm run migrate"]}
           onChange={(j) => set("release", j)}
+        />
+        <Job
+          label="Teardown"
+          note="Runs once when a preview goes, before its services and branches: remove what its code made outside roll (test webhooks, OAuth redirect URIs). A failure is logged; the preview goes anyway."
+          job={s.teardown ?? null}
+          placeholder={["node:22", "node scripts/unregister-webhooks.js"]}
+          onChange={(j) => set("teardown", j)}
         />
       </Section>
 
@@ -419,6 +428,11 @@ function Form({
         {s.github.screenshot && (
           <Field label="More widths" note="The first page at these widths too, each compared and reviewed like a page (up to 3: 768 for a tablet, 1920).">
             <input value={widths} onChange={(e) => setWidths(e.target.value)} placeholder="desktop and phone only" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
+          </Field>
+        )}
+        {s.github.screenshot && (
+          <Field label="API document" note="A path of the first service's serving its OpenAPI document as JSON: its operations are compared with main's, a removed one named as breaking.">
+            <input value={openapi} onChange={(e) => setOpenapi(e.target.value)} placeholder="/openapi.json" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
           </Field>
         )}
         {s.github.screenshot && (

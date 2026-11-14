@@ -184,6 +184,17 @@ state. A pass of the reconciler:
    id never got recorded (a crash, a timeout) is found by its name when the preview is deleted.
 3. A step that fails records its error on the preview (`failed`) and is retried with backoff
    (15 s × 2ⁿ, at most 10 minutes). Nothing else is undone.
+4. A preview that goes (landed, closed, stale, deleted) first runs the project's `teardown`
+   once, the way the seed runs, before its services, secrets environment and branches are
+   removed, like Heroku's `pr-predestroy`: what the preview's code made outside roll with its
+   own keys (a payment provider's test webhook, an OAuth redirect URI, a DNS record) is cleaned
+   up while everything it needs is still there. It runs only at a head the preview ran (a
+   fork's push nobody approved never runs it; the approved head before it does), not again
+   when a removal after it is retried (a crash during the job itself runs it again, so make it
+   safe to repeat). A failure doesn't keep the preview: it's in rolld's log and the activity, and
+   the change is told as the preview goes (`Code::report_environment_gone`): the `preview` event
+   carries `teardown` (its exit code and output's tail) and the pull request's comment reads
+   "deleted. Its teardown failed:" with that output in a fence it can't close.
 
 The reconciler runs every 15 s, and right away when roll code emits a `change` or `landed`
 event (the broadcast is only a nudge, so a dropped event costs at most one interval). In a
@@ -344,6 +355,19 @@ control characters escaped (a newline in a name can't fake a line, an escape seq
 a terminal), lines cut at 300 characters, 200 lines at most; the comment keeps them inside a fence
 they can't close. A failure to read is
 logged and read again on the next converge; it never fails the preview.
+
+What in those lines would hurt production when the change lands is named above them
+(`schema_risks`, `roll_previews::schema::risks`; PlanetScale's deploy request warnings, Atlas's
+migration lint): a table that goes ("production's rows go with it"), a column that goes, a
+rename included ("the version running while it deploys may still read it": expand, then
+contract), a column whose type changes ("Postgres may rewrite the table under an exclusive
+lock") and one made `NOT NULL` ("scans the table under an exclusive lock", where a `CHECK … NOT
+VALID` validated first doesn't); on a search branch, an index that goes ("its documents go with
+it") and a field whose type changes ("a mapping can't change in place": a reindex). Added
+columns, fields and indexes aren't risks here: the release ran
+them on production's own rows, and its time is said beside it. The comment lists them unfolded
+as "Migration risks", each in a code span its names can't close; the sheet and the change page
+show them in red over the lines (the change page with the lines folded).
 
 Search branches the same way: each one's `_mapping` and its parent's, read through roll search's
 operator console request (no cluster password), become `index <name>` and `field <index>.<path>
@@ -678,6 +702,13 @@ land on the change.
   dismissed; from a terminal `roll preview notes` lists the open ones and `--resolve <id>`
   resolves one), so the button stops listing it. The page holds no credential for this either
   (live: a resolved note folds away).
+- A note is a thread (Vercel Comments' replies): its Reply opens roll (`?fb_reply=<review id>`)
+  on the same view, the note with its replies, a reply box and Resolve. A reply is a `comment`
+  review on the change starting "**Reply on the preview** · `<the note's id>`"
+  (`roll_previews::notes::thread` reads them back, the latest 20 per note, oldest first; one
+  naming any other review joins nothing), so it reaches the pull request as a GitHub review like
+  the note did. The page lists the replies under their note, as text, and `roll preview notes`
+  under each note too (live: a reply listed under its note).
 - Previews deployed on roll apps go through apps' own proxy, which doesn't add it yet.
 - Public previews don't get it (anyone could see the button), and a branch's preview has no
   change to post on.
@@ -744,7 +775,7 @@ and admins see every project.
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each) | `{vars}`: the preview's own variables; its services redeploy with them |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
-| `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500) |
+| `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}]}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500) |
 | `POST /v1/previews/{id}/notes/{note}/resolve` | | `{resolved}`: a note on the preview's page (its review's id) resolved, so the page stops listing it; 404 for a note that isn't the change's |
 | `GET /v1/previews/{id}/mail` | | `{mail: [{id, at, from, to, subject, size}]}`: what its services sent, caught (newest first, the last 50) |
 | `GET /v1/previews/{id}/mail/{mail}` | | One caught message as sent, as `text/plain` (never rendered) |
@@ -782,6 +813,7 @@ type Preview = {
   services: Service[]; resources: Resource[];
   cost: { sleeping_usd_month: number; active_usd_hour: number; month_to_date_usd: number; bytes: number };
   schema_changes: string[] | null;    // "+ …"/"- …" against the parents, once read at `head`; null: not known
+  schema_risks?: string[];            // what in them would hurt production when it lands (dropped tables and columns, type changes, NOT NULL)
   kept_until: number | null;          // kept past its TTL until then (POST …/keep)
   screenshot_at: number | null;       // when GET …/screenshot was taken (github.screenshot)
   last_reset_at: number | null; last_active_at: number; expires_at: number | null;
@@ -812,7 +844,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number } };   // all true but screenshot; pages, hide: []; budget 0s (none)
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -820,6 +852,7 @@ type Settings = {
   env_for: Record<string, Record<string, string>>; // branch glob → variables, over env, under a preview's own ({})
   seed: Job | null;                   // once on fresh data
   release: Job | null;                // at each new head, before services deploy (migrations)
+  teardown: Job | null;               // once when the preview goes, before its services and branches
   masking: Record<string, Record<string, string>>; // "postgres:<ref>" → {"schema.table.column": "email"}, "nosql:<ref>" → {"ks.table.column": "mask_default()"}, "search:<ref>" → {"index.field": "redact" | "remove" | "email"}
 };
 ```
@@ -852,8 +885,10 @@ type Settings = {
     `shot.js` drives the headless shell over the DevTools protocol on a pipe and reads the
     navigation timing, the first contentful paint and the bytes fetched (`page_speed`, with the
     head before's to compare; "Its first page loads in 1.2 s (+300 ms since the push before)" in
-    the comment). The page reports this about itself, so it's bounded (10 minutes, 10 GiB) and
-    only ever shown. An operator's own screenshot command only has to write the PNG.
+    the comment). It's read in a world of the checks' own (an isolated world: the page's DOM,
+    none of its JavaScript), so the page's code can't replace what reads it; it's still the
+    page's own load, so it's bounded (10 minutes, 10 GiB, and what the run writes) and only
+    ever shown. An operator's own screenshot command only has to write the PNG.
     A change's screenshots are also compared with the default branch's (Chromatic's baseline):
     `base_change`, the sheet's main view (`GET …/screenshot?base=1`), "Against `main`, the page
     differs by 8.0%" in the comment. With `github.baseline` (on by default) roll keeps that preview
@@ -952,7 +987,27 @@ type Settings = {
     gained and lost (`base_change.text`: in page order, 20 each, with counts), on the sheet, the
     change page and folded in the comment as a diff block nothing on the page can close ("text +1
     −1 against main"). It's the page's own text, shown as text (live: the change's line in,
-    `main` out). GitHub's branch protection can require
+    `main` out).
+    Its API too (Optic's and Bump's API diff), when the project names its OpenAPI document
+    (`github.openapi`, a JSON path of the first service's: `/openapi.json`, `/v3/api-docs`): the
+    same session fetches it from the page's own origin (at most 4 MB, 5 s) in the checks' world and
+    keeps every `METHOD /path` it declares (at most 1000, each `METHOD /path` or dropped), with the
+    screenshot and with main's at each head; a comparison with main says which operations it
+    adds and which it removes (`base_change.api`), a removed one being breaking for whoever calls
+    main's. It's unfolded in the pull request comment ("Its API against `main`: removes `DELETE
+    /users/{id}` (breaking for callers of `main`'s); adds `POST /orders`", each in a code span the
+    document can't close) and shown on the sheet and the change page (live: the operation the
+    change removes and the one it adds).
+    Inside the operations both keep, what breaks their callers (oasdiff's breaking-change rules,
+    `roll_previews::openapi`): the session also writes a line per fact of each operation (a
+    parameter's or request body field's type, whether it's required and the values it takes,
+    each 2xx response field's type; `$ref`s inside the document followed, fields to a depth of
+    4, at most 5000 lines, each line's shape checked by roll), and a parameter or body field that
+    becomes required (or a new required one), a type that changes, a request value no longer
+    taken and a response field that goes are named, by operation (`base_change.api_breaking`, at
+    most 30): in the comment's API line, the sheet and the change page (live: a query parameter
+    that becomes required). An optional new field, a new response field and fewer response
+    values break nobody, so they aren't. GitHub's branch protection can require
     `roll/visual`; with `required` roll's own landing does too (a `visual` blocker in
     `Code::blockers`, from the project's rule, never the change's). A review is someone else's:
     the change's author can't accept it (403 in roll, ignored from GitHub, and an older such
@@ -970,7 +1025,8 @@ type Settings = {
     ARIA, landmarks, headings, duplicate ids and the rest, one issue per rule that fails (its id,
     how many elements, the first one's markup, its impact and axe's words for it; at most 50).
     It's 640 KB, so it reaches the browser container on stdin, not in an environment variable,
-    and DevTools evaluates it outside the page's CSP. The page's session reports all of it, so
+    and DevTools evaluates it outside the page's CSP, in the checks' isolated world (a page that
+    locks a fake `window.axe` of its own changes nothing). The page's session reports all of it, so
     rule ids and impacts are checked against axe's own shapes and the words never go in a pull
     request comment ("4 elements failing `color-contrast`, serious"); the dashboard shows them as
     text. If axe doesn't load, the four checks above run as before. Against main the same way:
@@ -1142,6 +1198,38 @@ Ranked by what a person notices first. Done so far:
 - a look at the sheet from screenshots of a live preview with today's checks (desktop and phone):
   the data branch rows kept their names whole and their notes in word groups;
 - caught mail bounded by bytes (10 MiB a preview) as well as count;
+- breaking changes inside the operations a change keeps (oasdiff's rules): a parameter or field
+  that becomes required, a type that changes, a request value no longer taken, a response field
+  that goes;
+- the API against main (Optic's and Bump's API diff): `github.openapi`'s operations compared with
+  main's, a removed one named as breaking, unfolded in the pull request comment;
+- migration risks named over the schema changes (a dropped table or column, a type change, a
+  column made NOT NULL), on the sheet and unfolded in the pull request comment;
+- replies on a page's notes (Vercel Comments' threads): comment reviews naming the note, listed
+  under it on the page, in the sheet (with a reply box) and by `roll preview notes`;
+- a teardown's failure told to the change: the `preview` event's `teardown`, and the pull
+  request comment's "deleted. Its teardown failed:" with the job's output fenced;
+- the page's checks (speed, Core Web Vitals, accessibility, SEO, links, words) in a world of
+  their own, an isolated world with the page's DOM but none of its JavaScript: a page that
+  replaced `JSON.stringify` and locked a fake `window.axe` reported a 1 ms load, its own words
+  and no problems before, and its real load, text and missing `alt` after;
+- an eighth review (of this branch, #28) and its fixes: search masks through arrays of objects,
+  literal dotted keys and unindexed fields, failing on a version conflict; `connect` only for a
+  branch masked with today's rules; a screenshot run's output bounded (a page's code could have
+  made rolld read gigabytes); the mail catcher's slots time-boxed (15 s to sign in, 5 minutes a
+  connection, 8 per address); no control characters in a caught mail's addresses or in what
+  `roll preview mail` prints; an author's own token can't accept their visual change; an ANN
+  search can't be ordered by a masked vector; the diff link's pictures kept, not redrawn per
+  fetch;
+- a `teardown` job when a preview goes (Heroku's `pr-predestroy`): once, before its services
+  and branches, only at a head it ran (a fork's unapproved push never), checked live (it saw
+  the branch's URL, its failure didn't keep the preview);
+- the sheet's caught mail and open notes from a terminal (`roll preview mail`, `--read`;
+  `roll preview notes`, `--resolve`), checked live;
+- the stacked `feature/roll-previews-on-apps` refreshed against roll apps' `-next`: it found
+  apps' forwarded route turning every unrouted path's 404 into a 401 (previews read secrets'
+  404 as "off", so every converge failed), fixed on `feature/roll-apps-next` (9911f6e9d, with a
+  test);
 - a light previews list (each page's checks only in a preview's own view, which the sheet reads);
 - a phone-width screenshot with its own visual change;
 - every change compared with the default branch, whose preview roll keeps itself (`github.baseline`);
@@ -1228,10 +1316,9 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
-   wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
-   second copy of the project's variables. (A preview's cost now uses the memory its live
-   deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
+1. **Promote a preview's deployment to production on roll apps** (Vercel's promote): its `pv-`
+   environment's built image deployed to production as is (deployments are immutable, so no
+   rebuild), from the sheet, for someone who may deploy production. Waits on #26.
 2. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
    a preview reaches real people, but its code can still call any API (a payment provider's
    sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
@@ -1276,6 +1363,11 @@ Ranked by what a person notices first. Done so far:
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.
+
+Looked at and kept: previews' copy of a preview's variables in its roll apps environment, next
+to the `pv-` secrets environment roll apps reads itself (#31's `ForApps`). roll apps reads
+secrets only for a project `Workspace::trusts` (the operator's, an admin's); for anyone else's
+project the copy is the preview's only source, and the two hold the same values.
 
 Looked at and dropped: branching from a stopped parent without starting it. pg-control already
 copies a stopped parent's directory directly; the slow first numbers (9.6–16.8 s) were brand-new

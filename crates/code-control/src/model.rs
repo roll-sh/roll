@@ -293,6 +293,10 @@ pub struct PreviewEnvironment {
     /// read; untrusted text (a fork's migrations name the objects).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_changes: Option<Vec<String>>,
+    /// What in `schema_changes` would hurt production when it lands (roll previews'
+    /// `schema::risks`); untrusted text too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_risks: Vec<String>,
     /// How long the project's release (migrations) took on the preview's data at `head`, and at
     /// the run before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -434,6 +438,15 @@ pub struct PreviewBaseChange {
     /// SEO problems its first page has that the branch's didn't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seo_added: Option<u32>,
+    /// Its API's operations (`GET /users/{id}`) against the branch's, from the OpenAPI document
+    /// roll previews reads (`github.openapi`): `removed` is what callers of the branch's find
+    /// gone. Untrusted: the change's own document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<PreviewTextDiff>,
+    /// What it breaks inside the operations both keep (a parameter that becomes required, a
+    /// response field that goes, …): a sentence each, by operation. Untrusted text too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_breaking: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

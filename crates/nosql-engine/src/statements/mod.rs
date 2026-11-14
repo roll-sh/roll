@@ -260,6 +260,9 @@ pub async fn execute(
             )?;
             authorize_functions(db, session, &plan.functions)?;
             crate::masking::check_platform_keys(db, &plan.table)?;
+            if let Some(a) = &plan.ann {
+                crate::masking::check_platform_ann(db, &plan.table, a.column)?;
+            }
             crate::masking::check_restrictions(
                 db,
                 session,

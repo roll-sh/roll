@@ -137,10 +137,14 @@ async fn previews_beyond_the_limit_wait_and_start_as_others_go() {
 
 #[tokio::test]
 async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_changes_with() {
-    let e = env(json!({ "enabled": true, "max_previews": 1, "github": { "screenshot": true, "pages": ["/pricing", "api:/", "api:/health"] } }));
+    let e = env(json!({ "enabled": true, "max_previews": 1, "github": { "screenshot": true, "pages": ["/pricing", "api:/", "api:/health"], "openapi": "/openapi.json" } }));
     let mut png = Vec::new();
     image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
     *e.apps.shot.lock() = Some(png);
+    // Main's API, and the change's: one operation gone, one new.
+    let ops = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    e.apps.api.lock().insert("cs_web0".into(), ops(&["DELETE /users/{id}", "GET /users", "GET /users param query:limit type integer"]));
+    e.apps.api.lock().insert("cs_1a".into(), ops(&["GET /users", "GET /users param query:limit required", "GET /users param query:limit type integer", "POST /orders"]));
     e.code.open(change("chg_1", 1));
     e.engine.pass().await.unwrap();
     e.engine.pass().await.unwrap();
@@ -153,13 +157,18 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     let mut compared = None;
     for _ in 0..500 {
         compared = e.code.last_report("chg_1").base_change;
-        if compared.is_some() {
+        // Main's screenshot may compare the change before the change's own report is in: the
+        // change's own comparison, right after, has its API too.
+        if compared.as_ref().is_some_and(|c| c.api.is_some()) {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     let compared = compared.expect("compared with the baseline");
     assert_eq!((compared.branch.as_str(), compared.percent), ("main", 0.0));
+    assert_eq!(compared.api_breaking, ["GET /users: the parameter query:limit becomes required"], "what breaks inside an operation both keep");
+    let api = compared.api.expect("its API against main's");
+    assert_eq!((api.removed, api.added), (vec!["DELETE /users/{id}".to_string()], vec!["POST /orders".to_string()]), "what main's callers lose, and what's new");
     assert_eq!(e.engine.store.base_change(&e.engine.store.row_by_change("chg_1").unwrap().unwrap().id).unwrap().and_then(|b| b.head).as_deref(), Some("cs_web0"), "at its merge base");
     // Its other pages too, another service's included, each against the baseline's at the same path.
     let pages: Vec<_> = e.code.last_report("chg_1").pages.iter().map(|p| (p.path.clone(), p.base_percent)).collect();
@@ -224,19 +233,21 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     shoot("cs_1b", 255, 255);
     assert_eq!(review().map(|v| (v.state, v.percent)), Some((VisualState::Changed, 100.0)));
     assert_eq!(waiting(), Some(vec!["".to_string(), "/pricing".to_string()]));
-    assert!(e.engine.accept_visual(&base.id, "ada", true, None, None).await.is_err(), "only a change's");
+    assert!(e.engine.accept_visual(&base.id, "ada", None, true, None, None).await.is_err(), "only a change's");
     // Not by its own author.
-    let err = e.engine.accept_visual(&chg.id, "carol", true, Some("cs_1b"), None).await.unwrap_err();
+    let err = e.engine.accept_visual(&chg.id, "carol", None, true, Some("cs_1b"), None).await.unwrap_err();
     assert!(err.to_string().contains("own author"), "{err}");
+    let err = e.engine.accept_visual(&chg.id, "token:ci", Some("carol"), false, Some("cs_1b"), None).await.unwrap_err();
+    assert!(err.to_string().contains("own author"), "nor with their own token: {err}");
     // What was seen: an older screenshot's head is refused, this one's accepted.
-    let err = e.engine.accept_visual(&chg.id, "ada", true, Some("cs_1a"), None).await.unwrap_err();
+    let err = e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1a"), None).await.unwrap_err();
     assert!(err.to_string().contains("a newer screenshot came in"), "{err}");
     // One page at a time: the change waits until every changed page is accepted.
-    let p = e.engine.accept_visual(&chg.id, "ada", true, Some("cs_1b"), Some("/pricing")).await.unwrap();
+    let p = e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1b"), Some("/pricing")).await.unwrap();
     assert_eq!(p.visual_review.map(|v| v.state), Some(VisualState::Changed));
     assert_eq!(waiting(), Some(vec!["".to_string()]));
-    assert!(e.engine.accept_visual(&chg.id, "ada", true, Some("cs_1b"), Some("/nowhere")).await.is_err(), "a page it has no screenshot of");
-    let p = e.engine.accept_visual(&chg.id, "ada", true, Some("cs_1b"), Some("")).await.unwrap();
+    assert!(e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1b"), Some("/nowhere")).await.is_err(), "a page it has no screenshot of");
+    let p = e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1b"), Some("")).await.unwrap();
     assert_eq!(p.visual_review.map(|v| (v.state, v.by)), Some((VisualState::Accepted, Some("ada".into()))));
     assert_eq!(e.code.last_report("chg_1").visual_review.map(|v| v.state), Some(VisualState::Accepted), "the change is told at once");
     // A push that changes nothing visible keeps it.
@@ -249,7 +260,7 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     assert_eq!(review().map(|v| v.state), Some(VisualState::Changed));
     assert_eq!(waiting(), Some(vec!["/pricing".to_string()]));
     // Accept with no page: every page there.
-    e.engine.accept_visual(&chg.id, "ada", true, Some("cs_1d"), None).await.unwrap();
+    e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1d"), None).await.unwrap();
     assert_eq!(review().map(|v| v.state), Some(VisualState::Accepted));
     // Under the project's threshold a page counts as unchanged (a clock `hide` can't name).
     let mut one_pixel = image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 255, 255, 255]));
@@ -310,6 +321,37 @@ async fn the_seed_runs_once_on_fresh_data_before_services_deploy() {
     e.engine.reset(&p.id, Vec::new()).unwrap();
     e.engine.pass().await.unwrap();
     assert_eq!(e.apps.seeds.lock().len(), 3, "reset data is seeded again");
+}
+
+#[tokio::test]
+async fn the_teardown_runs_once_at_a_head_the_preview_ran_before_its_data_goes() {
+    let e = env(json!({ "enabled": true, "teardown": { "image": "node:22", "run": "node scripts/unregister.js" } }));
+    // A fork, approved at its first head; a push nobody approved after it.
+    e.code.open(ChangeInfo { trusted: false, ..change("chg_t", 4) });
+    e.engine.pass().await.unwrap();
+    e.code.edit("chg_t", |c| c.approved = true);
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_t").unwrap().unwrap();
+    assert_eq!(p.state, State::Ready);
+    e.code.edit("chg_t", |c| {
+        c.head = "cs_4b".into();
+        c.approved = false;
+    });
+    e.engine.pass().await.unwrap();
+    // It goes: the teardown fails, and so does the first removal, which is tried again.
+    e.apps.seed_exit.store(2, Ordering::SeqCst);
+    e.apps.fail_remove.store(1, Ordering::SeqCst);
+    e.engine.delete(&p.id).unwrap();
+    for _ in 0..4 {
+        e.engine.store.update(&p.id, |r| r.next_at = 0).ok();
+        e.engine.pass().await.unwrap();
+    }
+    assert!(e.engine.store.row(&p.id).is_err(), "a failed teardown doesn't keep the preview");
+    let runs: Vec<_> = e.apps.runs.lock().iter().map(|(run, rev, _)| (run.clone(), rev.clone())).collect();
+    assert_eq!(runs, [("node scripts/unregister.js".to_string(), "cs_4a".to_string())], "once, at the approved head, never the unapproved push");
+    assert!(e.apps.seeds.lock().last().unwrap().starts_with("fake://prj_db~pv-"), "before the branch went: {:?}", e.apps.seeds.lock());
+    let told = e.code.teardowns.lock().clone();
+    assert!(told.len() == 1 && told[0].0 == p.id && told[0].1.contains("exit code 2"), "the change is told how it failed: {told:?}");
 }
 
 #[tokio::test]
@@ -429,10 +471,16 @@ async fn masked_postgres_is_masked_before_it_serves_and_new_rules_reach_it() {
     let mut s = e.engine.store.settings(&e.project).unwrap();
     s.masking.insert("postgres:prj_db".into(), [("public.users.email".to_string(), "email".to_string()), ("public.users.name".to_string(), "redact".to_string())].into_iter().collect());
     e.engine.store.put_settings(&e.project, &s).unwrap();
+    // Until they have, `connect` hands out no connection to it: the branch has the new column's
+    // real values.
+    let handed = e.engine.connections(&p.id).await.unwrap();
+    assert!(!handed.iter().any(|c| c.kind == Kind::Postgres), "a branch masked with older rules isn't handed out");
     e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
     let made = e.pg.made.load(Ordering::SeqCst);
     e.engine.pass().await.unwrap();
     assert_eq!(e.pg.masks.lock().len(), 2, "the changed rules were applied");
+    let handed = e.engine.connections(&p.id).await.unwrap();
+    assert!(handed.iter().any(|c| c.kind == Kind::Postgres), "masked with today's rules, it is");
     // Never rewritten in place (its code may have left triggers a superuser's UPDATE would run):
     // a new branch, masked before it's Ready.
     assert_eq!(e.pg.made.load(Ordering::SeqCst), made + 1, "branched again for the new rules");
@@ -798,7 +846,7 @@ async fn a_pages_notes_by_its_environment_name() {
     e.code.open(change("chg_n", 4));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_n").unwrap().unwrap();
-    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1 };
+    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1, replies: Vec::new() };
     e.code.feedback.lock().insert("chg_n".into(), vec![note("/", "Too big"), note("/about", "Typo")]);
     let env_name = roll_previews::branch_name(&p.id);
     let got = e.engine.notes_for(&env_name, "/").await.unwrap();

@@ -149,6 +149,7 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           github: {comment, status, deployment},
                           head?: string /* the changeset it's for: statuses are about it (after pushes that touched only ignored paths its services run an earlier one) */,
                           schema_changes?: string[] /* "+ …"/"- …": its Postgres schema against the parents' */,
+                          schema_risks?: string[] /* what in them would hurt production when it lands */,
                           screenshot_url?: string /* a public preview's screenshot, signed and expiring */,
                           diff_url?: string /* the same for where it differs from the default branch's, when it does */,
                           expires_at?: number /* ms: when it goes (its TTL, or a keep, running out), once a day away */,
@@ -157,7 +158,7 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           page_speed?: {ttfb_ms, fcp_ms: number | null, load_ms, bytes, before_load_ms: number | null} /* how fast that page loaded, timed with its screenshot */,
                           page_health?: {errors, first_error: string | null, failed, first_failed: string | null} /* what went wrong while it loaded: the page's own words, untrusted */,
                           page_a11y?: {issues: [{kind: "images" | "fields" | "buttons" | "links", count, first: string | null}], lang: bool, title: bool} /* what a screen reader can't name there; first is the page's markup, untrusted */,
-                          base_change?: {branch, percent, phone_percent: number | null, head?: string | null, load_ms?: number, a11y_added?: number, errors_added?: number} /* how much the page differs from the project's preview of the default branch */,
+                          base_change?: {branch, percent, phone_percent: number | null, head?: string | null, load_ms?: number, a11y_added?: number, errors_added?: number, text?: TextDiff, links_added?: number, seo_added?: number, api?: TextDiff /* its API operations against the branch's */, api_breaking?: string[] /* what it breaks inside the operations both keep */} /* how much the page differs from the project's preview of the default branch */,
                           pages?: [{path, errors, percent: number | null, base_percent: number | null}] /* the project's other pages (github.pages): errors while each loaded, its change since the push before, against the default branch */,
                           speed_budget?: {load_ms, bytes} /* the project's github.budget (0: no limit), for roll/speed */,
                           visual_review?: {state: 'unchanged' | 'changed' | 'accepted', branch, percent, by: string | null, required, head?, pages?: {path /* '': the first page */, percent, by: string | null}[] /* each page that differs, accepted per page */} /* the roll/visual status (the project's visual_review; required: a visual blocker too) */} /* roll previews (docs/previews.md) */}
@@ -474,7 +475,10 @@ POST  /v1/code/work/{id}/heartbeat | /release | /complete {agent?} → WorkItem
 `preview`, `queue`, `review`, `thread`, `push` and `budget`. Repo webhooks get the same events with the same data.
 A `budget` event is `{budget: {project, project_name, percent /* 80, 100 */, spent_usd_month, max_usd_month},
 dashboard_url}`: the repo's workspace project's previews passed that share of their monthly budget
-(docs/previews.md).
+(docs/previews.md). A `preview` event is `{change, preview}`, with `preview: null` once it's gone; a
+preview environment that went with the project's `teardown` failing adds `teardown` (what the job
+said: its exit code and its output's tail, the change's code's words), and the pull request's
+comment says so too.
 
 **Stream limits.** Each caller may hold at most 32 event streams open at once
 (`--code-max-streams-per-caller`, `ROLL_CODE_MAX_STREAMS_PER_CALLER`), and the server 10,000 in total

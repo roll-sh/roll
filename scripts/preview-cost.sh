@@ -73,7 +73,10 @@ say "a repo with a service, and one of each data resource"
 api POST /v1/code/owners '{"name":"acme","kind":"org"}' >/dev/null
 api POST /v1/code/repos '{"owner":"acme","name":"web","source":"native"}' >/dev/null
 TOML='[preview]\nimage = \"'"$IMAGE"'\"\nrun = \"env > env.txt && python -m http.server $PORT\"\nport = 8000\nhealth = \"/\"\nmemory = 128\ncpus = 0.25\n'
-api POST /v1/code/repos/acme/web/land "{\"message\":\"init\",\"files\":{\"roll.toml\":{\"content\":\"$TOML\"},\"index.html\":{\"content\":\"main\"}}}" >/dev/null
+# The service's API, as an OpenAPI document (github.openapi): the change removes one operation and adds one.
+OPENAPI_MAIN='{\"paths\":{\"/users\":{\"get\":{\"parameters\":[{\"name\":\"limit\",\"in\":\"query\",\"schema\":{\"type\":\"integer\"}}]}},\"/users/{id}\":{\"delete\":{}}}}'
+OPENAPI_CHG='"openapi.json":{"content":"{\"paths\":{\"/users\":{\"get\":{\"parameters\":[{\"name\":\"limit\",\"in\":\"query\",\"required\":true,\"schema\":{\"type\":\"integer\"}}]}},\"/orders\":{\"post\":{}}}}"}'
+api POST /v1/code/repos/acme/web/land "{\"message\":\"init\",\"files\":{\"roll.toml\":{\"content\":\"$TOML\"},\"index.html\":{\"content\":\"main\"},\"openapi.json\":{\"content\":\"$OPENAPI_MAIN\"}}}" >/dev/null
 # A second service, from a second repo (its default branch in every preview): its pages too.
 api POST /v1/code/repos '{"owner":"acme","name":"wiki","source":"native"}' >/dev/null
 api POST /v1/code/repos/acme/wiki/land "{\"message\":\"init\",\"files\":{\"roll.toml\":{\"content\":\"$TOML\"},\"index.html\":{\"content\":\"the wiki\"}}}" >/dev/null
@@ -92,6 +95,9 @@ SEARCH_C=$(api POST /v1/search/clusters '{"name":"catalog"}')
 SEARCH=$(echo "$SEARCH_C" | jq_ "d['id']")
 SEARCH_URL_PARENT=$(echo "$SEARCH_C" | jq_ "d['url'].replace('://', '://' + d['username'] + ':' + d['password'] + '@', 1)")
 curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/1?refresh=true" -H 'content-type: application/json' -d '{"name":"parent"}' >/dev/null
+# An address inside an array of objects, and one under a literal dotted key: masks reach both.
+curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/3?refresh=true" -H 'content-type: application/json' -d '{"name":"other","owner":[{"email":"ada@corp.example"}]}' >/dev/null
+curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/4?refresh=true" -H 'content-type: application/json' -d '{"name":"dotted","owner.email":"bob@corp.example"}' >/dev/null
 PG=$(api POST /v1/projects '{"name":"shop-db"}' | jq_ "d['id']")
 # A real-looking row in the parent, which previews mask.
 PG_PARENT_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['parent_id'] is None][0]")
@@ -127,7 +133,7 @@ PRJ=$(api POST /v1/workspace/projects '{"name":"shop"}' | jq_ "d['id']")
 for r in "repo/acme%2Fweb" "repo/acme%2Fwiki" "postgres/$PG" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work" "search/$SEARCH"; do
   api PUT "/v1/workspace/projects/$PRJ/resources/$r" '{"x":0,"y":0}' >/dev/null
 done
-api PUT "/v1/previews/projects/$PRJ/settings" "{\"env\":{\"SENDGRID_API_KEY\":\"SG.from-production\",\"SMTP_HOST\":\"smtp.sendgrid.net\"},\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"},\"search:$SEARCH\":{\"products.name\":\"redact\"}}}" >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" "{\"env\":{\"SENDGRID_API_KEY\":\"SG.from-production\",\"SMTP_HOST\":\"smtp.sendgrid.net\"},\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"},\"search:$SEARCH\":{\"products.name\":\"redact\",\"products.owner.email\":\"redact\"}}}" >/dev/null
 # A mask on a key column can't hide it (the engine refuses to read such a table): the settings
 # name it instead of letting a preview's pages fail.
 KEY_MASK=$(curl -s -o /tmp/roll-previews-keymask.json -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' \
@@ -136,7 +142,7 @@ KEY_MASK=$(curl -s -o /tmp/roll-previews-keymask.json -w '%{http_code}' -X PUT "
 
 say "open a change"
 T0=$(now_ms)
-CHG=$(api POST /v1/code/repos/acme/web/changes '{"title":"New page","message":"New page","base":"main","files":{"index.html":{"content":"preview of change 1"}}}' | jq_ "d['id']")
+CHG=$(api POST /v1/code/repos/acme/web/changes '{"title":"New page","message":"New page","base":"main","files":{"index.html":{"content":"preview of change 1"},'"$OPENAPI_CHG"'}}' | jq_ "d['id']")
 PV=""
 for _ in $(seq 1 240); do
   L=$(api GET "/v1/previews?project=$PRJ")
@@ -258,6 +264,9 @@ ES_READ=$(curl -sf "$APP_ES/products/_doc/1" | jq_ "d['_source']['name']")
 [ "$ES_READ" = "[masked]" ] || { echo "the search branch should read the parent's document with products.name masked, not $ES_READ"; exit 1; }
 ES_PARENT=$(curl -sf "$SEARCH_URL_PARENT/products/_doc/1" | jq_ "d['_source']['name']")
 [ "$ES_PARENT" = "parent" ] || { echo "masking the branch shouldn't touch the parent's document: $ES_PARENT"; exit 1; }
+ES_DEEP=$( (curl -sf "$APP_ES/products/_doc/3" | jq_ "d['_source']['owner'][0]['email']"; curl -sf "$APP_ES/products/_doc/4" | jq_ "d['_source']['owner.email']") | paste -sd/)
+[ "$ES_DEEP" = "[masked]/[masked]" ] || { echo "a mask should reach a field in an array of objects and under a dotted key: $ES_DEEP"; exit 1; }
+[ "$(curl -sf "$SEARCH_URL_PARENT/products/_doc/3" | jq_ "d['_source']['owner'][0]['email']")" = "ada@corp.example" ] || { echo "the parent's address should stay (the check's premise)"; exit 1; }
 # Nor can the preview's code read the masked value back out of the segments the branch shares
 # with its parent (a term dictionary keeps a replaced document's terms): the parent's has it,
 # the branch's doesn't.
@@ -300,6 +309,10 @@ echo "$NOTES" | grep -q "The heading is cut off" || { echo "the page's notes sho
 NOTE_ID=$(echo "$NOTES" | jq_ "d[0]['id']")
 [ "$(api GET "/v1/previews/$PV/notes" | jq_ "[n['id'] for n in d['notes']]")" = "['$NOTE_ID']" ] || { echo "the preview's open notes should list the page's, with its id"; exit 1; }
 ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview notes "$PV" | grep -q "^$NOTE_ID  / body > h1  by .*: The heading is cut off" || { echo "roll preview notes should list it: $(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview notes "$PV")"; exit 1; }
+# A reply to it (the sheet's Reply: a comment review naming the note) is listed under it on the page.
+api POST "/v1/code/changes/$CHG/reviews" "{\"verdict\":\"comment\",\"body\":\"**Reply on the preview** · \`$NOTE_ID\`\\n\\nWhich width?\"}" >/dev/null
+REPLIES=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F" | jq_ "[r['note'] for n in d for r in n.get('replies', [])]")
+[ "$REPLIES" = "['Which width?']" ] || { echo "the note's reply should be listed under it on the page: $REPLIES"; exit 1; }
 [ "$(api POST "/v1/previews/$PV/notes/$NOTE_ID/resolve" '{}' | jq_ "d.get('resolved')")" = "$NOTE_ID" ] || { echo "resolving the page's note should answer with it"; exit 1; }
 RESOLVED=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F" | jq_ "len(d)")
 [ "$RESOLVED" = 0 ] && [ "$(api GET "/v1/previews/$PV/notes" | jq_ "len(d['notes'])")" = 0 ] || { echo "a resolved note should fold away on the page and from the open notes: $RESOLVED left"; exit 1; }
@@ -321,7 +334,7 @@ ACTIVE=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
 
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
-api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000}}}' >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json"}}' >/dev/null
 # roll keeps a preview of the default branch (github.baseline): the change's screenshots are
 # compared with its.
 MAINPV=""
@@ -380,7 +393,7 @@ SLEEPING=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
 say "migrate the preview's Postgres branch, push: the next head's schema changes name the table"
 if [ -n "$PG_BRANCH" ]; then
   PG_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['id']=='$PG_BRANCH'][0]")
-  api POST "/v1/endpoints/$PG_EP/query" '{"sql":"CREATE TABLE preview_only (id int PRIMARY KEY, note text NOT NULL DEFAULT '"'"'x'"'"')"}' >/dev/null
+  api POST "/v1/endpoints/$PG_EP/query" '{"sql":"CREATE TABLE preview_only (id int PRIMARY KEY, note text NOT NULL DEFAULT '"'"'x'"'"'); ALTER TABLE users ALTER COLUMN email SET NOT NULL"}' >/dev/null
   # The preview's code tries to get the superuser to run it (a function shadowing one the schema
   # diff calls, pg_get_indexdef(oid), the database's search_path pointed at it): the diff runs as the branch's role
   # with only the catalog's names, so the role stays what it is.
@@ -394,7 +407,7 @@ if [ -n "$PG_BRANCH" ]; then
   APP_ROLE=$(echo "$APP_DB2" | sed -E 's#^postgres://([^:]+):.*#\1#')
   PLANTED=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB2" -Atc "CREATE FUNCTION public.pg_get_indexdef(oid) RETURNS text LANGUAGE plpgsql AS \$f\$ BEGIN EXECUTE 'ALTER ROLE $APP_ROLE SUPERUSER'; RETURN 'x'; END \$f\$; ALTER DATABASE main SET search_path = public, pg_catalog" 2>&1 | tail -1 || true)
   [ "$PLANTED" = "ALTER DATABASE" ] || { echo "the hostile function should have been planted: $PLANTED (env.txt: $(echo "$ENV_TXT" | head -c 300))"; exit 1; }
-  api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"New page, again","files":{"index.html":{"content":"preview of change 1, again"}}}' >/dev/null
+  api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"New page, again","files":{"index.html":{"content":"preview of change 1, again"},'"$OPENAPI_CHG"'}}' >/dev/null
   SCHEMA=""
   for _ in $(seq 1 120); do
     SCHEMA=$(api GET "/v1/previews/$PV" | jq_ "'\\n'.join(d.get('schema_changes') or [])")
@@ -403,6 +416,10 @@ if [ -n "$PG_BRANCH" ]; then
   done
   case "$SCHEMA" in *"+ table public.preview_only"*) ;; *) echo "the schema changes should name the new table: $SCHEMA"; exit 1;; esac
   case "$SCHEMA" in *"+ field products.price "*) ;; *) echo "the schema changes should name the search branch's new field: $SCHEMA"; exit 1;; esac
+  # A column made NOT NULL is named as a migration risk; the new table isn't one.
+  RISKS=$(api GET "/v1/previews/$PV" | jq_ "' | '.join(d.get('schema_risks') or [])")
+  case "$RISKS" in "makes public.users.email (postgres:$PG) NOT NULL: "*) ;; *) echo "the schema's risks should name the NOT NULL column (and its database), and only it: $RISKS"; exit 1;; esac
+  case "$RISKS" in *" | "*) echo "only the NOT NULL column is a risk: $RISKS"; exit 1;; esac
   ESCALATED=$(api POST "/v1/endpoints/$PG_EP/query" "{\"sql\":\"SELECT rolsuper FROM pg_roles WHERE rolname = '$APP_ROLE'\"}" | jq_ "d['results'][0]['rows'][0][0]")
   [ "$ESCALATED" = f ] || { echo "the branch's role became a superuser ($ESCALATED)"; exit 1; }
   say "$SCHEMA"
@@ -437,7 +454,7 @@ until_head() { # until_head <change head>: the preview is for it
   echo "the preview should follow the change to $1"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1
 }
 BUILD=$(api GET "/v1/previews/$PV" | jq_ "d['head']")
-api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"Docs","files":{"index.html":{"content":"preview of change 1, again"},"docs/setup.md":{"content":"how to run it"}}}' >/dev/null
+api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"Docs","files":{"index.html":{"content":"preview of change 1, again"},"docs/setup.md":{"content":"how to run it"},'"$OPENAPI_CHG"'}}' >/dev/null
 DOCS_HEAD=$(api GET "/v1/code/changes/$CHG" | jq_ "d['head']")
 until_head "$DOCS_HEAD"
 RUNS=$(api GET "/v1/previews/$PV" | jq_ "d.get('runs') or ''")
@@ -445,7 +462,7 @@ RUNS=$(api GET "/v1/previews/$PV" | jq_ "d.get('runs') or ''")
 WAITED2=$(ROLL_API_URL="http://$API" "$ROLL_CLI" preview wait --change "$CHG" --timeout 30) || { echo "roll preview wait should pass for the docs-only head"; exit 1; }
 # This one's page logs an error, which its screenshot's load must catch.
 THIRD='preview of change 1, third<script>console.error(\"boom\")</script> <nav><a href=\"/gone\">a page that went</a></nav>'
-api POST "/v1/code/changes/$CHG/revise" "{\"base\":\"main\",\"message\":\"Code\",\"files\":{\"index.html\":{\"content\":\"$THIRD\"},\"docs/setup.md\":{\"content\":\"how to run it\"}}}" >/dev/null
+api POST "/v1/code/changes/$CHG/revise" "{\"base\":\"main\",\"message\":\"Code\",\"files\":{\"index.html\":{\"content\":\"$THIRD\"},\"docs/setup.md\":{\"content\":\"how to run it\"},$OPENAPI_CHG}}" >/dev/null
 CODE_HEAD=$(api GET "/v1/code/changes/$CHG" | jq_ "d['head']")
 until_head "$CODE_HEAD"
 for _ in $(seq 1 120); do
@@ -540,6 +557,12 @@ api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
 # Main's load where it was compared comes along (to say "300 ms slower than main").
 # Its words against main's: the change's line in, main's out.
 WORDS=$(api GET "/v1/previews/$PV" | jq_ "(lambda t: '+%s -%s' % (t['added'], t['removed']))(d['base_change'].get('text') or {'added': [], 'removed': []})")
+# Its API against main's, read from each one's OpenAPI document (github.openapi).
+API_DIFF=$(api GET "/v1/previews/$PV" | jq_ "(lambda t: '+%s -%s' % (t['added'], t['removed']))(d['base_change'].get('api') or {'added': [], 'removed': []})")
+[ "$API_DIFF" = "+['POST /orders'] -['DELETE /users/{id}']" ] || { echo "the change's API against main's should name the operation it removes and the one it adds: $API_DIFF"; exit 1; }
+# And what it breaks inside an operation both keep: the limit parameter becomes required.
+API_BREAKING=$(api GET "/v1/previews/$PV" | jq_ "' | '.join(d['base_change'].get('api_breaking') or [])")
+[ "$API_BREAKING" = "GET /users: the parameter query:limit becomes required" ] || { echo "the change's API should name what it breaks in an operation both keep: $API_BREAKING"; exit 1; }
 case "$WORDS" in "+['preview of change 1"*"-['main']") ;; *) echo "the page's words should be compared with main's: $WORDS"; exit 1;; esac
 MAIN_LOAD=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('load_ms')")
 case "$MAIN_LOAD" in [0-9]*) ;; *) echo "the comparison with main should carry main's load time: $MAIN_LOAD"; exit 1;; esac
@@ -623,14 +646,19 @@ if [ -n "${STOP_BEFORE_LAND:-}" ]; then
   echo "stopped before landing: project $PRJ, preview $PV (run with --keep to leave the daemon up)"
   exit 0
 fi
-say "land the change: the preview and its branches go, the parents stay"
+say "land the change: the teardown runs, the preview and its branches go, the parents stay"
+# The project's teardown, as the preview goes: exit 3 only when the branch's URL reached it, and
+# its failure doesn't keep the preview.
+api PUT "/v1/previews/projects/$PRJ/settings" '{"teardown":{"image":"'"$IMAGE"'","run":"test -n \"$DATABASE_URL\" && exit 3"}}' >/dev/null
 api POST "/v1/code/changes/$CHG/land" '{}' >/dev/null
-for _ in $(seq 1 120); do
+for _ in $(seq 1 240); do
   N=$(api GET "/v1/previews?project=$PRJ" | jq_ "len(d)")
   [ "$N" = 0 ] && break
   sleep 0.5
 done
 [ "$N" = 0 ] || { api GET "/v1/previews?project=$PRJ"; exit 1; }
+TEARDOWN=$(sed 's/\x1b\[[0-9;]*m//g' "$HOME_DIR/rolld.log" | grep -c "the teardown failed preview=$PV error=the teardown command failed with exit code 3" || true)
+[ "$TEARDOWN" = 1 ] || { echo "the teardown should run once, with the branch's URL, as the preview goes: $TEARDOWN"; grep -i teardown "$HOME_DIR/rolld.log" | tail -5; exit 1; }
 PARENTS_OK=$( (api GET "/v1/redis/databases/$REDIS" | jq_ "d['id']"; api GET /v1/storage/buckets/assets | jq_ "d['name']"; api GET "/v1/nosql/databases/$NOSQL" | jq_ "d['id']"; api GET "/v1/search/clusters/$SEARCH" | jq_ "d['id']") | wc -l)
 SEARCH_BRANCH_GONE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${ROLL_ADMIN_TOKEN:-}" "http://$API/v1/search/clusters/$BRANCH_SEARCH")
 [ "$SEARCH_BRANCH_GONE" = 404 ] || { echo "the search branch should be gone after landing ($SEARCH_BRANCH_GONE)"; exit 1; }
@@ -647,6 +675,7 @@ cat <<EOF
 | What each branch hands the preview's code | $DATA |
 | Core Web Vitals of the first page (the screenshot's load) | $VITALS |
 | The first page's words against main's | $WORDS |
+| Its API against main's (from each one's OpenAPI document) / what it breaks in the operations both keep | $API_DIFF / $API_BREAKING |
 | SEO basics of the first page | $SEO |
 | /pricing's own checks (against main's /pricing) | $PRICING |
 | The first page's broken links (HEAD only) / new against main | $LINKS / $LINKS_NEW |
@@ -655,9 +684,12 @@ cat <<EOF
 | The release's time on the preview's data (at its head) / on the change | $RELEASE / $CHG_RELEASE ms |
 | The preview's link as a QR code (PNG, no-store) | $QR |
 | Mail: the provider's key in the service / sent as the preview, caught | gone / $MAIL |
+| A page's note: its reply, listed under it on the page | $REPLIES |
 | A page's note resolved in roll: notes the page lists after | $RESOLVED |
 | \`roll preview connect --kind postgres\`: the branch's own role | $(role "$CONNECT") |
 | Postgres users.email in the branch / in the parent | $PG_MASKED / $PG_PARENT |
+| The migration's risks the preview names | ${RISKS:-} |
+| The teardown as the preview went (its exit code, with the branch's URL) / runs | 3 / $TEARDOWN |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |
 | First visit (cold start of the service container, image cached) | $((T3 - T2)) ms |
@@ -683,5 +715,6 @@ cat <<EOF
 | The first page's speed, timed with its screenshot | $SPEED |
 | The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |
 | Search: products.name in the branch / in the parent / the branch's term dictionary | $ES_READ / $ES_PARENT / $ES_TERMS |
+| Search: an address in an array of objects / under a dotted key, in the branch | $ES_DEEP |
 | After landing: parents present / preview Redis branches left | $PARENTS_OK of 4 / $BRANCHES_LEFT |
 EOF

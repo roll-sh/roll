@@ -104,6 +104,10 @@ impl Engine {
             self.store.update(&r.id, |row| row.state = State::Creating)?;
             self.store.log(&r.id, "approved: starting")?;
         }
+        // A head that may run: where the project's `teardown` runs when the preview goes.
+        if self.store.ran_head(&r.id)?.as_deref() != Some(r.build()) {
+            self.store.set_ran_head(&r.id, Some(r.build()))?;
+        }
         let project = self.workspace.get(roll_workspace::Scope::All, &r.project_id)?;
         let name = branch_name(&r.id);
 
@@ -303,23 +307,12 @@ impl Engine {
             }
             anyhow::bail!("this preview may not inherit the production environment {:?}", s.secrets.base);
         }
-        let urls = self.resource_env(&r.id).await?;
+        let vars = self.preview_vars(r, &s).await?;
         let branches = self.branch_vars(&r.id).await?;
         let (access_token, bypass) = match self.store.access(&r.id)? {
             Some(crate::store::Access { token: t, required: true, bypass }) if !t.is_empty() => (Some(t), bypass),
             _ => (None, None),
         };
-        let mut vars: Vec<(String, String)> = project_env(&s, r.branch.as_deref());
-        for (k, v) in self.store.vars(&r.id)? {
-            set(&mut vars, &k, v);
-        }
-        // A deploy elsewhere (roll apps) never emails real people either.
-        if s.mail == crate::settings::MailRule::Catch {
-            self.catch_mail_vars(&r.id, &mut vars)?;
-        }
-        for (k, v) in urls {
-            set(&mut vars, &k, v);
-        }
         // Every converge (at least every few minutes, for usage) pushes its expiry out: only a
         // preview nobody converges any more lets it lapse.
         let trusted = s.secrets.allow_production && r.trusted;
@@ -559,14 +552,14 @@ impl Engine {
     /// backend that can't, a failure) is remembered for the head, and the last one taken stays.
     pub(super) async fn take_screenshot(&self, r: &Row) -> bool {
         let Ok(Some(first)) = self.store.services(&r.id).map(|v| v.into_iter().next()) else { return false };
-        let (entries, hide, widths) = self.store.settings(&r.project_id).map(|s| (s.github.pages, s.github.hide, s.github.widths)).unwrap_or_default();
+        let (entries, hide, widths, openapi) = self.store.settings(&r.project_id).map(|s| (s.github.pages, s.github.hide, s.github.widths, s.github.openapi)).unwrap_or_default();
         // The first page at the project's other widths: entries of their own (`@768`).
         let width_keys: Vec<String> = widths.iter().map(|w| format!("@{w}")).collect();
         // The first service's own pages go in its run; another service's in a run of its own.
         let mine = |svc: Option<&str>| svc.is_none_or(|s| s == first.name);
         let mut first_paths: Vec<String> = width_keys.clone();
         first_paths.extend(entries.iter().filter_map(|e| crate::settings::page_entry(e)).filter(|(s, p)| mine(*s) && *p != "/").map(|(_, p)| p.to_string()));
-        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone() };
+        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi };
         match self.apps.screenshot(&r.id, &first.name, &opts).await {
             Ok(Some(shot)) => {
                 // Kept under the entry that asked for each (`/pricing`, or `web:/pricing`).
@@ -594,7 +587,7 @@ impl Engine {
                 let (store, id, head) = (self.store.clone(), r.id.clone(), r.build().to_string());
                 let kept = tokio::task::spawn_blocking(move || {
                     store.set_screenshot(&id, &head, &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok()
-                        && store.set_page_report(&id, shot.health.as_ref(), shot.a11y.as_ref(), shot.text.as_deref(), shot.links.as_ref()).is_ok()
+                        && store.set_page_report(&id, shot.health.as_ref(), shot.a11y.as_ref(), shot.text.as_deref(), shot.links.as_ref(), shot.api.as_deref()).is_ok()
                         && store.set_page_shots(&id, &head, &pages, &wanted).is_ok()
                 })
                 .await
@@ -654,7 +647,7 @@ impl Engine {
             if !services.iter().any(|s| s.name == svc) {
                 continue;
             }
-            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec() };
+            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), openapi: None };
             match self.apps.screenshot(&r.id, svc, &opts).await {
                 Ok(Some(shot)) => {
                     if paths.contains(&"/") {
@@ -712,6 +705,24 @@ impl Engine {
     /// Run the project's seed or release to its end on the preview's tree: its secrets
     /// environment (as services get it: untrusted unless the project allows production and the
     /// change is trusted), the branches and overrides on top.
+    /// What the preview's secrets environment and jobs get: the project's `env`, the preview's own
+    /// variables, the mail catcher's settings, and the branches' URLs over them all.
+    async fn preview_vars(&self, r: &Row, s: &Settings) -> anyhow::Result<Vec<(String, String)>> {
+        let urls = self.resource_env(&r.id).await?;
+        let mut vars: Vec<(String, String)> = project_env(s, r.branch.as_deref());
+        for (k, v) in self.store.vars(&r.id)? {
+            set(&mut vars, &k, v);
+        }
+        // A deploy elsewhere (roll apps) never emails real people either.
+        if s.mail == crate::settings::MailRule::Catch {
+            self.catch_mail_vars(&r.id, &mut vars)?;
+        }
+        for (k, v) in urls {
+            set(&mut vars, &k, v);
+        }
+        Ok(vars)
+    }
+
     async fn run_job(&self, r: &Row, s: &Settings, vars: &[(String, String)], what: &str, job: &crate::settings::Seed) -> anyhow::Result<()> {
         let untrusted = !(s.secrets.allow_production && r.trusted);
         let mut env = self.resolve_secrets(r, untrusted).await?;
@@ -836,6 +847,25 @@ impl Engine {
             let row = self.store.update(&r.id, |row| row.state = State::Deleting)?;
             self.report(row).await;
         }
+        // The project's teardown, once, at a head the preview ran, while what it made is still
+        // there. A failure is logged and the preview goes regardless (Heroku's `pr-predestroy`).
+        if let Some(head) = self.store.ran_head(&r.id)? {
+            let s = self.store.settings(&r.project_id)?;
+            if let Some(job) = &s.teardown {
+                let at = Row { runs: Some(head), ..r.clone() };
+                let ran = async {
+                    let vars = self.preview_vars(&at, &s).await?;
+                    self.run_job(&at, &s, &vars, "teardown", job).await
+                };
+                if let Err(e) = ran.await {
+                    let e = format!("{e:#}");
+                    warn!(preview = %r.id, error = %e, "previews: the teardown failed");
+                    self.store.log(&r.id, &e)?;
+                    self.store.set_teardown_error(&r.id, &e)?;
+                }
+            }
+            self.store.set_ran_head(&r.id, None)?;
+        }
         for p in self.store.pinned(&r.id)? {
             let name = format!("{}@{}", p.service, p.revision);
             self.apps.remove(&r.id, &name).await.map_err(|e| anyhow::anyhow!("removing {name}: {e:#}"))?;
@@ -851,7 +881,8 @@ impl Engine {
             self.store.drop_resource(&r.id, res.kind, &res.parent)?;
         }
         let view = self.store.preview(&r.id)?;
-        self.source.forget(&view).await;
+        // The change hears it went, and how its teardown failed if it did.
+        self.source.forget(&view, self.store.teardown_error(&r.id)?.as_deref()).await;
         // What it cost this month stays counted against the project's budget.
         self.store.add_spend(&r.project_id, crate::store::month_start(self.store.now_ms()?), view.cost.month_to_date_usd)?;
         self.store.remove(&r.id)?;

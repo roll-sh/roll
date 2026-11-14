@@ -26,6 +26,8 @@ pub struct FakeCode {
     pub health: Mutex<Option<String>>,
     pub reports: Mutex<Vec<Preview>>,
     pub forgotten: Mutex<Vec<String>>,
+    /// Previews that went with their teardown failing: (preview, what it said).
+    pub teardowns: Mutex<Vec<(String, String)>>,
     /// Budget alerts sent: (the repos told, the alert).
     pub budgets: Mutex<Vec<(Vec<String>, roll_previews::ports::BudgetAlert)>>,
 }
@@ -78,8 +80,11 @@ impl Source for FakeCode {
     async fn report(&self, p: &Preview, _s: &Settings) {
         self.reports.lock().push(p.clone());
     }
-    async fn forget(&self, p: &Preview) {
+    async fn forget(&self, p: &Preview, teardown: Option<&str>) {
         self.forgotten.lock().push(p.id.clone());
+        if let Some(t) = teardown {
+            self.teardowns.lock().push((p.id.clone(), t.to_string()));
+        }
     }
     async fn budget(&self, repos: &[String], alert: &roll_previews::ports::BudgetAlert) -> anyhow::Result<()> {
         self.budgets.lock().push((repos.to_vec(), alert.clone()));
@@ -202,10 +207,15 @@ pub struct FakeApps {
     /// The next deploys that answer "still deploying", then the next that fail.
     pub still: AtomicUsize,
     pub fail_deploy: AtomicUsize,
+    /// The next removals that fail.
+    pub fail_remove: AtomicUsize,
     /// Runs inside a deploy (an API call landing while the reconciler works).
     pub on_deploy: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     /// The PNG every screenshot is (unset: the backend can't take one), and the previews taken.
     pub shot: Mutex<Option<Vec<u8>>>,
+    /// The API operations a screenshot reads when it's asked to (`github.openapi`), by a
+    /// revision the preview runs.
+    pub api: Mutex<HashMap<String, Vec<String>>>,
     /// Each service's last deploy asked for the feedback button.
     pub feedback: Mutex<HashMap<(String, String), bool>>,
     pub shots: Mutex<Vec<String>>,
@@ -247,6 +257,10 @@ impl Apps for FakeApps {
     }
     async fn sleep(&self, _: &str, _: &str) {}
     async fn remove(&self, p: &str, s: &str) -> anyhow::Result<()> {
+        if self.fail_remove.load(Ordering::SeqCst) > 0 {
+            self.fail_remove.fetch_sub(1, Ordering::SeqCst);
+            anyhow::bail!("the runtime is busy");
+        }
         self.deployed.lock().remove(&(p.to_string(), s.to_string()));
         self.removed.lock().push((p.to_string(), s.to_string()));
         Ok(())
@@ -261,11 +275,14 @@ impl Apps for FakeApps {
         self.runs.lock().push((job.seed.run.clone(), job.revision.clone(), at_rev));
         Ok((self.seed_exit.load(Ordering::SeqCst), "seed output".into()))
     }
-    async fn screenshot(&self, preview: &str, _: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
+    async fn screenshot(&self, preview: &str, _service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
         let Some(png) = self.shot.lock().clone() else { return Ok(None) };
+        // The API the preview serves: by any revision it runs (whichever service is first).
+        let revs: Vec<String> = self.deployed.lock().iter().filter(|((p, _), _)| p == preview).map(|(_, r)| r.clone()).collect();
+        let api = opts.openapi.as_ref().and_then(|_| revs.iter().find_map(|r| self.api.lock().get(r).cloned()));
         self.shots.lock().push(preview.to_string());
         let pages = opts.pages.iter().map(|p| roll_previews::ports::PageShot { path: p.clone(), png: png.clone(), errors: 0, report: Default::default() }).collect();
-        Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None, pages, text: None, links: None }))
+        Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None, pages, text: None, links: None, api }))
     }
     fn status(&self, _: &str, _: &str) -> Option<ServiceState> {
         None
