@@ -168,6 +168,7 @@ GET /v1/previews/projects/{project}/usage
 GET /v1/previews/{id}/activity
 PUT /v1/previews/{id}/env
 POST /v1/previews/{id}/keep
+POST /v1/previews/{id}/notes/{note}/resolve
 GET /v1/previews/{id}/logs
 POST /v1/previews/{id}/refresh
 GET /v1/previews/{id}/screenshot
