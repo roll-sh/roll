@@ -245,6 +245,8 @@ export type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "exp
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
 /** A project's certificate authority: what it signs for, and its certificate (PEM) for clients to trust. */
+/** A certificate a CA signed for a CSR (`POST …/cas/{id}/sign`): the device keeps its key. */
+export type SignedCertificate = { certificate: string; ca: string; serial: string; names: string[]; not_after: number };
 export type Ca = { id: string; name: string; certificate: string; domains: string[]; allow_ip: boolean; max_days: number; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };

@@ -576,6 +576,14 @@ TLS certificates for services (mTLS between them), with no CA to run.
   most) and never past the CA's own end. A link's names and rotation are checked when it's written.
   Certificates are for servers and clients both (`serverAuth`, `clientAuth`; the key only signs),
   with a random 128-bit serial.
+- `POST …/cas/{id}/sign {csr (PEM), days? | ttl_minutes?}` (`write`, audited; `roll secrets cas
+  sign NAME req.csr [--days N] [--chain]`) signs a CSR, for a device or a service mesh that keeps
+  its own private key. The request's signature is checked, then only its public key and its
+  subjectAltName names (DNS names and IP addresses, each within the policy; the subject's CN isn't
+  read) are taken: usages, lifetime (30 days, or the CA's `max_days` if shorter, by default; 5
+  minutes to `max_days`) and everything else are the CA's own, whatever the CSR asks (being a CA
+  itself, signing code). It answers `{certificate, ca, serial, names, not_after}`. Checked with
+  OpenSSL's CSRs (P-256 and RSA): `openssl verify -x509_strict` passes against the CA.
 - A certificate can't be taken back: there are no revocation lists, so lifetimes stay short, and a
   lease that ends leaves its certificate valid until it expires. A CA a key links to can't be
   deleted; deleting one leaves what it signed valid until it expires.
@@ -608,7 +616,7 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
-roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | rm ID
+roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain] | rm ID
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -1448,6 +1456,7 @@ isn't in the workspace is 404.
 | `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
 | `POST /cas` | `{name, domains, allow_ip?, max_days?}` | 201 `Ca` (`admin`) |
 | `DELETE /cas/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `POST /cas/{id}/sign` | `{csr, days?, ttl_minutes?}` | `{certificate, ca, serial, names, not_after}` (`write`, audited); 400 for a name outside the policy or a lifetime past `max_days` |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
 

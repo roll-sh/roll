@@ -1,6 +1,6 @@
-import { Check, Copy, Plus, ShieldCheck, Trash2 } from "lucide-react";
+import { Check, Copy, FileSignature, Plus, ShieldCheck, Trash2 } from "lucide-react";
 import { useState } from "react";
-import type { Ca } from "@/lib/secrets-api";
+import type { Ca, SignedCertificate } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, useLoad } from "./ui";
 
@@ -22,6 +22,7 @@ export function Cas() {
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [signing, setSigning] = useState<string | null>(null);
   const list_ = domains.split(",").map((d) => d.trim().toLowerCase()).filter(Boolean);
   const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name) && list_.length > 0 && list_.every((d) => DOMAIN.test(d));
 
@@ -108,6 +109,9 @@ export function Cas() {
                 <span className="ml-auto text-[11px] text-subtle">
                   made {ago(c.created_at)} · <ActorMark who={c.created_by} />
                 </span>
+                <button className={ghost} onClick={() => setSigning((s) => (s === c.id ? null : c.id))} aria-expanded={signing === c.id} aria-label={`Sign a CSR with ${c.name}`} title="Sign a CSR: the device or mesh keeps its private key">
+                  <FileSignature className="size-3.5" />
+                </button>
                 <button className={ghost} onClick={() => copy(c)} aria-label={`Copy ${c.name}'s certificate`} title="Copy the CA's certificate (PEM) for clients to trust">
                   {copied === c.id ? <Check className="size-3.5 text-ok" /> : <Copy className="size-3.5" />}
                 </button>
@@ -125,11 +129,93 @@ export function Cas() {
                     <Trash2 className="size-3.5" />
                   </button>
                 )}
+                {signing === c.id && <SignCsr ca={c} />}
               </div>
             ))}
           </div>
         )
       )}
     </Section>
+  );
+}
+
+/** Paste a CSR, get its certificate: names within the CA's policy, its key stays where it was made. */
+function SignCsr({ ca }: { ca: Ca }) {
+  const { api } = useSecrets();
+  const [csr, setCsr] = useState("");
+  const [days, setDays] = useState(Math.min(30, ca.max_days));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [signed, setSigned] = useState<SignedCertificate | null>(null);
+  const [copied, setCopied] = useState(false);
+  const ok = csr.includes("BEGIN CERTIFICATE REQUEST") && days >= 1 && days <= ca.max_days;
+  const sign = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setSigned(await api.signCsr(ca.id, csr.trim(), days));
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="rise basis-full space-y-2 pt-1">
+      <ErrorNote error={error} onDismiss={() => setError(null)} />
+      {signed ? (
+        <>
+          <p className="text-[11.5px] text-muted">
+            For <span className="font-mono text-fg">{signed.names.join(", ")}</span> until {new Date(signed.not_after).toISOString().slice(0, 10)} · serial <span className="font-mono">{signed.serial.slice(0, 16)}…</span>
+          </p>
+          <textarea readOnly value={signed.certificate} rows={6} className={`${field} h-auto py-1.5 font-mono text-[11px]`} aria-label="The signed certificate" />
+          <div className="flex gap-2">
+            <button
+              className={button}
+              onClick={() => {
+                void navigator.clipboard?.writeText(signed.certificate);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1200);
+              }}
+            >
+              {copied ? <Check className="size-3.5 text-ok" /> : <Copy className="size-3.5" />} Copy certificate
+            </button>
+            <button className={ghost} onClick={() => (setSigned(null), setCsr(""))}>
+              Sign another
+            </button>
+          </div>
+        </>
+      ) : (
+        <form
+          className="space-y-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (ok && !busy) void sign();
+          }}
+        >
+          <textarea
+            autoFocus
+            value={csr}
+            onChange={(e) => setCsr(e.target.value)}
+            rows={5}
+            spellCheck={false}
+            placeholder={"-----BEGIN CERTIFICATE REQUEST-----\n…"}
+            aria-label="The CSR (PEM)"
+            className={`${field} h-auto py-1.5 font-mono text-[11px]`}
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-1.5 text-[12px] text-muted">
+              Valid for
+              <input type="number" min={1} max={ca.max_days} value={days} onChange={(e) => setDays(Number(e.target.value))} className={`${field} h-7 w-16 font-mono text-[12px]`} aria-label="Days" />
+              days
+            </label>
+            <span className="text-[11px] text-subtle">Only its key and subjectAltName names are used; each must be under {ca.domains.join(", ")}.</span>
+            <button type="submit" className={`${primary} ml-auto`} disabled={!ok || busy}>
+              {busy ? "Signing…" : "Sign"}
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
   );
 }

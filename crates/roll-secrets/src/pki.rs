@@ -11,6 +11,9 @@
 //!   `private_key` and `ca` are one credential: `dynamic` gives each lease its own certificate (the
 //!   lease's TTL plus five minutes), `managed` stores one and rotates it (twice `rotate_days`, 30 by
 //!   default, so a rotation always comes before the end).
+//! - `…/cas/{id}/sign` signs a CSR, for a device or a mesh that keeps its own private key: only
+//!   the request's public key and names are taken (every name within the policy); the usages,
+//!   lifetime and everything else are this CA's, as for a link's certificates.
 //! - A certificate can't be taken back: there are no revocation lists, so lifetimes stay short. A
 //!   lease that ends leaves its certificate valid until it expires.
 
@@ -203,26 +206,10 @@ impl LinkProvider for Provider {
             _ => link.rotate_days().unwrap_or(30) * 2 * 24 * 60,
         }
         .min(u64::from(policy.max_days) * 24 * 60);
-        let now = time::OffsetDateTime::now_utc();
         let ca_key = rcgen::KeyPair::from_pem(ca_key.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
         let issuer = rcgen::Issuer::from_ca_cert_pem(&ca_pem, &ca_key).map_err(|e| Error::Internal(format!("the CA's certificate: {e}")))?;
         let key = rcgen::KeyPair::generate().map_err(|e| Error::Internal(format!("a certificate's key: {e}")))?;
-        let mut params = rcgen::CertificateParams::new(names.clone()).map_err(|e| Error::BadRequest(format!("a certificate's names: {e}")))?;
-        params.distinguished_name = rcgen::DistinguishedName::new();
-        params.distinguished_name.push(rcgen::DnType::CommonName, names[0].clone());
-        params.not_before = now - time::Duration::minutes(1);
-        // Never past the CA's own end.
-        let ca_end = x509_parser::pem::parse_x509_pem(ca_pem.as_bytes())
-            .ok()
-            .and_then(|(_, p)| x509_parser::parse_x509_certificate(&p.contents).ok().map(|(_, c)| c.validity().not_after.timestamp()))
-            .and_then(|t| time::OffsetDateTime::from_unix_timestamp(t).ok())
-            .ok_or_else(|| Error::Internal("the CA's certificate doesn't parse".into()))?;
-        params.not_after = (now + time::Duration::minutes(minutes as i64)).min(ca_end);
-        params.serial_number = Some(rcgen::SerialNumber::from_slice(&serial()));
-        // An ECDSA key signs; it never enciphers (RFC 5480).
-        params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
-        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth, rcgen::ExtendedKeyUsagePurpose::ClientAuth];
-        params.use_authority_key_identifier_extension = true;
+        let params = leaf(&ca_pem, &names, minutes)?;
         let cert = params.signed_by(&key, &issuer).map_err(|e| Error::Internal(format!("signing a certificate: {e}")))?;
         let not_after = (params.not_after.unix_timestamp_nanos() / 1_000_000) as i64;
         let parts = BTreeMap::from([("certificate".to_string(), Value::new(cert.pem())), ("private_key".to_string(), Value::new(key.serialize_pem())), ("ca".to_string(), Value::new(ca_pem))]);
@@ -237,6 +224,49 @@ impl LinkProvider for Provider {
     fn renew(&self, _: &str, _: &Json, _: i64) -> Result<()> {
         Err(Error::BadRequest("a certificate can't be extended: resolve again for a new one".into()))
     }
+}
+
+/// A leaf certificate's parameters: `names`, `minutes` long (never past the CA's own end), and
+/// only this CA's usages.
+fn leaf(ca_pem: &str, names: &[String], minutes: u64) -> Result<rcgen::CertificateParams> {
+    let now = time::OffsetDateTime::now_utc();
+    let mut params = rcgen::CertificateParams::new(names.to_vec()).map_err(|e| Error::BadRequest(format!("a certificate's names: {e}")))?;
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params.distinguished_name.push(rcgen::DnType::CommonName, names[0].clone());
+    params.not_before = now - time::Duration::minutes(1);
+    let ca_end = x509_parser::pem::parse_x509_pem(ca_pem.as_bytes())
+        .ok()
+        .and_then(|(_, p)| x509_parser::parse_x509_certificate(&p.contents).ok().map(|(_, c)| c.validity().not_after.timestamp()))
+        .and_then(|t| time::OffsetDateTime::from_unix_timestamp(t).ok())
+        .ok_or_else(|| Error::Internal("the CA's certificate doesn't parse".into()))?;
+    params.not_after = (now + time::Duration::minutes(minutes as i64)).min(ca_end);
+    params.serial_number = Some(rcgen::SerialNumber::from_slice(&serial()));
+    // An ECDSA key signs; it never enciphers (RFC 5480).
+    params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth, rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+    params.use_authority_key_identifier_extension = true;
+    Ok(params)
+}
+
+/// A CSR to sign, and how long its certificate lives (`days` or `ttl_minutes`; 30 days, or the
+/// CA's longest if that's shorter, by default).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Csr {
+    pub csr: String,
+    #[serde(default)]
+    pub days: Option<u32>,
+    #[serde(default)]
+    pub ttl_minutes: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Signed {
+    pub certificate: String,
+    pub ca: String,
+    pub serial: String,
+    pub names: Vec<String>,
+    pub not_after: i64,
 }
 
 /// 16 random bytes, the top bit clear (a positive serial).
@@ -332,6 +362,51 @@ impl Secrets {
             c.execute("DELETE FROM cas WHERE id = ?", [id])?;
             audit::record(c, project, caller, "ca.delete", None, None, &[], &format!("deleted CA {name}"), now)
         })
+    }
+
+    /// Sign a CSR within the CA's policy: the request's own key, its names, this CA's usages and
+    /// lifetime. Audited (the names and serial; a certificate is public).
+    pub fn sign_csr(&self, project: &str, id: &str, req: Csr, caller: &Caller) -> Result<Signed> {
+        caller.need(Action::Write, &Scope::project(project))?;
+        self.project(project)?;
+        let mine: Option<String> = self.db.read(|c| c.query_row("SELECT name FROM cas WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional())?;
+        let ca_name = mine.ok_or_else(|| Error::NotFound(format!("no CA {id}")))?;
+        if req.csr.len() > 64 * 1024 {
+            return Err(Error::BadRequest("a CSR is 64 KiB at most".into()));
+        }
+        // Parsed and its signature checked: whoever asks holds the key it names.
+        let csr = rcgen::CertificateSigningRequestParams::from_pem(req.csr.trim()).map_err(|e| Error::BadRequest(format!("not a CSR this CA signs: {e}")))?;
+        let mut names = vec![];
+        for san in &csr.params.subject_alt_names {
+            names.push(match san {
+                rcgen::SanType::DnsName(d) => d.as_str().to_ascii_lowercase(),
+                rcgen::SanType::IpAddress(ip) => ip.to_string(),
+                _ => return Err(Error::BadRequest("a CSR's names are DNS names and IP addresses (subjectAltName), nothing else".into())),
+            });
+        }
+        let (ca_pem, ca_key, policy) = Provider { db: self.db.clone(), keys: self.keys()?.clone() }.open(id)?;
+        if names.is_empty() {
+            return Err(Error::BadRequest("a CSR names what it's for in subjectAltName (DNS names, or IP addresses where the CA allows them); the subject's CN isn't read".into()));
+        }
+        allowed(&names, &policy)?;
+        let longest = u64::from(policy.max_days) * 24 * 60;
+        let minutes = match (req.days, req.ttl_minutes) {
+            (Some(_), Some(_)) => return Err(Error::BadRequest("days or ttl_minutes, not both".into())),
+            (Some(d), None) => u64::from(d) * 24 * 60,
+            (None, Some(m)) => m,
+            (None, None) => (30 * 24 * 60).min(longest),
+        };
+        if !(5..=longest).contains(&minutes) {
+            return Err(Error::BadRequest(format!("a certificate from {ca_name} lives 5 minutes to {} days", policy.max_days)));
+        }
+        let ca_key = rcgen::KeyPair::from_pem(ca_key.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
+        let issuer = rcgen::Issuer::from_ca_cert_pem(&ca_pem, &ca_key).map_err(|e| Error::Internal(format!("the CA's certificate: {e}")))?;
+        let params = leaf(&ca_pem, &names, minutes)?;
+        let not_after = (params.not_after.unix_timestamp_nanos() / 1_000_000) as i64;
+        let serial = hex(&serial_of(&params));
+        let cert = rcgen::CertificateSigningRequestParams { params, public_key: csr.public_key }.signed_by(&issuer).map_err(|e| Error::BadRequest(format!("signing the CSR: {e}")))?;
+        self.audit_now(project, caller, "ca.sign", None, None, &[], &format!("{ca_name} signed a CSR for {} (serial {serial})", names.join(", ")));
+        Ok(Signed { certificate: cert.pem(), ca: ca_pem, serial, names, not_after })
     }
 
     pub(crate) fn ca_refs(&self, project: &str) -> Result<Vec<(String, String)>> {

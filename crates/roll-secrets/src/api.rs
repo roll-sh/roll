@@ -86,6 +86,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
         .route(&format!("{P}/cas"), get(cas).post(add_ca))
         .route(&format!("{P}/cas/{{id}}"), axum::routing::delete(delete_ca))
+        .route(&format!("{P}/cas/{{id}}/sign"), post(sign_csr))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
@@ -867,6 +868,11 @@ async fn add_ca(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes)
 async fn delete_ca(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_ca(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn sign_csr(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let req: crate::pki::Csr = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.sign_csr(&project, &id, req, &c)).await?))
 }
 
 async fn list_syncs(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
