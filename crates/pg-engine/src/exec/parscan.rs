@@ -451,6 +451,24 @@ impl<'a> Pre<'a> {
         self.live_set = false;
     }
 
+    /// `decode` of `n` rows for a plan that reads no column and has no filter (count(*)'s):
+    /// nothing of the rows is read, every one decided. (Apart from `decode`: its loop is the
+    /// scans' hot one.)
+    #[inline(never)]
+    fn decode_none(&mut self, n: usize) {
+        use super::vector::Tri;
+        self.odd.clear();
+        self.odd.resize(n, false);
+        self.cols.len = n;
+        self.cols.cols.iter_mut().for_each(|c| *c = None);
+        self.cols.ext.clear();
+        self.sel.clear();
+        self.sel.extend(0..n as u32);
+        self.tri.clear();
+        self.tri.resize(n, Tri::T);
+        self.live_set = false;
+    }
+
     /// `live` for the run `decode` decoded (made only where read: `aggregate`, `eval_nums`).
     fn fill_live(&mut self) {
         use super::vector::Tri;
@@ -1481,7 +1499,10 @@ fn partial_chunk<'d>(
             if n % 4096 < run.len() && stopped() {
                 return (false, pa);
             }
-            pre.decode(scan.batch, run.clone());
+            match pre.plan.reads || pre.plan.filter.is_some() {
+                true => pre.decode(scan.batch, run.clone()),
+                false => pre.decode_none(run.len()),
+            }
             let pa_run = run.len();
             // (The whole run at once where the batch decides every row; else row by row.)
             if pre.aggregate(&mut pa) {

@@ -444,6 +444,38 @@ impl GroupsIter {
     }
 }
 
+/// Each slot's best row of a batch for a min / max (`max`) of column `col` into `best` (by
+/// slot and aggregate, `na` of them; this one `i`), by the row path's rule: a later row equal
+/// to the best replaces it. (Apart from `run_sums`: its loops are every aggregation's.)
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn best_rows(col: &crate::storage::cols::Col, max: bool, slots: &[u32], live: &[u32], na: usize, i: usize, best: &mut [u32]) {
+    use crate::storage::cols::ColData as D;
+    #[allow(clippy::too_many_arguments)]
+    fn pick<T: Copy>(v: &[T], cmp: impl Fn(T, T) -> Ordering, nulls: &[bool], max: bool, slots: &[u32], live: &[u32], na: usize, i: usize, best: &mut [u32]) {
+        for (&s, &r) in slots.iter().zip(live) {
+            let r = r as usize;
+            if nulls[r] {
+                continue;
+            }
+            let j = s as usize * na + i;
+            let take = best[j] == u32::MAX || {
+                let o = cmp(v[r], v[best[j] as usize]);
+                o == Ordering::Equal || (o == Ordering::Greater) == max
+            };
+            if take {
+                best[j] = r as u32;
+            }
+        }
+    }
+    match &col.data {
+        D::I32(v) | D::Date(v) => pick(v, |a, b| a.cmp(&b), &col.nulls, max, slots, live, na, i, best),
+        D::I64(v) => pick(v, |a, b| a.cmp(&b), &col.nulls, max, slots, live, na, i, best),
+        D::F64(v) => pick(v, crate::types::value::float_cmp, &col.nulls, max, slots, live, na, i, best),
+        _ => unreachable!("batch_run checked it"),
+    }
+}
+
 /// A bpchar key's value as its groups compare it.
 fn trimmed(v: Value) -> Value {
     match v {
@@ -535,9 +567,11 @@ struct RunScratch {
     /// By group number: its slot this batch (u32::MAX: none).
     slot_of: Vec<u32>,
     touched: Vec<u32>,
-    /// By slot and aggregate: the batch's sum and count.
+    /// By slot and aggregate: the batch's sum and count, and a min / max's best row
+    /// (u32::MAX: none).
     acc: Vec<i128>,
     cnt: Vec<i64>,
+    best: Vec<u32>,
     /// New groups by their key's bytes (`batch_key`, or a words key's), and the groups.
     newk: hashbrown::HashMap<Box<[u8]>, u32, super::fasthash::FastState>,
     newg: Vec<NewGroup>,
@@ -1043,6 +1077,7 @@ impl<'a> Partials<'a> {
                     Some((crate::storage::cols::ColData::F64(v), false)) => Some((v[r].to_bits() as i128, 0)),
                     _ => return false,
                 },
+                AggArg::Best(..) => return false,
             };
             // (A NULL an aggregate doesn't skip: `row` adds it as only it can.)
             if v.is_none() && !*skip {
@@ -1230,6 +1265,15 @@ impl<'a> Partials<'a> {
                         return false;
                     }
                 }
+                (AggArg::Best(c, _), Partial::Best(_)) => {
+                    use crate::storage::cols::ColData as D;
+                    let Some(col) = &b.cols[*c] else { return false };
+                    if !matches!(col.data, D::I32(_) | D::I64(_) | D::Date(_) | D::F64(_))
+                        || (!*skip && live.iter().any(|&r| col.nulls[r as usize]))
+                    {
+                        return false;
+                    }
+                }
                 _ => return false,
             }
         }
@@ -1383,6 +1427,8 @@ impl<'a> Partials<'a> {
         run.acc.resize(nslots * na, 0);
         run.cnt.clear();
         run.cnt.resize(nslots * na, 0);
+        run.best.clear();
+        run.best.resize(nslots * na, u32::MAX);
         for (i, arg) in plan.args.iter().enumerate() {
             let (acc, cnt) = (&mut run.acc, &mut run.cnt);
             match arg {
@@ -1395,6 +1441,11 @@ impl<'a> Partials<'a> {
                     }
                 }
                 AggArg::Float(_) => {}
+                AggArg::Best(c, _) => {
+                    let col = b.cols[*c].as_ref().expect("batch_run checked it");
+                    let Partial::Best(st) = &self.spec.aggs[i].2 else { unreachable!("a min / max") };
+                    best_rows(col, st.max, &run.slots, live, na, i, &mut run.best);
+                }
                 AggArg::Num(_) => {
                     let l = lanes.arg(i);
                     if l.nulls.is_empty() {
@@ -1548,7 +1599,16 @@ impl<'a> Partials<'a> {
                             }
                             Partial::SumInt(t) if n > 0 => *t = Some(t.unwrap_or(0) + x as i64),
                             Partial::SumInt(_) | Partial::Floats(_) => {}
-                            Partial::Best(_) => unreachable!("batch_run takes no other state"),
+                            Partial::Best(bs) => {
+                                let (super::vector::AggArg::Best(c, ty), r) = (&plan.args[i], run.best[s * na + i]) else {
+                                    unreachable!("a min / max's argument")
+                                };
+                                if r != u32::MAX
+                                    && let Some(Ok(v)) = b.cols[*c].as_ref().map(|col| col.value(b, r as usize, ty))
+                                {
+                                    bs.add(&v);
+                                }
+                            }
                         }
                     }
                 }
