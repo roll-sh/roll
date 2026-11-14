@@ -1048,8 +1048,11 @@ Ranked by what a person notices first. Done so far:
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it). It merges into #28 once #26
-   is on main. On a fleet an instance runs on its service's holder: `Reach` there asks that node
-   (an `apps:service:<id>` dispatch) for a screenshot rather than a container to join.
+   is on main. On a fleet an instance runs on its service's holder, and Fargate has no container
+   to join: previews' own internal screenshot route, run on the holder through
+   `cluster.dispatch(&apps_control::lease_key(service), …)` (the apps thread's advice), joins the
+   instance where `reachable` answers (Docker) and else loads the environment's URL through its
+   access link, in the browser container.
 2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change

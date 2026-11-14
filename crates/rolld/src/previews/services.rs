@@ -22,12 +22,15 @@ pub struct RollApps {
     ids: std::sync::Mutex<std::collections::HashMap<(String, String), String>>,
     /// roll apps takes `feedback` on an environment (roll apps' #26; an older one refuses an
     /// unknown field): previews' button on its pages.
+    /// The deployment last started per (preview, service), with what it deploys (`key`): a poll
+    /// while it's under way waits on it, and once it's live nothing is started again.
+    started: std::sync::Mutex<std::collections::HashMap<(String, String), (String, String)>>,
     pub feedback: bool,
 }
 
 impl RollApps {
     pub fn new(api: Api) -> RollApps {
-        RollApps { api, ids: Default::default(), feedback: false }
+        RollApps { api, ids: Default::default(), started: Default::default(), feedback: false }
     }
 
 
@@ -147,6 +150,39 @@ impl roll_previews::ports::Apps for RollApps {
         // At the sha already (a reset's new URLs, say): run it again with the variables, no build.
         // Otherwise deploy, keyed so a retry after a crash returns the same deployment.
         let env = self.api.get(&path).await?;
+        // What's deployed, named: the commit and what it's deployed with.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut sorted: Vec<_> = set.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in sorted {
+            for b in k.bytes().chain([0]).chain(v.to_string().into_bytes()).chain([0]) {
+                h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+        let key = format!(
+            "{}@{}@{h:016x}{}{}",
+            t.environment,
+            t.git.as_deref().unwrap_or("image"),
+            if t.access_token.is_some() { "p" } else { "" },
+            if self.feedback && t.feedback { "f" } else { "" }
+        );
+        // The deployment previews last started for exactly this, still under way or live: wait on
+        // it (or it's done). The engine asks again while a deploy is in flight, and roll apps'
+        // redeploy has no idempotency key, so starting another would supersede it each time.
+        let mine = (t.preview.clone(), t.service.clone());
+        let last = self.started.lock().unwrap_or_else(|p| p.into_inner()).get(&mine).cloned();
+        if let Some((id, _)) = last.filter(|(_, k)| *k == key) {
+            let under_way = env["latest"]["id"].as_str() == Some(id.as_str()) && matches!(env["latest"]["status"].as_str(), Some("queued" | "building" | "deploying"));
+            if under_way {
+                self.settle(&path, env["latest"].clone()).await?;
+                return Ok(s(&self.api.get(&path).await?["url"]));
+            }
+            if env["active"]["id"].as_str() == Some(id.as_str()) {
+                return Ok(s(&env["url"]));
+            }
+        }
+        // At the sha already (a reset's new URLs, say): run it again with the variables, no build.
+        // Otherwise deploy, keyed so a retry after a crash returns the same deployment.
         let at_sha = t.git.is_some() && env["active"]["revision"].as_str() == t.git.as_deref();
         let deployment = if at_sha {
             self.api.post(&format!("{path}/redeploy"), json!({ "message": format!("roll preview {}: new variables", t.preview) })).await?
@@ -155,32 +191,19 @@ impl roll_previews::ports::Apps for RollApps {
                 Some(sha) => json!({ "revision": sha, "message": format!("roll preview {}", t.preview) }),
                 None => json!({ "message": format!("roll preview {}", t.preview) }),
             };
-            // The key names what's deployed: the commit and what it's deployed with (a retry
-            // after a crash returns the same deployment; new variables make a new one).
-            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-            let mut sorted: Vec<_> = set.iter().collect();
-            sorted.sort_by(|a, b| a.0.cmp(b.0));
-            for (k, v) in sorted {
-                for b in k.bytes().chain([0]).chain(v.to_string().into_bytes()).chain([0]) {
-                    h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
-                }
-            }
-            let mut key = format!(
-                "{}@{}@{h:016x}{}{}",
-                t.environment,
-                t.git.as_deref().unwrap_or("image"),
-                if t.access_token.is_some() { "p" } else { "" },
-                if self.feedback && t.feedback { "f" } else { "" }
-            );
+            let mut idem = key.clone();
             // After a failed or canceled deploy, a retry is a new deploy (a registry timeout
             // doesn't fail the preview until the next push); a crash's retry still finds its own.
             if matches!(env["latest"]["status"].as_str(), Some("failed" | "canceled"))
                 && let Some(failed) = s(&env["latest"]["id"])
             {
-                key.push_str(&format!("~{failed}"));
+                idem.push_str(&format!("~{failed}"));
             }
-            self.api.call_with(Method::POST, &format!("{path}/deploys"), Some(body), Some(&key)).await?
+            self.api.call_with(Method::POST, &format!("{path}/deploys"), Some(body), Some(&idem)).await?
         };
+        if let Some(id) = s(&deployment["id"]) {
+            self.started.lock().unwrap_or_else(|p| p.into_inner()).insert(mine, (id, key));
+        }
         self.settle(&path, deployment).await?;
         let env = self.api.get(&path).await?;
         Ok(s(&env["url"]))
@@ -211,6 +234,7 @@ impl roll_previews::ports::Apps for RollApps {
             self.api.delete(&Self::env_path(&id, &env)).await?;
         }
         self.ids.lock().unwrap_or_else(|p| p.into_inner()).remove(&(preview.to_string(), service.to_string()));
+        self.started.lock().unwrap_or_else(|p| p.into_inner()).remove(&(preview.to_string(), service.to_string()));
         Ok(())
     }
 
