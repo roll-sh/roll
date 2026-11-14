@@ -1,7 +1,7 @@
 import { Boxes, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Smartphone, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Confirm } from "@/components/ui";
-import { a11yWords, duration, followLogs, openUrl, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type PageCheck, type Preview, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
+import { a11yWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type PageCheck, type Preview, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, type PreviewFeedback } from "./preview-feedback";
@@ -282,7 +282,7 @@ export function PreviewSheet({
               <ul className="mt-1 space-y-0.5 text-[11.5px]" aria-label="Pages to review">
                 {p.visual_review.pages.map((pg) => (
                   <li key={pg.path} className="flex min-w-0 items-center gap-2">
-                    <span className="truncate font-mono text-[11px] text-muted">{pg.path || "/"}</span>
+                    <span className="truncate font-mono text-[11px] text-muted">{pageLabel(pg.path)}</span>
                     <span className="shrink-0 font-mono text-[11px] tabular-nums text-subtle">{Math.max(pg.percent, 0.1).toFixed(1)}%</span>
                     {pg.by ? (
                       <span className="ml-auto shrink-0 text-subtle">accepted by {pg.by}</span>
@@ -730,7 +730,7 @@ function Screenshot({
               aria-pressed={path === x}
               className={`h-6 max-w-40 truncate rounded-md border px-1.5 font-mono text-[11px] transition-colors ${path === x ? "border-line-2 bg-panel text-fg" : "border-transparent text-muted hover:text-fg"}`}
             >
-              {x}
+              {pageLabel(x)}
             </button>
           ))}
         </div>

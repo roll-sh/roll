@@ -155,6 +155,16 @@ pub struct GithubRule {
     /// can't name. 0: any change counts.
     #[serde(default)]
     pub visual_threshold: f64,
+    /// More widths the first page is taken at (Percy's widths: a tablet's 768), each compared
+    /// and reviewed like another page (kept as `@768`). Up to 3, 320 to 2560 pixels; they share
+    /// a run's five other pages with `pages`.
+    #[serde(default)]
+    pub widths: Vec<u32>,
+}
+
+/// A width's page entry (`@768`): the first page at that width.
+pub fn width_entry(e: &str) -> Option<u32> {
+    e.strip_prefix('@').filter(|n| !n.starts_with('0')).and_then(|n| n.parse::<u32>().ok()).filter(|w| (320..=2560).contains(w))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -244,7 +254,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0 }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new() }
     }
 }
 
@@ -385,6 +395,10 @@ impl Settings {
         if self.github.hide.len() > MAX_HIDE || !self.github.hide.iter().all(|s| selector_ok(s)) {
             return bad(format!("github.hide: at most {MAX_HIDE} CSS selectors of up to 200 characters (no braces, semicolons or comments)"));
         }
+        let w = &self.github.widths;
+        if w.len() > 3 || w.iter().any(|x| width_entry(&format!("@{x}")).is_none()) || (1..w.len()).any(|i| w[..i].contains(&w[i])) {
+            return bad("github.widths: up to 3 different widths, 320 to 2560 pixels".into());
+        }
         if !(0.0..=50.0).contains(&self.github.visual_threshold) {
             return bad("github.visual_threshold: a percent from 0 to 50".into());
         }
@@ -440,6 +454,12 @@ mod tests {
 
     #[test]
     fn patches_merge_and_production_needs_a_yes() {
+        // Widths: up to three different ones a tablet or a wide screen has, kept as `@<width>`.
+        assert!(Settings::default().patched(&json!({ "github": { "widths": [768, 1920] } })).is_ok());
+        for bad in [json!([768, 768]), json!([100]), json!([400, 500, 600, 700])] {
+            assert!(Settings::default().patched(&json!({ "github": { "widths": bad } })).is_err(), "{bad}");
+        }
+        assert_eq!((width_entry("@768"), width_entry("@0768"), width_entry("/pricing")), (Some(768), None, None));
         let s = Settings::default().patched(&json!({ "enabled": true, "github": { "comment": false } })).unwrap();
         assert!(s.enabled && !s.github.comment && s.github.status);
         assert!(Settings::default().patched(&json!({ "secrets": { "base": "production" } })).is_err());

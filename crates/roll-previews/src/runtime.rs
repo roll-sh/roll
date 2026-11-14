@@ -933,7 +933,7 @@ impl Runtime {
         args.extend(code_preview::docker::limits(1024, 1.0));
         args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into(), "--env".into(), "HOME=/tmp".into()]);
         args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}"), "--env".into(), "AXE=/tmp/axe.js".into()]);
-        let pages: Vec<&String> = opts.pages.iter().filter(|p| crate::settings::page_path_ok(p)).take(crate::settings::MAX_PAGES).collect();
+        let pages: Vec<&String> = opts.pages.iter().filter(|p| crate::settings::page_path_ok(p) || crate::settings::width_entry(p).is_some()).take(crate::settings::MAX_PAGES).collect();
         args.extend(["--env".into(), format!("PAGES={}", serde_json::to_string(&pages)?)]);
         let hide: Vec<&String> = opts.hide.iter().filter(|s| crate::settings::selector_ok(s)).take(crate::settings::MAX_HIDE).collect();
         args.extend(["--env".into(), format!("HIDE={}", serde_json::to_string(&hide)?)]);

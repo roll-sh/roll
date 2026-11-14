@@ -82,6 +82,7 @@ function Form({
   const [paths, setPaths] = useState(saved.paths.join(", "));
   const [ignorePaths, setIgnorePaths] = useState(saved.ignore_paths.join(", "));
   const [pages, setPages] = useState((saved.github.pages ?? []).join(", "));
+  const [widths, setWidths] = useState((saved.github.widths ?? []).join(", "));
   // Selectors can hold commas: one per line.
   const [hide, setHide] = useState((saved.github.hide ?? []).join("\n"));
   const [env, setEnv] = useState<[string, string][]>(Object.entries(saved.env));
@@ -91,7 +92,7 @@ function Form({
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof PreviewSettings>(k: K, v: PreviewSettings[K]) => setS((x) => ({ ...x, [k]: v }));
 
-  useEffect(() => setError(null), [s, branches, paths, ignorePaths, pages, hide, env, perBranch]);
+  useEffect(() => setError(null), [s, branches, paths, ignorePaths, pages, widths, hide, env, perBranch]);
 
   const next: PreviewSettings = {
     ...s,
@@ -101,6 +102,7 @@ function Form({
     github: {
       ...s.github,
       pages: words(pages),
+      widths: words(widths).map(Number),
       hide: hide
         .split("\n")
         .map((x) => x.trim())
@@ -400,6 +402,11 @@ function Form({
         {s.github.screenshot && (
           <Field label="Other pages" note="Taken with / at each push and compared the same way (up to 10: /pricing, or another service's, admin:/users).">
             <input value={pages} onChange={(e) => setPages(e.target.value)} placeholder="/ only" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
+          </Field>
+        )}
+        {s.github.screenshot && (
+          <Field label="More widths" note="The first page at these widths too, each compared and reviewed like a page (up to 3: 768 for a tablet, 1920).">
+            <input value={widths} onChange={(e) => setWidths(e.target.value)} placeholder="desktop and phone only" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
           </Field>
         )}
         {s.github.screenshot && (

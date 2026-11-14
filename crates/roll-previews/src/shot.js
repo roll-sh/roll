@@ -189,15 +189,18 @@ const still = async (sessionId) => {
     const phone = await send("Page.captureScreenshot", { format: "png" }, sessionId);
     fs.writeFileSync(process.env.OUT + ".phone.png", Buffer.from(phone.data, "base64"));
   } catch {}
-  // The project's other pages ($PAGES, paths roll checked), at the desktop width, each to
-  // $OUT.<n>.png, and what went wrong while each loaded to $OUT.pages.json. Best effort too.
+  // The project's other pages ($PAGES, paths roll checked), at the desktop width, and the first
+  // page at its other widths (`@768`), each to $OUT.<n>.png, and what went wrong while each
+  // loaded to $OUT.pages.json. Best effort too.
   const pages = [];
   try {
-    await send("Emulation.clearDeviceMetricsOverride", {}, sessionId);
     for (const [n, path] of JSON.parse(process.env.PAGES || "[]").slice(0, 5).entries()) {
+      const width = /^@[1-9][0-9]*$/.test(path) ? Number(path.slice(1)) : null;
+      if (width) await send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: width < 600 }, sessionId);
+      else await send("Emulation.clearDeviceMetricsOverride", {}, sessionId);
       const before = errors.length + failed.length;
       const done = once("Page.loadEventFired");
-      await send("Page.navigate", { url: new URL(path, process.env.URL).href }, sessionId);
+      await send("Page.navigate", { url: width ? process.env.URL : new URL(path, process.env.URL).href }, sessionId);
       await Promise.race([done, sleep(10000)]);
       await sleep(300);
       await still(sessionId);
