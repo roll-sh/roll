@@ -725,6 +725,15 @@ impl Secrets {
         let mut out = vec![];
         let mut views: HashMap<(String, String), Vec<String>> = HashMap::new();
         for item in items {
+            // A server's credential under a name a framework sends to browsers.
+            if let ItemAction::Set { value, link, .. } = &item.action
+                && let Some(why) = crate::strength::browser_exposure(&item.key, value.as_ref().map(|v| v.expose()), self.secret_field(link.as_ref().and_then(|l| l.as_ref())).as_deref())
+            {
+                // What kind of credential it is comes from the value (a rollback or a promote's
+                // writer never saw it): only for whoever may reveal it there.
+                let why = if caller.allows(Action::Reveal, &Scope::at(project, slug, &item.path)) { why } else { crate::strength::public_without_reveal(&why) };
+                out.push(format!("{}: {why}", item.key));
+            }
             let ItemAction::Set { value: Some(v), .. } = &item.action else { continue };
             // What a value references is part of the value: a writer who can't reveal it there (a
             // rollback's, a promote's, who never saw it) isn't told.

@@ -572,9 +572,28 @@ imports and base), `exposed` (a protected value also in an unprotected environme
 `expiring`, `certificate_expiring` (a certificate a project CA signed for a CSR that ends
 within two weeks: links' certificates are replaced by roll, a CSR's only by whoever asked; `key` is
 its names, `path` its CA), `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
+right folder: `expired`, `missing` (a required key an environment doesn't define, through its
+imports and base), `exposed` (a protected value also in an unprotected environment), `public`,
+`weak`, `expiring`, `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
 and it's older than that). Each `Finding` names the environment, folder and key where it's set,
 with a detail (the other environments, the reason, the date): never a value, and nothing is
 decrypted. Only what the caller may read is listed, and `weak` only where it may reveal.
+
+**In the browser.** `public` is a server's credential under a name a framework puts in the
+JavaScript it sends to every visitor: `NEXT_PUBLIC_` (Next.js), `NUXT_PUBLIC_`, `EXPO_PUBLIC_`,
+`REACT_APP_`, `VUE_APP_`, `GATSBY_`, `STORYBOOK_`, `VITE_` and `PUBLIC_` (SvelteKit, Astro). It's
+a credential when its value has a server-only shape (`sk_live_`, `whsec_`, `ghp_`, `xoxb-`,
+`SG.`, a private key, a connection string with a password…), when it links a field its provider
+marks secret (a database's password or connection string), or when its name says so (`SECRET`,
+`PASSWORD`, `PRIVATE_KEY`, `SERVICE_ROLE`), as does a reference to such a key
+(`NEXT_PUBLIC_X=${STRIPE_SECRET_KEY}`). Keys made to be public aren't flagged: Stripe's
+`pk_live_`, a Firebase or Maps browser key, Supabase's anon key. The write that sets one warns
+(`warnings` on the answer), and health lists it with the framework and what it holds
+(`NEXT_PUBLIC_ keys go into the browser bundle (Next.js), and this one holds a Stripe secret key`).
+What kind of credential it is comes from the value, so a caller who may not reveal it (and the
+daily notice's channel) sees "a server credential" instead.
+Judged when a value is written, as `weak` is (a value written before this is judged by its name
+and link only), so health decrypts nothing.
 
 **Keys no code reads.** With `?code=1` (`roll secrets health --code`, the view's "Check the code"),
 health also lists `unreferenced` keys: ones no repository on the project's canvas mentions on its
@@ -1119,7 +1138,7 @@ roll completions bash|zsh|fish|powershell
   project.
 - `roll secrets doctor` checks that setup in one go, each line ok or FAIL: who the token is (and
   the project it's bound to), the directory's project and environment and how many keys it can
-  read there, anything there that needs fixing now (expired, missing or exposed keys, from health),
+  read there, anything there that needs fixing now (expired, missing, exposed or in-the-browser keys, from health),
   the keys a `.env.example` names that it lacks, whether a local `.env` still matches (the diff
   above, by fingerprint), and whether staged files hold any of
   the project's values (the scan, names only). It fails when a check does: a first step when
@@ -2086,7 +2105,7 @@ minutes.
         # roll on the runner's PATH; then:
         - run: roll secrets check .env.example   # every key the code reads is set in staging
         - run: roll secrets scan .               # no stored value was committed
-        - run: roll secrets health               # nothing expired, missing or exposed
+        - run: roll secrets health               # nothing expired, missing, exposed or in the browser
         - run: roll run -- npm test              # the tests get staging's values, never on disk
   ```
 - When roll-access takes over tokens, identities mint its scoped tokens instead; the routes stay.
@@ -2373,6 +2392,7 @@ type ProjectFindings = { project: string; project_name: string; findings: Findin
 type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Finding = { issue: "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
+type Finding = { issue: "expired" | "missing" | "exposed" | "public" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };

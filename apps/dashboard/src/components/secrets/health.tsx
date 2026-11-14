@@ -12,6 +12,7 @@ const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: b
   { issue: "revoke_failing", title: "Not revoked yet", what: "Credentials roll retired or that expired but couldn't revoke yet: they still work until it can. roll keeps trying.", serious: true },
   { issue: "missing", title: "Missing", what: "Required keys an environment doesn't define.", serious: true },
   { issue: "exposed", title: "Exposed", what: "A protected environment's value, also set where more people and less vetted code read it.", serious: true },
+  { issue: "public", title: "In the browser", what: "Server credentials under a name a framework puts in the JavaScript it sends to every visitor (NEXT_PUBLIC_, VITE_, PUBLIC_…): rename the key, or keep the value on the server.", serious: true },
   { issue: "weak", title: "Weak", what: "Credentials easy to guess: New value replaces one with 48 random characters.", serious: false },
   { issue: "expiring", title: "Expiring", what: "Values that stop working outside roll within two weeks.", serious: false },
   { issue: "certificate_expiring", title: "Certificates ending", what: "Certificates a CA here signed for a CSR that end within two weeks: nothing renews them but whoever asked. Sign a new CSR.", serious: false },

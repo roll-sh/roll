@@ -216,7 +216,7 @@ function SecretsToFix({ project, at }: { project: string; at: string }) {
   useEffect(() => {
     let live = true;
     cachedHealth(project).then(
-        (found) => live && setN(found.filter((f) => f.issue === "expired" || f.issue === "missing" || f.issue === "exposed").length),
+        (found) => live && setN(found.filter((f) => f.issue === "expired" || f.issue === "missing" || f.issue === "exposed" || f.issue === "public").length),
         () => live && setN(0),
       );
     return () => {
