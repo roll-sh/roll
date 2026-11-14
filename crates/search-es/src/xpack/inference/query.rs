@@ -62,6 +62,7 @@ pub fn needs_rewrite(q: &Query, targets: &Targets) -> bool {
     visit(q, &mut |q| {
         found |= match q {
             Query::Semantic(_) => true,
+            Query::Exists(e) => semantic_field(&e.field),
             Query::Match(m) => semantic_field(&m.field),
             Query::Knn(k) => semantic_field(&k.field),
             Query::SparseVector(s) => s.query.is_some() && (s.inference_id.is_some() || semantic_field(&s.field)),
@@ -266,6 +267,32 @@ fn replacement(q: &Query, targets: &Targets, embedded: &[((String, String), supe
         }
         return parse(&obj! { "nested" => Value::Obj(nested) }).map(Some);
     }
+    // `exists` on a `semantic_text` field: whether it has chunks (`SemanticFieldType.existsQuery`).
+    if let Query::Exists(e) = q
+        && targets.iter().any(|(_, i)| matches!(config(i, &e.field), FieldConfig::Semantic { .. }))
+    {
+        let mut clauses: Vec<Value> = Vec::new();
+        for (name, idx) in targets {
+            let clause = match config(idx, &e.field) {
+                FieldConfig::Semantic { settings: Some(_), .. } => obj! { "nested" => obj! {
+                    "path" => chunks_path(&e.field),
+                    "query" => obj! { "exists" => obj! { "field" => embeddings_path(&e.field) } },
+                    "ignore_unmapped" => true,
+                } },
+                FieldConfig::Semantic { settings: None, .. } | FieldConfig::Unmapped => continue,
+                FieldConfig::Other(_) => q.to_value(),
+            };
+            clauses.push(obj! { "bool" => obj! {
+                "must" => crate::arr![clause],
+                "filter" => crate::arr![obj! { "term" => obj! { "_index" => name.clone() } }],
+            } });
+        }
+        let v = match clauses.len() {
+            0 => obj! { "match_none" => obj! {} },
+            _ => obj! { "constant_score" => obj! { "filter" => obj! { "bool" => obj! { "should" => Value::Arr(clauses), "minimum_should_match" => 1 } }, "boost" => crate::query::xparser::float_value(e.common.boost) } },
+        };
+        return parse(&v).map(Some);
+    }
     let Some((kind, field, text, explicit)) = node(q) else { return Ok(None) };
     let common = match q {
         Query::Semantic(s) => &s.common,
@@ -392,19 +419,44 @@ fn apply(q: &mut Query, targets: &Targets, embedded: &[((String, String), super:
     Ok(())
 }
 
-/// Rewrites a search request's query (`_search`), when its targets hold `semantic_text` fields
-/// or it embeds a query text.
+/// Rewrites a search request's queries (`_search`, `_msearch`, templates): the top-level query and
+/// every compound retriever's children (and the queries their totals are matched with), when
+/// the targets hold `semantic_text` fields or a query embeds a text.
 pub async fn rewrite_request(ctx: &Ctx<'_>, req: &mut crate::search::SearchRequest) -> EsResult<()> {
-    if ctx.cluster.dialect != crate::cluster::Dialect::Elasticsearch || req.source.query.is_none() {
+    if ctx.cluster.dialect != crate::cluster::Dialect::Elasticsearch || (req.source.query.is_none() && req.source.fusion.is_none()) {
         return Ok(());
     }
     let st = ctx.state();
     let Ok(resolved) = crate::search::resolve_targets(ctx.cluster, &st, req) else { return Ok(()) };
     let targets: Targets = resolved.into_iter().map(|(i, _, _)| (i.name.clone(), i)).collect();
-    let size = Some(req.source.size.map_or(10, |s| s as i64));
-    let Some(q) = req.source.query.as_mut() else { return Ok(()) };
-    if !needs_rewrite(q, &targets) {
-        return Ok(());
-    }
-    rewrite(ctx, q, &targets, size).await
+    rewrite_source(ctx, &mut req.source, &targets).await
+}
+
+fn rewrite_source<'a>(
+    ctx: &'a Ctx<'_>,
+    src: &'a mut crate::search_source::SearchSource,
+    targets: &'a Targets,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = EsResult<()>> + Send + 'a>> {
+    Box::pin(async move {
+        let size = Some(src.size.map_or(10, |s| s as i64));
+        if let Some(q) = src.query.as_mut()
+            && needs_rewrite(q, targets)
+        {
+            rewrite(ctx, q, targets, size).await?;
+        }
+        if let Some(f) = src.fusion.as_mut() {
+            for c in f.children.iter_mut() {
+                rewrite_source(ctx, c, targets).await?;
+            }
+            // A `standard` child's query as JSON, which the final phase matches totals with.
+            for tail in f.tails.iter_mut().flatten() {
+                let Ok((mut q, _)) = crate::query::parse_query(tail, None, &[]) else { continue };
+                if needs_rewrite(&q, targets) {
+                    rewrite(ctx, &mut q, targets, size).await?;
+                    *tail = q.to_value();
+                }
+            }
+        }
+        Ok(())
+    })
 }

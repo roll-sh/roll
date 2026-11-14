@@ -323,3 +323,40 @@ async fn semantic_text_is_embedded_in_batches_and_searchable_by_a_writer_without
     let (s, _, _) = call_as(&c, w, "POST", "/_inference/emb", r#"{"input":"hi"}"#).await;
     assert_eq!(s, 403);
 }
+
+/// Retrievers over inference: `rrf`'s simplified `query`/`fields` form fuses a lexical query on
+/// the text fields with the `semantic_text` field's semantic query, and `text_similarity_reranker`
+/// reorders the window by a rerank endpoint (the mock ranks the last document first).
+#[tokio::test]
+async fn the_simplified_rrf_form_and_the_text_similarity_reranker() {
+    let (m, log) = mock().await;
+    let c = cluster(&m, &[]).await;
+    let emb = format!(r#"{{"service":"openai","service_settings":{{"api_key":"sk","model_id":"emb","url":"{m}/v1/embeddings"}}}}"#);
+    assert_eq!(call(&c, "PUT", "/_inference/text_embedding/emb", &emb).await.0, 200);
+    assert_eq!(call(&c, "PUT", "/_inference/rerank/rr", r#"{"service":"cohere","service_settings":{"api_key":"k","model_id":"rerank-v3"}}"#).await.0, 200);
+    let mapping = r#"{"mappings":{"properties":{"body":{"type":"semantic_text","inference_id":"emb"},"title":{"type":"text"}}}}"#;
+    assert_eq!(call(&c, "PUT", "/docs", mapping).await.0, 200);
+    for (id, body, title) in [("1", "ab", "red fox"), ("2", "abcd", "blue fox"), ("3", "abcdef", "green owl")] {
+        let doc = format!(r#"{{"body":"{body}","title":"{title}"}}"#);
+        assert_eq!(call(&c, "PUT", &format!("/docs/_doc/{id}?refresh=true"), &doc).await.0, 201);
+    }
+    seen(&log);
+    let ids = |v: &Value| -> Vec<String> { v.pointer(&["hits", "hits"]).and_then(Value::as_array).unwrap().iter().map(|h| h.get("_id").unwrap().to_es_string()).collect() };
+
+    // `fox` matches 1 and 2 lexically; the semantic query on `body` ranks 2 first.
+    let (s, v, _) = call(&c, "POST", "/docs/_search", r#"{"retriever":{"rrf":{"query":"wxyz","fields":["title","body"]}}}"#).await;
+    assert_eq!(s, 200, "{v:?}");
+    assert_eq!(ids(&v).first().map(String::as_str), Some("2"), "{v:?}");
+    let (s, v, _) = call(&c, "POST", "/docs/_search", r#"{"retriever":{"rrf":{"query":"","fields":["title"]}}}"#).await;
+    assert_eq!((s, v.pointer(&["error", "reason"]).and_then(Value::as_str)), (400, Some("Validation Failed: 1: [rrf] [query] cannot be empty;")));
+    seen(&log);
+
+    let rerank = r#"{"size":2,"retriever":{"text_similarity_reranker":{"retriever":{"standard":{"query":{"match_all":{}}}},"field":"title","inference_id":"rr","inference_text":"owl","rank_window_size":3}}}"#;
+    let (s, v, _) = call(&c, "POST", "/docs/_search", rerank).await;
+    assert_eq!(s, 200, "{v:?}");
+    // Tied scores keep the child's order.
+    assert_eq!(ids(&v), vec!["3", "1"]);
+    let calls = seen(&log);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].body.get("query").map(Value::to_es_string).as_deref(), Some("owl"));
+}

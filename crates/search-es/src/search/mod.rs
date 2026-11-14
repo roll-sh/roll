@@ -3886,6 +3886,18 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     } else {
         None
     };
+    // Retrievers that need inference: a top-level `text_similarity_reranker` reranks the page
+    // after the search, and `rrf`/`linear`'s simplified `query`/`fields` form expands against
+    // the targets' mappings.
+    let reranker = crate::xpack::inference::rerank::take(&mut body)?;
+    if let Some(b) = body.as_mut()
+        && crate::xpack::inference::retrievers::uses_simplified(b)
+    {
+        let st = ctx.state();
+        let names = crate::api::resolve_indices(ctx, crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN).unwrap_or_default();
+        let targets: Vec<Arc<IndexMeta>> = names.iter().filter_map(|n| st.metadata.indices.get(n).cloned()).collect();
+        crate::xpack::inference::retrievers::expand(&targets, b)?;
+    }
     let mut req = parse_request(ctx, body.as_ref(), ctx.raw_json())?;
     // Queries that need inference (`semantic`, and others on `semantic_text` fields).
     crate::xpack::inference::query::rewrite_request(ctx, &mut req).await?;
@@ -3902,9 +3914,12 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let Some(pipeline) = pipeline else {
         // Hits carry their stored `_source` bytes as they are when the page goes straight out
         // (`json::raw`).
-        let raw = ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch && ctx.query("filter_path").is_none();
+        let raw = ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch && ctx.query("filter_path").is_none() && reranker.is_none();
         let mut out = crate::json::raw::with_enabled(raw, || run(ctx, req.clone()))?;
         let mut v = render_take(&mut out, &req);
+        if let Some(rr) = &reranker {
+            crate::xpack::inference::rerank::apply(ctx, rr, &mut v).await?;
+        }
         crate::opensearch::add_reduce_phases(ctx, &out, &req, &mut v)?;
         crate::opensearch::add_search_extras(&out, &req, phase_took, &mut v);
         return Reply::ok(v);
