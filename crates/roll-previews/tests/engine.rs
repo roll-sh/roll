@@ -811,6 +811,11 @@ async fn a_preview_s_mail_is_caught_never_sent() {
     assert_eq!(get("SMTP_USER").as_deref(), Some(p.id.as_str()));
     let pass = get("SMTP_PASSWORD").unwrap();
     assert!(e.engine.store.mail_signs_in(&p.id, &pass).unwrap() && !e.engine.store.mail_signs_in(&p.id, "guess").unwrap());
+    // A deploy elsewhere (roll apps) gets the same: roll's SMTP, and the provider's key replaced
+    // over what roll secrets would give it.
+    let deployed = e.apps.vars.lock().get(&(p.id.clone(), "web".to_string())).cloned().unwrap_or_default();
+    let dget = |k: &str| deployed.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    assert_eq!((dget("SMTP_USER").as_deref(), dget("SENDGRID_API_KEY").as_deref()), (Some(p.id.as_str()), Some("roll-previews-mail-caught")));
     // Through the catcher's mailbox: kept with the preview, listed.
     let mb = roll_previews::mail::Store(e.engine.store.clone());
     assert_eq!(mb.authorize(&p.id, &pass).await.as_deref(), Some(p.id.as_str()));

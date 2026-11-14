@@ -313,6 +313,10 @@ impl Engine {
         for (k, v) in self.store.vars(&r.id)? {
             set(&mut vars, &k, v);
         }
+        // A deploy elsewhere (roll apps) never emails real people either.
+        if s.mail == crate::settings::MailRule::Catch {
+            self.catch_mail_vars(&r.id, &mut vars)?;
+        }
         for (k, v) in urls {
             set(&mut vars, &k, v);
         }

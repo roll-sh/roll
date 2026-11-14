@@ -170,13 +170,34 @@ impl Engine {
     /// SMTP settings common frameworks read, signed in as the preview, and providers' API keys
     /// removed. Without a catcher they point nowhere, so mail fails rather than reaching anyone.
     fn catch_mail(&self, preview: &str, env: &mut Vec<(String, String)>) -> anyhow::Result<()> {
+        env.retain(|(k, _)| !MAIL_API_KEYS.contains(&k.as_str()));
+        for (k, v) in self.mail_overrides(preview)? {
+            set(env, k, v);
+        }
+        Ok(())
+    }
+
+    /// The same for a roll apps deploy's variables (and the secrets environment's overrides):
+    /// roll secrets gives the environment the project's keys itself, so each provider key is set
+    /// over them to a value no provider takes, instead of removed.
+    pub(super) fn catch_mail_vars(&self, preview: &str, vars: &mut Vec<(String, String)>) -> anyhow::Result<()> {
+        for k in MAIL_API_KEYS {
+            set(vars, k, "roll-previews-mail-caught".into());
+        }
+        for (k, v) in self.mail_overrides(preview)? {
+            set(vars, k, v);
+        }
+        Ok(())
+    }
+
+    /// roll's catcher, signed in as the preview, under the names common frameworks read.
+    fn mail_overrides(&self, preview: &str) -> anyhow::Result<Vec<(&'static str, String)>> {
         let addr = self.cfg.mail.clone().unwrap_or_else(|| "127.0.0.1:9".into());
         let (host, port) = addr.rsplit_once(':').unwrap_or((addr.as_str(), "25"));
         let user = preview.to_string();
         let pass = self.store.mail_password(preview)?;
         let url = format!("smtp://{user}:{pass}@{host}:{port}");
-        env.retain(|(k, _)| !MAIL_API_KEYS.contains(&k.as_str()));
-        for (k, v) in [
+        Ok(vec![
             ("SMTP_URL", url.clone()),
             ("SMTP_HOST", host.to_string()),
             ("SMTP_PORT", port.to_string()),
@@ -199,9 +220,6 @@ impl Engine {
             ("MAIL_USERNAME", user.clone()),
             ("MAIL_PASSWORD", pass.clone()),
             ("MAIL_ENCRYPTION", "null".into()),
-        ] {
-            set(env, k, v);
-        }
-        Ok(())
+        ])
     }
 }
