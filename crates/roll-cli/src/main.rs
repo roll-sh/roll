@@ -16,6 +16,7 @@ mod preview;
 mod storage;
 mod redis;
 mod apps;
+mod login;
 
 /// roll — serverless infrastructure.
 #[derive(Parser)]
@@ -103,6 +104,11 @@ enum Cmd {
     /// roll's MCP server: client config, approvals waiting for you, the audit log.
     #[command(subcommand)]
     Mcp(access::Mcp),
+    /// Sign this CLI in to roll through your browser: you choose what it may do, and commands
+    /// use it when no token is set (`roll logout` ends it).
+    Login(login::Login),
+    /// Revoke this CLI's login and forget it.
+    Logout,
 }
 
 #[derive(Subcommand)]
@@ -445,7 +451,14 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::from_arg_matches(&matches)?;
     // A scoped token, when set, is what everything uses: the narrower credential wins.
     let admin = cli.roll_token.filter(|t| !t.trim().is_empty()).or(cli.admin_token.filter(|t| !t.trim().is_empty()));
-    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: admin.clone().or(cli.api_key), headers: Vec::new() };
+    let base = cli.api.trim_end_matches('/').to_string();
+    let http = reqwest::Client::new();
+    // `roll login`'s, last: any credential set for this run wins over it (a workload's identity, a
+    // streams key too).
+    let identity = std::env::var("ROLL_IDENTITY").is_ok_and(|v| !v.trim().is_empty());
+    let signed_in = if admin.is_none() && cli.api_key.is_none() && !identity && !matches!(cli.cmd, Cmd::Login(_) | Cmd::Logout) { login::token(&base, &http).await } else { None };
+    let admin = admin.or(signed_in);
+    let api = Api { base, http, key: admin.clone().or(cli.api_key), headers: Vec::new() };
     let cmd = match cli.cmd {
         Cmd::Db(cmd) => cmd,
         Cmd::Agent(cmd) => return agent::run(&api.base, cli.json, cmd).await,
@@ -478,6 +491,8 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
         Cmd::Token(cmd) => return access::token(&api, cli.json, cmd).await,
         Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,
+        Cmd::Login(l) => return login::login(&api.base, &api.http, cli.json, l).await,
+        Cmd::Logout => return login::logout(&api.base, &api.http, cli.json).await,
         Cmd::Nosql(cmd) => {
             let r = nosql::run(&api, cli.json, *cmd).await;
             if let Err(e) = &r
