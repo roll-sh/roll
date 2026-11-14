@@ -531,7 +531,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: a person's own token's page tested to show only their reach; `roll token list
+Done lately: a token can start later (`not_before`, Cloudflare's TTL start): refused until then as an unknown token, the dashboard's "Starts" and `roll token create --starts 2h` (the expiry counts from the start), changeable and clearable; a person's own token's page tested to show only their reach; `roll token list
 --product/--resource` and `--workloads`; a workload token makes no tokens; the ninth review's
 findings (people's mail in roll's words only: names as words, an approval's mail without its
 resource, a leak's without where, one approval mail per token per ten minutes and 20 a person an

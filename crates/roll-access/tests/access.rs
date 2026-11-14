@@ -533,6 +533,17 @@ async fn a_token_never_makes_a_stronger_one() {
     let hidden = json!({ "name": "ci\u{e0072}\u{e006d}", "rules": read, "expires_at": code_sql::now_ms() + 86_400_000 });
     let (s, e) = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(hidden)).await;
     assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("invisible"), "{e}");
+    // A token can start later (Cloudflare's TTL start): refused until then, as an unknown one is.
+    let later = json!({ "name": "release-window", "rules": read, "not_before": code_sql::now_ms() + 3_600_000, "expires_at": code_sql::now_ms() + 86_400_000 });
+    let (s, made) = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(later)).await;
+    assert_eq!(s, StatusCode::CREATED, "{made}");
+    let early = made["token"].as_str().unwrap().to_string();
+    assert_eq!(d.call(&early, Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED, "not yet");
+    let id = made["grant"]["id"].as_str().or(made["id"].as_str()).unwrap().to_string();
+    assert_eq!(d.call(OPERATOR, Method::PATCH, &format!("/v1/access/tokens/{id}"), Some(json!({ "not_before": null }))).await.0, StatusCode::OK);
+    assert_eq!(d.call(&early, Method::GET, "/v1/projects", None).await.0, StatusCode::OK, "started");
+    let backwards = json!({ "name": "backwards", "rules": read, "not_before": code_sql::now_ms() + 86_400_000, "expires_at": code_sql::now_ms() + 3_600_000 });
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(backwards)).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(make(json!([{ "product": "postgres", "resources": "*", "actions": { "write": "allow" } }]), Some(end)).await.0, StatusCode::FORBIDDEN);
     assert_eq!(make(read.clone(), None).await.0, StatusCode::FORBIDDEN, "outlives its maker");
     // A limited maker makes only tokens limited as tightly.

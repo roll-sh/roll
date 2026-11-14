@@ -85,9 +85,12 @@ pub struct Create {
     name: String,
     #[command(flatten)]
     rules: RuleArgs,
-    /// Lifetime: 30d, 12h, 90m, or never (default 30d).
+    /// Lifetime: 30d, 12h, 90m, or never (default 30d); from its start with --starts.
     #[arg(long, default_value = "30d")]
     expires: String,
+    /// It works only from this far on (2h, 1d): refused until then.
+    #[arg(long)]
+    starts: Option<String>,
     /// Addresses it may be used from (CIDRs), repeatable.
     #[arg(long = "ip", value_delimiter = ',')]
     ip_allow: Vec<String>,
@@ -252,20 +255,34 @@ pub enum Client {
 
 /// "30d" → milliseconds from now; "never" → none.
 fn expiry(s: &str) -> anyhow::Result<Option<i64>> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    Ok(span(s, "--expires")?.map(|ms| now + ms))
+}
+
+/// `--starts` and `--expires` as times: the expiry counts from the start.
+fn window(starts: Option<&str>, expires: &str) -> anyhow::Result<(Option<i64>, Option<i64>)> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    let from = match starts {
+        Some(s) => Some(now + span(s, "--starts")?.with_context(|| format!("--starts {s}: a number and d, h or m (2h)"))?),
+        None => None,
+    };
+    Ok((from, span(expires, "--expires")?.map(|ms| from.unwrap_or(now) + ms)))
+}
+
+/// "30d" → its milliseconds; "never" → none.
+fn span(s: &str, flag: &str) -> anyhow::Result<Option<i64>> {
     let s = s.trim();
     if s.eq_ignore_ascii_case("never") {
         return Ok(None);
     }
     let (n, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
-    let n: i64 = n.parse().with_context(|| format!("--expires {s}: a number and d, h or m (30d), or never"))?;
-    let ms = match unit {
+    let n: i64 = n.parse().with_context(|| format!("{flag} {s}: a number and d, h or m (30d), or never"))?;
+    Ok(Some(match unit {
         "d" => n * 86_400_000,
         "h" => n * 3_600_000,
         "m" => n * 60_000,
-        _ => bail!("--expires {s}: a number and d, h or m (30d), or never"),
-    };
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
-    Ok(Some(now + ms))
+        _ => bail!("{flag} {s}: a number and d, h or m (30d), or never"),
+    }))
 }
 
 /// The rules a `create` asks for: the preset's (its "project" filled in), then a rule of its own.
@@ -385,7 +402,8 @@ pub fn date(ms: i64) -> String {
 pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> {
     match cmd {
         Token::Create(c) => {
-            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow, "rate_per_minute": c.rate, "ask_otherwise": c.ask_otherwise });
+            let (not_before, expires_at) = window(c.starts.as_deref(), &c.expires)?;
+            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "not_before": not_before, "expires_at": expires_at, "ip_allow": c.ip_allow, "rate_per_minute": c.rate, "ask_otherwise": c.ask_otherwise });
             let made = api.post("/v1/access/tokens", body).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&made)?);
