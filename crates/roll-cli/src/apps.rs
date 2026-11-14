@@ -955,12 +955,59 @@ fn parse_env(text: &str) -> (Vec<(String, String)>, Vec<usize>) {
         let v = v.trim();
         let v = match (v.chars().next(), v.len() >= 2) {
             (Some('\''), true) if v.ends_with('\'') => v[1..v.len() - 1].to_string(),
-            (Some('"'), true) if v.ends_with('"') => v[1..v.len() - 1].replace("\\n", "\n").replace("\\\"", "\""),
+            (Some('"'), true) if v.ends_with('"') => unescape(&v[1..v.len() - 1]),
             _ => v.to_string(),
         };
         vars.push((k.to_string(), v));
     }
     (vars, bad)
+}
+
+/// A double-quoted `.env` value's escapes (`\n`, `\r`, `\t`, `\"`, `\\`), as Compose's env files and
+/// the dashboard read them.
+fn unescape(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    let mut it = v.chars();
+    while let Some(c) = it.next() {
+        match (c, it.clone().next()) {
+            ('\\', Some(n @ ('n' | 'r' | 't' | '"' | '\\'))) => {
+                it.next();
+                out.push(match n {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    other => other,
+                });
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// One `KEY=value` line that [`parse_env`] reads back as it is: plain when safe, else quoted.
+fn env_line(k: &str, v: &str) -> String {
+    let safe = v.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-./:@,+=%?&~".contains(&b));
+    if safe {
+        format!("{k}={v}")
+    } else if !v.contains(['\'', '\n', '\r']) {
+        format!("{k}='{v}'")
+    } else {
+        let mut q = String::with_capacity(v.len() + 2);
+        for c in v.chars() {
+            match c {
+                '\n' => q.push_str("\\n"),
+                '\r' => q.push_str("\\r"),
+                '\t' => q.push_str("\\t"),
+                '"' | '\\' => {
+                    q.push('\\');
+                    q.push(c);
+                }
+                c => q.push(c),
+            }
+        }
+        format!("{k}=\"{q}\"")
+    }
 }
 
 /// Print a log's lines (SSE `data:` JSON) until the stream ends.
@@ -1957,8 +2004,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let v = if reveal { api.get(&format!("{base}/values")).await? } else { api.get(&base).await? };
             if !json_out {
                 if reveal {
+                    // As a `.env` that `--from-file` (and the dashboard) reads back exactly.
                     for (k, val) in v.as_object().into_iter().flatten() {
-                        println!("{k}={}", s(val));
+                        println!("{}", env_line(k, &s(val)));
                     }
                 } else {
                     for x in v["vars"].as_array().into_iter().flatten() {
@@ -2395,6 +2443,12 @@ mod tests {
         let (vars, bad) = parse_env("# db\nexport DATABASE_URL=postgres://x\nNAME='a b'\nMULTI=\"one\\ntwo\"\n\n1BAD=x\nnope\n");
         assert_eq!(vars, [("DATABASE_URL".into(), "postgres://x".into()), ("NAME".into(), "a b".into()), ("MULTI".into(), "one\ntwo".into())]);
         assert_eq!(bad, [6, 7]);
+        // What `--reveal` prints reads back exactly.
+        let tricky = [("URL", "postgres://u:p@h/db?x=1"), ("SPACED", " a b "), ("QUOTE", "it's \"x\""), ("PEM", "-----BEGIN-----\nab\\nc\t\r\n-----END-----"), ("EMPTY", ""), ("HASH", "a #b")];
+        let text: String = tricky.iter().map(|(k, v)| env_line(k, v) + "\n").collect();
+        let (back, bad) = parse_env(&text);
+        assert!(bad.is_empty(), "{text}");
+        assert_eq!(back, tricky.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>(), "{text}");
     }
 
     #[test]
