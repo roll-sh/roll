@@ -386,7 +386,7 @@ fn confirm(ctx: &QueryCtx, f: &FieldInfo, s: search_index::query::IntervalsSourc
         return s;
     }
     let Some(a) = f.analyzer.clone() else { return s };
-    let src = Arc::new(SourceText { table: ctx.table.clone(), path: f.name.clone() });
+    let src = Arc::new(SourceText { table: ctx.table.clone(), path: text_path(f) });
     let spec = search_index::query::source_confirmed::SourceSpec::new(f.number, f.name.clone(), a, src);
     search_index::query::IntervalsSource::source_confirmed(Arc::new(spec), s)
 }
@@ -638,6 +638,11 @@ pub fn more_like_this(ctx: &QueryCtx, m: &crate::query::specialized::MoreLikeThi
     Ok(arc(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Must, base).add(search_index::query::Occur::MustNot, super::query::ids_query(&exclude_ids))))
 }
 
+/// Where a field's text is in `_source`: a multi-field's is its parent's value.
+fn text_path(f: &FieldInfo) -> String {
+    f.parent.clone().unwrap_or_else(|| f.name.clone())
+}
+
 struct SourceText {
     table: Arc<FieldTable>,
     path: String,
@@ -680,6 +685,6 @@ fn like_item_index(ctx: &QueryCtx, index: Option<&str>) -> Option<std::sync::Arc
 
 pub fn source_confirmed(ctx: &QueryCtx, f: &FieldInfo, q: QueryRef) -> QueryRef {
     let Some(a) = f.analyzer.clone() else { return q };
-    let src = Arc::new(SourceText { table: ctx.table.clone(), path: f.name.clone() });
+    let src = Arc::new(SourceText { table: ctx.table.clone(), path: text_path(f) });
     arc(ConstantScoreQuery::new(arc(search_index::query::SourceConfirmedQuery::new(q, f.number, a, src))))
 }

@@ -607,7 +607,7 @@ impl<'a> Walk<'a> {
                 leaf.extra_sorted = true;
             }
         }
-        if info.kind == Kind::Text && !info.store && !info.doc_values {
+        if matches!(info.kind, Kind::Text | Kind::MatchOnlyText) && !info.store && !info.doc_values {
             // Text keeps what its keyword delegate can't: the value moves to the fallback layer.
             if let Value::Str(s) = v {
                 if !delegate_takes(self.table, self.ctx, f, full, s) {
@@ -989,10 +989,12 @@ fn write_leaf(w: &Walk<'_>, info: &FieldInfo, f: &FieldMapper, full: &str, scope
         dv = leaf.dv.iter().map(|d| d.v.clone()).collect();
     } else {
         let mut sorted: Vec<&Dv> = leaf.dv.iter().collect();
-        let in_order = info.store || matches!(info.kind, Kind::MatchOnlyText | Kind::DenseVector) || (info.kind == Kind::Text && !info.doc_values);
-        let unique = matches!(info.kind, Kind::Keyword | Kind::Ip | Kind::Wildcard | Kind::Version | Kind::Binary | Kind::Text)
+        // Text read back from doc values comes sorted (and unique), as the doc values hold it.
+        let in_order = info.store || info.kind == Kind::DenseVector || (matches!(info.kind, Kind::Text | Kind::MatchOnlyText) && !info.doc_values);
+        let unique = matches!(info.kind, Kind::Keyword | Kind::Ip | Kind::Wildcard | Kind::Version | Kind::Binary | Kind::Text | Kind::MatchOnlyText)
             || info.kind.is_range();
-        let text_delegate = info.kind == Kind::Text && !info.store && delegate(w.table, w.ctx, f, full).is_some();
+        // `match_only_text` loads from a keyword multi-field as `text` does.
+        let text_delegate = matches!(info.kind, Kind::Text | Kind::MatchOnlyText) && !info.store && delegate(w.table, w.ctx, f, full).is_some();
         if !in_order || text_delegate {
             sorted.sort_by(|a, b| a.key.partial_cmp(&b.key).unwrap_or(std::cmp::Ordering::Equal));
             if unique || text_delegate {
@@ -1006,7 +1008,7 @@ fn write_leaf(w: &Walk<'_>, info: &FieldInfo, f: &FieldMapper, full: &str, scope
         extra.sort_by(|a, b| a.1.cmp(&b.1));
     }
     let mut all: Vec<Value> = Vec::with_capacity(dv.len() + extra.len());
-    if info.kind == Kind::Text {
+    if matches!(info.kind, Kind::Text | Kind::MatchOnlyText) {
         // The fallback layer comes first.
         all.extend(extra.iter().map(|e| e.0.clone()));
         all.append(&mut dv);
