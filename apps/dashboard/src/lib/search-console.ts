@@ -1148,3 +1148,14 @@ export function mappingFields(resp: unknown): FieldInfo[] {
   }
   return [...out.entries()].map(([name, type]) => ({ name, type })).sort((a, b) => a.name.localeCompare(b.name));
 }
+
+/** JSON keys whose string values are credentials (inference endpoints' `api_key`, users'
+ * `password`, snapshot repositories' and connectors' secrets, tokens). */
+const SECRET_KEYS =
+  /"(api_key|password|password_hash|passphrase|secret|secret_key|secret_access_key|access_key|session_token|access_token|refresh_token|client_secret|private_key|token)"(\s*:\s*)"(?:[^"\\]|\\.)*"/g;
+
+/** A request with its credentials replaced by `<redacted>`, as the console keeps it in history
+ * (the browser's storage must never hold a key someone pasted into a request). */
+export function redactSecrets(text: string): string {
+  return text.replace(SECRET_KEYS, (_m, key: string, sep: string) => `"${key}"${sep}"<redacted>"`);
+}

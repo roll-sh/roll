@@ -1,7 +1,7 @@
 // Tests of the console completion (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { applyCompletion, bodyKind, complete, jsonContext, mappingFields, ndjsonRole, parseConsole, requestIndex, type Completion, type CompletionSources } from "./search-console";
+import { applyCompletion, bodyKind, complete, jsonContext, mappingFields, ndjsonRole, parseConsole, redactSecrets, requestIndex, type Completion, type CompletionSources } from "./search-console";
 
 const FIELDS = [
   { name: "price", type: "float" },
@@ -246,4 +246,12 @@ test("URL query parameters", async () => {
   assert.equal(r.text, "GET /products/_search?size=&from=1 ");
   // Without a table, nothing (the old behaviour).
   assert.equal(complete("GET /_search?si", 15, { indices: [], fields: [] }), null);
+});
+
+test("history keeps requests without their credentials", () => {
+  const req = 'PUT /_inference/text_embedding/e\n{"service":"openai","service_settings":{"api_key" : "sk-a\\"b","model_id":"m"}}\nPUT /_security/user/u\n{"password":"hunter22","roles":["r"],"key":"kept"}';
+  const out = redactSecrets(req);
+  assert.ok(!out.includes("sk-a") && !out.includes("hunter22"), out);
+  assert.ok(out.includes('"api_key" : "<redacted>"') && out.includes('"password":"<redacted>"'), out);
+  assert.ok(out.includes('"model_id":"m"') && out.includes('"key":"kept"'), out);
 });

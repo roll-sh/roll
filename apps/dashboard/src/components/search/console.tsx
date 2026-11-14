@@ -1,6 +1,7 @@
 import { Play, RotateCcw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { parseConsole, searchApi, type ConsoleResponse, type SearchCluster } from "@/lib/search-api";
+import { redactSecrets } from "@/lib/search-console";
 import { formatJson } from "@/lib/search-docs";
 import { useMarkState } from "../mark-state";
 import { btn, CopyButton, Panel, primary, useCopy } from "../ui";
@@ -110,7 +111,8 @@ export function SearchConsole({ cluster, prefill }: { cluster: SearchCluster; pr
     }
   }, [cluster.id]);
 
-  const remember = (t: string) => {
+  const remember = (sent: string) => {
+    const t = redactSecrets(sent);
     setHistory((h) => {
       const next = [t, ...h.filter((x) => x !== t)].slice(0, 20);
       try {
