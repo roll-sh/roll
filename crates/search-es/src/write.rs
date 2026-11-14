@@ -712,8 +712,9 @@ pub(crate) fn time_series_id(idx: &IndexMeta, parsed: &crate::document::ParsedDo
     Ok((generated, tsid, desc))
 }
 
-/// The `_source` bytes the index keeps: as sent, filtered by the mapping's `_source`
-/// includes/excludes, or nothing when `_source` is disabled.
+/// The `_source` bytes the index keeps: as sent, without the vectors Elasticsearch keeps out
+/// of it, filtered by the mapping's `_source` includes/excludes, or nothing when `_source` is
+/// disabled.
 pub fn stored_source(idx: &IndexMeta, table: &crate::engine::fields::FieldTable, source: &Bytes, value: &Value) -> Option<Bytes> {
     use crate::engine::synthetic;
     let sc = &idx.mapping.source;
@@ -742,6 +743,20 @@ pub fn stored_source(idx: &IndexMeta, table: &crate::engine::fields::FieldTable,
                 (source, value)
             }
         }
+        _ => (source, value),
+    };
+    // Elasticsearch keeps indexed vectors out of the stored source; the readers that need them
+    // patch them back from the vector values (`engine::source_vectors`).
+    let stripped;
+    let (source, value) = match value {
+        Value::Obj(m) if !table.stripped_vectors.is_empty() => match crate::engine::source_vectors::strip(&table.stripped_vectors, m) {
+            Some(m) => {
+                let m = Value::Obj(m);
+                stripped = (Bytes::from(m.to_json()), m);
+                (&stripped.0, &stripped.1)
+            }
+            None => (source, value),
+        },
         _ => (source, value),
     };
     let inc = sc.includes.clone().unwrap_or_default();
@@ -1092,6 +1107,9 @@ pub fn copy_docs(cluster: &Cluster, searchers: &[search_index::Searcher], dst: &
     let table = de.table();
     let ctx = dst.mapping_ctx();
     let root = search_index::query::nested::root_filter();
+    // The source's stored source may lack its vectors: they come back from its segments (by
+    // path: the copies number their engine fields their own way) before the copy is indexed.
+    let vectors = crate::engine::source_vectors::copied(&table);
     for searcher in searchers {
         let mut docs = Vec::new();
         struct All<'a>(&'a mut Vec<u32>);
@@ -1119,8 +1137,13 @@ pub fn copy_docs(cluster: &Cluster, searchers: &[search_index::Searcher], dst: &
             let stored = searcher.stored(doc).map_err(convert::index_error)?;
             let id = crate::search::hits::stored_id(&stored).unwrap_or_default();
             let routing = crate::fetch::routing(&stored);
-            let source = crate::fetch::source_bytes(&stored).map(Bytes::copy_from_slice).unwrap_or_else(|| Bytes::from_static(b"{}"));
-            let value = crate::fetch::parse_source(&source)?;
+            let mut source = crate::fetch::source_bytes(&stored).map(Bytes::copy_from_slice).unwrap_or_else(|| Bytes::from_static(b"{}"));
+            let mut value = crate::fetch::parse_source(&source)?;
+            if let Value::Obj(m) = &mut value
+                && crate::engine::source_vectors::patch_raw(&vectors, m, &mut crate::engine::source_vectors::InSegmentByName(seg, local))
+            {
+                source = Bytes::from(value.to_json());
+            }
             let mut parsed = crate::document::parse_document(&dst.mapping, &ctx, &value, Some(&source), Some(&id))?;
             crate::search::index_time::apply(&cluster.scripts, &cluster.state(), &dst.mapping, &value, &mut parsed)?;
             // Time series documents keep their `_tsid` and the routing hash their `_id` starts
