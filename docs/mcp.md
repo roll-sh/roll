@@ -515,7 +515,7 @@ waits on a sibling PR reaching main is last.
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25), and compare each product's routes with its tools
    (an everyday route with no tool is a gap: apps' were found this way).
-2. *Waits on secrets bringing #30 onto their landing branch (feature/roll-secrets-landing, #62):* rebuild the integration branch as #25 plus that (landing's 86 catalogue rows merge cleanly; 14 roll-secrets files conflict between #30's swap and landing, which are theirs). Until then: **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+2. *Waits on secrets' `feature/roll-secrets-landing-access` (landing #62 plus #30, a branch of its own so #62 lands without #25; they'll send its head once their suites and rolld's route check pass):* rebuild the integration branch as #25 plus that (landing's 86 catalogue rows merge cleanly; 14 roll-secrets files conflict between #30's swap and landing, which are theirs). Until then: **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
    lands after #20, #25 and #30): kept merged both ways (secrets' head of 2026-11-14 merged: a
    forgotten project's credentials revoked first and retried by the sweeper, with the integration's
    `identity_logins` kept in what's forgotten). The canvas check costs nothing measurable
