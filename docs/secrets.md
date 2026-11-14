@@ -1311,7 +1311,9 @@ after the approvals still has to be met). Every way to change a covered key goes
 writes, deletes (deleting a covered folder, or one holding one, is refused), a promotion (it opens
 a request), and setting a covered folder's imports needs `admin`, as on a protected environment. A
 reviewer needs `admin` on each folder the request changes (a folder's own admin reviews its
-folder's requests); applying checks the gates in the applying transaction, and a bypass of gates
+folder's requests), and a review counts only for the gates whose scope its reviewer is admin of:
+an admin of `/payments` approves for `/payments`' gate, never for a protected environment's own
+(`gates` on each review); applying checks the gates in the applying transaction, and a bypass of gates
 that aren't met is audited. Backups carry folder policies, and a restore sets them last. Only who
 may change what is per folder: reading (untrusted readers, exposure in health) stays the
 environment's.
@@ -1503,7 +1505,7 @@ type Rotator = { id: string; name: string; host: string; created_at: number; cre
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };
 type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to"; from: number | null; to: number | null }[] };
-type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number }[]; approvals: number; approvals_needed: number; gates: { path?: string; approvals: number; approvers?: string[]; approved: number }[]; applied_seq: number | null };
+type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number; gates?: (string | null)[] }[]; approvals: number; approvals_needed: number; gates: { path?: string; approvals: number; approvers?: string[]; approved: number }[]; applied_seq: number | null };
 type FolderPolicy = { path: string; approvals: number; approvers: string[]; created_at: number; created_by: string };
 type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
 type Lease = { id: string; environment: string; path: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
