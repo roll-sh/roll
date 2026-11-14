@@ -122,25 +122,26 @@ async fn register(State(a): S, req: axum::extract::Request) -> Response {
     let ip = crate::evaluate::client_ip(&req, &a.config);
     let network = ip.and_then(|i| crate::store::network_of(&i.to_string())).unwrap_or_else(|| "unknown".into());
     {
-        let now = code_sql::now_ms() / 60_000;
+        let now = code_sql::now_ms();
+        let minute_ago = now - 60_000;
         let mut seen = a.registrations.lock().unwrap_or_else(|e| e.into_inner());
-        // A new minute starts the counts again; within one, the map holds at most 10,000 networks
-        // and refuses the rest (one sweep a minute, never a scan per request).
-        if seen.get("").is_none_or(|(minute, _)| *minute != now) {
-            seen.clear();
-            seen.insert(String::new(), (now, 0));
+        // Networks with nothing in the last minute go once a minute; the map holds at most 10,000
+        // and refuses the rest.
+        if seen.swept < minute_ago {
+            seen.by.retain(|_, times| times.back().is_some_and(|t| *t > minute_ago));
+            seen.swept = now;
         }
-        if !seen.contains_key(&network) && seen.len() > 10_000 {
+        if !seen.by.contains_key(&network) && seen.by.len() >= 10_000 {
             return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "60")], Json(json!({ "error": "too_many_requests", "error_description": "too many registrations lately: try again in a minute" }))).into_response();
         }
-        let (minute, n) = seen.entry(network).or_insert((now, 0));
-        if *minute != now {
-            (*minute, *n) = (now, 0);
+        let times = seen.by.entry(network).or_default();
+        while times.front().is_some_and(|t| *t <= minute_ago) {
+            times.pop_front();
         }
-        if *n >= REGISTER_PER_MINUTE {
+        if times.len() >= REGISTER_PER_MINUTE as usize {
             return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "60")], Json(json!({ "error": "too_many_requests", "error_description": "too many registrations from this network: try again in a minute" }))).into_response();
         }
-        *n += 1;
+        times.push_back(now);
     }
     let Ok(body) = axum::body::to_bytes(req.into_body(), (16 << 10) + 1).await else { return reg_error("invalid_client_metadata", "the registration is too large") };
     if body.len() > 16 << 10 {

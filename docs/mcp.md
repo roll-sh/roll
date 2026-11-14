@@ -540,7 +540,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: a token used before its start says so (401 `not_yet_valid`, "this token works from <time>", with `not_before`; the token list and page show the start); the ninth review's findings (apps settings that change what production runs, its
+Done lately: open registration's limit is a sliding minute per network (a fixed minute let twice the limit through at its edge, and its test failed when a run crossed one); a token used before its start says so (401 `not_yet_valid`, "this token works from <time>", with `not_before`; the token list and page show the start); the ninth review's findings (apps settings that change what production runs, its
 source, build, start and pre-deploy commands, schedule, kind, port, volume and `run.public`, are
 deploy; `create_grant` refuses extensions that name no caller; the expiry digest leaves out tokens
 made for a day or less); a token can start later (`not_before`, Cloudflare's TTL start): refused
