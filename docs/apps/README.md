@@ -521,7 +521,8 @@ every deployment is immutable with instant rollback.
   points instead, addresses where a CNAME belongs (Cloudflare's proxy on, an apex without
   flattening), no record yet, the TXT on the hostname instead of the challenge name or with more
   around the token (quotes); `domain.active` when it goes live, `domain.expiring` a day before an
-  unverified one goes (with what DNS said) and `domain.expired` when it does, the last two
+  unverified one goes (with what DNS said) and `domain.expired` when it does, `domain.tls_failed`
+  when its certificate fails (once, in the same transaction as the state), the last three
   notified by default, and the Domains tab counts the days left (Vercel's "Invalid
   configuration"; `model.rs::domain_diagnosis`, `api.rs::a_custom_domain_routes_once_its_dns_points_at_roll`).
   A domain still unverified 7 days after it was added is removed (`PENDING_CLAIM_TTL`), so

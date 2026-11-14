@@ -509,7 +509,8 @@ export type NotifyEvent =
   | "job.failed"
   | "domain.active"
   | "domain.expiring"
-  | "domain.expired";
+  | "domain.expired"
+  | "domain.tls_failed";
 
 /** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
 export interface AppEvent {

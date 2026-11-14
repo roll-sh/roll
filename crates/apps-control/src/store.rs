@@ -1515,8 +1515,19 @@ impl Store {
     }
 
     /// A custom domain's certificate state. False if there's no such custom domain.
+    /// A custom domain's certificate state; one that just failed is a `domain.tls_failed` event,
+    /// in the same transaction (once per failure, not each check that still finds it failed).
     pub fn set_domain_tls(&self, host: &str, tls: TlsStatus, error: Option<&str>) -> Result<bool> {
-        Ok(self.db.execute("UPDATE domains SET tls = ?, tls_error = ? WHERE hostname = ? AND kind = 'custom'", params![tls.as_str(), error, host])? > 0)
+        let now = self.now()?;
+        Ok(self.db.write(|c| {
+            let was: Option<(String, String, String)> = c.query_row("SELECT service, env, tls FROM domains WHERE hostname = ? AND kind = 'custom'", [host], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            let Some((svc, env, before)) = was else { return Ok::<_, code_sql::Error>(false) };
+            c.execute("UPDATE domains SET tls = ?, tls_error = ? WHERE hostname = ? AND kind = 'custom'", params![tls.as_str(), error, host])?;
+            if tls == TlsStatus::Failed && before != TlsStatus::Failed.as_str() {
+                insert_event(c, now, "domain.tls_failed", &svc, &env, None, &serde_json::json!({ "hostname": host, "error": error }))?;
+            }
+            Ok(true)
+        })?)
     }
 
     pub fn delete_domain(&self, service: &str, env: &str, host: &str) -> Result<()> {

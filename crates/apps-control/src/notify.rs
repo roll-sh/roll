@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 14] = [
+pub const EVENTS: [&str; 15] = [
     "deploy.failed",
     "crash_loop",
     "deploy.active",
@@ -30,8 +30,9 @@ pub const EVENTS: [&str; 14] = [
     "domain.active",
     "domain.expiring",
     "domain.expired",
+    "domain.tls_failed",
 ];
-const DEFAULT_EVENTS: [&str; 11] = ["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired"];
+const DEFAULT_EVENTS: [&str; 12] = ["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed"];
 /// Targets per project.
 const MAX_TARGETS: usize = 20;
 /// After the first try: the waits before the next ones.
@@ -317,6 +318,10 @@ impl Apps {
             "domain.expiring" => (
                 format!("{what}: {} isn't verified", e.data["hostname"].as_str().unwrap_or("a domain")),
                 format!("It's removed tomorrow unless its DNS checks out: {}", e.data["error"].as_str().unwrap_or("its records aren't there yet")),
+            ),
+            "domain.tls_failed" => (
+                format!("{what}: {}'s certificate failed", e.data["hostname"].as_str().unwrap_or("a domain")),
+                format!("Visitors over HTTPS get an error until it's issued: {}", e.data["error"].as_str().unwrap_or("its provider gave no reason")),
             ),
             "domain.expired" => (
                 format!("{what}: {} was removed", e.data["hostname"].as_str().unwrap_or("a domain")),

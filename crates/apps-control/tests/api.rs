@@ -108,6 +108,8 @@ impl Sources for FakeCode {
 struct FakeTls {
     calls: Mutex<Vec<String>>,
     issued: Mutex<Vec<String>>,
+    /// Hosts whose certificate failed, and why.
+    failed: Mutex<Vec<(String, String)>>,
     /// It can issue a wildcard's certificate (DNS-01).
     dns01: std::sync::atomic::AtomicBool,
 }
@@ -119,6 +121,9 @@ impl apps_control::integrations::DomainTls for FakeTls {
     }
     async fn ensure(&self, host: &str) -> anyhow::Result<Option<(apps_control::model::TlsStatus, Option<String>)>> {
         self.calls.lock().push(format!("ensure {host}"));
+        if let Some((_, why)) = self.failed.lock().iter().find(|(h, _)| h == host) {
+            return Ok(Some((apps_control::model::TlsStatus::Failed, Some(why.clone()))));
+        }
         Ok(Some(match self.issued.lock().iter().any(|h| h == host) {
             true => (apps_control::model::TlsStatus::Issued, None),
             false => (apps_control::model::TlsStatus::Pending, Some("waiting for HTTP validation".into())),
@@ -767,6 +772,15 @@ async fn a_custom_domain_routes_once_its_dns_points_at_roll() {
     // The certificate: the provider heard of the hostname only once it was accepted (never the
     // refused one), and verifying reads where its certificate is.
     assert_eq!((d["tls"].as_str(), d["tls_error"].as_str()), (Some("pending"), Some("waiting for HTTP validation")), "{d}");
+    // A certificate that fails is an event once (checks that still find it failed aren't).
+    w.tls.failed.lock().push(("www.example.com".into(), "CAA forbids the issuer".into()));
+    for _ in 0..2 {
+        call(&w.api, "POST", &format!("{base}/www.example.com/verify"), None).await;
+    }
+    let ev = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    let failed: Vec<&Value> = ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "domain.tls_failed").collect();
+    assert!(failed.len() == 1 && failed[0]["data"]["error"] == "CAA forbids the issuer", "{ev}");
+    w.tls.failed.lock().clear();
     w.tls.issued.lock().push("www.example.com".into());
     let (_, v) = call(&w.api, "POST", &format!("{base}/www.example.com/verify"), None).await;
     assert_eq!((v["tls"].as_str(), &v["tls_error"]), (Some("issued"), &Value::Null), "{v}");
@@ -1642,7 +1656,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired"]), "the default events");
+    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");
