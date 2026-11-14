@@ -9909,6 +9909,197 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Storage format v2: design (agent 231)
+
+**Measured first**, offline, by `storage::sst::study` (an ignored test: `FMT_DIR=<a store's
+directory> cargo test --release --lib storage::sst::study -- --ignored --nocapture`,
+`FMT_ONLY=codecs,cols,seek`), over the files as builds wrote them: the bulk script's table and
+indexes after the compaction that follows its DELETE (the base binary, `248f9f8fa`, a run of
+`bulk2.sh` with `keep` steps) and TPC-H SF1 (agent 227's pristine data directory). One CPU of
+lane B, single-threaded; times are wall on a loaded host, compared within one run.
+
+Bytes by component (format 1, the file form decompressed):
+
+| relation | raw MB | header % | key % (of it the version) | value % | the value's duplicated row key % | cache form MB |
+|---|---|---|---|---|---|---|
+| bulk table (750k rows, 4 cols) | 41.0 | 5.2 | 17.5 (14.0) | 77.3 | 0 | 38.3 (-7%) |
+| bulk index on a | 23.6 | 9.1 | 39.5 (24.2) | 51.4 | 51.4 | 6.1 (-74%) |
+| bulk unique index on id | 27.9 | 7.7 | 48.8 (20.5) | 43.6 | 43.6 | 10.4 (-63%) |
+| TPC-H lineitem rows (16 cols) | 831.6 | 2.5 | 7.0 (5.5) | 90.5 | 0 | 789.8 (-5%) |
+| TPC-H lineitem's three indexes | 614.6 | 7-10 | 37-52 (19-25) | 41-54 | 41-54 | 195.5 (-68%) |
+| TPC-H orders rows (9 cols) | 189.1 | 2.5 | 7.6 (6.1) | 89.9 | 0 | 178.6 (-6%) |
+| TPC-H all | 2,046 | | | | | 1,412 (-31%) |
+
+The cache form (`Block`, what `Block::decode` makes of every block read) already leaves out an
+index entry's row key and the block's version; every block in these files has keys of one length.
+`Block::decode` costs 7-8 µs a row block and 13-24 µs an index block (TPC-H: 1.35 s for all 2 GB,
+half of what zstd's decompression of them costs).
+
+Codecs (MB written, compress / decompress MB/s of the raw input; zstd contexts kept):
+
+| data | form | zstd 1 (today) | zstd -1 | zstd -2 | zstd -3 | zstd 3 | lz4 |
+|---|---|---|---|---|---|---|---|
+| TPC-H all | file (format 1) | **621** 326/905 | 684 | 717 | 773 | 594 | 844 |
+| TPC-H all | cache form | 530 248/702 | **593** 320/964 | 615 338/984 | 661 | 498 | 701 523/2184 |
+| bulk table + indexes after DELETE | file | **19.8** | 22.3 | | | 18.2 | 33.5 |
+| bulk table + indexes after DELETE | cache form | 15.7 | **18.7** | 20.1 | 21.8 | 13.8 | 23.9 |
+
+In time, for TPC-H: compressing today's form 6.3 s, the cache form at zstd -1 4.4 s (-30%); a
+cold read (decompress and decode) 3.6 s against 1.5 s (-60%). For the bulk files: compression
+0.252 -> 0.158 s (-37%). LZ4 halves compression again but writes 13% (TPC-H) to 21% (bulk) more
+than today; zstd -2 already writes more than today on the bulk files.
+
+Column decode (`cols::decode_cols` over cached blocks, ns a row; a PAX block's typed columns
+copied out instead; a whole row rebuilt from PAX columns):
+
+| table | columns read | decode_cols | PAX columns | PAX bytes / row bytes | whole row from PAX |
+|---|---|---|---|---|---|
+| lineitem | q01's 7 | 75.7 | 7.9 | 0.83 | 241 |
+| lineitem | q06's 4 | 64.5 | 6.0 | | |
+| orders | all 9 | 54.8 | 13.7 | 0.91 | 97 |
+| bulk table | all 4 | 29.8 | 5.2 | 0.84 | 33 |
+
+In-block search (`Block::seek` of a key the block holds; cold: random blocks of a 16k-block
+working set): 200-430 ns warm, 560-1,180 ns cold, of which `first_restart` (the restart words'
+search) 30-560 ns and `find_block` 30-430 ns. Restarts every 8 or 4 entries instead of 16: warm
+seeks 0-40% cheaper, cold ones no cheaper (more restart words to search: more misses), and index
+entries take 11-75% more cache bytes (9.1 -> 15.4 bytes an entry for the bulk index on a).
+
+**Design**, each choice with its expected effect on the three goals (bulk DELETE + compaction;
+analytic scans; point reads), bytes written, data-dir size, peak memory:
+
+1. **The file form is the cache form** (format 2, `sst.rs`'s module comment): entries as
+   `Block` holds them (the version left out when it is the block's, an index entry's row key
+   derived from its key, keys before values), the restart words and value offsets stored after
+   them, so a block read is decompressed and used: no decode (its entries copied once into an
+   allocation of their size, as the decode's output was, so the cache holds what it held). A
+   block holds exactly the
+   entries format 1's did (it ends where format 1's 16 kB would), so the cache holds the same
+   bytes block for block and every read of a cached block runs the same code on the same bytes.
+   Effects: (1) compaction compresses 31% fewer bytes (index files 63-78% fewer) and reads its
+   format 2 inputs without decoding; (2) a miss costs the decompression alone (half of it went
+   to `Block::decode`); (3) none: cached blocks are unchanged. Bytes, size, memory: below.
+2. **zstd level 1 for format 2's blocks** (`sst::ZSTD_LEVEL`). Level -1 was the plan (the
+   cheapest level writing no more than today on TPC-H and the bulk files: 593 against 621 MB,
+   18.7 against 19.8) and was built and measured (`s001`), but the OLTP benchmark's accounts table
+   (100,000 rows with a text note) then took 2.32 MB against 1.82 (the store 14% more): its rows
+   compress worse at every negative level, in either form. At level 1 the compact form writes
+   less than today everywhere measured (TPC-H 530 against 621 MB, bulk 15.7 against 19.8,
+   accounts 2.68 against 2.82): compression -9 to -15% (fewer bytes, but each costs more),
+   decompression -10%, the decode gone. LZ4: more bytes than today everywhere it was measured.
+   Also in format 2: the bloom filter's hash taken 8 bytes at a time (`sst::hash64_2`; FNV-1a a
+   byte at a time was a fifth of `SstWriter::add`, which is 12-16% of the compaction after the
+   bulk DELETE, and a point read hashes its key once per file), and the writer's shared-prefix
+   count 8 bytes at a time (another fifth of `add`; files byte for byte as before).
+3. **Restart interval per block** (flag bits of the trailer, `Block::rlog`; written as 16): the
+   format can change it per file kind without a version. Not changed: the numbers above show it
+   is not the lever; cold seeks are cache misses (restart words in their own allocation, then the
+   entries), which a layout with the words next to the entries or a two-level word search could
+   cut. That is agent 230's lead (in-block search, block cache read path); format 2 leaves room
+   for it (flags, entry counts per block in the index).
+4. **No PAX on disk.** Typed columns would cut scans' decode 8-10x (75.7 -> 7.9 ns a lineitem
+   row for q01), but every row-path reader (point gets, index fetches, `LazyBuf`) would rebuild
+   rows (241 ns a lineitem row: q18's 6 M fetches alone +1.4 s of CPU). The hybrid worth building
+   is in memory: typed columns of a cached block made at its first column-subset decode and
+   charged to the block cache. It needs no format change (format 2 changes nothing it needs) and
+   costs memory a 2 GB cache has room for (peak +240 MB on TPC-H for lineitem's q01 columns), so
+   it fails the peak-memory gate as long as the cache isn't full: measure it against a cache
+   sized to the data (next lead, with the executor agent: `decode_cols` is the seam).
+5. **Deletion vectors: designed, not built this round.** A bulk DELETE would write, per L1 file,
+   a bitmap of the entries it deletes at its commit ts (positions: block entry counts are in
+   format 2's index for this) instead of 2.25 M tombstones, and the compaction after it (7.2 G
+   instructions) would not be due. What it costs: point reads and scans check the bitmaps of the
+   file they read (a version a bitmap names reads as a tombstone at the bitmap's ts); logical
+   decoding (`repl::decode`) reads deletions from tombstones today; conflict checks and the
+   spill path see tombstones; the bitmaps must commit atomically with the WAL record. Space: a
+   deleted row stays in the file until a compaction rewrites it (a threshold: half dead).
+   Highest gain for goal 1 (DELETE 6.2 G -> ~2, its compaction 7.2 G -> 0) and the highest risk.
+6. **Copying unchanged compressed blocks in compaction**: format 2 makes a block's stored bytes
+   what its output would be. It pays where an L0 file meets a big L1 file in few blocks (a tiny
+   commit over a big table: `compact_within`), not after a bulk DELETE (every block has a deleted
+   row). Next after 1-2.
+
+**Versioning**: the manifest has `format` (absent: 1); a build refuses a manifest of a format past
+its own (`sst::FORMAT`) and a file whose footer says so, with an error naming both. Format 2's
+footer ends with its format and the magic `rollsst2`: a build before format 2 refuses such a file
+at open ("bad footer"), so it never misreads one. Format 1 is read forever (its decode is the code
+every store used until now) and **migrated lazily**: every file a flush, a compaction, a range
+deletion's rewrite or the close's rewrite of linked runs writes is format 2; files nobody
+rewrites stay format 1 and cost what they cost before. No up-front rewrite (a big store would
+spend its first minutes rewriting files it reads as well as it did), and no new crash window: a
+migration is a compaction. A transaction's runs stay format 1 (their values carry the run's tags,
+`Block::decode_linked` takes them off as it reads): a linked run at L1 is format 1 until a
+compaction or a clean close rewrites it. Tests: `storage::tests::format_1_files_read_beside_format_2`
+(a store written by the pinned format 1 encoder, `StoreOptions::format = 1`, read at every
+snapshot beside format 2 L0 files, then mixed L1, reopened; a newer manifest refused),
+`sst::tests::format2_reads_as_format1` (every codec; the same blocks, byte for byte in cache
+form), `tests/block_format.rs` (`tests/data/storage_format1.tar.gz`, written by `248f9f8fa`:
+read, written, reopened; a kill -9 during the compactions that turn its files into format 2).
+
+**Steps**, by measured gain per risk: (1) items 1+2, gated as one; (2) block copy in compaction;
+(3) the in-memory column cache (with the executor agent); (4) deletion vectors.
+
+## Storage format v2, round 1 (agent 231)
+
+BENCH.md "Storage format v2, round 1" has the gates and the same-day tables. What landed (two
+commits, gated together as `s003`):
+
+- **Block format 2** (`storage/sst.rs`, module comment): `SstWriter::put2` writes an entry as
+  `Block` holds it (`shared | unshared << 2 | F_TS | F_DERIVED`, the value field, the key's bytes;
+  values after all the entries), `body2` appends the restart words and value offsets, the block's
+  version, entry and restart counts, `common` and flags (bit 0 derived values, bits 4-7 the
+  restart interval's log), and `Block::load` reads them back (no `decode_with` pass; the entries
+  and values copied into an allocation of their own size, as `decode_with`'s output is: a slice
+  kept the trailer and the read's frame, TPC-H's peak +12-20 MB). A block ends where format 1's
+  would (`raw1`, what format 1 would have written), so the cache holds the same bytes, block for
+  block (`format2_reads_as_format1` compares every block's cache form with format 1's).
+  The index gains each block's entry count (for count-only scans and deletion vectors later),
+  the footer the format; the bloom filter hashes a key 8 bytes at a time (`hash64_2`) and the
+  writer counts shared prefixes 8 bytes at a time (`common_prefix`: format 1's files are byte for
+  byte as before). Codec byte 2 is LZ4 (readers take it; nothing writes it: more bytes than zstd
+  everywhere measured).
+- **Versions**: `Manifest::format` and the footer's; a newer one is refused with an error naming
+  both (`newer_formats_are_refused`, `format_1_files_read_beside_format_2`). Builds before format 2
+  refuse its files at open ("bad footer"): no silent misread. `StoreOptions::format = 1` writes
+  format 1 as `248f9f8fa` did (the tests' pinned old encoder).
+- **Migration**: lazy. Flushes, ingests, compactions, range deletions' rewrites and the close's
+  rewrite of linked runs write format 2; format 1 files are read as before until one of those
+  rewrites them. A transaction's runs (`txn::spill`) stay format 1 (their values carry tags that
+  `Block::decode_linked` takes off): a linked run at L1 is format 1 until compaction or a clean
+  close. Making runs format 2 was estimated (the decode of linked runs: about 1% of the bulk
+  script, 11% of the compaction after its DELETE) and not done: their tags would have to move
+  into the entry header or a side array, and a transaction's own reads of its runs would then
+  rebuild tagged values.
+- **zstd level**: 1, as before (level -1 measured as `s001`: compaction -10%, VACUUM -16%, but
+  the OLTP accounts' rows take 28% more bytes stored).
+- Tests: `sst::tests::format2_reads_as_format1` (every codec, every block's cache form equal to
+  format 1's, another restart interval), `newer_formats_are_refused`, `common_prefix_and_hash64_2`;
+  `storage::tests::format_1_files_read_beside_format_2` (a store of format 1 read at every
+  snapshot by this build, then format 2 L0 over format 1 L1, then mixed L1, reopened, a newer
+  manifest refused); `tests/block_format.rs`: `format_1_store_reads_and_upgrades` (the fixture
+  `tests/data/storage_format1.tar.gz`, written by `248f9f8fa` from `storage_format1.sql`: read
+  as written, then writes, an index build, updates, deletes, VACUUM; mixed formats on disk; read
+  after a restart and after every row is rewritten), `kill_during_upgrade_compactions` (kill -9
+  while compactions turn the fixture's files into format 2, three rounds).
+- `storage::sst::study` (an ignored test) is the measuring tool of the design section; run it on
+  any store directory.
+
+**What the executor can take from format 2** (not wired; for the next executor agent): each
+block's entry count is in the file's index (`SstWriter::finish`, read and dropped by
+`SstReader::open` now): a count-only scan of a range whose L1 blocks have one version per key, no
+tombstone and no newer source in their range can count from the index without reading the
+blocks (count(*) is 2.7x PostgreSQL, 7.9x pgrust in the bulk script). A column-subset reader
+needs no format change: `cols::decode_cols` is the seam, and the measured lever is typed columns
+kept per cached block (design item 4).
+
+**Next**, by size: (1) deletion vectors (design item 5: DELETE 6.2 G and its compaction 6.4 G
+against PostgreSQL's 1.7 G for both); (2) the compaction's own work (`SstWriter::add` 12-16% of
+it, the merge's `Cursor::head` / `Merge::min` / `Block::read` 15%, format 1 inputs' decode 11%);
+(3) cold in-block seeks (agent 230's lead: restart words in their own allocation, then the
+entries; the format can now change the restart interval per block, but the study shows the
+misses, not the interval, are the cost); (4) the in-memory column cache (design item 4) against
+a cache sized to the data.
+
 ## Analytic path against pgrust (agent 220)
 
 TPC-H SF1 on lane C (servers on CPUs 14,15,32,33, i.e. two cores with their hyperthreads;
