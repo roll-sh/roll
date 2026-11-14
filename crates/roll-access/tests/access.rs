@@ -538,7 +538,8 @@ async fn a_token_never_makes_a_stronger_one() {
     let (s, made) = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(later)).await;
     assert_eq!(s, StatusCode::CREATED, "{made}");
     let early = made["token"].as_str().unwrap().to_string();
-    assert_eq!(d.call(&early, Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED, "not yet");
+    let (s, e) = d.call(&early, Method::GET, "/v1/projects", None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::UNAUTHORIZED, Some("not_yet_valid")), "not yet, and it says so: {e}");
     let id = made["grant"]["id"].as_str().or(made["id"].as_str()).unwrap().to_string();
     assert_eq!(d.call(OPERATOR, Method::PATCH, &format!("/v1/access/tokens/{id}"), Some(json!({ "not_before": null }))).await.0, StatusCode::OK);
     assert_eq!(d.call(&early, Method::GET, "/v1/projects", None).await.0, StatusCode::OK, "started");
