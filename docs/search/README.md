@@ -250,11 +250,18 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    A/B; Rally rerun pending) and `terms_enum`; a full rerun of every Rally track with variance;
    one allocator policy (rolld's against search-dev's purge governor); `terms_enum`'s per-request
    overhead.
-2. **Vector search's cost and speed** (scale to zero meets HNSW): RAM loaded and idle, cold start
+2. **Elasticsearch's lifecycles run** (in progress, `wip/search-lifecycle`). ILM policies and the
+   data stream lifecycle (`data_retention`) are stored and explained but never acted on
+   (`xpack/ilm.rs`: "roll doesn't run the lifecycle steps"), so a retention someone set keeps
+   every byte forever. OpenSearch's ISM already runs as background jobs (`opensearch/ism.rs`):
+   run DSL's rollover and retention and ILM's phases and actions the same way, with
+   `_ilm/explain` and `_lifecycle/explain` as Elasticsearch prints them, waking a sleeping
+   cluster only when an action falls due.
+3. **Vector search's cost and speed** (scale to zero meets HNSW): RAM loaded and idle, cold start
    to the first `knn` answer, indexing, latency and recall@10 (filtered, in `rrf`), store bytes,
    against Elasticsearch 9.5.5 and OpenSearch 3.9 on 1M × 384 dims; then fix where roll loses. In
    progress (`wip/search-vectors`).
-3. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (in progress). Landed: the
+4. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (in progress). Landed: the
    index browser and console on the per-index routes, an API keys panel in Settings, the mapping
    view as a field table, OpenSearch-flavor clusters' own clients and `OPENSEARCH_*` variables,
    and importing a file into an index from the Indices tab (Kibana's "Upload a file"): NDJSON, a
@@ -271,7 +278,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    console search drawn as a tree, saved console requests. Signed-in users who aren't admins follow
    accounts' phase 2: today every product but code, agents and projects answers them 403
    (docs/accounts.md), search included.
-4. **Compatibility gaps** from the extended suites (4,956 of the 5,541 Elasticsearch passes),
+5. **Compatibility gaps** from the extended suites (4,956 of the 5,541 Elasticsearch passes),
    largest first. Landed: ent-search's last 5 (a `rule` retriever over `rrf`/`linear`, inference
    inside a rule query's organic, workflow-restricted API keys), ES|QL's last 5 (`TOP_SNIPPETS`,
    `CATEGORIZE`, approximation's columns, `LIMIT n BY`, `unsigned_long` past `i64::MAX`),
@@ -285,14 +292,14 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    fields); downsample's last one (allocation filtering). In the opensearch dialect, pick
    `auto_date_histogram`'s rounding from the bounds as OpenSearch's rewrite does where it differs
    from collecting (roll counts with Elasticsearch's choice in both dialects).
-5. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
+6. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
    endpoints, creates them (OpenAI or any compatible URL, Cohere, Anthropic; the API key sent
    once, sealed, never shown back), tests them with a sample, deletes them, and opens a
    `semantic_text` quickstart in the console. The index browser's mapping view is a field table
    (type, inference endpoint, vector dims, similarity and index type, analyzers, what isn't
    indexed; the JSON a toggle away). Left: a roll secret as an endpoint's key (after #20), MCP
    tools (they follow the routes; the MCP thread).
-6. **Semantic search** (the largest gap against Elasticsearch 9 and Elastic Cloud after machine
+7. **Semantic search** (the largest gap against Elasticsearch 9 and Elastic Cloud after machine
    learning). Landed (compatibility.md, "Inference" and "`semantic_text`"): the `_inference` API
    (`openai` with `url`, `cohere`, `anthropic`; keys sealed, `roll_net::PublicOnly`; `rate_limit`
    enforced; the preconfigured endpoints as a cluster without ML nodes; the test plugin's services
@@ -303,7 +310,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    multi-field, `index_options` validation, the `embedding` task type and `semantic` field type,
    `random_reranker`, rerankers inside compound retrievers (landed 2026-11-14; the rest is low
    priority).
-7. **Integration with the stacked branches**: previews (search brancher: branch, find, reset,
+8. **Integration with the stacked branches**: previews (search brancher: branch, find, reset,
    delete, `own_bytes`, `ELASTICSEARCH_URL`) and apps are on this branch; `scripts/preview-cost.sh`
    now branches a search cluster too (the branch reads the parent's document, its writes stay
    in it, the service gets its `ELASTICSEARCH_URL`, landing deletes it). Apps' links to search:
@@ -319,16 +326,16 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    before one are reissued. The fleet test with every product on passed on this branch
    (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall 1.2 s in
    the rolling restart).
-8. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
+9. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
-9. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
+10. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
    main's cache: under the minute, no room for another crate). (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
    12 of 40 runs on one CPU failed before, 0 of 40 after.)
-10. **Security**: a second review of what landed since the first (the `_inference` API, `semantic_text`,
+11. **Security**: a second review of what landed since the first (the `_inference` API, `semantic_text`,
    the new retrievers, workflow-restricted keys, service tokens, OpenSearch Security's new
    endpoints, ES|QL's new functions) landed in 7288684b9: `semantic_text` under field level
    security (queries and the semantic highlighter, `copy_to` sources included), an inference key
