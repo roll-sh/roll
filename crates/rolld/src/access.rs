@@ -10,6 +10,11 @@ use roll_access::{Access, Resolvers, WorkspaceResolver};
 use serde_json::Value;
 use std::sync::Arc;
 
+/// roll secrets, once it's open (it opens after roll-access): an ephemeral environment is a
+/// preview to rules (`environments: ["preview"]`), whatever its slug (`pv-12`).
+#[derive(Clone, Default)]
+pub struct SecretsEnvs(pub Arc<std::sync::OnceLock<Arc<roll_secrets::Secrets>>>);
+
 /// The products whose ids the evaluator can't read off a path.
 pub struct Products<'a> {
     pub postgres: Option<Arc<pg_control::Control>>,
@@ -17,12 +22,18 @@ pub struct Products<'a> {
     pub nosql: Option<Arc<nosql_control::Control>>,
     pub streams: Option<Arc<stream_broker::Broker>>,
     pub code: Option<&'a Arc<code_control::Code>>,
+    pub secrets: SecretsEnvs,
     pub apps: Option<Arc<apps_control::Apps>>,
     pub search: Option<Arc<search_control::Control>>,
 }
 
 fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Resolvers {
     let mut r = Resolvers { workspace: Some(Arc::new(WorkspaceResolver(workspace))), ..Default::default() };
+    let slot = p.secrets.0;
+    r.environment_fn("secrets", move |project, env| {
+        let e = slot.get()?.environment(project, env, &roll_secrets::Caller::operator()).ok()?;
+        (e.kind == roll_secrets::EnvironmentKind::Ephemeral).then(|| "preview".to_string())
+    });
     if let Some(pg) = p.postgres {
         // A project by its id; an endpoint is in its project.
         r.by_fn("endpoint", move |id: &str| pg.endpoint_or_404(id).ok().map(|e| e.project_id));
@@ -65,6 +76,21 @@ pub fn api_url(args: &crate::Args) -> String {
     args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())).trim_end_matches('/').to_string()
 }
 
+/// `ROLL_TRUSTED_PROXIES`: CIDRs or addresses (a /32 or /128), comma separated. A wrong entry
+/// stops rolld, so a typo never quietly means "trust nobody's header" or worse.
+fn trusted_proxies() -> anyhow::Result<Vec<ipnet::IpNet>> {
+    let Ok(v) = std::env::var("ROLL_TRUSTED_PROXIES") else { return Ok(Vec::new()) };
+    let mut out = Vec::new();
+    for entry in v.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let net = entry.parse::<ipnet::IpNet>().or_else(|_| entry.parse::<std::net::IpAddr>().map(ipnet::IpNet::from)).map_err(|_| anyhow::anyhow!("ROLL_TRUSTED_PROXIES: {entry:?} isn't an address or a CIDR"))?;
+        out.push(net);
+    }
+    if !out.is_empty() && !crate::auth::edge() {
+        tracing::warn!("ROLL_TRUSTED_PROXIES is set without ROLL_EDGE: X-Forwarded-For isn't read, so it has no effect");
+    }
+    Ok(out)
+}
+
 pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth, products: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> anyhow::Result<Arc<Access>> {
     let target = match args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty()) {
         Some(url) => code_sql::Target::Postgres { url: url.to_string(), schema: "access".into() },
@@ -77,6 +103,8 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
         locked: auth.enforcing(),
         audit_days: std::env::var("ROLL_ACCESS_AUDIT_DAYS").ok().and_then(|d| d.parse().ok()).filter(|d| *d > 0).unwrap_or(90),
         trust_forwarded_for: crate::auth::edge(),
+        // The edge's own addresses (the load balancer's subnets): X-Forwarded-For only from them.
+        trusted_proxies: trusted_proxies()?,
         metadata_allow_private: std::env::var("ROLL_ACCESS_METADATA_ALLOW_PRIVATE").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes")),
         ..Default::default()
     };

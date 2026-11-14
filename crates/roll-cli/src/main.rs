@@ -16,6 +16,8 @@ mod preview;
 mod search;
 mod storage;
 mod redis;
+mod seal;
+mod secrets;
 mod apps;
 
 /// roll — serverless infrastructure.
@@ -97,6 +99,18 @@ enum Cmd {
     /// S3-compatible object storage.
     #[command(subcommand, alias = "s3")]
     Storage(storage::Storage),
+    /// Secrets and environment variables of a project's environments (`ROLL_TOKEN`: a scoped
+    /// secrets token).
+    #[command(alias = "env")]
+    Secrets {
+        #[command(flatten)]
+        at: secrets::AtArgs,
+        #[command(subcommand)]
+        cmd: secrets::Secrets,
+    },
+    /// Run a command with an environment's secrets in its environment, without writing files:
+    /// `roll run -p shop -e production -- npm start`.
+    Run(secrets::Run),
     /// Preview environments: every service and a branch of every data resource of a project,
     /// per change or pull request.
     #[command(subcommand, alias = "previews")]
@@ -285,9 +299,39 @@ impl Api {
     async fn get(&self, p: &str) -> anyhow::Result<Value> {
         self.call(reqwest::Method::GET, p, None).await
     }
+    /// A `GET` whose answer isn't JSON (an export), as text.
+    async fn get_text(&self, p: &str) -> anyhow::Result<String> {
+        let mut req = self.http.get(format!("{}{p}", self.base));
+        if let Some(k) = &self.key {
+            req = req.bearer_auth(k);
+        }
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+        let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            bail!("{}", value["error"].as_str().map(str::to_string).unwrap_or_else(|| format!("{status}")));
+        }
+        Ok(text)
+    }
     async fn post(&self, p: &str, b: Value) -> anyhow::Result<Value> {
         self.call(reqwest::Method::POST, p, Some(b)).await
     }
+}
+
+/// The API as roll secrets is called: with `ROLL_TOKEN` (a scoped secrets token) if it's set,
+/// else a workload identity's login (`ROLL_IDENTITY`), else the operator token.
+async fn secrets_api(api: &Api) -> anyhow::Result<Api> {
+    let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
+    let token = match (env("ROLL_TOKEN"), env("ROLL_IDENTITY")) {
+        (Some(t), _) => Some(t),
+        (None, Some(identity)) => Some(secrets::identity_login(api, identity.trim()).await?),
+        (None, None) => api.key.clone(),
+    };
+    Ok(Api { base: api.base.clone(), http: api.http.clone(), key: token, headers: api.headers.clone() })
 }
 
 fn s(v: &Value) -> String {
@@ -442,6 +486,8 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
         Cmd::Search(cmd) => return search::run(&api, cli.json, cmd).await,
         Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
+        Cmd::Secrets { at, cmd } => return secrets::run(&secrets_api(&api).await?, cli.json, at, cmd).await,
+        Cmd::Run(r) => return secrets::run_command(&secrets_api(&api).await?, r).await,
         Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
         Cmd::Token(cmd) => return access::token(&api, cli.json, cmd).await,
         Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,

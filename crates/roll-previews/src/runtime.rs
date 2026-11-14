@@ -825,6 +825,8 @@ impl Apps for Runtime {
             memory_mb: job.seed.memory_mb,
             cpus: 1.0,
             env: Default::default(),
+            // A seed's variables come from the preview (`job.env`), not a secrets environment.
+            secrets: None,
         };
         let out = self.trees.run(&self.iso, &spec, &job.repo, &job.revision, &env).await?;
         match out.result {

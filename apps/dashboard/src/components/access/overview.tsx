@@ -44,7 +44,13 @@ export function AccessOverview() {
           </p>
         )}
         <ConnectPanel />
-        <PolicyPanel />
+        {me?.kind === "operator" && <PolicyPanel />}
+        {me?.kind === "user" && (
+          <p className="text-[12px] text-muted">
+            Your tokens and connections act as you: they reach what your account does (roll code, agents and your projects), never
+            more, and their approvals come to you.
+          </p>
+        )}
         <ErrorNote error={error} />
         {checkup && checkup.length > 0 && (
           <Attention
@@ -55,6 +61,7 @@ export function AccessOverview() {
           />
         )}
         {grants === null && !error ? <Connecting /> : <Grants grants={grants ?? []} refresh={refresh} />}
+        <Workloads />
       </div>
     </AccessShell>
   );
@@ -67,13 +74,14 @@ export function ConnectPanel({ token }: { token?: string }) {
   // Toolsets: only some products' tools, so the agent's context isn't spent on the rest.
   const [products, setProducts] = useState<string[]>([]);
   const [picked, setPicked] = useState<string[]>([]);
+  const [readonly, setReadonly] = useState(false);
   useEffect(() => {
     accessApi
       .catalog()
       .then((c) => setProducts(c.products.filter((p) => p !== "access")))
       .catch(() => {});
   }, []);
-  const url = withToolsets(mcpUrl(), picked);
+  const url = withToolsets(mcpUrl(), picked, readonly);
   const cfg = mcpConfig(client, url, token);
   return (
     <Panel
@@ -129,6 +137,10 @@ export function ConnectPanel({ token }: { token?: string }) {
             </div>
           </div>
         )}
+        <label className="flex items-center gap-2 text-[12px] text-muted">
+          <input type="checkbox" checked={readonly} onChange={(e) => setReadonly(e.target.checked)} className="accent-accent" />
+          Read-only: the client sees and runs only tools that read, whatever its token allows
+        </label>
         <p className="text-[13px] text-muted">{CLIENT_WHERE[client]}</p>
         <div className="relative rounded-lg border border-line bg-bg">
           <pre className="overflow-x-auto p-3 pr-10 font-mono text-[12px] leading-relaxed">{cfg.text}</pre>
@@ -262,6 +274,27 @@ function Grants({ grants, refresh }: { grants: Grant[]; refresh: () => Promise<v
   );
 }
 
+/** Workload tokens live: each a workload's for minutes (a CI job that proved who it is), listed
+ * apart from the tokens people make. Nothing shows when there are none. */
+function Workloads() {
+  const { data, refresh } = usePoll(() => accessApi.workloads(), 30_000);
+  const live = (data ?? []).filter((g) => statusOf(g) === "active");
+  if (live.length === 0) return null;
+  return (
+    <Panel title="Workload tokens" aside={<span className="font-mono text-[12px] text-subtle">{live.length} live</span>}>
+      <p className="border-b border-line px-5 py-2.5 text-[12px] text-muted">
+        Workloads that proved who they are (a CI job signing in to roll secrets) get a token for minutes, within their identity&apos;s
+        scope. They can&apos;t be changed; revoke one to stop it now.
+      </p>
+      <ul className="divide-y divide-line">
+        {live.map((g) => (
+          <GrantRow key={g.id} g={g} refresh={refresh} />
+        ))}
+      </ul>
+    </Panel>
+  );
+}
+
 const REACH_TONE: Record<ReturnType<typeof reach>, string> = {
   "read only": "text-muted border-line",
   "can change things": "text-fg border-line-2",
@@ -320,7 +353,7 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
             ) : (
               <span className="truncate text-[14px] font-medium">{g.name}</span>
             )}
-            <span className="rounded border border-line px-1.5 text-[11px] text-subtle">{g.kind === "oauth" ? (g.client?.name ?? "OAuth") : "token"}</span>
+            <span className="rounded border border-line px-1.5 text-[11px] text-subtle">{g.kind === "oauth" ? (g.client?.name ?? "OAuth") : g.kind}</span>
             {status === "active" ? (
               <span className={`rounded border px-1.5 text-[11px] ${REACH_TONE[r]}`}>{r}</span>
             ) : (
@@ -346,9 +379,11 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
         </div>
         {status === "active" && !confirm && (
           <span className="flex shrink-0 gap-1.5">
-            <button onClick={() => setEditing((e) => !e)} className={btn} aria-expanded={editing}>
-              Edit
-            </button>
+            {g.kind !== "workload" && (
+              <button onClick={() => setEditing((e) => !e)} className={btn} aria-expanded={editing}>
+                Edit
+              </button>
+            )}
             {g.kind === "token" && (
               <button onClick={rotate} disabled={busy} className={btn} title="A new secret with the same rules; the old one stops at once">
                 Rotate

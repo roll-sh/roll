@@ -164,11 +164,16 @@ Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, tit
            landed_as: string | null, conflict: {paths, head} | null,
            queue: QueueInfo | null /* its latest time in the merge queue */,
            blockers: Blocker[] /* why it can't be queued or land right now; [] when it can */,
+           notices?: Blocker[] /* what it should know but needn't block on: secret_missing (it reads an environment variable a roll secrets environment doesn't set); absent when none */,
            review: ReviewSummary /* see Reviews */,
            created_at, updated_at}
 Blocker   = {kind: "state" | "draft" | "untrusted" | "checks" | "needs_approval" | "needs_codeowner" | "changes_requested"
-                   | "unresolved_threads" | "review_pending" | "review_required" /* more may come: show unknown kinds by message */,
-             message}
+                   | "unresolved_threads" | "review_pending" | "review_required"
+                   | "secret_leak" /* it adds a roll secrets value; names keys, never values (docs/secrets.md) */
+                   | "secret_missing" /* a notice, on a trusted change in a repo that isn't public: it reads an environment variable some roll secrets environment doesn't set (the key only) */
+                   /* more may come: show unknown kinds by message */,
+             message,
+             key?: string, environments?: string[] /* secret_leak, secret_missing: the roll secrets key and where */}
 QueueInfo = {id /* qe_… */, position: number | null /* 1-based while queued; null once it left */,
              lane: "urgent" | "normal", state: EntryState, error: string | null /* why it was ejected: one line */,
              output: string | null /* the failing checks' log tail behind `error`, "<check>:\n<tail>" per check */,
@@ -495,6 +500,11 @@ Webhook = {id /* wh_… */, url, events: string[], active, created_by, created_a
 Status  = {context, state: "pending" | "success" | "failure" | "error", target_url: string | null,
            description: string | null, creator, created_at, updated_at}
 
+GET    /v1/code/repos/{owner}/{repo}/leaks?history= → {head, files, found: [{key, environment, folder, path, line}],
+       skipped, truncated, commits, history: [{key, environment, folder, changeset, path}]}
+       roll secrets' values in the default branch's head (docs/secrets.md), never the values; with
+       history=N (at most 1000) also the first-parent commits that added one; managers (401 anonymous,
+       403 others and agent tokens); 400 without roll secrets or a bad history
 GET    /v1/code/repos/{owner}/{repo}/webhooks → Webhook[]                       writers (401 anonymous, 403 others)
 POST   /v1/code/repos/{owner}/{repo}/webhooks {url, events?, secret?, active?}
        → 201 {webhook: Webhook, ping: delivery id, secret? /* only when roll generated it: shown once */}
@@ -822,12 +832,15 @@ shows is a `machine` event. Times are milliseconds.
 ```
 GET    /v1/code/agents/{owner}/sandboxes → {sandboxes: [Sandbox] /* oldest first */, sizes: [Size] /* the first is the default */,
        max /* per owner */, backend: "agent37" | "docker" | null /* null: sandboxes are off */}
-POST   /v1/code/agents/{owner}/sandboxes {name?, size? /* a Size name */, env?: {NAME: "value"}}
+POST   /v1/code/agents/{owner}/sandboxes {name?, size? /* a Size name */, env?: {NAME: "value"},
+       secrets?: {project /* id or name */, environment /* "development" or "staging:/api" */}}
        → 201 {sandbox: Sandbox /* status "creating" */, machine: Machine}
        env is passed to the sandbox only (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY): sealed with ROLL_SECRET_KEY
        until the backend has it, then dropped; never returned. At most 32 names (uppercase, digits, _),
        values one line of at most 4096 characters, 32 KiB in all; ROLL_*, AGENT37_*, HOME, USER, PATH,
-       SHELL and IS_SANDBOX are reserved. 400 bad name, size or env; 422 at the owner's limit (deleting
+       SHELL and IS_SANDBOX are reserved. secrets adds a roll secrets environment's values under env (docs/secrets.md):
+       the project must have one of the owner's repos on its canvas, the environment can't be protected, and its
+       values follow env's rules. 400 bad name, size, env or secrets; 422 at the owner's limit (deleting
        ones count until gone) or without ROLL_SECRET_KEY on the server; 503 sandboxes are off.
 POST   /v1/code/agents/{owner}/sandboxes/{id}/start → Sandbox   desired "running" (asleep ones too: a wake now);
        409 while it's being deleted

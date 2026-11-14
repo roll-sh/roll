@@ -1,6 +1,6 @@
 import { HorizonMark } from "@roll/brand";
 import { useEffect, useState } from "react";
-import { accessApi, EXPIRIES, ipProblems, parseRate, presetRules, type Catalog, type Grant, type Rule } from "@/lib/access-api";
+import { accessApi, catalogFor, EXPIRIES, ipProblems, parseRate, presetRules, type Catalog, type Grant, type Rule } from "@/lib/access-api";
 import { Link } from "../link";
 import { btn, Connecting, CopyButton, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 import { Builder } from "./builder";
@@ -23,7 +23,9 @@ export function NewToken() {
   useEffect(() => {
     accessApi
       .catalog()
-      .then((c) => {
+      .then(async (c) => {
+        const me = await accessApi.me().catch(() => null);
+        c = catalogFor(c, me);
         setCatalog(c);
         const start = c.presets.find((p) => p.id === "read-only") ?? c.presets[0];
         if (start) setRules(presetRules(start));

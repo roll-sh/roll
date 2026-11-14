@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { denyRedirect, draftOf, expiringSoon, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, withToolsets, approvableTogether, byConcern, type Approval, type Preset } from "./access-api";
+import { approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, withToolsets, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -41,6 +41,13 @@ describe("tokens", () => {
 });
 
 describe("the builder", () => {
+  it("offers a signed-in user only the products their account reaches", () => {
+    const c = { products: ["workspace", "postgres", "code", "agents"], actions: [], presets, routes: [], operator_only: [], api_url: "" };
+    const user = { kind: "user" as const, user: { id: "usr_a", handle: "a" }, reach: ["code", "agents", "workspace"], locked: true };
+    expect(catalogFor(c, user).products).toEqual(["workspace", "code", "agents"]);
+    expect(catalogFor(c, { kind: "operator", locked: true }).products).toEqual(c.products);
+  });
+
   it("keeps a product narrowed to some resources, next to the others' place", () => {
     const d = { matrix: { postgres: { read: "allow" as const }, redis: { write: "allow" as const } }, project: "prj_a", environments: [], ids: { redis: ["db_1", "db_2"] } };
     const rules = rulesOf(d);
@@ -75,6 +82,7 @@ describe("toolsets", () => {
   it("narrows the MCP URL to the products picked, and leaves it whole for none", () => {
     expect(withToolsets("https://api.roll.sh/v1/mcp", ["redis", "postgres"])).toBe("https://api.roll.sh/v1/mcp?toolsets=postgres,redis");
     expect(withToolsets("https://api.roll.sh/v1/mcp", [])).toBe("https://api.roll.sh/v1/mcp");
+    expect(withToolsets("https://api.roll.sh/v1/mcp", ["postgres"], true)).toBe("https://api.roll.sh/v1/mcp?toolsets=postgres&readonly=1");
   });
 });
 

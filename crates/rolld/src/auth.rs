@@ -30,6 +30,11 @@ pub const RULES: &[Rule] = &[
     // roll's MCP server answers 401 itself, naming the OAuth metadata; grants are decided by the
     // evaluator before it, and each tool call goes through the gate again.
     Rule { route: "/v1/mcp", access: Access::Product("MCP: 401 with OAuth discovery without a token") },
+    // Scoped tokens: the operator's, and each signed-in user's own (the routes check which).
+    Rule { route: "/v1/access", access: Access::User("access: a user's own tokens, approvals and audit") },
+    // …except where approvals are posted and where the audit log streams: the operator's.
+    Rule { route: "/v1/access/notify", access: Access::Operator },
+    Rule { route: "/v1/access/audit/sinks", access: Access::Operator },
     // Health: load balancers and the dashboard's status; nothing a tenant owns.
     Rule { route: "/v1/health", access: Access::Public("health: Postgres control plane version and status") },
     Rule { route: "/v1/code/health", access: Access::Public("health: load balancers") },
@@ -61,6 +66,16 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/storage/console/signin", access: Access::Public("storage sign-in: checks the IAM user's password and MFA") },
     Rule { route: "/v1/storage/console/session", access: Access::Product("storage: who a console session is, for that session's token only") },
     Rule { route: "/v1/storage", access: Access::Credential("a storage console session") },
+    // roll secrets: the operator, a signed-in person on their own projects, or a roll token with
+    // a rule on a project's environments and folders, checked on every request (docs/secrets.md,
+    // "Access").
+    Rule { route: "/v1/secrets", access: Access::UserOrCredential("a roll token (rlt_…), decided by roll-access") },
+    // The deployment key's state is about the whole server: never a person's session.
+    Rule { route: "/v1/secrets/health", access: Access::Credential("a roll token (rlt_…); the operator's answer") },
+    // A one-time share's link: the value is encrypted with a key only the link holds, and opens
+    // a few times at most (docs/secrets.md, "Sharing a value once").
+    Rule { route: "/v1/secrets/shares", access: Access::Public("a one-time share's link: ciphertext only, the key stays in the link") },
+    Rule { route: "/v1/secrets/login", access: Access::Public("a workload's OIDC token is the credential (workload identities)") },
     // Tasks: its own token (ROLL_TASKS_TOKEN) and API keys.
     Rule { route: "/v1/tasks", access: Access::Credential("a tasks token or API key") },
     // Hosted tenants (`/t/<tenant>/v1/tasks`) take only their own API keys; the tasks token
@@ -150,6 +165,7 @@ impl Auth {
     /// route with its access at debug (`RUST_LOG=rolld::auth=debug`).
     pub fn gate(&self, host: &str, router: axum::Router) -> axum::Router {
         let routes = route_patterns(&router);
+        let methods = route_methods(&router);
         let (mut public, mut product, mut credential, mut user, mut operator) = (0, 0, 0, 0, 0);
         for r in &routes {
             let access = self.gate.access(r);
@@ -157,11 +173,12 @@ impl Auth {
                 Access::Public(_) => public += 1,
                 Access::Product(_) => product += 1,
                 Access::Credential(_) => credential += 1,
-                Access::User(_) => user += 1,
+                Access::User(_) | Access::UserOrCredential(_) => user += 1,
                 Access::Operator => operator += 1,
             }
             let scoped = roll_access::catalog::classified(r).unwrap_or("none");
-            debug!(target: "rolld::auth", host = %host, route = %r, scoped = %scoped, access = %access, "route");
+            let m = methods.iter().find(|(p, _)| p == r).map_or("*", |(_, m)| m.as_str());
+            debug!(target: "rolld::auth", host = %host, route = %r, scoped = %scoped, access = %access, methods = %m, "route");
         }
         info!(host = %host, routes = routes.len(), operator, operator_or_credential = credential, user, product, public, "control-plane routes");
         router.layer(axum::middleware::from_fn_with_state(self.gate.clone(), roll_auth::check))
@@ -198,6 +215,42 @@ fn listeners(a: &Args) -> Vec<SocketAddr> {
     l.extend([n.nosql_alternator_https, n.nosql_cql_tls, n.nosql_cql_shard_aware_tls, n.nosql_metrics].into_iter().flatten());
     l.push(a.search.search_http);
     l
+}
+
+/// The methods each route of `router` serves, from its `Debug` (`allow_header: Bytes(b"GET,HEAD")`):
+/// `(pattern, "GET,POST")`, without `HEAD` (GET's); `*` where it can't tell (a nested service).
+pub fn route_methods(router: &axum::Router) -> Vec<(String, String)> {
+    let text = format!("{router:?}");
+    let routes = text.split("fallback_router:").next().unwrap_or_default();
+    let (routes, paths) = routes.split_once("node: Node { paths:").unwrap_or((routes, ""));
+    let mut allow: Vec<(String, String)> = Vec::new();
+    let mut rest = routes;
+    while let Some(i) = rest.find("RouteId(") {
+        rest = &rest[i + "RouteId(".len()..];
+        let id: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        // This route's entry runs to the next `RouteId(`.
+        let entry = rest.find("RouteId(").map_or(rest, |j| &rest[..j]);
+        let methods = entry
+            .split_once("allow_header: Bytes(b\"")
+            .and_then(|(_, a)| a.split_once('"'))
+            .map(|(a, _)| a.split(',').filter(|m| *m != "HEAD" && !m.is_empty()).collect::<Vec<_>>().join(","))
+            .unwrap_or_else(|| "*".into());
+        allow.push((id, methods));
+    }
+    let mut out = Vec::new();
+    let mut rest = paths;
+    while let Some(i) = rest.find("RouteId(") {
+        rest = &rest[i + "RouteId(".len()..];
+        let id: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        let Some(after) = rest.trim_start_matches(|c: char| c.is_ascii_digit()).strip_prefix("): \"") else { continue };
+        let Some(end) = after.find('"') else { break };
+        let path = &after[..end];
+        if path.starts_with('/') && !path.contains("__private__") {
+            let m = allow.iter().find(|(a, _)| *a == id).map_or("*".to_string(), |(_, m)| if m.is_empty() { "*".into() } else { m.clone() });
+            out.push((path.to_string(), m));
+        }
+    }
+    out
 }
 
 /// The route patterns of `router` (axum has no API for them; its `Debug` lists them).

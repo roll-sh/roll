@@ -462,7 +462,7 @@ impl Code {
 
     /// The paths `head` changes relative to its merge base (everything it adds on a branch
     /// with no common history).
-    fn changed_paths(&self, r: &RepoRow, mb: Option<&ChangesetId>, head: &ChangesetId) -> Result<Vec<code_store::FileDiff>> {
+    pub(crate) fn changed_paths(&self, r: &RepoRow, mb: Option<&ChangesetId>, head: &ChangesetId) -> Result<Vec<code_store::FileDiff>> {
         Ok(match mb {
             Some(mb) => self.store.compare(&r.id, mb, head)?,
             None => {

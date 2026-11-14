@@ -6,7 +6,7 @@ use crate::config::{CheckSpec, FILE, RollToml};
 use crate::docker::{self, Tail};
 use crate::isolation::{Isolation, Job, Kind};
 use async_trait::async_trait;
-use code_control::Runner;
+use code_control::{Runner, SecretEnv};
 use code_control::db::now;
 use code_control::model::{Change, Check, CheckStatus, RepoRow};
 use parking_lot::Mutex;
@@ -23,12 +23,19 @@ const SUMMARY_BYTES: usize = 3500;
 pub struct CheckRunner {
     isolation: Arc<dyn Isolation>,
     slots: Semaphore,
+    secrets: Option<Arc<dyn SecretEnv>>,
 }
 
 impl CheckRunner {
     /// `concurrency`: checks running at once from this node (each gets its own memory limit).
     pub fn new(isolation: Arc<dyn Isolation>, concurrency: usize) -> CheckRunner {
-        CheckRunner { isolation, slots: Semaphore::new(concurrency.max(1)) }
+        CheckRunner { isolation, slots: Semaphore::new(concurrency.max(1)), secrets: None }
+    }
+
+    /// roll secrets, for checks that name an environment (`secrets = "development"`).
+    pub fn with_secrets(mut self, s: Arc<dyn SecretEnv>) -> CheckRunner {
+        self.secrets = Some(s);
+        self
     }
 }
 
@@ -76,6 +83,28 @@ impl Runner for CheckRunner {
             return Ok(finished(&check.name, CheckStatus::Skipped, format!("{FILE} no longer declares this check"), now()));
         };
         let _slot = self.slots.acquire().await?;
+        // An environment's secrets go under roll.toml's own env, which wins.
+        let mut spec = spec;
+        let mut masks: Vec<String> = vec![];
+        if let Some(environment) = &spec.secrets {
+            let consumer = format!("check:{}#{}", repo.full_name(), check.name);
+            let got = match &self.secrets {
+                Some(s) => s.for_repo(&repo.full_name(), environment, &consumer).await,
+                None => Err(anyhow::anyhow!("roll secrets isn't on this server")),
+            };
+            match got {
+                Ok(values) => {
+                    for (k, v) in values {
+                        // Short values would mask ordinary words.
+                        if v.len() >= 6 {
+                            masks.push(v.clone());
+                        }
+                        spec.env.entry(k).or_insert(v);
+                    }
+                }
+                Err(e) => return Ok(finished(&check.name, CheckStatus::Failure, format!("couldn't get the secrets of {environment}: {e}"), now())),
+            }
+        }
         let mut env = vec![
             ("CI".to_string(), "true".to_string()),
             ("ROLL_REPO".into(), repo.full_name()),
@@ -93,9 +122,24 @@ impl Runner for CheckRunner {
             Outcome::TimedOut => (CheckStatus::Failure, format!("timed out after {}", secs(spec.timeout))),
             Outcome::Error(e) => (CheckStatus::Failure, format!("couldn't run: {e}")),
         };
-        let summary = if out.log.is_empty() { line } else { format!("{line}\n\n{}", out.log) };
+        let log = mask(&out.log, &masks);
+        let summary = if log.is_empty() { line } else { format!("{line}\n\n{log}") };
         Ok(finished(&check.name, status, summary, started))
     }
+}
+
+/// `log` with every secret value replaced by `***`: a check's output is stored as its summary.
+/// Longest first, so a value inside another is still masked whole.
+pub fn mask(log: &str, values: &[String]) -> String {
+    let mut values: Vec<&String> = values.iter().collect();
+    values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    let mut out = log.to_string();
+    for v in values {
+        for line in v.lines().filter(|l| l.trim().len() >= 6) {
+            out = out.replace(line, "***");
+        }
+    }
+    out
 }
 
 fn secs(d: Duration) -> String {
@@ -162,4 +206,14 @@ fn late_remove(isolation: &Arc<dyn Isolation>, name: String) {
         tokio::time::sleep(Duration::from_secs(60)).await;
         isolation.remove(&name).await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn secret_values_are_masked_in_a_checks_summary() {
+        let secrets = ["sk_live_abcdef".to_string(), "-----BEGIN KEY-----\nMIIBOgIBAAJBAKj34GkxFhD9\n-----END KEY-----".to_string(), "abc".to_string()];
+        let log = "key sk_live_abcdef\nMIIBOgIBAAJBAKj34GkxFhD9\nabc is fine";
+        assert_eq!(super::mask(log, &secrets), "key ***\n***\nabc is fine");
+    }
 }

@@ -10,16 +10,19 @@ export const ACTIONS = ["read", "write", "delete", "reveal", "deploy", "admin"] 
 export type Action = (typeof ACTIONS)[number];
 export type Effect = "allow" | "ask";
 
-/** `index`: only some indices of it (search: `logs-*`, `a,b`). */
+/** `index`: only some named parts of it (search's indices, `logs-*,a`; secrets' encryption keys). */
 export type Selector = { project: string } | { id: string; index?: string };
 
+/** What a product's resources narrow to by name (`{id, index}`), as roll-auth's `sub_resources`. */
+export const SUB_RESOURCES: Record<string, string> = { search: "indices", secrets: "encryption keys" };
+
 /**
- * A selector as the builder writes it: an id, or for search `cluster/indices` (`cl_1/logs-*`;
- * neither a cluster id nor an index name has a `/`).
+ * A selector as the builder writes it: an id, or `id/names` where the product has named parts
+ * (`cl_1/logs-*`, `prj_1/payments`; neither an id nor such a name has a `/`).
  */
 export const selectorText = (s: { id: string; index?: string }): string => (s.index ? `${s.id}/${s.index}` : s.id);
 export function selectorOf(product: string, text: string): { id: string; index?: string } {
-  const at = product === "search" ? text.indexOf("/") : -1;
+  const at = SUB_RESOURCES[product] ? text.indexOf("/") : -1;
   return at > 0 && at < text.length - 1 ? { id: text.slice(0, at), index: text.slice(at + 1) } : { id: text };
 }
 
@@ -42,10 +45,19 @@ export interface OAuthClient {
   last_used_at: number | null;
 }
 
+/** A token's MCP offer: its tools, its prompts and what the list costs an agent's context. */
+export interface AgentSees {
+  tools: { name: string; title: string; product: string; read_only: boolean; destructive: boolean }[];
+  prompts: { name: string; title: string; description: string }[];
+  context_tokens?: number;
+  live: boolean;
+}
+
 export interface Grant {
   id: string;
   name: string;
-  kind: "token" | "oauth";
+  /** `workload`: a short-lived token a workload got by proving who it is (roll secrets' identity logins). */
+  kind: "token" | "oauth" | "workload";
   rules: Rule[];
   expires_at: number | null;
   ip_allow: string[];
@@ -56,7 +68,7 @@ export interface Grant {
   last_used_ip: string | null;
   revoked_at: number | null;
   client?: OAuthClient;
-  /** Requests a minute it may make (per node); absent: no limit. */
+  /** Requests a minute it may make, across the fleet (each node enforces its share); absent: no limit. */
   rate_per_minute?: number;
   /** Why roll revoked it (a leaked secret: "found in acme/site .env at …"). */
   revoked_why?: string;
@@ -220,7 +232,17 @@ export interface Catalog {
   api_url: string;
 }
 
-export type Me = { kind: "operator"; locked: boolean } | { kind: "token" | "oauth"; grant: Grant; locked: boolean };
+export type Me =
+  | { kind: "operator"; locked: boolean }
+  | { kind: "token" | "oauth"; grant: Grant; locked: boolean }
+  /** A signed-in user who isn't an admin: their tokens act as them and reach only `reach`. */
+  | { kind: "user"; user: { id: string; handle: string }; reach: string[]; locked: boolean };
+
+/** The catalogue as `me` may use it: a user's tokens reach only what their account does. */
+export function catalogFor(c: Catalog, me: Me | null): Catalog {
+  if (me?.kind !== "user") return c;
+  return { ...c, products: c.products.filter((p) => me.reach.includes(p)) };
+}
 
 export interface Policy {
   max_days?: number | null;
@@ -290,6 +312,8 @@ export const accessApi = {
   me: () => call<Me>("GET", "/v1/access"),
   catalog: () => call<Catalog>("GET", "/v1/access/catalog"),
   tokens: () => call<Grant[]>("GET", "/v1/access/tokens"),
+  /** The latest workload tokens (they're not in `tokens`). */
+  workloads: () => call<Grant[]>("GET", "/v1/access/tokens?kind=workload"),
   token: (id: string) => call<Grant>("GET", token(id)),
   /** The token is in the answer this once. */
   create: (g: NewGrant) => call<{ grant: Grant; token: string }>("POST", "/v1/access/tokens", g),
@@ -299,6 +323,8 @@ export const accessApi = {
   checkup: () => call<Checkup[]>("GET", "/v1/access/checkup"),
   /** The networks it's been used from (/24s and /48s), newest first. */
   networks: (id: string) => call<{ network: string; first_at: number; last_at: number }[]>("GET", `${token(id)}/networks`),
+  /** What an agent connected with this token is offered over MCP (`tools/list`, `prompts/list`). */
+  agentSees: (id: string) => call<AgentSees>("GET", `${token(id)}/tools`),
   /** Take back what an approval allowed it for a while (and the approval, if unused). */
   forget: (id: string, approval: string) => call<Grant>("DELETE", `${token(id)}/temporary/${encodeURIComponent(approval)}`),
   /** Its rules narrowed to what its allowed requests used in the last `days` (never wider): a proposal. */
@@ -320,9 +346,9 @@ export const accessApi = {
   approve: (id: string, remember?: Remember) => call<Approval>("POST", `${approval(id)}/approve`, remember && remember !== "once" ? { remember } : {}),
   deny: (id: string, reason?: string) => call<Approval>("POST", `${approval(id)}/deny`, { reason }),
   audit: (f: AuditFilter = {}) => call<AuditEvent[]>("GET", `/v1/access/audit${query(f)}`),
-  /** The log as JSON lines (one event per line), for a download. */
-  auditExport: async (f: AuditFilter = {}) => {
-    const res = await fetch(`${ROLL_API}/v1/access/audit${query({ ...f, format: "jsonl" })}`, { headers: apiHeaders(), cache: "no-store" });
+  /** The log as CSV (a spreadsheet) or JSON lines (a log tool), for a download. */
+  auditExport: async (f: AuditFilter = {}, format: "csv" | "jsonl" = "csv") => {
+    const res = await fetch(`${ROLL_API}/v1/access/audit${query({ ...f, format })}`, { headers: apiHeaders(), cache: "no-store" });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     return res.blob();
   },
@@ -341,6 +367,8 @@ export const accessApi = {
   authorize: (c: Consent) => call<{ redirect: string }>("POST", "/v1/access/oauth/authorize", c),
   /** A search cluster's indices by name (search's own route; it wakes the cluster), for the builder. */
   searchIndices: (cluster: string) => call<{ index: string }[]>("GET", `/v1/search/clusters/${encodeURIComponent(cluster)}/indices`),
+  /** A secrets project's encryption keys by name (secrets' own route), for the builder. */
+  encryptionKeys: (project: string) => call<{ name: string }[]>("GET", `/v1/secrets/projects/${encodeURIComponent(project)}/transit`),
 };
 
 // ── pure helpers (tested in access-api.test.ts) ──
@@ -394,7 +422,7 @@ export function describeRule(r: Rule, projectName: (id: string) => string = (id)
     r.resources === "*"
       ? "all resources"
       : r.resources
-          .map((s) => ("project" in s ? `project ${projectName(s.project)}` : s.index ? `${resourceName(r.product, s.id)} indices ${s.index}` : resourceName(r.product, s.id)))
+          .map((s) => ("project" in s ? `project ${projectName(s.project)}` : s.index ? `${resourceName(r.product, s.id)} ${SUB_RESOURCES[r.product] ?? "parts"} ${s.index}` : resourceName(r.product, s.id)))
           .join(", ");
   const parts = [productName(r.product), actions.join(", ") || "nothing", where];
   if (r.environments?.length) parts.push(r.environments.join(", "));
@@ -472,10 +500,12 @@ export const mcpUrl = (api: string = ROLL_API) => `${api.replace(/\/+$/, "")}/v1
 
 /** How to connect a client: OAuth by default (no secret in the config), a bearer token with one. */
 /** The MCP URL listing only these products' tools (`?toolsets=`); none: every product's. */
-export function withToolsets(url: string, products: string[]): string {
-  if (products.length === 0) return url;
+export function withToolsets(url: string, products: string[], readonly = false): string {
+  if (products.length === 0 && !readonly) return url;
   const u = new URL(url);
-  u.searchParams.set("toolsets", [...products].sort().join(","));
+  if (products.length > 0) u.searchParams.set("toolsets", [...products].sort().join(","));
+  // Read-only: the server lists and runs only read-only tools (the token's rules still decide).
+  if (readonly) u.searchParams.set("readonly", "1");
   return u.toString().replace(/%2C/g, ",");
 }
 

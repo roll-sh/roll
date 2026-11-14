@@ -32,6 +32,7 @@ mod search;
 mod storage_events;
 mod streams;
 mod tasks;
+mod secrets;
 mod workspace;
 
 use products::{Product, Products};
@@ -380,11 +381,13 @@ async fn run() -> anyhow::Result<()> {
         true => Some(redis::Redis::start(&args, &storage, redis::Redis::clustered(&args)).await?),
         false => None,
     };
-    // roll code: same object storage; previews branch roll Postgres and Redis.
+    // roll code: same object storage; previews branch roll Postgres and Redis; checks and
+    // sandboxes read roll secrets once it's open (below).
+    let code_secrets = secrets::ForCode::default();
     let code = match on.on(Product::Code) {
         true => {
             let data = code_preview::RollData { postgres: postgres.as_ref().map(|p| p.control.clone()), redis: redis.as_ref().map(|r| r.control.clone()) };
-            Some(start_code(&args, &auth, &home, &storage, std::sync::Arc::new(data)).await?)
+            Some(start_code(&args, &auth, &home, &storage, std::sync::Arc::new(data), code_secrets.clone()).await?)
         }
         false => None,
     };
@@ -505,9 +508,11 @@ async fn run() -> anyhow::Result<()> {
     // Accounts and sign-in: always on; the gate resolves their session cookies. (Before the
     // evaluator joins the gate: setting sessions makes the gate anew.)
     let accounts = accounts::open(&args, &home, code.as_ref().map(|c| c.code.clone()), !auth.enforcing()).await?;
-    auth.sessions(accounts.sessions(), &accounts.config().api_url);
-    router = router.merge(roll_accounts::router(accounts));
+    let sessions = accounts.sessions();
+    auth.sessions(sessions.clone(), &accounts.config().api_url);
+    router = router.merge(roll_accounts::router(accounts.clone()));
     // Scoped tokens, approvals, audit and OAuth (access.rs): the evaluator joins the gate.
+    let secrets_envs = access::SecretsEnvs::default();
     let access = access::open(
         &args,
         &home,
@@ -518,12 +523,34 @@ async fn run() -> anyhow::Result<()> {
             nosql: nosql.as_ref().map(|n| n.control.clone()),
             streams: streams.as_ref().map(|s| s.broker.clone()),
             code: code.as_ref().map(|c| &c.code),
+            secrets: secrets_envs.clone(),
             search: search.as_ref().map(|s| s.control.clone()),
             apps: apps.as_ref().map(|a| a.apps.clone()),
         },
-        workspace,
+        workspace.clone(),
     )?;
     router = router.merge(roll_access::api::router(access.clone()));
+    // Users' own tokens act as them, as they are now (docs/permissions.md, "Users' own tokens").
+    let _ = access.people.set(sessions);
+    // A grant's rate is shared among the nodes serving requests (each enforces its share).
+    let nodes = cluster.clone();
+    let _ = access.nodes.set(Box::new(move || nodes.nodes().len()));
+    // roll secrets: always on. Its links call the products' routes in process, through the copy
+    // taken below: every product's router merges above this line, or its links 404.
+    // People's accounts: what a person made acts while they can sign in, and a person's canvas
+    // stands only for what's theirs (roll_workspace::Workspace::trusts, asked by every consumer).
+    let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()) };
+    workspace.set_owners(std::sync::Arc::new(people.clone()));
+    // Its tokens are roll-access's: grants for syncs a token made, workload tokens for identities.
+    let products_api = secrets::Api::default();
+    let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), access.clone(), people)?;
+    code_secrets.set(secrets.clone(), workspace.clone());
+    let _ = secrets_envs.0.set(secrets.clone());
+    if let Some(c) = &code {
+        secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
+    }
+    router = router.merge(roll_secrets::router(secrets));
+    products_api.set(router.clone());
     // apps' deploy hooks found leaked (`rlk_`) stop working, like tokens.
     if let Some(a) = &apps {
         let apps = a.apps.clone();
@@ -542,6 +569,8 @@ async fn run() -> anyhow::Result<()> {
     if on.on(Product::Code) {
         mcp_products.push("agents".into());
     }
+    // roll secrets is always on (no ROLL_PRODUCTS switch): its tools always show.
+    mcp_products.push("secrets".into());
     let tool_sets: Vec<std::sync::Arc<dyn roll_mcp::ToolSet>> = match &code {
         Some(_) => vec![std::sync::Arc::new(access::CodeTools)],
         None => Vec::new(),
@@ -817,6 +846,7 @@ async fn start_code(
     home: &std::path::Path,
     storage: &StorageConfig,
     data: std::sync::Arc<dyn code_preview::DataBranches>,
+    secrets: secrets::ForCode,
 ) -> anyhow::Result<CodeNode> {
     // Blobs are fsynced before a write returns (a local directory; S3 always is durable).
     let objects = pg_storage::Objects::new_durable(storage)?;
@@ -891,7 +921,8 @@ async fn start_code(
         Some(data),
         isolation.clone(),
     );
-    let runner = code_preview::CheckRunner::new(isolation.clone(), args.code_runner_concurrency);
+    let runner = code_preview::CheckRunner::new(isolation.clone(), args.code_runner_concurrency).with_secrets(std::sync::Arc::new(secrets.clone()));
+    code.set_secret_env(std::sync::Arc::new(secrets));
     let checks = code_preview::start(&code, std::sync::Arc::new(runner), previews.clone());
     Ok(CodeNode { code, previews, isolation, _checks: checks })
 }

@@ -128,9 +128,11 @@ async fn every_control_plane_route_needs_the_operator_token() {
     let routes = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
     // And how the permission catalogue classifies it for scoped tokens: `scoped=postgres`.
     let scoped = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
+    // And the methods each serves: `methods=GET,POST` (`*`: a nested service).
+    let methods = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
     let output = Arc::new(Mutex::new(String::new()));
     for pipe in [Box::new(child.stdout.take().unwrap()) as Box<dyn std::io::Read + Send>, Box::new(child.stderr.take().unwrap())] {
-        let (routes, scoped, output) = (routes.clone(), scoped.clone(), output.clone());
+        let (routes, scoped, methods, output) = (routes.clone(), scoped.clone(), methods.clone(), output.clone());
         std::thread::spawn(move || {
             for line in BufReader::new(pipe).lines().map_while(Result::ok) {
                 if line.contains("rolld::auth")
@@ -139,6 +141,8 @@ async fn every_control_plane_route_needs_the_operator_token() {
                     && let Some((route, rest)) = rest.split_once(" scoped=")
                     && let Some((class, access)) = rest.split_once(" access=")
                 {
+                    let (access, served) = access.split_once(" methods=").unwrap_or((access, "*"));
+                    methods.lock().unwrap().push((host.to_string(), route.to_string(), served.trim().to_string()));
                     routes.lock().unwrap().push((host.to_string(), route.to_string(), access.trim().to_string()));
                     scoped.lock().unwrap().push((host.to_string(), route.to_string(), class.trim().to_string()));
                 }
@@ -220,7 +224,7 @@ async fn every_control_plane_route_needs_the_operator_token() {
             protected += 1;
             // A product's own credential gets past the gate: a wrong one must not get further
             // than the route's method (a GET on a POST route is a 405 either way).
-            let credential = access.starts_with("operator or");
+            let credential = access.starts_with("operator or") || access.starts_with("user or");
             for (who, auth) in [("no token", None), ("a wrong token", Some("Bearer not-the-token")), ("Basic", Some("Basic eDp5"))] {
                 let status = send(via, host.clone(), path.clone(), auth.map(str::to_string)).await;
                 if status != 401 && !(credential && auth.is_some() && status == 405) {
@@ -246,7 +250,7 @@ async fn every_control_plane_route_needs_the_operator_token() {
             Err(e) if e.is_timeout() => 0,
             Err(e) => panic!("GET {path}: {e}"),
         };
-        let fine = if access.starts_with("user:") { status != 401 && status != 403 } else { status == 403 };
+        let fine = if access.starts_with("user:") || access.starts_with("user or") { status != 401 && status != 403 } else { status == 403 };
         if !fine {
             wrong.push(format!("{host} {route} ({access}): {status} with a user's session"));
         }
@@ -276,11 +280,33 @@ async fn every_control_plane_route_needs_the_operator_token() {
     };
     let token = minted["token"].as_str().expect("a token").to_string();
     assert_eq!(as_token(token.clone()).await, "owner");
+    // A scoped roll token the person makes is theirs (docs/permissions.md, "Users' own tokens"):
+    // roll code sees them, an operator's route stays shut whatever its rules say, and it stops
+    // with their account.
+    let mine: serde_json::Value = http
+        .post(format!("{api}/v1/access/tokens"))
+        .header("cookie", &cookie)
+        .header("origin", DASHBOARD)
+        .header("x-roll-csrf", session["csrf"].as_str().unwrap())
+        .json(&serde_json::json!({ "name": "cursor", "rules": [{ "product": "*", "resources": "*", "actions": { "read": "allow" } }] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let adas = mine["token"].as_str().unwrap_or_else(|| panic!("{mine}")).to_string();
+    let as_ada: serde_json::Value = http.get(format!("{api}/v1/code")).bearer_auth(&adas).send().await.unwrap().json().await.unwrap();
+    assert_eq!((as_ada["auth"]["caller"]["kind"].as_str(), as_ada["auth"]["caller"]["owner"].as_str()), (Some("owner"), Some("ada")), "{as_ada}");
+    let projects = http.get(format!("{api}/v1/workspace/projects")).bearer_auth(&adas).send().await.unwrap().status();
+    let operators = http.get(format!("{api}/v1/redis/databases")).bearer_auth(&adas).send().await.unwrap().status();
+    assert!(projects.is_success() && operators == 403, "projects {projects}, redis {operators}");
     let users: serde_json::Value = http.get(format!("{api}/v1/accounts/users")).header("authorization", &operator).send().await.unwrap().json().await.unwrap();
     let ada = users.as_array().unwrap().iter().find(|u| u["handle"] == "ada").unwrap()["id"].as_str().unwrap().to_string();
     let off = http.patch(format!("{api}/v1/accounts/users/{ada}")).header("authorization", &operator).json(&serde_json::json!({ "disabled": true })).send().await.unwrap();
     assert_eq!(off.status(), 200);
     assert_ne!(as_token(token).await, "owner", "a disabled account's roll code token still works");
+    assert_eq!(http.get(format!("{api}/v1/code")).bearer_auth(&adas).send().await.unwrap().status(), 401, "a disabled account's scoped token still works");
 
     // `/v1/info` answers before the gate: the dashboard's sidebar reads it before sign-in.
     assert_eq!(send("internal", "api".into(), "/v1/info".into(), None).await, 200);
@@ -307,9 +333,12 @@ async fn every_control_plane_route_needs_the_operator_token() {
         ("/v1/code/agents/shares/{id}", "public shares"),
         ("/v1/code/mcp", "roll code's own MCP server: grants use /v1/mcp"),
         ("/v1/code/review-apps", "review apps: their own tokens"),
+        ("/v1/apps/hooks", "apps' deploy hooks: the secret in the URL"),
         ("/v1/code/names", "public name lookups"),
         ("/v1/apps/hooks", "deploy hooks: the secret in the URL"),
         ("/v1/accounts", "people's accounts: sign-in, sessions and invites are a person's, never a token's"),
+        ("/v1/secrets/shares/{id}", "a one-time share: the link's key is the credential"),
+        ("/v1/secrets/login", "workload identities: the workload's OIDC token is the credential"),
     ];
     let unscoped: Vec<_> = scoped
         .lock()
@@ -319,6 +348,28 @@ async fn every_control_plane_route_needs_the_operator_token() {
         .map(|(_, r, _)| r.clone())
         .collect();
     assert!(unscoped.is_empty(), "routes no scoped token can be classified for (add catalogue rows in roll-access): {unscoped:#?}");
+    // A method a prefix row decides (no row of the route's own names it) takes the prefix's action,
+    // whatever it answers: each was looked at, and a new one is (a GET that answers values is
+    // reveal; the env of a preview was read until it was). Public routes aren't a grant's.
+    let public: Vec<String> = routes.iter().filter(|(h, _, a)| h == "api" && a.starts_with("public:")).map(|(_, r, _)| r.clone()).collect();
+    let mut unreviewed: Vec<String> = Vec::new();
+    for (h, r, served) in methods.lock().unwrap().iter() {
+        if h != "api" || public.contains(r) {
+            continue;
+        }
+        let list: Vec<&str> = if served == "*" { vec!["GET", "POST", "PUT", "PATCH", "DELETE"] } else { served.split(',').collect() };
+        for m in list {
+            if roll_access::catalog::method_by_prefix(m, r) && !roll_access::catalog::prefix_reviewed(m, r) {
+                unreviewed.push(format!("{m} {r}"));
+            }
+        }
+    }
+    unreviewed.sort();
+    unreviewed.dedup();
+    assert!(
+        unreviewed.is_empty(),
+        "methods decided only by a prefix row that nobody looked at: give each its own catalogue row (a GET whose answer holds a credential is reveal; changing what production runs is deploy), or add its `METHOD route` line to crates/roll-access/src/prefix-reviewed.txt: {unreviewed:#?}"
+    );
     // A token with every action on everything works where the operator's does.
     let made: serde_json::Value = http
         .post(format!("{api}/v1/access/tokens"))

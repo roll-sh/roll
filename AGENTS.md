@@ -282,7 +282,11 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     second resource inside one request). Don't build a second permission system.
   - Every route rolld serves needs a row in `roll-access/src/catalog.rs` (one action on one
     product, how to find its resource, which answer fields are credentials) or a reason to stay the
-    operator's; `rolld/tests/auth.rs` fails otherwise. A new product adds its name to
+    operator's; `rolld/tests/auth.rs` fails otherwise. A route a prefix row decides (no row of its
+    own) takes the prefix's action by method whatever it answers, so it's either given its own row
+    (a GET that answers a credential is reveal) or listed in `roll-access/src/prefix-reviewed.txt`
+    once looked at, as `METHOD route` (per method: a route with its own `GET` row can gain a `PUT`
+    a prefix decides); the same test fails otherwise. A new product adds its name to
     `scope::PRODUCTS`, its rows, and a resolver in `rolld/src/access.rs` when its ids aren't in the
     path (or take names).
   - Grant secrets carry a checksum (`roll_access::checksum_ok`); a leaked one is revoked, never
@@ -329,6 +333,40 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   `Operator`). A product that serves users reads `SignedIn`; everything else stays operator-only
   (403 for users). Never log or echo a code, token or seed. Tests: `roll-accounts/tests/flows.rs`
   (fake providers, file outbox) and `rolld/tests/auth.rs`.
+- **Secrets (roll secrets: a project's secrets and environment variables):**
+  - The design and the HTTP contract are `docs/secrets.md`; `apps/dashboard/src/lib/secrets-api.ts`
+    is its client (change both together). `crates/roll-secrets` is the store, crypto and router
+    (`/v1/secrets`); `crates/rolld/src/secrets.rs` mounts it and implements the link providers;
+    `roll secrets …` and `roll run` are `crates/roll-cli/src/secrets.rs`.
+  - Values are encrypted with the project's data key, sealed by `ROLL_SECRET_KEY`, and bound to
+    their row (project, secret, version) as associated data. A value never goes in a log, a
+    `Debug`, an error, an audit row, a change's or request's diff, or a command line: `Value`
+    redacts itself, and containers get env values by name (`code-preview/src/docker.rs`).
+  - Only the `reveal` routes return values. Every read of values and every write is audited.
+    Anything that touches a second environment (a reference, an import, a base, a promote's
+    source) checks the caller through `Caller::allows`; checks, sandboxes and previews resolve
+    untrusted (`Secrets::untrusted`, `"untrusted": true`): never a protected environment.
+  - Tokens are roll-access's: a project's token is a grant with one secrets rule made through
+    `POST /v1/access/tokens`, and identities' logins get `workload` grants (`Workloads`). Never
+    add a token store to secrets; it asks the caller's `Grant` (`GrantGrants`).
+  - Signed-in people manage their own projects' secrets (`OwnProjects`; others' projects 404). A
+    canvas proves nothing about who owns what's on it: anything acting on a resource through a
+    project asks `roll_workspace::Workspace::trusts` (secrets' `members`, `counts_for_repo`, roll
+    previews), never membership alone. What a person made (tokens and their tokens, identities,
+    syncs) acts only while they can sign in and still reach the project (`maker_reaches`).
+  - Workload identities (`identities.rs`) log CI in with its own OIDC token: an issuer is a URL a
+    tenant chose, fetched only through rolld's guarded client (`Deliver::get`), and a shared issuer
+    (GitHub, GitLab) needs a subject that names one repo.
+  - roll-secrets knows no product: a resource is linkable through a `LinkProvider` that rolld
+    registers, calling the product's own routes in process. A product's credential is never its
+    shared password when it can issue keys of its own. Issuing and revoking happen outside the
+    database transaction; a write closure only touches the database.
+  - Read-then-writes are one `code_sql` write (SQLite or the system database's `secrets` schema,
+    shared by every node); background work claims each item in a write before acting on it.
+  - Tests: flows in `crates/roll-secrets/tests/api.rs` (also on Postgres with
+    `ROLL_CODE_TEST_DATABASE`), two nodes in `tests/nodes.rs`, the CLI in
+    `crates/roll-cli/tests/secrets.rs`, dashboard logic in `apps/dashboard/src/lib/secrets-*.test.ts`.
+    No test calls a real product or platform: use fake providers.
 - **Agents (roll code agents: the agent harness on a canvas):**
   - The design is in `docs/code/agents.md`. It works like T3 Code (MIT; behavioural reference
     for threads, runs, the execution-node tree, requests, checkpoints, forks, handoffs and
