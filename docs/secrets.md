@@ -619,7 +619,10 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
   too): it's diagnostics, never data. stdout is data as often as a log (`pg_dump > dump.sql`,
   `| gzip`, a dump over ssh), so it's masked only in CI and never into a file: nothing written as
   data is ever changed unasked. `--mask`, or `ROLL_MASK=1` in a pod's or a unit's environment
-  where stdout is the log, masks both streams wherever they go; `--no-mask` neither. A value is
+  where stdout is the log, masks both streams wherever they go; `--no-mask` neither. **Jenkins**
+  writes a step's output to a log file, which roll can't tell from `> dump.sql`: set `ROLL_MASK=1`
+  in the job's environment (`environment { ROLL_MASK = '1' }`), or stdout reaches its log unmasked
+  while stderr is masked. A value is
   matched as it is, its JSON and URL encodings, each line of a multi-line one that has no spaces (a
   PEM key's lines, not a JSON file's `"type": …` lines), and, in a JSON value (a cloud key file,
   minified or not), the fields named as secrets (`private_key`, `client_secret`, not `token_uri`);
