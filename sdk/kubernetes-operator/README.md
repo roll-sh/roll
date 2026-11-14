@@ -21,6 +21,18 @@ spec:
   RollSecret, so deleting the RollSecret deletes them. A Secret of the same name someone else made
   is left alone, and the RollSecret's status says so.
 - Values that don't resolve leave the Secret as it was, and the status names the key.
+- **Each namespace logs in as itself.** Outside the operator's own namespaces
+  (`roll.namespaces`, default the release's), a RollSecret names a service account of its own
+  namespace and an identity for it:
+  ```yaml
+  spec:
+    environment: production
+    serviceAccountName: app      # the operator requests a 10-minute token for apps/app
+    identity: idn_…              # subject system:serviceaccount:apps:app
+  ```
+  So whoever may create a RollSecret in a namespace reaches only what that namespace's
+  identities allow, never the operator's own identity or another team's (as Vault Secrets
+  Operator's per-namespace auth and External Secrets' namespaced stores do).
 
 Install with Helm:
 

@@ -7,6 +7,11 @@ roll:
   tokenSecret:
     name: ""
     key: token
+  # Namespaces whose RollSecrets may use the operator's own login (default: the release's own;
+  # ["*"]: every namespace, for a cluster one team runs). Elsewhere a RollSecret logs in as a
+  # service account of its own namespace (spec.serviceAccountName), so creating a RollSecret
+  # can't reach what the operator's identity reaches.
+  namespaces: []
   # How often environments' digests are checked.
   syncEvery: 30s
 

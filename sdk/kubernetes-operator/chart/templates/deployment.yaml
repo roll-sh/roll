@@ -24,6 +24,7 @@ spec:
           env:
             - { name: ROLL_API_URL, value: {{ .Values.roll.apiUrl | quote }} }
             - { name: ROLL_SYNC_EVERY, value: {{ .Values.roll.syncEvery | quote }} }
+            - { name: ROLL_OPERATOR_NAMESPACES, value: {{ default (list .Release.Namespace) .Values.roll.namespaces | join "," | quote }} }
             {{- if .Values.roll.identity }}
             - { name: ROLL_IDENTITY, value: {{ .Values.roll.identity | quote }} }
             - { name: ROLL_OIDC_TOKEN_FILE, value: /var/run/secrets/roll/token }

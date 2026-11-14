@@ -6,9 +6,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -54,6 +56,28 @@ func kubeFromEnv() (*kube, error) {
 	pool.AppendCertsFromPEM(ca)
 	t := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
 	return &kube{api: "https://" + host + ":" + port, tokenFile: serviceAccount + "/token", http: &http.Client{Timeout: 30 * time.Second, Transport: t}}, nil
+}
+
+// serviceAccountToken is a short-lived token for ns/sa with audience (the TokenRequest API).
+func (k *kube) serviceAccountToken(ctx context.Context, ns, sa, audience string) (string, error) {
+	req := map[string]any{
+		"apiVersion": "authentication.k8s.io/v1",
+		"kind":       "TokenRequest",
+		"spec":       map[string]any{"audiences": []string{audience}, "expirationSeconds": 600},
+	}
+	var out struct {
+		Status struct {
+			Token string `json:"token"`
+		} `json:"status"`
+	}
+	path := "/api/v1/namespaces/" + url.PathEscape(ns) + "/serviceaccounts/" + url.PathEscape(sa) + "/token"
+	if err := k.call(ctx, http.MethodPost, path, "application/json", req, &out); err != nil {
+		return "", err
+	}
+	if out.Status.Token == "" {
+		return "", errors.New("kubernetes: the TokenRequest answered no token")
+	}
+	return out.Status.Token, nil
 }
 
 type kubeError struct {
@@ -151,6 +175,10 @@ type rollSecret struct {
 		SecretName string `json:"secretName"`
 		// The workload identity to log in as (default ROLL_IDENTITY).
 		Identity string `json:"identity"`
+		// A service account in the RollSecret's own namespace to log in as (a token the operator
+		// requests for it), so the identity's subject pins the namespace. Without one, the
+		// operator's own login, only in the namespaces it's given (ROLL_OPERATOR_NAMESPACES).
+		ServiceAccountName string `json:"serviceAccountName"`
 	} `json:"spec"`
 	Status rollStatus `json:"status"`
 }

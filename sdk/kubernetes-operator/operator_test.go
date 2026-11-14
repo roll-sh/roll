@@ -46,6 +46,16 @@ func (f *fakeKube) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(p, "/") // /apis/roll.sh/v1/namespaces/{ns}/rollsecrets/{name}/status
 		f.status[parts[5]+"/"+parts[7]] = b.Status
 		write(200, nil)
+	case strings.HasSuffix(p, "/token") && strings.Contains(p, "/serviceaccounts/") && r.Method == http.MethodPost:
+		// A TokenRequest: the token names the service account it's for and its audience.
+		var b struct {
+			Spec struct {
+				Audiences []string `json:"audiences"`
+			} `json:"spec"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		parts := strings.Split(strings.TrimPrefix(p, "/api/v1/namespaces/"), "/") // {ns}/serviceaccounts/{sa}/token
+		write(200, map[string]any{"status": map[string]string{"token": "sa:" + parts[0] + ":" + parts[2] + ":" + strings.Join(b.Spec.Audiences, ",")}})
 	case strings.HasPrefix(p, "/api/v1/namespaces/"):
 		parts := strings.Split(strings.TrimPrefix(p, "/api/v1/namespaces/"), "/") // {ns}/secrets[/{name}]
 		ns := parts[0]
@@ -89,7 +99,9 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/v1/secrets/login" {
 		var b map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&b)
-		if b["identity"] != "idn_cluster" || b["token"] != "projected-sa-token" {
+		// The cluster's identity takes the operator's own token; team-a's only team-a's app account.
+		ok := b["identity"] == "idn_cluster" && b["token"] == "projected-sa-token" || b["identity"] == "idn_team_a" && strings.HasPrefix(b["token"], "sa:team-a:app:http")
+		if !ok {
 			write(401, map[string]string{"error": "no identity takes this token"})
 			return
 		}
@@ -128,6 +140,7 @@ func TestTheOperatorKeepsItsSecretsInStepAndTouchesNoOtherSecret(t *testing.T) {
 	o := &operator{
 		kube: &kube{api: k8s.URL, token: "sa", http: http.DefaultClient}, api: roll.URL, identity: "idn_cluster",
 		oidc: func() (string, error) { return "projected-sa-token", nil }, now: time.Now, clients: map[string]*secrets.Client{},
+		namespaces: map[string]bool{"apps": true},
 	}
 	ctx := context.Background()
 
@@ -160,5 +173,44 @@ func TestTheOperatorKeepsItsSecretsInStepAndTouchesNoOtherSecret(t *testing.T) {
 	}
 	if got := string(kubeAPI.secrets["apps/web"].Data["DB_URL"]); got != "postgres://db/two" || rolld.logins != 2 {
 		t.Fatalf("after the change: %q, %d logins", got, rolld.logins)
+	}
+}
+
+// Outside the operator's own namespaces a RollSecret logs in as a service account of its own
+// namespace: creating one there can't borrow the operator's login, or another team's identity.
+func TestARollSecretElsewhereLogsInAsItsOwnNamespacesServiceAccount(t *testing.T) {
+	kubeAPI := &fakeKube{secrets: map[string]*secretObj{}, status: map[string]rollStatus{}}
+	add := func(ns, name, sa, identity string) {
+		var rs rollSecret
+		rs.Metadata = meta{Name: name, Namespace: ns, UID: "uid-" + ns + "-" + name, Generation: 1}
+		rs.Spec.Environment, rs.Spec.ServiceAccountName, rs.Spec.Identity = "production", sa, identity
+		kubeAPI.rs = append(kubeAPI.rs, rs)
+	}
+	add("team-a", "web", "app", "idn_team_a")
+	add("team-b", "borrowed", "", "")            // the operator's own login
+	add("team-b", "stolen", "app", "idn_team_a") // team-a's identity, team-b's account
+	rolld := &fakeRolld{digest: "d1", value: "postgres://db/one"}
+	k8s, roll := httptest.NewServer(kubeAPI), httptest.NewServer(rolld)
+	defer k8s.Close()
+	defer roll.Close()
+	o := &operator{
+		kube: &kube{api: k8s.URL, token: "sa", http: http.DefaultClient}, api: roll.URL, identity: "idn_cluster",
+		oidc: func() (string, error) { return "projected-sa-token", nil }, now: time.Now, clients: map[string]*secrets.Client{},
+		namespaces: map[string]bool{"roll-system": true},
+	}
+	if err := o.pass(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if s := kubeAPI.secrets["team-a/web"]; s == nil || string(s.Data["DB_URL"]) != "postgres://db/one" {
+		t.Fatalf("team-a's own account: %+v %+v", s, kubeAPI.status["team-a/web"])
+	}
+	if st := kubeAPI.status["team-b/borrowed"]; !strings.Contains(st.Error, "set spec.serviceAccountName") {
+		t.Fatalf("the operator's login borrowed: %+v", st)
+	}
+	if st := kubeAPI.status["team-b/stolen"]; !strings.Contains(st.Error, "no identity takes this token") {
+		t.Fatalf("another team's identity: %+v", st)
+	}
+	if len(kubeAPI.secrets) != 1 {
+		t.Fatalf("Secrets written: %d", len(kubeAPI.secrets))
 	}
 }

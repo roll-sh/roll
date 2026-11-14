@@ -165,7 +165,10 @@ Two ways, as the best products offer:
   holds no credential for the cluster. It checks the digest every 30 s and reads values only when
   it moved; it writes only Secrets it made (labelled, owned by their RollSecret, so they go with
   it) and leaves a same-named Secret someone else made alone; values that don't resolve leave the
-  Secret as it was. Its status says what happened.
+  Secret as it was. Its status says what happened. Outside the operator's own namespaces a
+  RollSecret logs in as a service account of its own namespace (`spec.serviceAccountName`, a
+  10-minute token the operator requests), so creating a RollSecret never reaches what the
+  operator's identity, or another team's, reaches.
 - **Push (the `kubernetes` sync)**: roll writes a Secret with credentials for the cluster it holds,
   sealed. For clusters roll can reach and the operator can't run in.
 ## Customer-managed keys

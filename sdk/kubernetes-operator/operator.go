@@ -39,40 +39,58 @@ type operator struct {
 	// The workload's own OIDC token (a projected service account token whose audience is the API).
 	oidc func() (string, error)
 	now  func() time.Time
+	// Namespaces whose RollSecrets may use the operator's own login ("*": every one). Elsewhere a
+	// RollSecret logs in as a service account of its own namespace: the operator's login reaches
+	// whatever its identity does, and creating a RollSecret mustn't be a way to it.
+	namespaces map[string]bool
 
 	mu      sync.Mutex
-	clients map[string]*secrets.Client // by identity
+	clients map[string]*secrets.Client // by login (namespace/service account, identity)
 }
 
-// client is a logged-in client for identity, kept until roll refuses it (its token ended).
-func (o *operator) client(ctx context.Context, identity string) (*secrets.Client, error) {
-	if identity == "" && o.token != "" {
+// login is how a RollSecret logs in: as a service account of its namespace, or as the operator.
+type login struct{ namespace, serviceAccount, identity string }
+
+func (l login) key() string { return l.namespace + "/" + l.serviceAccount + "/" + l.identity }
+
+// client is a logged-in client for l, kept until roll refuses it (its token ended).
+func (o *operator) client(ctx context.Context, l login) (*secrets.Client, error) {
+	if l.serviceAccount == "" && !o.namespaces[l.namespace] && !o.namespaces["*"] {
+		return nil, fmt.Errorf("RollSecrets in %s log in as a service account of their own namespace: set spec.serviceAccountName (and spec.identity, an identity whose subject is system:serviceaccount:%s:<name>), or add %s to the operator's namespaces", l.namespace, l.namespace, l.namespace)
+	}
+	if l.serviceAccount == "" && l.identity == "" && o.token != "" {
 		return secrets.New(o.api, o.token), nil
 	}
-	if identity == "" {
+	if l.identity == "" {
 		return nil, errors.New("no identity: set spec.identity or ROLL_IDENTITY")
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if c := o.clients[identity]; c != nil {
+	if c := o.clients[l.key()]; c != nil {
 		return c, nil
 	}
-	oidc, err := o.oidc()
+	var oidc string
+	var err error
+	if l.serviceAccount != "" {
+		oidc, err = o.kube.serviceAccountToken(ctx, l.namespace, l.serviceAccount, o.api)
+		if err != nil {
+			return nil, fmt.Errorf("a token for service account %s/%s: %w", l.namespace, l.serviceAccount, err)
+		}
+	} else if oidc, err = o.oidc(); err != nil {
+		return nil, err
+	}
+	c, err := secrets.Login(ctx, o.api, l.identity, oidc)
 	if err != nil {
 		return nil, err
 	}
-	c, err := secrets.Login(ctx, o.api, identity, oidc)
-	if err != nil {
-		return nil, err
-	}
-	o.clients[identity] = c
+	o.clients[l.key()] = c
 	return c, nil
 }
 
-func (o *operator) forget(identity string) {
+func (o *operator) forget(l login) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	delete(o.clients, identity)
+	delete(o.clients, l.key())
 }
 
 func refused(err error) bool {
@@ -105,9 +123,9 @@ func (o *operator) reconcile(ctx context.Context, rs *rollSecret) rollStatus {
 		st.Error = err.Error()
 		return st
 	}
-	identity := rs.Spec.Identity
-	if identity == "" {
-		identity = o.identity
+	l := login{namespace: rs.Metadata.Namespace, serviceAccount: rs.Spec.ServiceAccountName, identity: rs.Spec.Identity}
+	if l.identity == "" && l.serviceAccount == "" {
+		l.identity = o.identity
 	}
 	if rs.Spec.Environment == "" {
 		return fail(errors.New("spec.environment is required"))
@@ -122,7 +140,7 @@ func (o *operator) reconcile(ctx context.Context, rs *rollSecret) rollStatus {
 	var c *secrets.Client
 	var digest string
 	for attempt := 0; ; attempt++ {
-		login, err := o.client(ctx, identity)
+		login, err := o.client(ctx, l)
 		if err != nil {
 			return fail(fmt.Errorf("logging in to roll: %w", err))
 		}
@@ -132,7 +150,7 @@ func (o *operator) reconcile(ctx context.Context, rs *rollSecret) rollStatus {
 		}
 		digest, err = c.Digest(ctx, rs.Spec.Environment, rs.Spec.Path)
 		if refused(err) && attempt == 0 {
-			o.forget(identity) // its short-lived token ended: log in again
+			o.forget(l) // its short-lived token ended: log in again
 			continue
 		}
 		if err != nil {
@@ -231,13 +249,20 @@ func main() {
 			log.Fatalf("ROLL_SYNC_EVERY: %v", err)
 		}
 	}
+	namespaces := map[string]bool{}
+	for _, n := range strings.Split(env("ROLL_OPERATOR_NAMESPACES"), ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			namespaces[n] = true
+		}
+	}
 	o := &operator{
-		kube:     k,
-		api:      env("ROLL_API_URL"),
-		identity: env("ROLL_IDENTITY"),
-		token:    env("ROLL_TOKEN"),
-		now:      time.Now,
-		clients:  map[string]*secrets.Client{},
+		kube:       k,
+		api:        env("ROLL_API_URL"),
+		identity:   env("ROLL_IDENTITY"),
+		token:      env("ROLL_TOKEN"),
+		now:        time.Now,
+		clients:    map[string]*secrets.Client{},
+		namespaces: namespaces,
 		oidc: func() (string, error) {
 			b, err := os.ReadFile(env("ROLL_OIDC_TOKEN_FILE"))
 			return strings.TrimSpace(string(b)), err

@@ -26,6 +26,11 @@ rules:
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get, create, update]
+  # A RollSecret outside the operator's own namespaces logs in as a service account of its own
+  # namespace: a short-lived token for it, with the API's URL as audience.
+  - apiGroups: [""]
+    resources: [serviceaccounts/token]
+    verbs: [create]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -62,6 +67,9 @@ spec:
             - { name: ROLL_API_URL, value: "https://api.roll.example" }
             - { name: ROLL_IDENTITY, value: "idn_…" }
             - { name: ROLL_OIDC_TOKEN_FILE, value: /var/run/secrets/roll/token }
+            # Where RollSecrets may use the operator's own login; elsewhere they log in as a
+            # service account of their own namespace (spec.serviceAccountName). "*": everywhere.
+            - { name: ROLL_OPERATOR_NAMESPACES, value: roll-system }
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
           resources:
             requests: { cpu: 10m, memory: 16Mi }
