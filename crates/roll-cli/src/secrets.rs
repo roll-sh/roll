@@ -2004,6 +2004,8 @@ impl Relogin {
         let mut held = self.held.lock().await;
         if held.token == token {
             held.ends = std::time::Instant::now();
+            // A background login started before this may bring a token revoked with this one.
+            held.generation += 1;
         }
     }
 
