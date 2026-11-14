@@ -1160,7 +1160,10 @@ impl Block {
             return Err(bad());
         }
         Ok(Block {
-            data: raw.slice(..data_len),
+            // (Copied into an allocation of its own size, as `decode_with`'s is: a slice would
+            // keep the restart arrays, copied above, and the file buffer's frame with it, a few
+            // hundred bytes a block: TPC-H's peak +12 to +20 MB.)
+            data: Bytes::copy_from_slice(&raw[..data_len]),
             restarts,
             rvals,
             common,
