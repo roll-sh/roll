@@ -4307,8 +4307,8 @@ mod tests {
     fn format_1_files_read_beside_format_2() {
         let dir = tempfile::tempdir().unwrap();
         let mut expect = std::collections::BTreeMap::new();
-        // (Compactions only when asked.)
-        let opts = || StoreOptions { background: false, ..opts() };
+        // (Compactions only when asked; L1 files of 4 kB, so the "z" range has its own.)
+        let opts = || StoreOptions { background: false, target_file_bytes: 4 << 10, ..opts() };
         let v1 = || StoreOptions { format: 1, ..opts() };
         let mut snaps = Vec::new();
         {
@@ -4325,7 +4325,7 @@ mod tests {
                 }
             }
             // (Keys of another range, compacted alone: L1 files no later write meets.)
-            for i in 0..400 {
+            for i in 0..3000 {
                 let k = format!("z{i:04}");
                 put(&s, &k, Some("far"));
                 expect.insert(k, "far".into());

@@ -48,11 +48,11 @@ const TRAILER: usize = 8 + 4 + 4 + 2 + 1;
 
 /// The zstd level of format 2's blocks. Their entries leave out what format 1's repeat (an
 /// index entry's row key, the block's version), so they compress less well byte for byte but
-/// are a third smaller (TPC-H SF1: 1,412 MB against 2,046), and level -1 writes fewer bytes
-/// than level 1 did of format 1 (593 MB against 621; the bulk script's table and indexes after
-/// its DELETE 18.7 against 19.8) in 30-37% less time; level -2 writes more than that did
-/// (HANDOFF "Storage format v2: design"). (A transaction's runs, format 1, stay at level 1.)
-const ZSTD_LEVEL: i32 = -1;
+/// are a third smaller (TPC-H SF1: 1,412 MB against 2,046) and take 15% fewer bytes stored
+/// (530 MB against 621). Level -1 writes 5% fewer than format 1 at level 1 for TPC-H and the bulk
+/// script's files, but 14% more for the OLTP benchmark's accounts (its rows compress worse at
+/// any negative level): HANDOFF "Storage format v2: design".
+const ZSTD_LEVEL: i32 = 1;
 
 /// How a file's blocks are compressed (the writer's choice; each block records its own, and
 /// one compression didn't shrink by an eighth is stored raw).
@@ -119,6 +119,46 @@ pub fn hash64(b: &[u8]) -> u64 {
     h ^= h >> 33;
     h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
     h ^ (h >> 33)
+}
+
+/// Format 2's bloom filter hash: `hash64`'s final mix over the key taken 8 bytes at a time (a
+/// multiply and a rotation a word; FNV-1a's multiply a byte was a fifth of `SstWriter::add`,
+/// and a point read hashes its key again for every file it looks in).
+pub fn hash64_2(b: &[u8]) -> u64 {
+    const K: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut h = (b.len() as u64).wrapping_mul(K);
+    let (words, r) = b.as_chunks::<8>();
+    for w in words {
+        h = (h ^ u64::from_le_bytes(*w)).wrapping_mul(K).rotate_left(31);
+    }
+    if !r.is_empty() {
+        let mut t = [0u8; 8];
+        t[..r.len()].copy_from_slice(r);
+        h = (h ^ u64::from_le_bytes(t)).wrapping_mul(K).rotate_left(31);
+    }
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^ (h >> 33)
+}
+
+/// How many bytes `a` and `b` start with alike, 8 at a time.
+#[inline]
+fn common_prefix(a: &[u8], b: &[u8]) -> usize {
+    let n = a.len().min(b.len());
+    let mut i = 0;
+    while i + 8 <= n {
+        let x = u64::from_le_bytes(a[i..i + 8].try_into().unwrap()) ^ u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+        if x != 0 {
+            return i + (x.trailing_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+    while i < n && a[i] == b[i] {
+        i += 1;
+    }
+    i
 }
 
 pub fn user_key(storage_key: &[u8]) -> &[u8] {
@@ -438,7 +478,7 @@ impl SstWriter {
         let ts = key_ts(key);
         self.min_ts = self.min_ts.min(ts);
         self.max_ts = self.max_ts.max(ts);
-        let h = hash64(user_key(key));
+        let h = if self.v2 { hash64_2(user_key(key)) } else { hash64(user_key(key)) };
         self.rows |= !index_entry(user_key(key));
         if self.last_user_hash != Some(h) {
             match &mut self.bloom {
@@ -457,15 +497,7 @@ impl SstWriter {
     /// a restart), then the value.
     fn put1(&mut self, key: &[u8], value: Option<&[u8]>) {
         // (A whole key at every restart: `Block::decode` keeps the restarts where they are.)
-        let shared = if self.block_entries.is_multiple_of(RESTART) {
-            0
-        } else {
-            self.prev_key
-                .iter()
-                .zip(key)
-                .take_while(|(a, b)| a == b)
-                .count()
-        };
+        let shared = if self.block_entries.is_multiple_of(RESTART) { 0 } else { common_prefix(&self.prev_key, key) };
         put_varint(&mut self.block, shared as u64);
         put_varint(&mut self.block, (key.len() - shared) as u64);
         put_varint(
@@ -497,7 +529,7 @@ impl SstWriter {
             b.derived = true;
         }
         let restart = self.block_entries.is_multiple_of(1 << self.rlog);
-        let common = if restart { 0 } else { self.prev_key.iter().zip(key).take_while(|(a, b)| a == b).count() };
+        let common = if restart { 0 } else { common_prefix(&self.prev_key, key) };
         let vl = value.map_or(0, |v| v.len() + 1);
         // (Format 1's entry: its three lengths, the key's bytes past the shared ones, the value.)
         self.raw1 += varint_len(common) + varint_len(klen - common) + varint_len(vl) + klen - common + vl.saturating_sub(1);
@@ -1105,8 +1137,8 @@ impl Block {
             return Err(bad());
         }
         let r = &raw[data_len..];
-        let restarts: Vec<u64> = r[..nr * 8].chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
-        let rvals: Vec<u32> = r[nr * 8..nr * 12].chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        let restarts: Vec<u64> = r[..nr * 8].as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect();
+        let rvals: Vec<u32> = r[nr * 8..nr * 12].as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
         if restarts.iter().any(|&x| x as u32 as usize >= data_len) || rvals.iter().any(|&v| v as usize > data_len) {
             return Err(bad());
         }
@@ -1463,7 +1495,7 @@ impl SstReader {
         if self.bloom.is_empty() {
             return true;
         }
-        let h = hash64(user_key);
+        let h = if self.v2 { hash64_2(user_key) } else { hash64(user_key) };
         bloom_bits(h, self.bloom_mod).all(|bit| self.bloom[bit / 8] & (1 << (bit % 8)) != 0)
     }
 
@@ -1747,6 +1779,49 @@ mod tests {
             let passed = (5000..15000).filter(|&i| r.may_contain(user_key(&key(index, i)))).count();
             assert!(if index != 0 { passed == 10000 } else { passed < 500 }, "{passed}");
         }
+    }
+
+    /// `common_prefix` is the bytes two keys start with alike, whatever their lengths and
+    /// wherever they differ; format 2's bloom hash spreads keys alike but in one byte (each
+    /// byte of a word, past a word, in a tail) over its bits.
+    #[test]
+    fn common_prefix_and_hash64_2() {
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..20_000 {
+            let n = (next() % 40) as usize;
+            let a: Vec<u8> = (0..n).map(|_| (next() % 3) as u8).collect();
+            let mut b = a.clone();
+            b.truncate((next() % (n as u64 + 1)) as usize);
+            if next() % 2 == 0 && !b.is_empty() {
+                let i = (next() % b.len() as u64) as usize;
+                b[i] ^= 1 + (next() % 255) as u8;
+            }
+            b.extend((0..next() % 5).map(|_| (next() % 3) as u8));
+            let want = a.iter().zip(&b).take_while(|(p, q)| p == q).count();
+            assert_eq!(common_prefix(&a, &b), want, "{a:?} {b:?}");
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut ones = [0u32; 64];
+        for len in [3usize, 8, 13, 17, 25] {
+            for i in 0..len {
+                for v in 0..=255u8 {
+                    let mut k = vec![7u8; len];
+                    k[i] = v;
+                    let h = hash64_2(&k);
+                    seen.insert(h);
+                    (0..64).for_each(|bit| ones[bit] += (h >> bit & 1) as u32);
+                }
+            }
+        }
+        let n = seen.len() as u32;
+        assert!(n > 16_000, "{n}");
+        assert!(ones.iter().all(|&c| c > n * 2 / 5 && c < n * 3 / 5), "{ones:?}");
     }
 
     /// The bloom filter's bits must not change with how they are computed: files written

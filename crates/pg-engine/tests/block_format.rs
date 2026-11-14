@@ -65,7 +65,7 @@ fn formats(dir: &Path) -> (usize, usize) {
 /// What `storage_format1.sql` left, as the build that made the fixture answered (the
 /// queries' results then, from `make.sh`), with `extra` rows of f added since.
 fn check_fixture(s: &mut Session, what: &str) {
-    let t = |s: &mut Session, q: &str| one(s, &format!("SELECT concat_ws(',', {q})"));
+    let t = |s: &mut Session, q: &str| one(s, &format!("SELECT concat_ws(',', {q}"));
     assert_eq!(
         t(s, "count(*), sum(id), sum(n), sum(length(v)), sum(length(big))) FROM f WHERE id <= 8000 AND n >= 0"),
         "[[Text(\"6858,27435429,2625429,67630,103500\")]]",
