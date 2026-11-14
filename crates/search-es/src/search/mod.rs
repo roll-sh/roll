@@ -1523,7 +1523,7 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
             }
             field_after = Some((vals, None));
         }
-        let mut top = TopFieldCollector::new(built.keys.clone(), n, field_threshold, field_scores).with_searcher(&searcher);
+        let mut top = TopFieldCollector::new(built.keys.clone(), n, field_threshold, field_scores).with_searcher(&searcher).with_query(&q);
         if let Some((vals, d)) = field_after {
             top = top.with_after(vals, d);
         }

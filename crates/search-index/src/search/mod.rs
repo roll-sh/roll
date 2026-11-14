@@ -650,6 +650,16 @@ pub trait LeafCollector {
     fn competitive_from(&mut self, doc: u32) -> u32 {
         doc
     }
+    /// The caller runs the query over the whole segment again from the doc
+    /// [`next_pass`](Self::next_pass) returns, as often as it asks ([`search_partitions`] does).
+    /// Until this is called a collector must collect everything in one pass: wrappers that
+    /// don't forward it (aggregations, `terminate_after`, post filters) keep it so.
+    fn allow_passes(&mut self) {}
+    /// After a pass: `Some(from)` to have the matches from `from` on (to the segment's end)
+    /// collected again, `None` when done.
+    fn next_pass(&mut self) -> Option<u32> {
+        None
+    }
 }
 
 /// Collects matches across segments.
@@ -1480,16 +1490,32 @@ pub fn search_partitions(parts: &[Partition], w: &dyn Weight, collector: &mut dy
             continue;
         };
         let live = seg.live.as_deref();
-        let r = if ctl.is_noop() {
-            bs.score(leaf.as_mut(), live, part.min, part.max).map(|_| ())
-        } else {
-            score_with_checks(bs.as_mut(), leaf.as_mut(), live, ctl, part.min, part.max)
-        };
-        match r {
-            Ok(()) | Err(Error::CollectionTerminated) => {}
-            Err(e) => {
+        // Further passes cover the rest of the segment, so only a whole one allows them.
+        if part.min == 0 && part.max >= seg.reader.max_doc() {
+            leaf.allow_passes();
+        }
+        let mut from = part.min;
+        loop {
+            let r = if ctl.is_noop() {
+                bs.score(leaf.as_mut(), live, from, part.max).map(|_| ())
+            } else {
+                score_with_checks(bs.as_mut(), leaf.as_mut(), live, ctl, from, part.max)
+            };
+            match r {
+                Ok(()) | Err(Error::CollectionTerminated) => {}
+                Err(e) => {
+                    let _ = leaf.finish();
+                    return Err(interrupted(e));
+                }
+            }
+            let Some(next) = leaf.next_pass() else { break };
+            if let Err(e) = ctl.check() {
                 let _ = leaf.finish();
-                return Err(interrupted(e));
+                return Err(e);
+            }
+            match w.bulk_scorer(seg, mode).map_err(interrupted)? {
+                Some(b) => (bs, from) = (b, next),
+                None => break,
             }
         }
         if let Some(e) = take_deferred_error() {
