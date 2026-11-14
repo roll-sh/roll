@@ -932,10 +932,14 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         },
         None => send.await,
     };
-    // Gone: nothing listened, so the app never saw it (a pooled connection that had closed is
-    // the client's to try again on a fresh one, which then fails to connect). A request it may
-    // have seen (one that broke after it was written) is never sent twice, as Fly's proxy.
-    let gone = matches!(&sent, Err(e) if e.is_connect());
+    // Gone: nothing listened (the app never saw it), or a kept-alive connection broke and the
+    // instance isn't running any more (it died, perhaps with the request read: a safe request
+    // may be repeated, RFC 9110 9.2.2, as browsers do when a reused connection closes). Never
+    // for a request with a body.
+    let gone = match &sent {
+        Err(e) if replay.is_some() && again.is_some() => e.is_connect() || !apps.deps.runtime.running(&lease.inst.name).await,
+        _ => false,
+    };
     let sent = match (sent, replay, again) {
         (Err(e), Some((method, pq, headers, version)), Some(how)) if gone => {
             live.connect_failed(&lease.inst);

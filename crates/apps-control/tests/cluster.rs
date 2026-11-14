@@ -397,3 +397,51 @@ async fn a_tunnel_through_a_node_that_doesnt_own_the_service_reaches_its_port() 
     assert!(text.starts_with("HTTP/1.1 200") && text.contains(r#""path":"/through""#), "{text}");
     assert!(owner.fake.instances(&id).iter().any(|(n, ..)| text.contains(n.as_str())), "the owner's instance answered: {text}");
 }
+
+/// A cron service whose owner dies keeps its schedule on the node that takes it over, and its
+/// runs run there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cron_service_runs_on_the_node_that_takes_it_over() {
+    let mut f = fleet(2).await;
+    let via = &f.nodes[0];
+    let (st, svc) = call(&via.api, "POST", "/v1/apps/services", Some(json!({ "project": f.project, "name": "nightly", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "0 3 * * *"}, "variables": {"FAKE_EXIT": "0"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let dep = svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string();
+    for _ in 0..1000 {
+        if call(&via.api, "GET", &format!("{base}/deploys/{dep}"), None).await.1["status"] == "active" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let key = apps_control::lease_key(&id);
+    let owner = f.nodes.iter().position(|n| n.apps.deps.cluster.owns(&key)).unwrap();
+    let dead = f.nodes.remove(owner);
+    dead.server.abort();
+    dead.apps.deps.cluster.fault_kill();
+    let left = &f.nodes[0];
+    let mut env = Value::Null;
+    for _ in 0..300 {
+        env = call(&left.api, "GET", &base, None).await.1;
+        if left.apps.deps.cluster.owns(&key) && env["next_run_at"].is_i64() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(left.apps.deps.cluster.owns(&key) && env["next_run_at"].is_i64(), "its schedule moved: {env}");
+    let made = apps_control::runtime::fake::Fake::count(&left.fake.counts.creates);
+    let (st, run) = call(&left.api, "POST", &format!("{base}/runs"), None).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{run}");
+    let mut last = Value::Null;
+    for _ in 0..500 {
+        last = call(&left.api, "GET", &format!("{base}/runs"), None).await.1[0].clone();
+        if last["status"] != "running" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!((last["status"].as_str(), last["exit_code"].as_i64()), (Some("succeeded"), Some(0)), "{last}");
+    assert!(apps_control::runtime::fake::Fake::count(&left.fake.counts.creates) > made, "the run's container was made on the node left");
+    drop(dead);
+}

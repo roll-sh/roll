@@ -275,8 +275,10 @@ every deployment is immutable with instant rollback.
   failure (a connection closed before it answered) is a 502 that says so without the error, which
   goes to the environment's log.
 - **A request that finds its instance gone** (killed or out of memory, before roll noticed:
-  nothing listens on its port: the app never saw it) goes, if it's a GET, HEAD or OPTIONS with
-  no body (by its headers and the body itself), once more to a fresh instance (Fly's proxy retries the same way), the instance counted as
+  nothing listens on its port, or a kept-alive connection to it broke and the runtime says it
+  isn't running) goes, if it's a GET, HEAD or OPTIONS with no body (by its headers and the body
+  itself: a safe request, which RFC 9110 lets be repeated, as browsers do when a reused connection
+  closes), once more to a fresh instance (Fly's proxy retries the same way), the instance counted as
   crashed and the environment's log saying so; a request with a body gets the "Restarting" 503,
   never sent twice.
 
@@ -677,7 +679,8 @@ The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`,
   node left once its lease expires, a deploy in flight on a killed owner finishing on the node
   left with the dead one fenced off, and a joining node taking services with no visitor's request
   failing, a static site served by the node that takes it over from its tar in object storage
-  with nothing built again, and a tunnel opened at a node that doesn't own the service). The
+  with nothing built again, a tunnel opened at a node that doesn't own the service, and a cron
+  service's schedule and runs on the node that takes it over). The
   join test found a roll-cluster bug: mid-handoff the joining node still sent a
   service's requests to the old owner, which sent them back, until the hop limit answered 508;
   now a forward that would go straight back to the node that sent it asks the backend instead of
