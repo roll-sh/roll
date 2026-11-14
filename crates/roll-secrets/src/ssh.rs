@@ -263,6 +263,8 @@ const PUBLIC_SUFFIXES: &[&str] = &[
     "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp", "ne.jp", "or.jp", "co.kr", "com.br", "com.cn", "com.mx", "co.in", "co.za", "com.tr",
     "com.sg", "com.hk", "com.tw", "github.io", "gitlab.io", "pages.dev", "workers.dev", "vercel.app", "netlify.app", "herokuapp.com", "fly.dev", "onrender.com", "web.app",
     "firebaseapp.com", "azurewebsites.net", "cloudfront.net", "amazonaws.com", "appspot.com", "blogspot.com",
+    "com.ar", "com.co", "com.pl", "co.il", "com.vn", "com.ph", "com.my", "co.th", "co.id", "com.ua", "com.eg", "com.pk", "com.ng", "s3.amazonaws.com",
+    "elasticbeanstalk.com", "cloudapp.net", "cloudapp.azure.com", "trycloudflare.com", "ngrok.io", "ngrok-free.app", "railway.app", "up.railway.app",
 ];
 
 /// Whether a host name is one the CA signs (a domain, a name under it, or `*.` one under it).
