@@ -1024,6 +1024,8 @@ async fn a_sensitive_keys_value_reaches_only_roll_s_runtimes() {
     let (s, p) = (api.secrets.clone(), api.project.clone());
     let got = tokio::task::spawn_blocking(move || s.values(&p, "production", "/", true, Some("app:web"), &roll_secrets::Caller::consumer("app:web")).unwrap()).await.unwrap();
     assert_eq!((got.values["PAYMENTS_KEY"].expose(), got.values["WRAPPED"].expose()), ("sk_live_sensitive", "Bearer sk_live_sensitive"));
+    // …and are told which values never to show.
+    assert_eq!(got.sensitive, ["PAYMENTS_KEY"]);
 }
 
 #[tokio::test]

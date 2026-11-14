@@ -143,6 +143,8 @@ pub struct Values {
     pub dynamic: Vec<String>,
     /// Sensitive keys left out (only roll's runtimes and syncs read them).
     pub withheld: Vec<String>,
+    /// Sensitive keys whose values are here (a runtime's read): it uses them and never shows them.
+    pub sensitive: Vec<String>,
     /// Keys whose value comes from a link to a resource (any mode): a consumer that reaches
     /// resources another way (a container on a private network) knows which addresses to rewrite.
     pub linked: Vec<String>,
@@ -371,10 +373,14 @@ impl Secrets {
         let mut values = BTreeMap::new();
         let mut problems = vec![];
         let mut withheld = vec![];
+        let mut sensitive = vec![];
         for e in &entries {
-            if names::sensitive(&e.row.tags) && !caller.runtime {
-                withheld.push(e.row.key.clone());
-                continue;
+            if names::sensitive(&e.row.tags) {
+                if !caller.runtime {
+                    withheld.push(e.row.key.clone());
+                    continue;
+                }
+                sensitive.push(e.row.key.clone());
             }
             let (v, problem) = r.entry(e);
             if let Some(p) = problem {
@@ -400,7 +406,7 @@ impl Secrets {
         self.audit_now(project, caller, action, Some(slug), Some(&path), &keys, &summary);
         let dynamic = entries.iter().filter(|e| e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic)).map(|e| e.row.key.clone()).collect();
         let linked = entries.iter().filter(|e| e.row.link.is_some()).map(|e| e.row.key.clone()).collect();
-        Ok(Values { values, problems, leases, dynamic, linked, withheld })
+        Ok(Values { values, problems, leases, dynamic, linked, withheld, sensitive })
     }
 
     /// A folder's own values as they were after change `seq` (or at time `at`): what was stored
@@ -449,7 +455,7 @@ impl Secrets {
         }
         let keys: Vec<String> = values.keys().cloned().collect();
         self.audit_now(project, caller, "secrets.export", Some(slug), Some(&path), &keys, &format!("exported {} as of change #{seq}", crate::write::plural(keys.len(), "value")));
-        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, withheld }))
+        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, withheld, sensitive: vec![] }))
     }
 
     /// A digest of a folder's effective secrets (keys, where they come from, versions,
