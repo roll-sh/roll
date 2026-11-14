@@ -1586,7 +1586,11 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
-An independent security review of #43–#45 found no cross-tenant path; it found managed
+A third independent review (of #46 and #47) found four ways a sensitive value still reached a person
+(older versions, change requests that add the tag, syncs and sandboxes counted as runtimes) and
+guessing oracles, plus backups leaving out encryption keys: all fixed and tested. roll apps (#26)
+now seals sensitive variables and redeploys when an environment's digest moves (#31 implements
+it). An independent security review of #43–#45 found no cross-tenant path; it found managed
 certificates that could lapse, an issuer key that a deployment-key rotation would have broken, a
 fail-open decoy check and leases outliving cloud tokens, all fixed and tested. Measured again on 2026-11-14 (load about 20): values at 9,900 keys took 89–122 ms on SQLite and
 155 ms on Postgres, within the noise of the Performance table; nothing to fix. Reviewed again on
@@ -1604,20 +1608,26 @@ Doppler, Infisical, Vault and 1Password (clients, IaC, CI, Kubernetes, BYOK). Th
 is Vault's signature: dynamic credentials for clouds and databases roll doesn't run. CI stays
 under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
-Ranked (work that can start now):
+Ranked: first what can be built now, without a merge; then what waits on one (merges are the
+user's call).
 
-1. **Sensitive keys in roll apps** (once #46 and #31 land): `ForApps` sets `SecretVar.sensitive`
-   from `Values.sensitive`; apps (#26) already seals such variables (in a container's env, masked in
-   every answer). One line once both are on #20.
-2. **AWS through roll's issuer** (once #38 and #43 land): `AssumeRoleWithWebIdentity` with roll's
-   own token, so roll needs no AWS keys of its own and the trust policy pins `sub` as GCP's and
-   Azure's do.
-3. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
-   customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
-4. **Products say who owns a resource**, so a person's project can link their own databases,
-   buckets and streams. Waits on products serving signed-in people.
-5. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
-   besides its owner.
+1. **A rotations overview** (on #48), as Infisical's secret rotation page: every managed
+   credential in the project (environment, keys, resource), when it last rotated, when it's next
+   due, and why its last scheduled rotation failed; rotate from there.
+2. **Signing and HMAC with encryption keys** (on #47), as Vault's Transit: `…/sign` and `…/verify`
+   (Ed25519) for webhooks and tokens an app issues, and `…/hmac` for lookups over encrypted fields.
+3. **Certificates for keys that stay put** (on #44): `…/cas/{id}/sign` signs a CSR within the CA's
+   policy, so a device or a service mesh keeps its private key.
+4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
+   already seals such variables). One line once both are on #20.
+5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
+   token; the trust policy pins `sub`, as GCP's and Azure's do).
+6. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
+   notice.
+7. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
+   project can link their own databases, buckets and streams.
+8. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+   environment).
 
 Open pull requests after this one:
 
@@ -1641,6 +1651,8 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#48, failing rotations in health** (after #20): `rotation_failing` and `revoke_failing`
+  findings, with the reason, until roll succeeds.
 - **#47, encryption keys** (after #20): encryption as a service, as Vault's Transit: named,
   versioned keys that never leave roll; encrypt, decrypt (audited), rewrap, data keys.
 - **#46, sensitive keys** (after #20): a key tagged `sensitive` reaches only roll's runtimes, syncs
