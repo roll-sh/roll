@@ -724,9 +724,22 @@ fn dotnet_publishes_its_project_and_runs_it_on_port() {
 }
 
 #[test]
+fn elixir_is_built_as_a_release_and_phoenix_serves() {
+    let mix = "defmodule Shop.MixProject do\n  use Mix.Project\n  def project, do: [app: :shop, version: \"0.1.0\", deps: deps(), aliases: [\"assets.deploy\": [\"esbuild default --minify\", \"phx.digest\"]]]\n  defp deps, do: [{:phoenix, \"~> 1.7\"}]\nend\n";
+    let p = detect(&[("mix.exs", mix), ("mix.lock", "%{}"), ("assets/app.js", "")]);
+    assert_eq!((p.provider, p.framework.as_deref(), p.start.as_deref()), (Provider::Elixir, Some("phoenix"), Some("/app/bin/shop start")));
+    assert_eq!(p.build.as_deref(), Some("mix assets.deploy && mix release"));
+    has(&p, &["FROM elixir:1.17-slim AS build", "ENV MIX_ENV=prod", "ca-certificates git", "COPY mix.exs mix.lock ./", "mix deps.get --only prod", "COPY --from=build --chown=nobody:nogroup /app/_build/prod/rel/shop ./", "PHX_SERVER=true", "USER nobody"]);
+    assert!(p.notes.iter().any(|n| n.contains("SECRET_KEY_BASE")), "{:?}", p.notes);
+    // A plain Elixir app: its release, no assets step.
+    let p = detect(&[("mix.exs", "defmodule Hi.MixProject do\n  def project, do: [app: :hi, deps: []]\nend\n")]);
+    assert_eq!((p.framework.as_deref(), p.build.as_deref()), (None, Some("mix release")));
+}
+
+#[test]
 fn nothing_detected_says_what_it_did_find() {
-    let err = plan(&tree(&[("mix.exs", "defmodule Shop.MixProject do end")]), &Overrides::default()).unwrap_err();
-    assert!(err.to_string().contains("found mix.exs: Elixir"), "{err}");
+    let err = plan(&tree(&[("pubspec.yaml", "name: shop")]), &Overrides::default()).unwrap_err();
+    assert!(err.to_string().contains("found pubspec.yaml: Dart"), "{err}");
     let err = plan(&tree(&[("Shop.sln", "")]), &Overrides::default()).unwrap_err();
     assert!(err.to_string().contains("Shop.sln: a .NET solution"), "{err}");
 }

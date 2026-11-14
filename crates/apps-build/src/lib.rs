@@ -12,6 +12,7 @@ mod deno;
 mod df;
 mod docker;
 mod dotnet;
+mod elixir;
 mod golang;
 mod java;
 mod node;
@@ -124,6 +125,7 @@ pub enum Provider {
     Php,
     Java,
     Dotnet,
+    Elixir,
     Static,
 }
 
@@ -132,7 +134,7 @@ pub enum Error {
     #[error(
         "couldn't tell how to build this: found no Dockerfile, package.json, deno.json, \
          requirements.txt, pyproject.toml, go.mod, Cargo.toml, Gemfile, composer.json, index.php, \
-         pom.xml, build.gradle, a .csproj or index.html at the root{0}; add a Dockerfile or set the \
+         pom.xml, build.gradle, a .csproj, mix.exs or index.html at the root{0}; add a Dockerfile or set the \
          root directory"
     )]
     NothingDetected(String),
@@ -189,7 +191,7 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         return docker::plan(tree, &o);
     }
     type Detect = fn(&dyn Tree, &Overrides) -> Result<Option<Draft>, Error>;
-    const PROVIDERS: [Detect; 10] = [
+    const PROVIDERS: [Detect; 11] = [
         // Before Node: a Deno project's deno.json decides, a package.json beside it notwithstanding.
         deno::detect,
         node::detect,
@@ -200,6 +202,7 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         php::detect,
         java::detect,
         dotnet::detect,
+        elixir::detect,
         static_site::detect,
     ];
     for detect in PROVIDERS {
@@ -229,8 +232,7 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
 /// What the root holds that roll doesn't build yet, said with the error: `" (found mix.exs:
 /// Elixir)"`, or nothing.
 fn found(tree: &dyn Tree) -> String {
-    const KNOWN: [(&str, &str); 9] = [
-        ("mix.exs", "Elixir"),
+    const KNOWN: [(&str, &str); 8] = [
         ("pubspec.yaml", "Dart"),
         ("Package.swift", "Swift"),
         ("build.sbt", "Scala (sbt)"),

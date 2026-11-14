@@ -802,14 +802,14 @@ async fn the_proxys_own_cost_is_measured() {
 }
 
 
-/// Detected builds, built and run for real: a Deno app and an ASP.NET app, neither with a
-/// Dockerfile, each deployed from its tree and answering through roll on `$PORT`.
+/// Detected builds, built and run for real: a Deno app, an ASP.NET app and an Elixir release,
+/// none with a Dockerfile, each deployed from its tree and answering through roll on `$PORT`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn deno_and_dotnet_trees_build_and_answer() {
+async fn deno_dotnet_and_elixir_trees_build_and_answer() {
     let Some(w) = docker_world().await else { return };
     // An app: its name, its files, and what it answers.
     type App<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a str);
-    let apps: [App; 2] = [
+    let apps: [App; 3] = [
         (
             "deno-hi",
             &[
@@ -826,6 +826,17 @@ async fn deno_and_dotnet_trees_build_and_answer() {
             ],
             "dotnet says hi",
         ),
+        (
+            "elixir-hi",
+            &[
+                ("mix.exs", "defmodule Hi.MixProject do\n  use Mix.Project\n  def project, do: [app: :hi, version: \"0.1.0\", elixir: \"~> 1.15\", deps: []]\n  def application, do: [mod: {Hi, []}, extra_applications: [:logger]]\nend\n"),
+                (
+                    "lib/hi.ex",
+                    "defmodule Hi do\n  use Application\n  def start(_, _) do\n    port = String.to_integer(System.get_env(\"PORT\") || \"4000\")\n    {:ok, sock} = :gen_tcp.listen(port, [:binary, active: false, reuseaddr: true, ip: {0, 0, 0, 0}])\n    {:ok, spawn(fn -> loop(sock) end)}\n  end\n  defp loop(sock) do\n    {:ok, c} = :gen_tcp.accept(sock)\n    :gen_tcp.recv(c, 0, 1000)\n    :gen_tcp.send(c, \"HTTP/1.1 200 OK\\r\\ncontent-length: 15\\r\\nconnection: close\\r\\n\\r\\nelixir says hi\\n\")\n    :gen_tcp.close(c)\n    loop(sock)\n  end\nend\n",
+                ),
+            ],
+            "elixir says hi",
+        ),
     ];
     for (name, files, want) in apps {
         let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "upload"}, "run": {"memory_mb": 512, "cpu": 1.0, "health_timeout_s": 60} })), "application/json", None).await;
@@ -833,7 +844,9 @@ async fn deno_and_dotnet_trees_build_and_answer() {
         let id = svc["id"].as_str().unwrap().to_string();
         let tree = tempfile::tempdir().unwrap();
         for (f, body) in files {
-            std::fs::write(tree.path().join(f), body).unwrap();
+            let at = tree.path().join(f);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, body).unwrap();
         }
         let mut bundle = Vec::new();
         roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();

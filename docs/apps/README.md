@@ -1583,9 +1583,15 @@ the image. .NET (one `.csproj` or `.fsproj` at the root; two are the person's to
 `dotnet restore` and `dotnet publish` on the SDK image of its `TargetFramework`, run on the
 ASP.NET image as its `app` user with `--urls http://0.0.0.0:$PORT`. Both are plan-tested
 (`deno_runs_its_start_task_or_its_entry_module`, `dotnet_publishes_its_project_and_runs_it_on_port`)
-and built and run for real in Docker (`deno_and_dotnet_trees_build_and_answer`: a `Deno.serve`
-app and a minimal ASP.NET one, no Dockerfile, each answering through roll; 47 s for both from
-cold, 2026-11-15). A tree none of them builds says what it did find (`mix.exs`: Elixir, a
+and built and run for real in Docker. Elixir (a `mix.exs`) is a `mix release` on the Elixir image
+(`MIX_ENV=prod`; the dependencies' layer before the code; a Phoenix app's `assets.deploy` alias
+run first when it has `assets/`), run on the same image (its ERTS needs the same system
+libraries) as `nobody` with `PHX_SERVER=true`, `RELEASE_TMP=/tmp` and the CA certificates its TLS
+calls need; a Phoenix app's notes say `SECRET_KEY_BASE` must be set. The first Docker run found
+the slim image has no CA certificates, so `mix local.hex` couldn't fetch Hex: the build stage
+installs them (and git, for a git dependency). `deno_dotnet_and_elixir_trees_build_and_answer`
+builds a `Deno.serve` app, a minimal ASP.NET one and a dependency-free Elixir release, none with
+a Dockerfile, each answering through roll (55 s for the three from a warm cache, 2026-11-15). A tree none of them builds says what it did find (`mix.exs`: Elixir, a
 `.sln`, `pubspec.yaml`…), so the next step (a Dockerfile, the root directory) is plain.
 
 - Node yields to another language: a tree with a Gemfile, composer.json, requirements.txt,
@@ -1823,44 +1829,40 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (a second product review of the experience, a product review of what one engineer can close here now, bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **Elixir/Phoenix builds**: `mix release` on the Elixir image (`MIX_ENV=prod`, assets deployed
-   when there are any), run with `PHX_SERVER=true` on the same image, `SECRET_KEY_BASE` asked
-   for; built and run in Docker (`pnpm test:apps --docker`) before it ships, as Deno's and .NET's
-   are.
-2. **The project Logs view in a browser**: checked by typecheck and the suite only (rolld wasn't
+1. **The project Logs view in a browser**: checked by typecheck and the suite only (rolld wasn't
    built when it landed); look at it against a live rolld with several services, phone width too.
-3. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+2. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-4. **Region**: the region shown on the overview and each environment, defaulting to the project's
+3. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-5. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+4. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-6. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+5. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-7. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+6. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-8. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+7. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-9. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-10. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+8. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+9. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-11. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+10. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-12. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+11. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-13. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+12. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-14. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+13. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
