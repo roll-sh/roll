@@ -829,6 +829,11 @@ would go, so it carries the shape of the configuration and no value.
   folder, `roll://PROJECT@ENV/KEY` one in another project (its name, or its `prj_…` id with a
   scoped token; a name that more than one project has, under different owners, is refused: give
   the id). Segments are letters, digits, `-`, `_` and `.` (never `.` or `..`).
+- In the dashboard, a key's menu has **Copy reference**: the reference to the folder it's shown
+  in, so it resolves to what that folder reads (its own value, an import, an inherited one). On a
+  page that isn't https the browser has no clipboard, and the note shows the reference to copy.
+  (The desktop app's deep links also start `roll://`, as `roll://agents/thread/…`; the two never
+  meet: references are read from files and templates, deep links from the OS.)
 - `roll run --env-file .env` (repeatable) adds a dotenv file's entries to the environment's:
   plain values as written, references resolved, and the file's entries win over the environment's
   (the shell's own variables still win over both unless `--override`). A file such as
