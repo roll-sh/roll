@@ -752,6 +752,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/access/tokens/{id}/networks", "access", R, Tgt::Product),
     // What an agent with the token is offered over MCP (roll-mcp reads the token as the caller first).
     row("GET", "/v1/access/tokens/{id}/tools", "access", R, Tgt::Product),
+    // How many tools each product has and their context cost: counts only, for the connect panel.
+    row("GET", "/v1/mcp/toolsets", "access", R, Tgt::AnyGrant),
     row("GET", "/v1/access/checkup", "access", R, Tgt::Product),
     row("POST", "/v1/access/tokens/{id}/tighten", "access", ADMIN, Tgt::Product),
     row("DELETE", "/v1/access/tokens/{id}/temporary/{approval}", "access", ADMIN, Tgt::Product),
@@ -1188,6 +1190,9 @@ static ROWS: &[Row] = &[
     // The share link with its access token, as a QR code for a phone (previews-next): the token in
     // another encoding, so reveal as the link itself is.
     row("GET", "/v1/previews/{id}/qr.png", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Each data branch's connection as the preview's services get it (the branches' own
+    // credentials, never a parent's; previews-next): reveal, as the preview's env is.
+    row("GET", "/v1/previews/{id}/connect", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // Accepting a visual change is a person's call (with `visual_review = "required"` previews
     // refuses tokens anyway): admin, so a write token can't wave its own diff through.
     row("POST", "/v1/previews/{id}/visual/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),

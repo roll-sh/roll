@@ -22,6 +22,7 @@ const revoke = vi.fn(async (_id: string) => ({}));
 vi.mock("@/lib/access-api", async (orig) => ({
   ...(await orig<typeof import("@/lib/access-api")>()),
   accessApi: {
+    toolsetCosts: async () => [],
     tokens: async () => [],
     me: async () => ({ kind: "operator", locked: true }),
     checkup: async () => checkup,
