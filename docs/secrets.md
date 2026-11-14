@@ -1767,8 +1767,9 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A twelfth independent review** of the eleventh review's fixes (#54–#61), and its fixes; then a
-   live run of #58's "Move to roll" on a multi-line key in code-server.
+1. **A twelfth independent review** of the eleventh review's fixes (#54–#61) (running), and its
+   fixes. #58's "Move to roll" on a multi-line key was checked live in code-server: the whole key
+   moved, byte for byte, and no line of it was left in the file.
 2. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
    #49 and #54 meet, `watch` keeps both (answered digests, streams and signals).
 3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
