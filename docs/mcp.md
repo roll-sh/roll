@@ -534,9 +534,13 @@ an identity's scope, owned by its maker, out of the list and caps) for secrets' 
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
 revoked as leaked, about to expire; only their own, never a secret); `previews_resolve_note` (a
 preview page's note, write by the prefix; previews-next), and `apps_logs` takes `before`,
-`instance`, `deployment` and `stream` (apps-next); `previews_list_notes` and `previews_resolve_note`
-(a preview page's note, write by the prefix; previews-next), and `apps_logs` takes `before`,
-`instance`, `deployment` and `stream` (apps-next); apps-next's cron runs as tools
+`instance`, `deployment` and `stream` (apps-next); the fifteenth review: a list's credentials
+redacted item by item (a token with reveal on one Postgres database and read on all saw every
+database's password in `GET /v1/projects`; the same for every list with credential fields), a
+preview's `share_url` redacted without reveal (its access token: the QR code's reveal row protected
+nothing), and a cron run's logs reveal on this branch too; `previews_list_notes` and
+`previews_resolve_note` (a preview page's note, write by the prefix; previews-next), and `apps_logs`
+takes `before`, `instance`, `deployment` and `stream` (apps-next); apps-next's cron runs as tools
 (`apps_get_cron_run`, `apps_cron_run_logs`, `apps_cancel_cron_run`); a preview's caught mail as
 reveal, with `previews_list_mail` and `previews_read_mail` (previews-next); the connect panel says
 what a choice of toolsets costs (tools and context tokens, from `GET /v1/mcp/toolsets`) and warns

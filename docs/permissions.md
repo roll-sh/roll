@@ -257,6 +257,11 @@ password (`postgres://roll:redacted@host/main`), anything else becomes `"[redact
 may create a database without `reveal` gets the new database, not its password. `ask` for `reveal`
 counts as not allowed here: an answer is never held for a person.
 
+A list is judged item by item: a token with `reveal` on one database and `read` on every one lists
+them all, and sees only that one's credentials (the others' are replaced). A preview's links
+(`share_url`, in `GET /v1/previews` and `GET /v1/previews/{id}`) carry its access token, so they
+are credentials too, as its QR code is.
+
 ### Storage accounts
 
 Storage acts in the account a request names (`X-Roll-Account` or `?account=`), and bucket names
