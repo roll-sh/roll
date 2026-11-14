@@ -108,6 +108,19 @@ impl Daemon {
         Daemon { router, access, workspace, _dir: dir }
     }
 
+    /// The audit log at `path` once `until` holds of it (rows go through a batching writer), at
+    /// most 5 s.
+    async fn audit_until(&self, path: &str, until: impl Fn(&Value) -> bool) -> Value {
+        for _ in 0..50 {
+            let (_, log) = self.call(OPERATOR, Method::GET, path, None).await;
+            if until(&log) {
+                return log;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        self.call(OPERATOR, Method::GET, path, None).await.1
+    }
+
     async fn call(&self, token: &str, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
         self.send(token, method, path, body, &[]).await
     }
@@ -275,8 +288,8 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     // Revoked: dead on the next request; the audit log has every decision.
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{grant}"), None).await.0, StatusCode::OK);
     assert_eq!(d.call(&token, Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED);
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let (_, log) = d.call(OPERATOR, Method::GET, &format!("/v1/access/audit?grant={grant}"), None).await;
+    let has = |l: &Value, d: &str| l.as_array().is_some_and(|a| a.iter().any(|e| e["decision"] == d));
+    let log = d.audit_until(&format!("/v1/access/audit?grant={grant}"), |l| has(l, "allow") && has(l, "deny")).await;
     let decisions: Vec<_> = log.as_array().unwrap().iter().map(|e| e["decision"].as_str().unwrap()).collect();
     assert!(decisions.contains(&"allow") && decisions.contains(&"deny"), "{log}");
     assert!(log.as_array().unwrap().iter().all(|e| e["route"].as_str().unwrap().starts_with('/')), "routes, not paths: {log}");
@@ -990,8 +1003,7 @@ async fn a_rule_can_grant_some_indices() {
     assert_eq!(again["code"], "approval_pending", "logs-b still asks: {again}");
     // A request says what made it (its User-Agent), and the log keeps it.
     d.send(&logs, Method::POST, "/v1/search/clusters/cl_1/indices/logs-ua/search", Some(json!({})), &[("user-agent", "roll-cli/0.9\tforged")]).await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let (_, ua) = d.call(OPERATOR, Method::GET, "/v1/access/audit?resource=cl_1/logs-ua", None).await;
+    let ua = d.audit_until("/v1/access/audit?resource=cl_1/logs-ua", |l| !l[0]["client"].is_null()).await;
     assert_eq!(ua[0]["client"], "roll-cli/0.9forged", "one line: {ua}");
 }
 
