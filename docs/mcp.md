@@ -404,6 +404,13 @@ previews are listed once those products are on.
 | `apps_set_variables` | Set or unset an environment's variables (production is a "deploy" action). | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_metrics` | CPU, memory and requests of an environment. | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
 | `apps_plan` | How roll would build and run a repo, before making a service (a dry run). | `POST /v1/apps/plan` |
+| `apps_get_environment` | One environment: URL, state, live deploy, branch, size. | `GET /v1/apps/services/{id}/environments/{env}` |
+| `apps_link` | Give a service a roll resource's connection variables (reveal on the resource). | `PUT /v1/apps/services/{id}/links/{kind}/{ref}` |
+| `apps_unlink` | Stop giving a service a linked resource's variables. | `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` |
+| `apps_verify_domain` | Check a custom domain's DNS now. | `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/verify` |
+| `apps_list_backups` | An environment's volume backups. | `GET /v1/apps/services/{id}/environments/{env}/volume/backups` |
+| `apps_backup_volume` | Back up a volume now. | `POST /v1/apps/services/{id}/environments/{env}/volume/backups` |
+| `apps_restore_backup` | Put a volume back as a backup had it (delete: it replaces the files). | `POST /v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore` |
 | `apps_activity` | Who changed what on a service (never a value). | `GET /v1/apps/services/{service}/activity` |
 | `apps_get_deploy` | One deploy. | `GET …/environments/{env}/deploys/{deploy}` |
 | `apps_list_links` | What a service is linked to. | `GET /v1/apps/services/{service}/links` |
@@ -480,8 +487,10 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); a tool any token may call
-(`apps_plan`) is listed only where its product runs (it showed with apps off); previews' tools
+revoked as leaked, about to expire; only their own, never a secret); apps' missing everyday tools
+(`apps_create_service` takes links and run settings, an environment's state, linking and unlinking
+resources, checking a domain, volume backups and restoring one; all on main); a tool any token may
+call (`apps_plan`) is listed only where its product runs (it showed with apps off); previews' tools
 listed (they never were: roll previews runs with roll code and has no product switch, so MCP's
 product list left it out; rolld's auth test now fails on any product it serves with no tools
 listed); the token builder offers only the products this rolld runs (and any a token's rules name
