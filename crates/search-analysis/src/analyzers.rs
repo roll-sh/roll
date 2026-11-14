@@ -167,7 +167,7 @@ pub(crate) fn analyzer_provider(ty: &str) -> Option<AnalyzerBuilder> {
         "chinese" => |_, name, _| standard(name, english_stop().clone(), 255),
         "polish" => return crate::stempel::analyzer_provider(ty),
         "ukrainian" => return crate::ukrainian::analyzer_provider(ty),
-        _ => return crate::analyzers::language_provider(ty),
+        _ => return crate::cjk::analyzer_provider(ty).or_else(|| crate::analyzers::language_provider(ty)),
     })
 }
 
@@ -233,8 +233,11 @@ pub(crate) const BUILT_IN_ANALYZERS: &[&str] = &[
     "irish",
     "italian",
     "keyword",
+    "kuromoji",
+    "kuromoji_completion",
     "latvian",
     "lithuanian",
+    "nori",
     "norwegian",
     "pattern",
     "persian",
@@ -244,6 +247,7 @@ pub(crate) const BUILT_IN_ANALYZERS: &[&str] = &[
     "russian",
     "serbian",
     "simple",
+    "smartcn",
     "snowball",
     "sorani",
     "spanish",

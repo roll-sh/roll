@@ -143,9 +143,24 @@ never paged in, and none of it is decoded onto the heap at startup.
 | Lucene's Polish stop words (from Carrot2) | `polish_stop`, `polish` | 2 KB | BSD |
 | `morfologik-ukrainian-search` 3.7.5's `ukrainian.dict` (from dict_uk; GPL/LGPL, CC BY-NC-SA 4.0 or Apache-2.0, used under Apache-2.0) | `ukrainian` | 6.6 MB | Apache-2.0 |
 | Lucene's Ukrainian stop words | `ukrainian` | 16 KB | Apache-2.0 |
+| Lucene 10.5.1's Kuromoji dictionaries (built from IPADIC mecab-ipadic-2.7.0-20070801), packed by `examples/gen_cjk_dicts.rs` (`kuromoji/ipadic.dict`) | `kuromoji_tokenizer` and the `kuromoji` filters and analyzers | 3.9 MB | IPADIC licence (NAIST), Apache-2.0 |
+| Lucene 10.5.1's Nori dictionaries (built from mecab-ko-dic 2.1.1-20180720), packed the same way (`nori/mecab-ko-dic.dict`) | `nori_tokenizer` and the `nori` filters and analyzer | 6.1 MB | Apache-2.0 |
+| Lucene 10.5.1's smartcn dictionaries (`coredict.mem`, `bigramdict.mem`, derived from ICTCLAS) (`smartcn/hhmm.dict`) | `smartcn_tokenizer`, `smartcn` | 2.8 MB | Apache-2.0 |
+| Lucene's Japanese stop words and stop tags, romaji map and Chinese stop words | `ja_stop`, `kuromoji_part_of_speech`, `kuromoji_completion`, `smartcn_stop` | 23 KB | Apache-2.0 |
 
 The code that reads them ports Apache Commons Codec (Apache-2.0), Lucene's Egothor stemmer
 (Apache-2.0) and Morfologik 2.1.1 (BSD).
+
+The three CJK dictionaries are zstd-compressed (12.8 MB of the binary) and decompressed once per
+process on first use, into memory every index and cluster on the node shares: a node that never
+analyzes Japanese, Korean or Chinese text keeps its resident set (24 MiB idle for `search-dev`,
+unchanged), and the first use adds about 24 MiB (Japanese), 38 MiB (Korean) and 5 MiB (Chinese).
+`tools/cjk_dicts.sh` regenerates them from Lucene's jars: its `DumpDicts.java` reads out what only
+Lucene can (the FSTs, smartcn's serialized tables), the FSTs are rebuilt with the `fst` crate
+(MIT/Unlicense) and the connection costs are stored with duplicate rows and columns folded
+(mecab-ko-dic's 3,822 × 2,693 matrix has 1,902 × 1,908 distinct values: 7.3 MB in memory instead of
+20.6); every other Lucene dictionary file is kept byte for byte. The analyzers port Lucene's
+`org.apache.lucene.analysis.morph`, `.ja`, `.ko` and `.cn.smart` packages (Apache-2.0).
 
 ## Idle cost
 

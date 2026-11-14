@@ -39,6 +39,8 @@ pub const BUILT_IN_ANALYZERS: &[&str] = &[
     "indonesian", "irish", "italian", "keyword", "latvian", "lithuanian", "norwegian", "pattern", "persian", "portuguese",
     "romanian", "russian", "serbian", "simple", "snowball", "sorani", "spanish", "standard", "stop", "swedish", "thai", "turkish",
     "whitespace",
+    // The analysis-kuromoji, analysis-nori and analysis-smartcn plugins'.
+    "kuromoji", "kuromoji_completion", "nori", "smartcn",
     // The analysis-stempel and analysis-ukrainian plugins'.
     "polish", "ukrainian",
 ];
