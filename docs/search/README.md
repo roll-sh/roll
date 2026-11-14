@@ -145,8 +145,11 @@ gets its own cluster, deleted afterwards).
 The dashboard (`/dashboard/search/<cluster>`) lists indices; selecting one opens its documents
 (paged `_search` with a query string, as rows or as a table: the most common fields by default,
 a column picker over the page's paths and the mapping's leaf fields, kept per index in the
-browser, and click-to-sort on sortable columns, `.keyword` sub-fields for text), mapping
-and settings, with refresh and delete. Documents can be added, edited and deleted in place
+browser, and click-to-sort on sortable columns, `.keyword` sub-fields for text), mapping (a
+field table: types, inference endpoints, vector settings, analyzers; or the JSON) and settings,
+with refresh and delete. Import fills an index from a file (NDJSON, a JSON array, or CSV whose
+columns are typed from the first 1,000 rows), previewed first and sent in `_bulk` batches through
+the index's own route (`lib/search-import.ts`). Documents can be added, edited and deleted in place
 (`refresh=wait_for`, routing kept), and any view opens in the Dev Tools console. The console
 completes as you type (Ctrl+Space to ask): methods, paths and index names on the first line,
 then the API's URL query parameters after `?` and their allowed values after `=` (from
@@ -246,20 +249,22 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    A/B; Rally rerun pending) and `terms_enum`; a full rerun of every Rally track with variance;
    one allocator policy (rolld's against search-dev's purge governor); `terms_enum`'s per-request
    overhead.
-2. **A second security review** of what landed since the first (the `_inference` API, `semantic_text`,
-   the new retrievers, workflow-restricted keys, service tokens, OpenSearch Security's new
-   endpoints, ES|QL's new functions) landed in 7288684b9: `semantic_text` under field level
-   security (queries and the semantic highlighter, `copy_to` sources included), an inference key
-   given already sealed is sealed again (it was opened and sent to the client's `url`; watches
-   already refuse one, connector and Fleet secrets always seal), and chunking, the semantic
-   highlighter and `TOP_SNIPPETS` are linear in the text. Sealing binds the kind, not the
-   cluster: branches copy a cluster's state under a new id. Left, low: file service tokens are
-   node-wide (off unless the operator sets `path.conf`), the inference `timeout` has no upper
-   bound. (A simplified `rrf`/`linear` now expands only against indices the caller may read.)
-3. **Vector search's cost and speed** (scale to zero meets HNSW): RAM loaded and idle, cold start
+2. **Vector search's cost and speed** (scale to zero meets HNSW): RAM loaded and idle, cold start
    to the first `knn` answer, indexing, latency and recall@10 (filtered, in `rrf`), store bytes,
    against Elasticsearch 9.5.5 and OpenSearch 3.9 on 1M × 384 dims; then fix where roll loses. In
    progress (`wip/search-vectors`).
+3. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (in progress). Landed: the
+   index browser and console on the per-index routes, an API keys panel in Settings, the mapping
+   view as a field table, OpenSearch-flavor clusters' own clients and `OPENSEARCH_*` variables,
+   and importing a file into an index from the Indices tab (Kibana's "Upload a file"): NDJSON, a
+   JSON array or CSV with typed columns, previewed before anything is sent, read in 1 MiB chunks
+   and sent as `_bulk` batches of at most 4 MiB through the index's own route, with progress,
+   cancel and the first failures (100,000 ECS log lines, 42 MB, in 24 s on a debug build). Next:
+   creating an index with a mapping (a field editor, `semantic_text` with an endpoint picked from
+   the Inference tab), index templates and lifecycle policies listed per index, `_profile` of a
+   console search drawn as a tree, saved console requests. Signed-in users who aren't admins follow
+   accounts' phase 2: today every product but code, agents and projects answers them 403
+   (docs/accounts.md), search included.
 4. **Compatibility gaps** from the extended suites (4,956 of the 5,541 Elasticsearch passes),
    largest first. Landed: ent-search's last 5 (a `rule` retriever over `rrf`/`linear`, inference
    inside a rule query's organic, workflow-restricted API keys), ES|QL's last 5 (`TOP_SNIPPETS`,
@@ -308,18 +313,22 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    before one are reissued. The fleet test with every product on passed on this branch
    (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall 1.2 s in
    the rolling restart).
-8. **Dashboard polish**: the index browser and console are on the per-index routes, and a
-   cluster's Settings has an API keys panel (create with data or admin access and an expiry,
-   shown once; list on request, so it doesn't wake the cluster; revoke, naming keys apps and roll
-   secrets made). Left: a review against Elastic Cloud's and OpenSearch Dashboards' consoles.
-   Signed-in users who aren't admins follow accounts' phase 2: today every product but code,
-   agents and projects answers them 403 (docs/accounts.md), search included.
-9. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
+8. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
-10. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
+9. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
    main's cache: under the minute, no room for another crate). (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
    12 of 40 runs on one CPU failed before, 0 of 40 after.)
+10. **Security**: a second review of what landed since the first (the `_inference` API, `semantic_text`,
+   the new retrievers, workflow-restricted keys, service tokens, OpenSearch Security's new
+   endpoints, ES|QL's new functions) landed in 7288684b9: `semantic_text` under field level
+   security (queries and the semantic highlighter, `copy_to` sources included), an inference key
+   given already sealed is sealed again (it was opened and sent to the client's `url`; watches
+   already refuse one, connector and Fleet secrets always seal), and chunking, the semantic
+   highlighter and `TOP_SNIPPETS` are linear in the text. Sealing binds the kind, not the
+   cluster: branches copy a cluster's state under a new id. Left, low: file service tokens are
+   node-wide (off unless the operator sets `path.conf`), the inference `timeout` has no upper
+   bound. (A simplified `rrf`/`linear` now expands only against indices the caller may read.)
