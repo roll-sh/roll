@@ -158,7 +158,37 @@ steps:
   values the token may reveal), and each stored value found fails the check with an annotation on
   its file and line naming the key and environment, never the value.
 ## Kubernetes
-Two ways, as the best products offer:
+Three ways, as the best products offer:
+- **Mounted (`sdk/csi-provider`)**: a provider for the [Secrets Store CSI
+  Driver](https://secrets-store-csi-driver.sigs.k8s.io), as Vault's, AWS', Azure's, GCP's and
+  Infisical's: a pod's volume gets an environment's values as files when it starts, and no
+  Kubernetes Secret is made (nothing in etcd) unless the SecretProviderClass asks the driver to
+  sync one. Each pod logs in with its own service account token (the driver's `tokenRequests`,
+  audience the API's URL) through a workload identity, so a pod reads only what its service
+  account's identity allows; the cluster's keys can be pinned (#57) where roll can't reach its
+  issuer. Without an identity, a roll token from the volume's `nodePublishSecretRef` (`token`).
+  The read is strict: a value that doesn't resolve fails the mount (the pod waits and the event
+  names the key), and on the driver's rotation the files keep what they had. Dynamic credentials
+  only with `dynamic: "true"` (nothing renews their leases: each ends with its TTL). The folder's
+  digest is each file's version.
+  ```yaml
+  apiVersion: secrets-store.csi.x-k8s.io/v1
+  kind: SecretProviderClass
+  metadata: { name: shop-production }
+  spec:
+    provider: roll
+    parameters:
+      api: https://api.roll.example
+      identity: idn_…            # the pod's service account logs in (roll secrets identities add)
+      environment: production
+      path: /                    # the folder
+      format: dotenv             # files (one per key: the default), dotenv or json
+      file: .env                 # dotenv's and json's file name
+      keys: "DATABASE_URL=db-url STRIPE_KEY"   # optional: which keys, renamed with `=`
+  ```
+  Install the driver with `tokenRequests[0].audience=<the API's URL>`, then the provider
+  (`sdk/csi-provider/chart`, or `deploy/provider.yaml`): a DaemonSet that writes `roll.sock` into
+  the driver's provider directory. It needs no Kubernetes permissions.
 - **Pull (`sdk/kubernetes-operator`)**: a `RollSecret` names an environment and a folder (and a
   project or an identity, when not the operator's own), and the operator keeps a Secret beside it
   in step. It logs in with its own service account token through a workload identity, so roll
@@ -2711,7 +2741,7 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **The Secrets Store CSI Driver provider** (on #62, its own pull request next): secrets mounted
+1. **The Secrets Store CSI Driver provider** (#63, on #62; its merge is the user's call): secrets mounted
    into a pod as files, never a Kubernetes Secret in etcd, as Vault's, AWS', Azure's, GCP's and
    Infisical's providers do; each pod logs in with its own service account. Checked live against
    the driver v1.6.2 on k3s (mount, no Secret, another account refused, rotation in about 20 s, a
@@ -2803,6 +2833,10 @@ secrets tests, roll-access's, clippy with `-D warnings`, `pnpm typecheck`, the d
 tests, `@roll/secrets`' and the VS Code extension's.
 
 Open pull requests after this one:
+
+- **#63, a Secrets Store CSI Driver provider** (after #62): `sdk/csi-provider`, a pod's volume
+  gets an environment's values as files with no Secret in etcd, each pod logged in with its own
+  service account; the driver's gRPC served with Go's standard library.
 
 - **#30, one permission system** (after #20 and #25): a project's tokens are roll-access grants,
   identities' logins get `workload` tokens, `rlst_` is gone.
