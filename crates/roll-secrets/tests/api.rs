@@ -1324,3 +1324,38 @@ async fn a_key_is_found_in_every_project_the_caller_may_read() {
     let (_, mine) = api.req(Method::GET, "/v1/secrets/search?key=STRIPE_KEY", None, t["token"].as_str()).await;
     assert_eq!(mine.as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn reach_names_who_and_what_can_read_a_folder() {
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_live_1").await;
+    let deploy = api.ok(Method::POST, "/tokens", Some(json!({ "name": "deploy", "environments": ["production"], "actions": ["read", "reveal"] }))).await;
+    api.ok(Method::POST, "/tokens", Some(json!({ "name": "staging-ci", "environments": ["staging"], "actions": ["read", "reveal"] }))).await;
+    api.ok(Method::PUT, "/environments/staging/imports?path=/", Some(json!([{ "environment": "production", "path": "/" }]))).await;
+    api.req(Method::GET, "/environments/production/values", None, deploy["token"].as_str()).await;
+    // A read of staging reads production's key through the import: counted, and said so; so is
+    // one of development, which imports staging (a chain).
+    api.ok(Method::PUT, "/environments/development/imports?path=/", Some(json!([{ "environment": "staging", "path": "/" }]))).await;
+    api.values("staging", "/").await;
+    api.values("development", "/").await;
+    let r = api.ok(Method::GET, "/environments/production/reach?path=/&key=STRIPE_KEY", None).await;
+    let names = |k: &str| r[k].as_array().unwrap().iter().map(|h| h["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    // The production token reaches it (with what it may do), staging's doesn't.
+    assert_eq!(names("tokens"), ["deploy"]);
+    assert_eq!(r["tokens"][0]["actions"], json!(["read", "reveal"]));
+    assert_eq!((r["untrusted"].as_bool(), r["imported_by"].clone()), (Some(true), json!(["staging:/", "development:/"])));
+    let readers: Vec<&str> = r["readers"].as_array().unwrap().iter().map(|x| x["actor"].as_str().unwrap()).collect();
+    assert!(readers.iter().any(|a| a.starts_with("token:")) && readers.contains(&"operator (through staging:/)") && readers.contains(&"operator (through development:/)"), "{readers:?}");
+    // Another project it's shared with is named only as a project, never its environments.
+    let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "platform" }))).await;
+    let platform = other["id"].as_str().unwrap().to_string();
+    api.ok(Method::PUT, "/environments/production/exports?path=/", Some(json!([{ "project": platform }]))).await;
+    api.ok(Method::PUT, &format!("/v1/secrets/projects/{platform}/environments/staging/imports?path=/"), Some(json!([{ "project": api.project, "environment": "production", "path": "/" }]))).await;
+    let r = api.ok(Method::GET, "/environments/production/reach?path=/", None).await;
+    let mut by: Vec<&str> = r["imported_by"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
+    by.sort();
+    assert_eq!(by, ["development:/", &format!("project {platform}"), "staging:/"], "{r}");
+    // It lists the project's credentials: a project admin's.
+    let (s, _) = api.req(Method::GET, "/environments/production/reach", None, deploy["token"].as_str()).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}

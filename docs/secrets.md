@@ -583,6 +583,7 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
+roll secrets reach [KEY]                     # who and what can read it
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -1229,6 +1230,37 @@ code owner (`ada/…`).
   could hand a stranger's previews their variables (say, a `DATABASE_URL` pointing at their own
   server), or watch a stranger's landings for their values.
 
+### Reach
+
+`GET …/environments/{env}/reach?path=&key=` (`roll secrets reach [KEY]`, a key's menu "Who can
+read it…" in the dashboard) answers, for a folder or one key, every way its values can leave roll:
+before rotating after a leak, or for a review. It's a project admin's, since it lists the project's
+credentials as the tokens list does. Names and metadata only, never a value:
+
+- **Who could**: the tokens and workload identities whose scope covers it, each with what it may
+  do there (read, reveal, write, admin; decided by the same scope check requests are), when it was
+  last used and when it ends; and whether code roll hasn't vetted (checks, sandboxes, previews)
+  can read it, which is so unless the environment is protected.
+- **Where it goes by itself**: syncs of that folder (and that key), projects the folder is shared
+  with, and this project's folders that import it.
+- **Where it goes by itself** also counts folders that import it and environments based on it
+  (previews), and theirs in turn, as reads follow them (up to 8 steps and 256 folders; `truncated`
+  says when there were more). A read crosses into another project once, from here to the project
+  it's shared with (while it's shared), and never on into a third; that project is named only as
+  `project prj_…`, never its environments. Syncs of this project's importing folders are listed.
+- **Who did**: everyone who revealed, exported, resolved or synced it in the last 30 days, with
+  how often and when last (the audit log), here or through those folders (`operator (through
+  staging:/)`); another project's readers are named by the project, not their tokens. Reads through
+  a `${…}` or `roll://` reference in another key are recorded where they happened and aren't
+  counted: the answer says so (`uncounted`).
+
+roll-access's grants (`rlt_`, OAuth) aren't listed yet: they're rolld's (#30).
+
+Measured (release, 2026-11-14, `examples/bench.rs`, load average about 52): at its cap, 300 folders
+importing production (it follows 256), each read once, reach takes 5–7 ms on SQLite and 120–150 ms
+on Postgres. The audit is read once per project and filtered in memory (it was a query per folder:
+55–89 ms and 254–302 ms); what's left on Postgres is the walk's two queries per folder.
+
 ### Workload identities (OIDC)
 
 A CI job or a cluster logs in with its own short-lived OpenID Connect token instead of holding a
@@ -1402,6 +1434,7 @@ isn't in the workspace is 404.
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
 | `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&name=&namespace=&seq=&at=` | | `Values` (with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
+| `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, projects it's shared with, folders that import it, readers in 30 days |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked}` |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
@@ -1503,6 +1536,8 @@ type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: strin
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
 type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
+type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string }; // untrusted: checks, sandboxes and previews may read it (not protected)
+type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */ };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };

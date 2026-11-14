@@ -1,4 +1,4 @@
-import { Clock, Dices, Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, Trash2, Upload, User } from "lucide-react";
+import { Clock, Dices, Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, Trash2, Upload, User, Users } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
 import { canRotate, needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Import, type KeyInsight, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
@@ -11,6 +11,7 @@ import { FolderCrumbs } from "./folders";
 import { useSlashFocus } from "./grid";
 import { HistoryDrawer, type Drawer } from "./history";
 import { ImportDialog } from "./import-dialog";
+import { ReachDialog } from "./reach-dialog";
 import { ImportsPanel } from "./imports";
 import { RefInput, useRefSource, useRefWarnings, type RefSource } from "./ref-input";
 import { ShareDialog, type ShareSource } from "./share-dialog";
@@ -39,6 +40,7 @@ export function EnvView({ env }: { env: Environment }) {
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [reaching, setReaching] = useState<string | null>(null);
   const [linking, setLinking] = useState(false);
   const [drawer, setDrawer] = useState<Drawer | null>(null);
   const [sharing, setSharing] = useState<ShareSource | null>(null);
@@ -349,6 +351,7 @@ export function EnvView({ env }: { env: Environment }) {
                     onWrite={write}
                     onHistory={() => setDrawer({ kind: "versions", key: s.key, type: s.type })}
                     onShare={() => setSharing({ kind: "secret", env: env.slug, key: s.key, path })}
+                    onReach={() => setReaching(s.key)}
                     onSource={(src) => (src.kind === "import" ? setImportsOpen({ highlight: { ...(src.project && { project: src.project }), environment: src.environment, path: src.path } }) : go({ env: src.environment, path: p, key: s.key }))}
                   />
                 ))}
@@ -360,6 +363,7 @@ export function EnvView({ env }: { env: Environment }) {
       </div>
 
       <HistoryDrawer env={env} drawer={drawer} onClose={() => setDrawer(null)} onDrawer={setDrawer} onChanged={refresh} />
+      <ReachDialog open={reaching !== null} onClose={() => setReaching(null)} env={env} path={path} keyName={reaching ?? ""} />
       <ImportDialog open={importing} onClose={() => setImporting(false)} env={env} path={path} current={secrets} onImported={(text, w) => (setNote({ text, warnings: w }), refresh(), open.reload())} />
       <ShareDialog source={sharing} onClose={() => setSharing(null)} onShared={() => {}} />
       <LinkDialog open={linking} onClose={() => setLinking(false)} env={env} path={path} taken={keys} onWrite={write} />
@@ -493,6 +497,7 @@ function SecretRow({
   onHistory,
   onShare,
   onSource,
+  onReach,
 }: {
   env: Environment;
   secret: Secret;
@@ -509,6 +514,8 @@ function SecretRow({
   onHistory: () => void;
   onShare: () => void;
   onSource: (source: Exclude<Secret["source"], { kind: "own" }>) => void;
+  /** Who and what can read it (a project admin's). */
+  onReach: () => void;
 }) {
   const { api, project, resourceName } = useSecrets();
   const [editing, setEditing] = useState<null | EditMode>(null);
@@ -635,6 +642,11 @@ function SecretRow({
                   {!own && (
                     <MenuItem onClick={() => setEditing("own")}>
                       <Pencil className="size-3.5" /> Set here (own value)
+                    </MenuItem>
+                  )}
+                  {!personal && (
+                    <MenuItem onClick={onReach}>
+                      <Users className="size-3.5" /> Who can read it…
                     </MenuItem>
                   )}
                   {s.link?.mode !== "dynamic" && (
