@@ -305,8 +305,13 @@ impl Secrets {
         let (t, secret) = tokens::new_token(i.name.clone(), i.environments.clone(), i.paths.clone(), i.actions.clone(), Some(expires_at), i.allowed_ips.clone(), now, &principal);
         let caller = Caller { principal, grants: std::sync::Arc::new(crate::access::Everything), ip };
         self.db.write(|c| {
-            // Deleted meanwhile: no token.
-            if c.execute("UPDATE identities SET last_used_at = ?, last_subject = ? WHERE id = ?", params![now, sub, i.id])? == 0 {
+            // Deleted meanwhile, or its keys replaced (and so its maker changed): no token. A login
+            // verified against the old keys mustn't get one after the replacement revoked theirs.
+            let changed = c.execute(
+                "UPDATE identities SET last_used_at = ?, last_subject = ? WHERE id = ? AND COALESCE(jwks, '') = ? AND created_by = ?",
+                params![now, sub, i.id, jwks.clone().unwrap_or_default(), i.created_by],
+            )?;
+            if changed == 0 {
                 return Err(denied());
             }
             tokens::insert(c, &project, &t, &secret, Some(&i.id))?;
