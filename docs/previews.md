@@ -412,13 +412,24 @@ preview wrote a document with a price). With several such resources, each one's 
       the role reads and migrates its data, `pg_read_binary_file` and `pg_ls_waldir` are denied,
       and the parent's endpoint refuses it.
   - NoSQL: column masks (Cassandra 5's mask functions) added to the branch's read policy, on top
-    of what it inherits.
+    of what it inherits. The policy holds against the preview's own code (its credentials are
+    the branch's superuser) as the Postgres rewrite does: filters and indexes compare the masked
+    values, a table or view whose primary key has a masked column can't be read, and a masked
+    column can't be in an `IF` (`nosql-engine`'s
+    `platform_policy_tells_no_role_a_masked_value`; live: the branch reads `****`, and a filter
+    on the real address finds nothing there while it finds the row on the parent). Mask a
+    table's other columns, not its keys.
   - Search: `"search:<cluster>"` → `{"index.field": rule}` (a nested field's path too:
     `users.address.city`), the rule `redact` (`[masked]`), `remove` or `email`
     (`user-<document id>@example.invalid`). The branch's documents are rewritten with
     `_update_by_query` (a Painless script) before any service is pointed at it; the parent's
-    segments are shared, so the rewrites are the branch's own and the parent keeps its values
-    (live: the branch reads `[masked]`, the parent `parent`).
+    segments are shared, so the rewrites are the branch's own and the parent keeps its values.
+    The old versions stay in those shared segments as deleted documents, whose terms a term
+    dictionary still answers with (`_terms_enum`, suggesters, document frequencies), so every
+    segment that holds one is then expunged as the branch's own (`expunge_deletes_allowed` 0,
+    `_forcemerge?only_expunge_deletes`), as Postgres masking's `VACUUM FULL` (live: the branch
+    reads `[masked]` and its `_terms_enum` finds nothing, the parent reads `parent`; roll
+    search's `expunging_a_branch_rewrites_the_segments_it_shares` pins the sequence).
   - Other products: a `seed` anonymises the rows instead.
 - **Queues branch without what moves messages in.** Shovels and federation upstreams (and the
   `federation-upstream*` keys of policies) aren't copied, so a branch can't pull production
@@ -915,7 +926,8 @@ Ranked by what a person notices first. Done so far:
 - previews spread across a cluster's nodes, a lease each (tested);
 - roll apps' `pv-…` environments private, their 401 page linked through roll;
 - search mapping changes with the Postgres schema changes;
-- NoSQL column masks per preview, and search field masks (`search:<cluster>`, rewritten in the
+- NoSQL column masks per preview that hold against the preview's own queries (filters and
+  indexes compare masked values; masked keys and conditions refused), and search field masks (`search:<cluster>`, rewritten in the
   branch only, then every segment that still held a masked value expunged as the branch's own,
   since a term dictionary (`_terms_enum`, suggesters) keeps deleted documents' terms: the
   branch's term dictionary is checked empty of them live);
@@ -1049,23 +1061,35 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+1. **A NoSQL mask on a key column caught where it's set**: the engine refuses to read a table
+   whose primary key has a masked column (a key can't be hidden from its reader), so such a
+   mask today shows up as a preview page failing on `Unauthorized`. The settings (and `roll
+   preview settings`) should check each `nosql:` mask against the parent's schema (roll nosql's
+   `/schema`) and say which column is a key and what to mask instead. (Settings check a mask's
+   shape today, not its column; a Postgres mask on a column that doesn't exist should be named
+   the same way.)
+2. **Accept per page** (Chromatic accepts per snapshot): a visual review accepts the whole
+   change, so a push that moves `/pricing` on purpose and `/` by accident is accepted whole.
+   Each page's comparison gets its own state on the sheet and in the `roll/visual` check run's
+   summary; `required` waits on every changed page; carrying an acceptance over a pixel-identical
+   push stays per page.
+3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-3. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-4. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-5. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+7. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1078,7 +1102,7 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-6. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

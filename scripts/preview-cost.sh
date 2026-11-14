@@ -80,6 +80,10 @@ api POST /v1/code/repos/acme/wiki/land "{\"message\":\"init\",\"files\":{\"roll.
 REDIS=$(api POST /v1/redis/databases '{"name":"cache"}' | jq_ "d['id']")
 api POST /v1/storage/buckets '{"name":"assets"}' >/dev/null
 NOSQL=$(api POST /v1/nosql/databases '{"name":"events"}' | jq_ "d['id']")
+CQL() { api POST "/v1/nosql/databases/$1/cql" "$(python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1]}))' "$2")"; }
+CQL "$NOSQL" "CREATE KEYSPACE app WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1}" >/dev/null
+CQL "$NOSQL" "CREATE TABLE app.users (id int PRIMARY KEY, email text, name text)" >/dev/null
+CQL "$NOSQL" "INSERT INTO app.users (id, email, name) VALUES (1, 'alice@corp.example', 'Alice')" >/dev/null
 api POST /v1/queues/vhosts '{"name":"jobs"}' >/dev/null
 STREAM=$(api POST /v1/streams '{"name":"clicks"}' | jq_ "d['id']")
 # A search cluster with a document the preview's branch must read.
@@ -165,6 +169,12 @@ BRANCH_SEES=$($S3 ls --recursive "s3://$BRANCH_BUCKET/" | wc -l)
 BRANCH_NOSQL=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='nosql'][0]")
 MASKED=$(api GET "/v1/nosql/databases/$BRANCH_NOSQL" | jq_ "d['masking'].get('app.users.email')")
 PARENT_MASKED=$(api GET "/v1/nosql/databases/$NOSQL" | jq_ "len(d['masking'])")
+# What the preview's own code can ask its branch (the console is its superuser): the email reads
+# masked, and a filter on the real address finds nothing (the premise: on the parent it does).
+[ "$(CQL "$NOSQL" "SELECT name FROM app.users WHERE email = 'alice@corp.example' ALLOW FILTERING" | jq_ "d['rows']")" = "[['Alice']]" ] || { echo "the parent's filter should find Alice"; exit 1; }
+NOSQL_READ=$(CQL "$BRANCH_NOSQL" "SELECT email FROM app.users WHERE id = 1" | jq_ "d['rows'][0][0]")
+NOSQL_FILTER=$(CQL "$BRANCH_NOSQL" "SELECT name FROM app.users WHERE email = 'alice@corp.example' ALLOW FILTERING" | jq_ "d.get('rows', d)")
+[ "$NOSQL_READ" != "alice@corp.example" ] && [ "$NOSQL_FILTER" = "[]" ] || { echo "the NoSQL branch tells the masked email: read $NOSQL_READ, filter $NOSQL_FILTER"; exit 1; }
 # The preview's Postgres branch has the email rewritten; the parent's row is as it was.
 PG_BRANCH_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['id']=='$PG_BRANCH'][0]")
 PG_MASKED=$(api POST "/v1/endpoints/$PG_BRANCH_EP/query" '{"sql":"SELECT email FROM users WHERE id = 1"}' | jq_ "d['results'][0]['rows'][0][0]")
@@ -536,6 +546,7 @@ cat <<EOF
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
 | NoSQL branch's mask on app.users.email / masks on the parent | $MASKED / $PARENT_MASKED |
+| NoSQL: app.users.email in the branch / a filter on the real address there | $NOSQL_READ / $NOSQL_FILTER |
 | Postgres users.email in the branch / in the parent | $PG_MASKED / $PG_PARENT |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |
