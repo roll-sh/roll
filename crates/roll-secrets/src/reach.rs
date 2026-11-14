@@ -125,7 +125,7 @@ impl Secrets {
             r.reads += 1;
         }
         let mut readers: Vec<Reader> = readers.into_values().collect();
-        readers.sort_by(|a, b| b.last_at.cmp(&a.last_at));
+        readers.sort_by_key(|r| std::cmp::Reverse(r.last_at));
         Ok(Reach { environment: slug.to_string(), path, key: key.map(String::from), protected: env.protected, untrusted: !env.protected, tokens, identities, syncs, projects, imported_by, readers })
     }
 }
