@@ -163,3 +163,25 @@ async fn a_local_tree_is_planned_before_anything_is_made() {
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("couldn't tell how to build"), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(t.json(&["list"]).await, serde_json::json!([]), "nothing made");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_projects_services_logs_read_together() {
+    let t = start().await;
+    t.ok(&["create", "web", "-p", "acme", "--image", "nginx:1.27", "--port", "80"]).await;
+    t.ok(&["create", "api", "-p", "acme", "--image", "nginx:1.27", "--port", "80"]).await;
+    // Each deploy writes its own lines; read together, each is named by its service, oldest first.
+    let mut names = std::collections::BTreeSet::new();
+    let mut lines = serde_json::json!([]);
+    for _ in 0..100 {
+        let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).args(["--json", "logs", "--all-services", "-p", "acme"]).current_dir(t.work.path()).env("ROLL_API_URL", &t.api).env_remove("ROLL_API_KEY").output().await.unwrap();
+        lines = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+        names = lines.as_array().unwrap().iter().filter_map(|l| l["service_name"].as_str().map(str::to_string)).collect();
+        if names.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(names, ["api".to_string(), "web".to_string()].into(), "{lines}");
+    let ts: Vec<i64> = lines.as_array().unwrap().iter().map(|l| l["t"].as_i64().unwrap()).collect();
+    assert!(ts.windows(2).all(|w| w[0] <= w[1]), "merged by time: {ts:?}");
+}

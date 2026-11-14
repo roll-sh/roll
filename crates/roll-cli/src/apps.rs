@@ -87,6 +87,10 @@ pub struct Logs {
     /// A deployment's build log instead of the runtime log (`latest` for the newest).
     #[arg(long, short = 'b')]
     pub build: Option<String>,
+    /// Every service of the project (`--project`, else this directory's link's), each line
+    /// named by its service (Railway's Log Explorer): merged by time, or followed together.
+    #[arg(long, conflicts_with_all = ["build", "instance", "deployment", "service"])]
+    pub all_services: bool,
     /// Only lines that contain this (any case), searched back through the stored logs.
     #[arg(long, short = 'g')]
     pub grep: Option<String>,
@@ -1263,6 +1267,11 @@ async fn follow(api: &Api, path: &str) -> anyhow::Result<()> {
 
 /// [`follow`], printing only lines containing `grep` (case-insensitive, as `?q=` searches).
 async fn follow_matching(api: &Api, path: &str, grep: Option<&str>) -> anyhow::Result<()> {
+    follow_as(api, path, grep, None).await
+}
+
+/// [`follow_matching`], each line named by `service` (a project's logs together).
+async fn follow_as(api: &Api, path: &str, grep: Option<&str>, service: Option<&str>) -> anyhow::Result<()> {
     let grep = grep.map(str::to_lowercase);
     let mut req = api.http.get(format!("{}{path}", api.base));
     if let Some(k) = &api.key {
@@ -1282,9 +1291,88 @@ async fn follow_matching(api: &Api, path: &str, grep: Option<&str>) -> anyhow::R
                 && let Ok(v) = serde_json::from_str::<Value>(data.trim())
                 && grep.as_ref().is_none_or(|g| s(&v["text"]).to_lowercase().contains(g))
             {
-                print_line(&v);
+                match service {
+                    Some(name) => print_line_of(&v, name),
+                    None => print_line(&v),
+                }
             }
         }
+    }
+    Ok(())
+}
+
+/// A line of a project's logs: its service's name first.
+fn print_line_of(l: &Value, service: &str) {
+    print!("{service:>12} ");
+    print_line(l);
+}
+
+/// Every service of the project's logs (the same filters on each): the newest `tail` of them
+/// merged by time, or each followed, its lines named by its service.
+async fn project_logs(api: &Api, json_out: bool, l: &Logs) -> anyhow::Result<()> {
+    let project = match &l.target.project {
+        Some(p) => project_id(api, p).await?,
+        None => match find_link(&std::env::current_dir()?) {
+            Some(link) => s(&link["project"]),
+            None => bail!("which project? pass --project, or run it in a directory linked to one of its services"),
+        },
+    };
+    let services: Vec<Value> = api.get(&format!("/v1/apps/services?project={}", enc(&project))).await?.as_array().cloned().unwrap_or_default();
+    if services.is_empty() {
+        bail!("the project has no services");
+    }
+    let mut q = String::new();
+    if let Some(d) = &l.since {
+        q.push_str(&format!("&since={}", chrono::Utc::now().timestamp_millis() - ago_ms(d)?));
+    }
+    if let Some(d) = &l.before {
+        q.push_str(&format!("&before={}", chrono::Utc::now().timestamp_millis() - ago_ms(d)?));
+    }
+    for (k, v) in [("stream", &l.stream), ("level", &l.level), ("status", &l.status), ("by", &l.by)] {
+        if let Some(v) = v {
+            q.push_str(&format!("&{k}={}", enc(v)));
+        }
+    }
+    if let Some(ms) = l.min_ms {
+        q.push_str(&format!("&min_ms={ms}"));
+    }
+    if l.http {
+        q.push_str("&http=1");
+    }
+    // An environment a service doesn't have is skipped, not an error: a project's staging needn't be every service's.
+    let have: Vec<&Value> = services.iter().filter(|svc| svc["environments"].as_array().into_iter().flatten().any(|e| e["name"] == l.target.env.as_str())).collect();
+    if l.follow {
+        let all = have.iter().map(|svc| {
+            let (path, name, grep) = (format!("{}/logs?follow=1&tail={}{q}", env_path(svc, &l.target.env), l.tail), s(&svc["name"]), l.grep.clone());
+            async move { follow_as(api, &path, grep.as_deref(), Some(&name)).await }
+        });
+        for r in futures::future::join_all(all).await {
+            r?;
+        }
+        return Ok(());
+    }
+    let grep = l.grep.as_deref().map(|g| format!("&q={}", enc(g))).unwrap_or_default();
+    let reads = have.iter().map(|svc| {
+        let path = format!("{}/logs?tail={}{q}{grep}", env_path(svc, &l.target.env), l.tail);
+        let name = s(&svc["name"]);
+        async move { api.get(&path).await.map(|v| (name, v)) }
+    });
+    let mut lines: Vec<Value> = Vec::new();
+    for r in futures::future::join_all(reads).await {
+        let (name, v) = r?;
+        for mut line in v.as_array().cloned().unwrap_or_default() {
+            line["service_name"] = json!(name);
+            lines.push(line);
+        }
+    }
+    lines.sort_by_key(|l| l["t"].as_i64().unwrap_or(0));
+    let lines: Vec<Value> = lines.split_off(lines.len().saturating_sub(l.tail));
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&lines)?);
+        return Ok(());
+    }
+    for line in &lines {
+        print_line_of(line, &s(&line["service_name"]));
     }
     Ok(())
 }
@@ -1645,6 +1733,9 @@ pub async fn deploy(api: &Api, json_out: bool, d: Deploy) -> anyhow::Result<()> 
 }
 
 pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
+    if l.all_services {
+        return project_logs(api, json_out, &l).await;
+    }
     let svc = service(api, &l.target).await?;
     let base = env_path(&svc, &l.target.env);
     let path = match &l.build {

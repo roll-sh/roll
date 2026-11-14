@@ -59,6 +59,7 @@ import { Route as AgentsSIdIndexRouteImport } from './routes/agents/s/$id/index'
 import { Route as AgentsSIdOpengraphImageRouteImport } from './routes/agents/s/$id/opengraph-image'
 import { Route as DashboardAccessTokensIdRouteImport } from './routes/dashboard/access/tokens.$id'
 import { Route as DashboardCodeOwnerIndexRouteImport } from './routes/dashboard/code/$owner/index'
+import { Route as DashboardProjectsIdLogsRouteImport } from './routes/dashboard/projects/$id/logs'
 import { Route as DashboardProjectsIdPreviewsRouteImport } from './routes/dashboard/projects/$id/previews'
 import { Route as DashboardQueuesQueuesIndexRouteImport } from './routes/dashboard/queues/queues/index'
 import { Route as DashboardStorageChar91Char93AccountsRouteImport } from './routes/dashboard/storage/[-]/accounts'
@@ -325,6 +326,11 @@ const DashboardCodeOwnerIndexRoute = DashboardCodeOwnerIndexRouteImport.update({
   path: '/dashboard/code/$owner/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const DashboardProjectsIdLogsRoute = DashboardProjectsIdLogsRouteImport.update({
+  id: '/logs',
+  path: '/logs',
+  getParentRoute: () => DashboardProjectsIdRoute,
+} as any)
 const DashboardProjectsIdPreviewsRoute =
   DashboardProjectsIdPreviewsRouteImport.update({
     id: '/previews',
@@ -444,6 +450,7 @@ export interface FileRoutesByFullPath {
   '/$owner/$repo/info/refs': typeof OwnerRepoInfoRefsRoute
   '/agents/s/$id/opengraph-image': typeof AgentsSIdOpengraphImageRoute
   '/dashboard/access/tokens/$id': typeof DashboardAccessTokensIdRoute
+  '/dashboard/projects/$id/logs': typeof DashboardProjectsIdLogsRoute
   '/dashboard/projects/$id/previews': typeof DashboardProjectsIdPreviewsRoute
   '/dashboard/storage/-/accounts': typeof DashboardStorageChar91Char93AccountsRoute
   '/dashboard/storage/-/api': typeof DashboardStorageChar91Char93ApiRoute
@@ -507,6 +514,7 @@ export interface FileRoutesByTo {
   '/$owner/$repo/info/refs': typeof OwnerRepoInfoRefsRoute
   '/agents/s/$id/opengraph-image': typeof AgentsSIdOpengraphImageRoute
   '/dashboard/access/tokens/$id': typeof DashboardAccessTokensIdRoute
+  '/dashboard/projects/$id/logs': typeof DashboardProjectsIdLogsRoute
   '/dashboard/projects/$id/previews': typeof DashboardProjectsIdPreviewsRoute
   '/dashboard/storage/-/accounts': typeof DashboardStorageChar91Char93AccountsRoute
   '/dashboard/storage/-/api': typeof DashboardStorageChar91Char93ApiRoute
@@ -572,6 +580,7 @@ export interface FileRoutesById {
   '/$owner/$repo/info/refs': typeof OwnerRepoInfoRefsRoute
   '/agents/s/$id/opengraph-image': typeof AgentsSIdOpengraphImageRoute
   '/dashboard/access/tokens/$id': typeof DashboardAccessTokensIdRoute
+  '/dashboard/projects/$id/logs': typeof DashboardProjectsIdLogsRoute
   '/dashboard/projects/$id/previews': typeof DashboardProjectsIdPreviewsRoute
   '/dashboard/storage/-/accounts': typeof DashboardStorageChar91Char93AccountsRoute
   '/dashboard/storage/-/api': typeof DashboardStorageChar91Char93ApiRoute
@@ -638,6 +647,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo/info/refs'
     | '/agents/s/$id/opengraph-image'
     | '/dashboard/access/tokens/$id'
+    | '/dashboard/projects/$id/logs'
     | '/dashboard/projects/$id/previews'
     | '/dashboard/storage/-/accounts'
     | '/dashboard/storage/-/api'
@@ -701,6 +711,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo/info/refs'
     | '/agents/s/$id/opengraph-image'
     | '/dashboard/access/tokens/$id'
+    | '/dashboard/projects/$id/logs'
     | '/dashboard/projects/$id/previews'
     | '/dashboard/storage/-/accounts'
     | '/dashboard/storage/-/api'
@@ -765,6 +776,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo/info/refs'
     | '/agents/s/$id/opengraph-image'
     | '/dashboard/access/tokens/$id'
+    | '/dashboard/projects/$id/logs'
     | '/dashboard/projects/$id/previews'
     | '/dashboard/storage/-/accounts'
     | '/dashboard/storage/-/api'
@@ -1186,6 +1198,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DashboardCodeOwnerIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/dashboard/projects/$id/logs': {
+      id: '/dashboard/projects/$id/logs'
+      path: '/logs'
+      fullPath: '/dashboard/projects/$id/logs'
+      preLoaderRoute: typeof DashboardProjectsIdLogsRouteImport
+      parentRoute: typeof DashboardProjectsIdRoute
+    }
     '/dashboard/projects/$id/previews': {
       id: '/dashboard/projects/$id/previews'
       path: '/previews'
@@ -1308,10 +1327,12 @@ const OwnerRepoRouteRouteWithChildren = OwnerRepoRouteRoute._addFileChildren(
 )
 
 interface DashboardProjectsIdRouteChildren {
+  DashboardProjectsIdLogsRoute: typeof DashboardProjectsIdLogsRoute
   DashboardProjectsIdPreviewsRoute: typeof DashboardProjectsIdPreviewsRoute
 }
 
 const DashboardProjectsIdRouteChildren: DashboardProjectsIdRouteChildren = {
+  DashboardProjectsIdLogsRoute: DashboardProjectsIdLogsRoute,
   DashboardProjectsIdPreviewsRoute: DashboardProjectsIdPreviewsRoute,
 }
 
