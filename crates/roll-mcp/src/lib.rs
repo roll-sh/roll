@@ -419,15 +419,6 @@ impl Ctx {
     /// Every tool this caller can use, as `tools/list` shows it.
     fn tools(&self) -> Vec<Value> {
         let mut out: Vec<Value> = tools::all().iter().filter(|t| self.usable(t)).map(tools::Tool::definition).collect();
-        // A connection no person is ever asked about has no use for the approval argument (a
-        // model reads every tool's schema): the operator's, and a token whose rules only allow.
-        if !self.can_ask() {
-            for t in &mut out {
-                if let Some(p) = t["inputSchema"]["properties"].as_object_mut() {
-                    p.remove("approval");
-                }
-            }
-        }
         for set in self.m.sets.iter() {
             for t in set.tools() {
                 let product = t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string();
@@ -440,6 +431,16 @@ impl Ctx {
         }
         if self.readonly {
             out.retain(|t| t["annotations"]["readOnlyHint"].as_bool() == Some(true));
+        }
+        // A connection no person is ever asked about has no use for the approval argument (a
+        // model reads every tool's schema): the operator's, and a token whose rules only allow.
+        // Fronted sets' tools take it too.
+        if !self.can_ask() {
+            for t in &mut out {
+                if let Some(p) = t["inputSchema"]["properties"].as_object_mut() {
+                    p.remove("approval");
+                }
+            }
         }
         out
     }
