@@ -509,31 +509,36 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Pending tokens from the CLI and in admins' mail** (#25): `roll token list --pending`,
+1. **The approval flow live, with accounts and mail** (`users-live/`, a rolld on :7480 built from
+   #25 with accounts and a mail outbox): a person's token past the policy waits, admins get the
+   mail, an admin approves from the CLI, the person gets theirs, and the token works.
+2. **`debug_failing_service` reads apps' new signals**: an environment's `attention` (crash loop,
+   capped, maintenance, a failed deploy with `error_detail`) and `apps_activity` with `all`.
+3. **Pending tokens from the CLI and in admins' mail** (#25): `roll token list --pending`,
    `roll token approve|deny <id>`, and a mail to admins when a person's token waits (GitHub mails
    organization owners), through accounts' list of admins.
-2. **Docs an agent can search** (Supabase's `search_docs`): roll's docs (docs/*.md) served by
+4. **Docs an agent can search** (Supabase's `search_docs`): roll's docs (docs/*.md) served by
    rolld under a read route and searched by a `docs_search` tool, so an agent looks up how a
    product works instead of guessing.
-3. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+5. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25), and compare each product's routes with its tools
    (an everyday route with no tool is a gap: apps' were found this way).
-4. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+6. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
    lands after #20, #25 and #30): kept merged both ways (secrets' head of 2026-11-14 merged: a
    forgotten project's credentials revoked first and retried by the sweeper, with the integration's
    `identity_logins` kept in what's forgotten). The canvas check costs nothing measurable
    (`gate_latency`, release, pinned, A/B twice: 83–115 µs p50 with it, 105–116 µs without).
-5. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
+7. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
    `.index("name")` on the per-key routes and `Scope.key` in their own check (`GrantGrants` sets
    `id` since #30's fix). The tools and the builder's key picker are in; check both live once the
    rows land (a token on `prj_x/one-key` signs with it and is refused another key and the
    project's environments).
-6. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+8. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-7. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+9. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Considered and left out: a smaller default toolset, or search-then-call meta-tools (see Toolsets: clients handle long lists or have a picker, and meta-tools would hide each tool's hints); a connection narrowed to one project (Supabase's `project_ref`): their
