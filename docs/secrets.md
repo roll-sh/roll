@@ -1589,6 +1589,32 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
+A sixth independent review (2026-11-14, of `roll://` references, check-and-set, OCSP, OpenSearch
+links and the grant fix) found no high-severity issue; it found an OCSP route an anonymous caller
+could make sign and cache per request, references whose leases were renewed at the wrong project,
+check-and-set dropped on protected environments, and smaller ones (a provider asked before the
+project check, a project name two owners share, render --watch, env-file errors, restore names,
+public suffixes): all fixed, OCSP re-checked live. The project's tokens now read rules naming it by
+id and show key-scoped ones (#30).
+
+Later: the grid sends check-and-set too (#50), OCSP for project CAs (#44: checked with `openssl
+ocsp`), search links on OpenSearch clusters (#51, agreed with the search thread), and a fix from roll
+MCP's review on #30 (a grant naming the project by id reaches it inside roll secrets too).
+
+Then (2026-11-14, latest): `roll://` references in files (#49: `roll run --env-file`, `render`) and
+check-and-set writes (#50: `if_version`, the dashboard's editor), each its own pull request on #20.
+
+A fifth independent review (2026-11-14, of host and user SSH certificates, ClickHouse,
+certificates ending, `--rotate-due` and the fourth review's fixes) found no high-severity issue; it
+found a CLI that would upload a private key given its path, SSH CAs that could claim a top-level
+domain, best-effort signing audits, a stale-CRL race, ClickHouse's kill-then-drop order, a
+known_hosts order and `--rotate-due --json` that didn't rotate: all fixed. Screenshots of the new
+surfaces are on #44, #45 and #48.
+
+Later still: SSH user certificates for keys people keep (#45: `…/sign-user`, `roll ssh --key`,
+checked with an agent-held key against a real `sshd`) and `roll secrets rotations --rotate-due`
+(#48).
+
 Then (2026-11-14, latest): certificates ending as health findings (#44: `certificate_expiring`)
 and ClickHouse outside roll (#39, merged up into #41 and #42: its HTTPS interface, `sha256_hash`
 passwords, checked live against ClickHouse 25.8).
@@ -1638,15 +1664,15 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **Transit keys scoped by name**: a grant's resources include one encryption key
-   (`secrets:transit/<name>`), so signing with one key doesn't need write on the project. Needs a
-   resource kind in roll-access's catalogue (the MCP thread's), so agree it there first.
-2. **Certificates for keys that stay put on SSH too**: `roll ssh` signs a key the user already has
-   (`…/ssh-cas/{id}/sign-user {public_key}`), for people who keep their key in an agent or a
-   hardware token.
-3. **Rotation for roll's own resources from outside**: `roll secrets rotate --all-due`, for an
-   operator's maintenance window, rotating every managed credential due within a week in one run
-   and reporting what failed.
+1. **RabbitMQ outside roll** (on #39), as Vault's and Infisical's RabbitMQ engines: two users take
+   turns, or a user per lease with a template user's vhost permissions, through the management
+   HTTPS API and the same guards; passwords as RabbitMQ's salted SHA-256 hash, so the broker never
+   sees one.
+2. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
+   and outside databases (#33), and transit in the Go and Python clients (#32).
+3. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47), a live check of
+   OpenSearch links (#29 and #51 in one build), and splitting the CLI's `secrets.rs` (2,700 lines)
+   by command once the stacked pull requests that touch it have landed.
 4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
 5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
@@ -1680,6 +1706,12 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#51, search links on OpenSearch clusters** (after #20): an internal user (`user`,
+  `password`) where the cluster has no API keys; the wrong field for a flavor is refused when linked.
+- **#50, check-and-set writes** (after #20): `if_version` on a set or delete, refused as `stale`
+  when the key moved; the dashboard's editor sends it.
+- **#49, `roll://` references in files** (after #20): `roll run --env-file` and `render` resolve
+  `roll://ENV/KEY` beside plain values, as 1Password's `op://`.
 - **#48, failing rotations in health** (after #20): `rotation_failing` and `revoke_failing`
   findings, with the reason, until roll succeeds; a rotations overview of every managed credential.
 - **#47, encryption keys** (after #20): encryption as a service, as Vault's Transit: named,
