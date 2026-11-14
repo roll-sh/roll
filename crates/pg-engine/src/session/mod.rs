@@ -155,6 +155,8 @@ struct PlanUses {
     /// Whether a custom plan folds parameter values into constants that may fail
     /// (`fold::param_folds` of the generic binding), found at the first Bind with values.
     param_folds: Option<bool>,
+    /// Its Parse binding left PL/pgSQL calls for planning (`Procs::deferred`): a Bind plans it.
+    proc_deferred: bool,
 }
 
 /// RevalidateCachedQuery's error: a prepared statement whose result row the catalog changed
@@ -2561,6 +2563,7 @@ impl Session {
             }
             p.param_types = parsed.param_types;
             let mut plans = p.plans.lock();
+            plans.proc_deferred = parsed.bq.procs.deferred;
             plans.param_oids = parsed.param_oids;
             plans.fixed_result = parsed.fixed_result;
             plans.parse_oids = Some(param_oids.into());
@@ -2603,6 +2606,7 @@ impl Session {
                     }
                     let mut plans = p.plans.lock();
                     plans.param_oids = oids;
+                    plans.proc_deferred = b.procs.deferred;
                     plans.fixed_result = Some(result_row(&b.cols));
                     drop(plans);
                     b.params.clone()
@@ -2956,9 +2960,9 @@ impl Session {
         let mut values = Vec::with_capacity(params.len());
         // Parameters of a domain type: their input is domain_in / domain_recv, which checks
         // the domain's constraints here, whether or not the statement reads them.
-        let (domains, param_folds) = {
+        let (domains, param_folds, procs) = {
             let plans = p.plans.lock();
-            ((!plans.param_oids.is_empty()).then(|| plans.param_oids.clone()), plans.param_folds)
+            ((!plans.param_oids.is_empty()).then(|| plans.param_oids.clone()), plans.param_folds, plans.proc_deferred)
         };
         for (i, &raw) in params.iter().enumerate() {
             let f = match formats.len() {
@@ -3063,9 +3067,8 @@ impl Session {
                 p.plans.lock().param_folds = Some(f);
                 f
             });
-        // (A statement whose analysis left PL/pgSQL calls for the planner: planning runs
-        // them, at the Bind.)
-        let procs = p.bound.lock().as_ref().is_some_and(|b| b.3.procs.deferred);
+        // (A statement whose analysis left PL/pgSQL calls for the planner, `procs`: planning
+        // runs them, at the Bind.)
         let mut planned = None;
         if p.is_query()
             && (mismatch || generic_failed || folds || procs)
