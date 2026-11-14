@@ -287,6 +287,9 @@ pub const MAIL_BYTES: i64 = 10 << 20;
 pub const BASE_HISTORY: usize = 10;
 
 /// A preview's screenshots, base64 as stored: desktop, phone, and its other pages by path.
+/// A preview's schema changes (`None`: not known), their risks, and its release's last run.
+type ReleaseFacts = (Option<Vec<String>>, Vec<String>, Option<crate::ReleaseRun>);
+
 struct Shots {
     head: String,
     png: String,
@@ -476,7 +479,7 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
-        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT"), ("base_preview", "TEXT"), ("base_branch", "TEXT"), ("base_change_bp", "INTEGER"), ("base_phone_bp", "INTEGER"), ("base_head", "TEXT"), ("base_speed", "TEXT"), ("base_a11y", "TEXT"), ("base_health", "TEXT"), ("text", "TEXT"), ("base_text", "TEXT"), ("links", "TEXT"), ("base_links", "TEXT"), ("api", "TEXT"), ("base_api", "TEXT"), ("base_api_breaking", "TEXT")] {
+        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT"), ("base_preview", "TEXT"), ("base_branch", "TEXT"), ("base_change_bp", "INTEGER"), ("base_phone_bp", "INTEGER"), ("base_head", "TEXT"), ("base_speed", "TEXT"), ("base_a11y", "TEXT"), ("base_health", "TEXT"), ("text", "TEXT"), ("base_text", "TEXT"), ("links", "TEXT"), ("base_links", "TEXT"), ("api", "TEXT"), ("base_api", "TEXT"), ("base_api_breaking", "TEXT"), ("base_api_unread", "INTEGER")] {
             if !db.has_column("screenshots", col)? {
                 db.add_column("screenshots", col, ty)?;
             }
@@ -512,7 +515,7 @@ impl Store {
                 db.add_column("previews", col, "INTEGER")?;
             }
         }
-        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head", "teardown_error"] {
+        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head", "teardown_error", "schema_risks"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "TEXT")?;
             }
@@ -1074,10 +1077,12 @@ impl Store {
         Ok(self.db.read(|c| c.query_row("SELECT schema_head FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
     }
 
-    pub fn set_schema_changes(&self, id: &str, head: &str, changes: Option<&[String]>) -> Result<()> {
+    /// `risks`: [`crate::schema::risks`] of every line, the ones past `changes`' cap too.
+    pub fn set_schema_changes(&self, id: &str, head: &str, changes: Option<&[String]>, risks: &[String]) -> Result<()> {
         let json = changes.map(|c| serde_json::to_string(c).expect("strings serialize"));
+        let risks = serde_json::to_string(risks).expect("strings serialize");
         self.db.write(|c| {
-            c.execute("UPDATE previews SET schema_head = ?, schema_changes = ? WHERE id = ?", params![head, json, id])?;
+            c.execute("UPDATE previews SET schema_head = ?, schema_changes = ?, schema_risks = ? WHERE id = ?", params![head, json, risks, id])?;
             Ok::<_, Error>(())
         })
     }
@@ -1264,11 +1269,13 @@ impl Store {
         let both = ours.api.as_deref().zip(theirs.api.as_deref());
         let api = both.and_then(|(now, then)| serde_json::to_string(&crate::visual::text_diff(&crate::openapi::operations(then), &crate::openapi::operations(now))).ok());
         let api_breaking = both.and_then(|(now, then)| serde_json::to_string(&crate::openapi::breaking(then, now)).ok());
+        // Main's document was read and the change's wasn't (gone, broken, too big, too slow).
+        let api_unread = ours.api.is_none() && theirs.api.is_some();
         self.db.write(|c| {
             c.execute(
                 "UPDATE screenshots SET base_preview = ?, base_branch = ?, base_change_bp = ?, base_phone_bp = ?, base_head = ?, base_speed = ?, base_a11y = ?, base_health = ?, base_text = ?, \
-                 base_links = ?, base_api = ?, base_api_breaking = ? WHERE preview_id = ?",
-                params![base, branch, change, phone, theirs.head, theirs.speed, theirs.a11y, theirs.health, text, theirs.links, api, api_breaking, id],
+                 base_links = ?, base_api = ?, base_api_breaking = ?, base_api_unread = ? WHERE preview_id = ?",
+                params![base, branch, change, phone, theirs.head, theirs.speed, theirs.a11y, theirs.health, text, theirs.links, api, api_breaking, api_unread, id],
             )?;
             for (path, bp) in &page_bps {
                 c.execute("UPDATE page_shots SET base_bp = ? WHERE preview_id = ? AND path = ?", params![bp, id, path])?;
@@ -1316,7 +1323,7 @@ impl Store {
         let row = self.db.read(|c| {
             c.query_row(
                 "SELECT CASE WHEN png <> '' THEN at END, head, prev_head, change_bp, phone_change_bp, phone_png IS NOT NULL, speed, prev_speed, health, a11y, \
-                 base_preview, base_branch, base_change_bp, base_phone_bp, base_head, base_speed, base_a11y, base_health, base_text, links, base_links, base_api, base_api_breaking FROM screenshots WHERE preview_id = ?",
+                 base_preview, base_branch, base_change_bp, base_phone_bp, base_head, base_speed, base_a11y, base_health, base_text, links, base_links, base_api, base_api_breaking, base_api_unread FROM screenshots WHERE preview_id = ?",
                 [id],
                 |r| {
                     let base = match (r.get::<_, Option<String>>(10)?, r.get::<_, Option<String>>(11)?, r.get::<_, Option<i64>>(12)?) {
@@ -1333,6 +1340,7 @@ impl Store {
                             links: json(r.get(20)?),
                             api: json(r.get(21)?),
                             api_breaking: json(r.get(22)?).unwrap_or_default(),
+                            api_unread: r.get::<_, Option<bool>>(23)?.unwrap_or(false),
                         }),
                         _ => None,
                     };
@@ -1727,20 +1735,21 @@ impl Store {
     /// No schema changes shown (the head they were read at stays, so they're read again).
     pub fn clear_schema_changes(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            c.execute("UPDATE previews SET schema_changes = NULL WHERE id = ? AND schema_changes IS NOT NULL", [id])?;
+            c.execute("UPDATE previews SET schema_changes = NULL, schema_risks = NULL WHERE id = ? AND schema_changes IS NOT NULL", [id])?;
             Ok::<_, Error>(())
         })
     }
 
     /// What the release last did, in one read: the schema's changes and how long it took.
-    fn release_facts(&self, id: &str) -> Result<(Option<Vec<String>>, Option<crate::ReleaseRun>)> {
-        type Raw = (Option<String>, Option<String>, Option<i64>, Option<i64>);
+    /// The schema's changes and their risks, and the release's run.
+    fn release_facts(&self, id: &str) -> Result<ReleaseFacts> {
+        type Raw = (Option<String>, Option<String>, Option<String>, Option<i64>, Option<i64>);
         let raw: Option<Raw> = self.db.read(|c| {
-            c.query_row("SELECT schema_changes, released, release_ms, prev_release_ms FROM previews WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()
+            c.query_row("SELECT schema_changes, schema_risks, released, release_ms, prev_release_ms FROM previews WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional()
         })?;
-        let Some((changes, head, ms, before)) = raw else { return Ok((None, None)) };
+        let Some((changes, risks, head, ms, before)) = raw else { return Ok((None, Vec::new(), None)) };
         let run = head.zip(ms).map(|(head, ms)| crate::ReleaseRun { head, ms, before_ms: before });
-        Ok((changes.and_then(|j| serde_json::from_str(&j).ok()), run))
+        Ok((changes.and_then(|j| serde_json::from_str(&j).ok()), risks.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(), run))
     }
 
     /// A preview's access token, and whether its project requires it.
@@ -1947,7 +1956,7 @@ impl Store {
         };
         let url = services.first().map(|(s, _)| s.url.clone());
         let share_url = url.as_deref().map(share);
-        let (schema_changes, release) = self.release_facts(&r.id)?;
+        let (schema_changes, schema_risks, release) = self.release_facts(&r.id)?;
         let kept_until = self.kept_until(&r.id)?;
         let goes_at = self.goes_at(&r.id)?;
         // The screenshot row in one read, without its images.
@@ -1975,6 +1984,7 @@ impl Store {
             links_added: page_links.as_ref().zip(b.links.as_ref()).map(|(ours, main)| ours.added_since(main)),
             api: b.api,
             api_breaking: b.api_breaking,
+            api_unread: b.api_unread,
             endpoints: f.speed.as_ref().map(|now| {
                 let main = b.speed.as_ref().map(|s| s.endpoints.as_slice()).unwrap_or_default();
                 now.endpoints.iter().map(|e| crate::EndpointAgainst { path: e.path.clone(), ms: e.ms, status: e.status, main_ms: main.iter().find(|m| m.path == e.path).map(|m| m.ms) }).collect()
@@ -2026,7 +2036,7 @@ impl Store {
                 })
                 .collect(),
             cost: cost.rounded(),
-            schema_risks: schema_changes.as_deref().map(crate::schema::risks).unwrap_or_default(),
+            schema_risks,
             schema_changes,
             release,
             kept_until,
@@ -2093,6 +2103,8 @@ pub struct BaseRow {
     pub api: Option<crate::TextDiff>,
     /// What the change breaks inside the operations both keep.
     pub api_breaking: Vec<String>,
+    /// Main's API document was read and the change's wasn't.
+    pub api_unread: bool,
 }
 
 /// Live share links a preview may have at once.
@@ -2156,7 +2168,7 @@ mod tests {
         store.set_screenshot(&main.id, "cs_m", &png(1), None, Some(&png(0))).unwrap();
         store.keep_base_history(&main.id, "cs_m").unwrap();
         store.compare_with_base(id, &main.id, "main", None).unwrap();
-        assert_eq!(store.base_change(id).unwrap(), Some(BaseRow { preview: main.id.clone(), branch: "main".into(), change_bp: 2000, phone_bp: Some(5000), head: Some("cs_m".into()), speed: None, a11y: None, health: None, text: None, links: None, api: None, api_breaking: Vec::new() }));
+        assert_eq!(store.base_change(id).unwrap(), Some(BaseRow { preview: main.id.clone(), branch: "main".into(), change_bp: 2000, phone_bp: Some(5000), head: Some("cs_m".into()), speed: None, a11y: None, health: None, text: None, links: None, api: None, api_breaking: Vec::new(), api_unread: false }));
         // Main moves on (to what the change's page looks like): a change that left it at cs_m is
         // still compared with cs_m's, and shown that one.
         store.set_screenshot(&main.id, "cs_m2", &png(3), Some(&speed(700)), Some(&png(5))).unwrap();

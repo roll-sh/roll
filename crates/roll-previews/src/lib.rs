@@ -706,6 +706,10 @@ pub struct BaseChange {
     /// What it breaks inside the operations both keep (`openapi::breaking`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub api_breaking: Vec<String>,
+    /// Main's OpenAPI document was read and the change's wasn't (gone, broken, too big, too slow):
+    /// nothing compared, said so rather than nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub api_unread: bool,
     /// Its endpoints' times against the branch's (`github.endpoints`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<EndpointAgainst>,

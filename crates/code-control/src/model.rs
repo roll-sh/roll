@@ -450,6 +450,9 @@ pub struct PreviewBaseChange {
     /// response field that goes, …): a sentence each, by operation. Untrusted text too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub api_breaking: Vec<String>,
+    /// The branch's OpenAPI document was read and the change's wasn't.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub api_unread: bool,
     /// Its endpoints' times (roll previews' `github.endpoints`, the median of 10 GETs) against
     /// the branch's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

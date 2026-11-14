@@ -280,6 +280,7 @@ export function PreviewSheet({
             {p.base_change?.text && <TextAgainst diff={p.base_change.text} branch={p.base_change.branch} />}
             {p.base_change?.api && <TextAgainst diff={p.base_change.api} branch={p.base_change.branch} what="api" />}
             {p.base_change?.api_breaking && <ApiBreaking items={p.base_change.api_breaking} />}
+            {p.base_change?.api_unread && <p className="mt-1.5 text-[11.5px] text-danger">Its OpenAPI document couldn't be read (gone, broken, or too big or slow): its API isn't compared with {p.base_change.branch}'s.</p>}
             {p.base_change?.endpoints && <Endpoints items={p.base_change.endpoints} branch={p.base_change.branch} />}
             {p.visual_review && p.visual_review.state !== "unchanged" && (
               <div className="mt-1.5 flex items-center gap-2 text-[11.5px]">

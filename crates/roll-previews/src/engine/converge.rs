@@ -746,24 +746,31 @@ impl Engine {
     async fn read_schema(&self, r: &Row) {
         let read = async {
             let mut all: Option<Vec<String>> = None;
+            // Every line, uncapped, for the risks: the shown lines stop at 200.
+            let mut every: Vec<String> = Vec::new();
             let resources = self.store.resources(&r.id)?;
             let has_schema = |k: Kind| matches!(k, Kind::Postgres | Kind::Search);
             let several = resources.iter().filter(|x| has_schema(x.kind)).count() > 1;
             for res in resources.iter().filter(|x| has_schema(x.kind)) {
                 let Some(branch) = &res.r#ref else { continue };
                 let Some((parent, mine)) = self.brancher(res.kind)?.schema(&res.parent, branch).await? else { continue };
-                let lines = crate::schema::diff(&parent, &mine);
+                let lines = crate::schema::diff_all(&parent, &mine);
+                let header = format!("# {}:{}", res.kind.as_str(), res.parent);
+                if several && !lines.is_empty() {
+                    every.push(header.clone());
+                }
+                every.extend(lines.iter().cloned());
                 let out = all.get_or_insert_with(Vec::new);
                 if several && !lines.is_empty() {
-                    out.push(format!("# {}:{}", res.kind.as_str(), res.parent));
+                    out.push(header);
                 }
-                out.extend(lines);
+                out.extend(crate::schema::cap(lines));
             }
-            anyhow::Ok(all.map(crate::schema::cap))
+            anyhow::Ok((all.map(crate::schema::cap), crate::schema::risks(&every)))
         };
         match read.await {
-            Ok(changes) => {
-                if let Err(e) = self.store.set_schema_changes(&r.id, r.build(), changes.as_deref()) {
+            Ok((changes, risks)) => {
+                if let Err(e) = self.store.set_schema_changes(&r.id, r.build(), changes.as_deref(), &risks) {
                     warn!(preview = %r.id, error = %e, "previews: keeping the schema's changes");
                 }
             }
