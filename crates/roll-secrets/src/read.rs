@@ -680,6 +680,9 @@ impl Secrets {
             if let ItemAction::Set { value, link, .. } = &item.action
                 && let Some(why) = crate::strength::browser_exposure(&item.key, value.as_ref().map(|v| v.expose()), self.secret_field(link.as_ref().and_then(|l| l.as_ref())).as_deref())
             {
+                // What kind of credential it is comes from the value (a rollback or a promote's
+                // writer never saw it): only for whoever may reveal it there.
+                let why = if caller.allows(Action::Reveal, &Scope::at(project, slug, &item.path)) { why } else { crate::strength::public_without_reveal(&why) };
                 out.push(format!("{}: {why}", item.key));
             }
             let ItemAction::Set { value: Some(v), .. } = &item.action else { continue };
