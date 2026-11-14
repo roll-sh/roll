@@ -405,6 +405,15 @@ impl Ctx {
         }
     }
 
+    /// Whether a call of this connection's can wait for a person: a rule that asks, or "ask for
+    /// anything else". The operator's never do (the gate doesn't judge them).
+    fn can_ask(&self) -> bool {
+        match &self.principal {
+            Principal::Operator => false,
+            Principal::Grant(g) => g.ask_otherwise || g.scope.0.iter().any(|r| r.actions.values().any(|e| *e == roll_auth::scope::Effect::Ask)),
+        }
+    }
+
     /// Whether the connection asked for this product's toolset (the access tools always).
     fn asked(&self, product: &str) -> bool {
         product == "access" || self.toolsets.as_ref().is_none_or(|t| t.iter().any(|p| p == product))
@@ -420,6 +429,15 @@ impl Ctx {
     /// Every tool this caller can use, as `tools/list` shows it.
     fn tools(&self) -> Vec<Value> {
         let mut out: Vec<Value> = tools::all().iter().filter(|t| self.usable(t)).map(tools::Tool::definition).collect();
+        // A connection no person is ever asked about has no use for the approval argument (a
+        // model reads every tool's schema): the operator's, and a token whose rules only allow.
+        if !self.can_ask() {
+            for t in &mut out {
+                if let Some(p) = t["inputSchema"]["properties"].as_object_mut() {
+                    p.remove("approval");
+                }
+            }
+        }
         for set in self.m.sets.iter() {
             for t in set.tools() {
                 let product = t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string();
