@@ -209,7 +209,7 @@ function SignCsr({ ca }: { ca: Ca }) {
             className={`${field} h-auto py-1.5 font-mono text-[11px]`}
           />
           <div className="flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-1.5 text-[12px] text-muted">
+            <label className="flex items-center gap-1.5 whitespace-nowrap text-[12px] text-muted">
               Valid for
               <input type="number" min={1} max={ca.max_days} value={days} onChange={(e) => setDays(Number(e.target.value))} className={`${field} h-7 w-16 font-mono text-[12px]`} aria-label="Days" />
               days
