@@ -969,6 +969,8 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             } else {
                 std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?
             };
+            // Polled before the first read when watching: a write during it is a change.
+            let before = if watch && out.is_some() { digests(&c, &[format!("{env}/digest?{}", c.q())]).await? } else { Digests::new() };
             let (text, leases, follow) = render_env(&c, &env, &file, &tpl).await?;
             let Some(out) = out else {
                 print!("{text}");
@@ -976,7 +978,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             };
             replace_private(&out, &text)?;
             if watch {
-                render_watch(&c, &env, &file, &tpl, &out, text, leases, follow, interval, exec.as_deref()).await?;
+                render_watch(&c, &env, &file, &tpl, &out, text, leases, follow, before, interval, exec.as_deref()).await?;
             }
         }
         Secrets::Health { all: false, code } => {
@@ -2102,10 +2104,10 @@ fn replace_private(path: &str, text: &str) -> anyhow::Result<()> {
 /// `roll secrets render --watch`: write the file again when the environment's digest changes and
 /// the text with it, then run `exec`; renew dynamic credentials' leases every 10 minutes.
 #[allow(clippy::too_many_arguments)]
-async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &str, mut text: String, mut leases: Vec<String>, mut follow: Vec<String>, interval: u64, exec: Option<&str>) -> anyhow::Result<()> {
+async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &str, mut text: String, mut leases: Vec<String>, mut follow: Vec<String>, before: Digests, interval: u64, exec: Option<&str>) -> anyhow::Result<()> {
     // The environment's digest, and every one its references read (from the first render: a
     // second one would read and issue everything again).
-    let mut last = digests(c, &follow).await?;
+    let mut last = digests_since(c, &before, &follow).await;
     let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
     loop {
         tokio::select! {
@@ -2129,7 +2131,7 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
                 if now == last {
                     continue;
                 }
-                last = now;
+                last = now.clone();
                 let (next, next_leases, next_follow) = match render_env(c, env, file, tpl).await {
                     Ok(r) => r,
                     Err(e) => {
@@ -2138,11 +2140,9 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
                     }
                 };
                 leases = next_leases;
-                // References may have changed: compare the new set from here on.
-                if next_follow != follow {
-                    follow = next_follow;
-                    last = digests(c, &follow).await.unwrap_or(last);
-                }
+                // As polled before this read; references may have changed.
+                last = digests_since(c, &now, &next_follow).await;
+                follow = next_follow;
                 if next == text {
                     continue;
                 }
@@ -2450,13 +2450,31 @@ async fn resolve_refs(c: &Client<'_>, refs: &[crate::secret_refs::Ref]) -> anyho
 }
 
 /// Every followed digest, as one: any of them moving moves it.
-async fn digests(c: &Client<'_>, follow: &[String]) -> anyhow::Result<String> {
-    let mut all = String::new();
+/// The digest at each of `follow`'s paths.
+async fn digests(c: &Client<'_>, follow: &[String]) -> anyhow::Result<Digests> {
+    let mut all = Digests::new();
     for p in follow {
-        all.push_str(&s(&c.call(Method::GET, p, None).await?["digest"]).to_string());
-        all.push(';');
+        all.insert(p.clone(), s(&c.call(Method::GET, p, None).await?["digest"]));
     }
     Ok(all)
+}
+
+type Digests = std::collections::BTreeMap<String, String>;
+
+/// What a watch compares from now on, after a read that follows `follow`: each path's digest as
+/// polled before that read (`before`), so a write that lands during the read still counts as a
+/// change. Only a path the read newly references is polled now; one that can't be is left empty,
+/// which the next poll sees as a change.
+async fn digests_since(c: &Client<'_>, before: &Digests, follow: &[String]) -> Digests {
+    let mut out = Digests::new();
+    for p in follow {
+        let d = match before.get(p) {
+            Some(d) => d.clone(),
+            None => c.call(Method::GET, p, None).await.map(|v| s(&v["digest"])).unwrap_or_default(),
+        };
+        out.insert(p.clone(), d);
+    }
+    out
 }
 
 /// `roll run`: resolve, then exec the command with the values in its environment; with
@@ -2465,9 +2483,11 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     let at = r.at.resolve();
     let project = project(api, at.project.as_deref()).await?;
     let c = Client { project, api, at: at.clone() };
+    // Polled before the first read when watching: a write during it is a change.
+    let before = if r.watch { digests(&c, &[format!("{}/digest?{}", c.env(&at.env), c.q())]).await? } else { Digests::new() };
     let (env, leases, follow) = run_env(&c, &at, &r).await?;
     if r.watch {
-        return watch(&c, &at, &r, env, leases, follow).await;
+        return watch(&c, &at, &r, env, leases, follow, before).await;
     }
     let mut cmd = std::process::Command::new(&r.command[0]);
     cmd.args(&r.command[1..]).envs(env);
@@ -2487,9 +2507,10 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
 /// `roll run --watch`: the command as a child, restarted (SIGTERM, then SIGKILL after 10 s) when
 /// the environment changes. A change that doesn't resolve keeps the running command. Exits with
 /// the command's own code when it exits by itself.
-async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>, mut leases: Vec<String>, mut follow: Vec<String>) -> anyhow::Result<()> {
+#[allow(clippy::too_many_arguments)]
+async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>, mut leases: Vec<String>, mut follow: Vec<String>, before: Digests) -> anyhow::Result<()> {
     // The environment's digest, and every referenced one's (an env file's `roll://…`).
-    let mut last = digests(c, &follow).await?;
+    let mut last = digests_since(c, &before, &follow).await;
     let every = std::time::Duration::from_secs(r.interval.max(1));
     // Dynamic credentials outlive their first lease: renewed every 10 minutes while it runs.
     let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
@@ -2520,17 +2541,15 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>,
                     if now == last {
                         continue;
                     }
-                    last = now;
+                    last = now.clone();
                     match run_env(c, at, r).await {
                         Ok((next, next_leases, next_follow)) => {
                             eprintln!("roll run: {}:{} changed, restarting {}", at.env, at.path, r.command[0]);
                             env = next;
                             leases = next_leases;
-                            // References may have changed: compare the new set from here on.
-                            if next_follow != follow {
-                                follow = next_follow;
-                                last = digests(c, &follow).await.unwrap_or(last);
-                            }
+                            // As polled before this read; references may have changed.
+                            last = digests_since(c, &now, &next_follow).await;
+                            follow = next_follow;
                             stop(&mut child).await;
                             break;
                         }
