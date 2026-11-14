@@ -228,7 +228,11 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `_msearch`, search templates and async search, `index_options` validation, the `embedding`
    task type and `semantic` field type, the `random_reranker` and `text_similarity_reranker`
    retrievers. A delegate, `wip/search-inference`.
-2. **Indexing CPU and benchmarks on a quiet host** (docs/benchmarks/search.md). Indexing: the
+2. **Semantic search in roll's surfaces**: a dashboard panel for a cluster's inference endpoints
+   (create with a provider form whose API key is sent once and never shown back, test with a
+   sample text, delete), `semantic_text` in the index browser's mapping view, and a quickstart;
+   MCP tools follow the routes (the MCP thread). In progress (the parent).
+3. **Indexing CPU and benchmarks on a quiet host** (docs/benchmarks/search.md). Indexing: the
    direct document parser now takes float types, plain objects and the opensearch dialect
    (nyc_taxis 8 clients 90k docs/s against Elasticsearch's 66k and OpenSearch's 60k; an ECS log
    74.5k against 59.0k and 41.3k), but with one client roll spends more CPU per document than
@@ -244,7 +248,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    A/B; Rally rerun pending) and `terms_enum`; a full rerun of every Rally track with variance;
    one allocator policy (rolld's against search-dev's purge governor); `terms_enum`'s per-request
    overhead.
-3. **Integration with the stacked branches**: previews (search brancher: branch, find, reset,
+4. **Integration with the stacked branches**: previews (search brancher: branch, find, reset,
    delete, `own_bytes`, `ELASTICSEARCH_URL`) and apps are on this branch; `scripts/preview-cost.sh`
    now branches a search cluster too (the branch reads the parent's document, its writes stay
    in it, the service gets its `ELASTICSEARCH_URL`, landing deletes it). Apps' links to search:
@@ -258,8 +262,12 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    link user like apps'. The fleet test with every product on passed on this branch
    (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall 1.2 s in
    the rolling restart).
-4. **Compatibility gaps** from the extended suites (4,912 of the 5,541 Elasticsearch passes),
-   largest first: platinum's machine learning (278, a product decision: anomaly detection and
+5. **Compatibility gaps** from the extended suites (4,912 of the 5,541 Elasticsearch passes),
+   largest first. In progress (`wip/search-compat`): ent-search's last 5 (a `rule` retriever over
+   `rrf`/`linear`, a rule query's organic rewrite), ES|QL's last 5, file-based service tokens,
+   security's last 4, and OpenSearch Security's endpoints not built yet (`whoami`,
+   `permissionsinfo`, `tenants`, `securityconfig`, `audit`, `ssl`, cache flush). Then:
+   platinum's machine learning (278, a product decision: anomaly detection and
    trained models), security's last 4 (ES|QL's `METRICS_INFO` and `TS_INFO` under FLS: the two
    commands themselves), file-based service tokens (`service_accounts`), ES|QL's last 5
    (TOP_SNIPPETS, CATEGORIZE, approximation, `unsigned_long` past `i64::MAX`). `logsdb`'s last 9 are
@@ -268,17 +276,17 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    fields); downsample's last one (allocation filtering). In the opensearch dialect, pick
    `auto_date_histogram`'s rounding from the bounds as OpenSearch's rewrite does where it differs
    from collecting (roll counts with Elasticsearch's choice in both dialects).
-5. **Dashboard polish**: the index browser and console are on the per-index routes, and a
+6. **Dashboard polish**: the index browser and console are on the per-index routes, and a
    cluster's Settings has an API keys panel (create with data or admin access and an expiry,
    shown once; list on request, so it doesn't wake the cluster; revoke, naming keys apps and roll
    secrets made). Left: a review against Elastic Cloud's and OpenSearch Dashboards' consoles.
    Signed-in users who aren't admins follow accounts' phase 2: today every product but code,
    agents and projects answers them 403 (docs/accounts.md), search included.
-6. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
+7. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
-7. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
+8. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
    main's cache: under the minute, no room for another crate). (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
