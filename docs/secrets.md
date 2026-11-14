@@ -563,7 +563,8 @@ does, and issues a login per lease, as Vault's database engine does. A project r
 (`POST …/outside-databases {name, url, roles?, group?, ca?}`, `admin`; `roll secrets databases add
 NAME --role a --role b --group g`, the URL on stdin): `url` is an admin connection
 (`postgres://admin:…@host:5432/db`, `mysql://admin:…@host:3306/db`,
-`sqlserver://admin:…@host:1433/db` or `clickhouse://admin:…@host:8443/db`, a user that may alter both
+`sqlserver://admin:…@host:1433/db`, `clickhouse://admin:…@host:8443/db` or
+`rabbitmq://admin:…@host:15671/vhost`, a user that may alter both
 roles and create roles in the group), sealed with the project's data key like a rotator's (only `host:port` is shown); `roles` are
 two login roles that take turns (managed links); `group` is a role whose grants dynamic logins get;
 one or both. `ca` is the server's CA certificates (PEM) when the system's don't cover it (RDS).
@@ -625,6 +626,19 @@ cluster, keep users in replicated access storage. Checked against ClickHouse 25.
 password refused, the new one taken), a dynamic login that signs in with the role and can't once
 dropped, an untrusted certificate and a wrong admin password refused, and no password in the
 server's query log.
+
+**RabbitMQ** too, as Vault's and Infisical's RabbitMQ engines, through its management HTTPS API
+(`rabbitmq://admin:…@host:15671/vhost`; no vhost is `/`; no settings), with the same guards as
+ClickHouse (the checked address pinned, the certificate verified, no redirects or proxy, answers
+read up to 256 KiB). The admin needs the `administrator` tag (checked at registration, with the
+vhost and the users). Passwords go as RabbitMQ's own salted SHA-256 (`password_hash`), so the
+broker never sees one. Rotation sets a new password on two users that take turns, keeping their
+tags; `group` names a template user whose permissions and topic permissions on the vhost a
+dynamic user copies (no tags). RabbitMQ has no expiry for a user: ending a lease deletes it, then
+closes its connections where the broker has that route (3.11 and later). Checked against RabbitMQ
+4: rotation (tags kept, the old password refused), a dynamic user with the template's permissions
+that's gone once dropped, and an untrusted certificate, a wrong password and a user without the
+administrator tag refused.
 
 **SQL Server** (and Azure SQL Managed Instance) too, as Vault's MSSQL engine (`sqlserver://…`; the
 URL may set `encrypt=true` and nothing else). Everything is encrypted and the certificate verified
@@ -1825,7 +1839,7 @@ Open pull requests after this one:
   signature checked.
 - **#41, Redis outside roll** (after #39): two ACL users take turns (`#<sha256>` passwords), or a
   user per lease copying a template user's rules; the tenant's replies read by a bounded parser.
-- **#39, Postgres, MySQL, SQL Server and ClickHouse outside roll** (after #20): two login roles take turns (rotation), or a
+- **#39, Postgres, MySQL, SQL Server, ClickHouse and RabbitMQ outside roll** (after #20): two login roles take turns (rotation), or a
   login per lease in a group role (dynamic), over verified TLS to a public address rolld resolved
   itself (Postgres gets a SCRAM verifier, never the password).
 
