@@ -319,6 +319,18 @@ impl Caller {
         Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true }
     }
 
+    /// Whether this caller may learn anything of a row's value: reveal it, see its fingerprint, or
+    /// test a guess against it. A sensitive row's only reaches a runtime.
+    pub fn sees(&self, project: &str, env: &str, path: &str, tags: &[String]) -> bool {
+        (self.runtime || !crate::names::sensitive(tags)) && self.allows(Action::Reveal, &Scope::at(project, env, path))
+    }
+
+    /// The same caller, not a runtime: sensitive values are left out (checks, sandboxes).
+    pub fn not_runtime(mut self) -> Caller {
+        self.runtime = false;
+        self
+    }
+
     /// This caller, kept out of `except` (a project's protected environments) whatever it may
     /// otherwise do.
     pub fn without(&self, except: Vec<String>) -> Caller {

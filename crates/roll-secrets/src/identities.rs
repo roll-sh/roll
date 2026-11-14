@@ -255,7 +255,7 @@ impl Secrets {
         let expires_at = now + i.ttl_minutes * 60_000;
         let principal = format!("identity:{}", i.id);
         let (t, secret) = tokens::new_token(i.name.clone(), i.environments.clone(), i.paths.clone(), i.actions.clone(), Some(expires_at), i.allowed_ips.clone(), now, &principal);
-        let caller = Caller { principal, grants: std::sync::Arc::new(crate::access::Everything), ip, runtime: true };
+        let caller = Caller { principal, grants: std::sync::Arc::new(crate::access::Everything), ip, runtime: false };
         self.db.write(|c| {
             // Deleted meanwhile: no token.
             if c.execute("UPDATE identities SET last_used_at = ?, last_subject = ? WHERE id = ?", params![now, sub, i.id])? == 0 {

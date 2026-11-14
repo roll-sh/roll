@@ -1024,8 +1024,22 @@ async fn a_sensitive_keys_value_reaches_only_roll_s_runtimes() {
     let (s, p) = (api.secrets.clone(), api.project.clone());
     let got = tokio::task::spawn_blocking(move || s.values(&p, "production", "/", true, Some("app:web"), &roll_secrets::Caller::consumer("app:web")).unwrap()).await.unwrap();
     assert_eq!((got.values["PAYMENTS_KEY"].expose(), got.values["WRAPPED"].expose()), ("sk_live_sensitive", "Bearer sk_live_sensitive"));
-    // …and are told which values never to show.
-    assert_eq!(got.sensitive, ["PAYMENTS_KEY"]);
+    // …and are told which values never to show, a key that holds one through a reference too.
+    assert_eq!(got.sensitive, ["PAYMENTS_KEY", "WRAPPED"]);
+    // A sandbox's or a check's resolve isn't a runtime's.
+    let (s, p) = (api.secrets.clone(), api.project.clone());
+    let sandbox = tokio::task::spawn_blocking(move || s.values(&p, "production", "/", true, Some("sandbox:x"), &roll_secrets::Caller::consumer("sandbox:x").not_runtime()).unwrap()).await.unwrap();
+    assert!(!sandbox.values.contains_key("PAYMENTS_KEY"));
+
+    // Tagging a key that already has a value: its older versions hold the value too, so none shows.
+    api.ok(Method::PUT, "/environments/staging/secrets/OLD_KEY", Some(json!({ "value": "sk_live_old" }))).await;
+    api.ok(Method::PUT, "/environments/staging/secrets/OLD_KEY", Some(json!({ "tags": ["sensitive"] }))).await;
+    assert_eq!(api.call(Method::GET, "/environments/staging/secrets/OLD_KEY/versions/1/value", None).await.0, StatusCode::FORBIDDEN);
+    // No test of a guess: the leak scan, a local file and another environment's copy don't say.
+    assert_eq!(api.ok(Method::POST, "/leaks", Some(json!({ "candidates": ["sk_live_old"] }))).await, json!([]));
+    api.ok(Method::PUT, "/environments/development/secrets/OLD_KEY", Some(json!({ "value": "sk_live_old" }))).await;
+    let cmp = api.ok(Method::GET, "/compare?from=development&to=staging", None).await;
+    assert_eq!(cmp["rows"].as_array().unwrap().iter().find(|r| r["key"] == "OLD_KEY").unwrap()["status"], "hidden");
 }
 
 #[tokio::test]

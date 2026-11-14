@@ -107,7 +107,8 @@ export type Cell = { fp: string; version: number; updated_at: number; link: Link
 export type RowStatus = "same" | "different" | "missing";
 export type GridRow = { key: string; cells: Record<string, Cell | null>; status: RowStatus };
 export type Grid = { path: string; environments: string[]; rows: GridRow[]; folders: string[]; previews: number };
-export type CompareStatus = "same" | "different" | "only_from" | "only_to";
+/** `hidden`: in both, but the caller can't compare them (it may not reveal one, or one is sensitive). */
+export type CompareStatus = "same" | "different" | "only_from" | "only_to" | "hidden";
 export type CompareRow = { key: string; status: CompareStatus; from: number | null; to: number | null };
 export type Compare = { from: string; to: string; path: string; rows: CompareRow[] };
 export type RequestState = "open" | "approved" | "rejected" | "applied" | "closed" | "stale";

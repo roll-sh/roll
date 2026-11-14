@@ -654,7 +654,8 @@ impl ForCode {
         tokio::task::spawn_blocking(move || {
             // Never a protected environment: not asked for, nor through a reference, an import or
             // an ephemeral environment's base.
-            let caller = secrets.untrusted(&project, &roll_secrets::Caller::consumer(&consumer))?;
+            // Not a runtime: a sandbox is a terminal, so sensitive keys stay out (checks too).
+            let caller = secrets.untrusted(&project, &roll_secrets::Caller::consumer(&consumer).not_runtime())?;
             if !caller.allows(roll_secrets::Action::Reveal, &roll_secrets::Scope::env(&project, &slug)) {
                 anyhow::bail!("{slug} is protected: protected environments never go to checks or sandboxes");
             }

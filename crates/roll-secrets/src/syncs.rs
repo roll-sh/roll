@@ -530,16 +530,14 @@ impl Secrets {
 
     /// Push a claimed sync and record what happened. `true`: it pushed.
     fn push_sync(&self, r: Row, hold: i64, digest: Option<String>, force: bool) -> bool {
-        // Within what its maker may do; a machine delivering to a platform, so it carries
-        // sensitive keys too.
-        let caller = self.sync_caller(&r).map(|mut c| {
-            c.runtime = true;
-            c
-        });
+        // Within what its maker may do. Not a runtime: a sync's target is one its maker chose and
+        // may read back (a webhook sealed to their key, a cluster of theirs), so sensitive keys
+        // stay out (named under "not synced"; the target keeps what it had).
+        let caller = self.sync_caller(&r);
         let outcome = caller.and_then(|caller| self.push_once(&r, &caller, digest, force));
         let now = self.db.now_ms().unwrap_or(hold - HOLD_MS);
         let (project, id, env, path) = (r.project.as_str(), r.info.id.as_str(), r.info.environment.as_str(), r.info.path.as_str());
-        let actor = Caller { principal: format!("sync:{id}"), grants: Arc::new(Everything), ip: None, runtime: true };
+        let actor = Caller { principal: format!("sync:{id}"), grants: Arc::new(Everything), ip: None, runtime: false };
         let ok = outcome.is_ok();
         let res = self.db.write(|c| {
             match &outcome {

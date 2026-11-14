@@ -446,6 +446,8 @@ project.
 
 - `GET …/compare?from=development&to=staging&path=/` lists every key in either environment with a
   status: `same`, `different`, `only_from` or `only_to`. Fingerprints decide; no value is revealed.
+  A key in both that the caller can't compare (it may not reveal one side, or one is sensitive) is
+  `hidden`: equality would test guesses against a value it can't read.
 - `POST …/environments/{to}/promote?from={from}` copies the selected keys (values, comments, tags and
   links) from one environment to another as one change in the target. On a protected target, it
   opens a change request instead.
@@ -559,21 +561,30 @@ grace period (its revocation goes through the rotator).
 
 A key tagged `sensitive` (`roll secrets set KEY --tag sensitive`, or its tags in the dashboard) can be
 written but never read back by a person or a token, as Vercel's sensitive environment variables and
-Doppler's restricted secrets: only roll's runtimes (apps, previews, checks, sandboxes, tasks), syncs
-pushing to their platform, and workload identities' logins (CI) get its value.
+Doppler's restricted secrets: only roll apps' builds and instances get its value (`ForApps`
+resolves as a runtime), where the service's code uses it.
 
-- Everywhere else it's withheld: `…/values` and `roll run` leave it out and name it in `withheld` (so
-  `roll run` still starts, saying so); `…/secrets/{key}/value` and a version written while it was
-  sensitive answer 403; a reference to it doesn't resolve (`${KEY}` can't carry it into another key);
-  a change request's values hide it (reviewers approve without seeing it); a backup carries its name,
-  not its value. The operator is no exception.
+- Everything else is a person or acts for one, so it's withheld there. The operator is no exception.
+  - `…/values` and `roll run` leave it out and name it in `withheld`, so `roll run` still starts,
+    saying so. `…/secrets/{key}/value` answers 403, and so does every version of a key that's
+    sensitive now: tagging a key keeps its value, so an older version holds it too.
+  - A reference doesn't resolve to it (`${KEY}` can't carry it into another key). A change
+    request's values hide it, when it's sensitive now or the request makes it so (a promote, a new
+    key). A backup carries its name, not its value.
+  - Checks, sandboxes (a terminal), previews, syncs (a target its maker chose and may read back:
+    the key is "not synced" and the target keeps what it had) and CI's workload identities don't
+    get it.
+- Nothing tests a guess against it either: no fingerprint, weakness or typed-key misfit shows for
+  it, comparing environments says `hidden`, a local file's diff skips it, and the leak scan
+  (`POST …/leaks`) doesn't match it. roll code's own scans of pushed code still do: a sensitive
+  value in code leaked like any other.
 - Sensitive is for good: a write that takes the tag off is refused (delete the key and set it again
-  for a value people can read). Versions from before it was tagged stay readable: they were never
-  sensitive.
-- In-process callers say what they are (`Caller::runtime`): `Caller::consumer` (roll's runtimes) and
-  a sync's push are; tokens, people and the operator aren't. A runtime's read names the sensitive
-  keys it got in `sensitive`, so it uses them and never shows them (roll apps puts them in a
-  container's environment and masks them in its variables, as its own sealed ones).
+  for a value people can read).
+- In-process callers say what they are (`Caller::runtime`): `Caller::consumer` is one, and
+  `.not_runtime()` makes it not (checks and sandboxes). A runtime's read names the keys whose value
+  holds a sensitive one, directly or through a reference, in `sensitive`, so it uses them and never
+  shows them (roll apps puts them in a container's environment and masks them in its variables, as
+  its own sealed ones).
 
 ## Consumption
 
@@ -1498,7 +1509,7 @@ type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" 
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };
-type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to"; from: number | null; to: number | null }[] };
+type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to" | "hidden"; from: number | null; to: number | null }[] };
 type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number }[]; approvals: number; approvals_needed: number; applied_seq: number | null };
 type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
 type Lease = { id: string; environment: string; path: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };

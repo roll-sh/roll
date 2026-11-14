@@ -220,7 +220,8 @@ impl Secrets {
         for (n, o) in ops.iter().enumerate() {
             let cur = self.db.read(|c| crate::write::current(c, &env.id, &o.path, &o.key, &o.owner))?;
             // A sensitive key's values stay out of reach here too: reviewers approve without them.
-            let hidden = !caller.runtime && cur.as_ref().is_some_and(|c| crate::names::sensitive(&c.tags));
+            // …whether it's sensitive now or the request makes it so (a promote, a new key).
+            let hidden = !caller.runtime && (cur.as_ref().is_some_and(|c| crate::names::sensitive(&c.tags)) || o.tags.as_ref().is_some_and(|t| crate::names::sensitive(t)));
             let now = match &cur {
                 _ if hidden => None,
                 Some(cur) if cur.link.as_ref().is_none_or(|l| l.mode == crate::Mode::Managed) => cur.value.as_ref().map(|ct| dek.open(&crate::crypto::value_aad(project, &cur.id, cur.version), ct)).transpose()?,
