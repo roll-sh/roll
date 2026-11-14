@@ -24,6 +24,8 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
 textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,.14);
  background:#000;color:#ededed}
 .row{display:flex;gap:6px;justify-content:flex-end}
+.resolve{height:22px;padding:0 8px;border-radius:6px;border:1px solid rgba(255,255,255,.14);background:transparent;color:#8f8f8f;cursor:pointer;font-size:11px}
+.resolve:hover{color:#ededed}
 .row button{height:28px;padding:0 10px;border-radius:7px;border:1px solid rgba(255,255,255,.14);background:transparent;color:#ededed;cursor:pointer}
 .row button.go{background:#4c8dff;border-color:#4c8dff;color:#fff}
 .bar{display:flex;gap:6px;justify-content:flex-end}
@@ -140,7 +142,14 @@ textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8p
         meta.textContent = `${n.by} · ${ago(n.at)}${n.selector ? ` · ${n.selector}` : ""}`;
         const text = document.createElement("p");
         text.textContent = n.note;
+        // Resolved in roll, by someone who may (a writer, or whoever left it): it folds away here.
+        const done = document.createElement("button");
+        done.type = "button";
+        done.className = "resolve";
+        done.textContent = "Resolve";
+        done.addEventListener("click", () => window.open(`${TARGET}&${new URLSearchParams({ fb_resolve: String(n.id || "") })}`, "_blank", "noopener"));
         item.append(meta, text);
+        if (n.id) item.append(done);
         item.addEventListener("mouseenter", () => {
           let el = null;
           try { el = n.selector ? document.querySelector(n.selector) : null; } catch { el = null; }

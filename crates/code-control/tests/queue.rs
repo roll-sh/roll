@@ -532,6 +532,8 @@ async fn blockers_keep_changes_out_of_the_queue() {
             github: Default::default(),
             head: None,
             schema_changes: None,
+            release_ms: None,
+            release_before_ms: None,
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
@@ -539,11 +541,12 @@ async fn blockers_keep_changes_out_of_the_queue() {
             page_speed: None,
             page_health: None,
             page_a11y: None,
+            page_links: None,
             base_change: None,
             diff_url: None,
             pages: Vec::new(),
             speed_budget: None,
-            visual_review: Some(code_control::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.0, by: by.map(Into::into), required: true, head: None }),
+            visual_review: Some(code_control::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.0, by: by.map(Into::into), required: true, head: None, pages: Vec::new() }),
         }),
     };
     a.code.report_environment(&id(&c), Some(&preview("changed", None))).unwrap();

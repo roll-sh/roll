@@ -259,6 +259,7 @@ pub async fn execute(
                 },
             )?;
             authorize_functions(db, session, &plan.functions)?;
+            crate::masking::check_platform_keys(db, &plan.table)?;
             crate::masking::check_restrictions(
                 db,
                 session,

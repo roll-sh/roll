@@ -13,6 +13,34 @@ use serde_json::{Value, json};
 pub struct Postgres(pub Api);
 
 impl Postgres {
+    /// A branch of `parent` named `name` (`at`: as the parent was then), with its own role; one
+    /// made just before a crash is found and finished instead.
+    async fn create(&self, parent: &str, name: &str, mode: Mode, at: Option<i64>) -> anyhow::Result<Branched> {
+        let (id, has_role) = match self.find(parent, name).await? {
+            Some(b) => {
+                let id = s(&b["id"]).unwrap_or_default();
+                // From before a crash: it may still hold rows, so empty it again (idempotent).
+                if mode == Mode::Schema {
+                    self.0.post(&format!("/v1/projects/{}/branches/{}/reset", seg(parent), seg(&id)), json!({ "schema_only": true })).await?;
+                }
+                (id, false)
+            }
+            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "schema_only": mode == Mode::Schema, "app_role": true, "at": at })).await {
+                Ok(v) => (s(&v["branch"]["id"]).ok_or_else(|| anyhow::anyhow!("a branch without an id"))?, v["app_connection_uri"].is_string()),
+                Err(e) if conflict_is_ours(&e) => {
+                    let b = self.find(parent, name).await?.ok_or(e)?;
+                    (s(&b["id"]).unwrap_or_default(), false)
+                }
+                Err(e) => return Err(e),
+            },
+        };
+        // A branch found again (a crash) gets its role now (idempotent).
+        if !has_role {
+            self.0.post(&format!("/v1/projects/{}/branches/{}/app-role", seg(parent), seg(&id)), json!({})).await?;
+        }
+        Ok(Branched { r#ref: id, kept: Some(APP_ROLE.into()) })
+    }
+
     async fn find(&self, project: &str, name: &str) -> anyhow::Result<Option<Value>> {
         let p = self.0.get(&format!("/v1/projects/{}", seg(project))).await?;
         Ok(p["branches"].as_array().and_then(|b| b.iter().find(|b| b["name"] == name).cloned()))
@@ -36,30 +64,20 @@ impl Brancher for Postgres {
     /// `Mode::Schema`: branched, then every user table emptied (`schema_only`). Either way the
     /// branch gets a role of its own for the preview's code (pg-control's `app_role`).
     async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
-        let (id, has_role) = match self.find(parent, name).await? {
-            Some(b) => {
-                let id = s(&b["id"]).unwrap_or_default();
-                // From before a crash: it may still hold rows, so empty it again (idempotent).
-                if mode == Mode::Schema {
-                    self.0.post(&format!("/v1/projects/{}/branches/{}/reset", seg(parent), seg(&id)), json!({ "schema_only": true })).await?;
-                }
-                (id, false)
-            }
-            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "schema_only": mode == Mode::Schema, "app_role": true })).await {
-                Ok(v) => (s(&v["branch"]["id"]).ok_or_else(|| anyhow::anyhow!("a branch without an id"))?, v["app_connection_uri"].is_string()),
-                Err(e) if conflict_is_ours(&e) => {
-                    let b = self.find(parent, name).await?.ok_or(e)?;
-                    (s(&b["id"]).unwrap_or_default(), false)
-                }
-                Err(e) => return Err(e),
-            },
-        };
-        // A branch found again (a crash) gets its role now (idempotent).
-        if !has_role {
-            self.0.post(&format!("/v1/projects/{}/branches/{}/app-role", seg(parent), seg(&id)), json!({})).await?;
-        }
-        Ok(Branched { r#ref: id, kept: Some(APP_ROLE.into()) })
+        self.create(parent, name, mode, None).await
     }
+
+    /// From the parent's history (pg-control's point in time: unix seconds).
+    async fn branch_at(&self, parent: &str, name: &str, mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
+        self.create(parent, name, mode, Some(at)).await.map(Some)
+    }
+
+    /// A reset in place can't go back in time: branched again from there instead.
+    async fn reset_at(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
+        self.delete(parent, branch, name).await?;
+        self.create(parent, name, mode, Some(at)).await.map(Some)
+    }
+
 
     /// In place: same branch, endpoint and `DATABASE_URL` (pg-control makes the branch's role
     /// again, same password).
@@ -295,6 +313,18 @@ impl Brancher for Nosql {
         Ok((d["parent_id"] == parent_id && !parent_id.is_null()).then(|| s(&d["id"])).flatten())
     }
 
+    /// From the parent's history (`at`, unix seconds).
+    async fn branch_at(&self, parent: &str, name: &str, mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
+        let v = self.0.post(&format!("/v1/nosql/databases/{}/branches", seg(parent)), json!({ "name": name, "schema_only": mode == Mode::Schema, "at": at })).await?;
+        Ok(Some(Branched::plain(s(&v["id"]).ok_or_else(|| anyhow::anyhow!("a database without an id"))?)))
+    }
+
+    /// In place, to the parent as it was then (same id, endpoint and credentials).
+    async fn reset_at(&self, _parent: &str, branch: &str, _kept: Option<&str>, _name: &str, _mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
+        self.0.post(&format!("/v1/nosql/databases/{}/reset", seg(branch)), json!({ "at": at })).await?;
+        Ok(Some(Branched::plain(branch)))
+    }
+
     async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         let body = json!({ "name": name, "schema_only": mode == Mode::Schema });
         match self.0.post(&format!("/v1/nosql/databases/{}/branches", seg(parent)), body).await {
@@ -317,6 +347,11 @@ impl Brancher for Nosql {
             policy.insert(col.clone(), json!(f));
         }
         self.0.call(Method::PATCH, &format!("/v1/nosql/databases/{}", seg(branch)), Some(json!({ "masking": policy }))).await.map(|_| ())
+    }
+
+    async fn mask_problems(&self, parent: &str, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<Vec<String>> {
+        let schema = self.0.get(&format!("/v1/nosql/databases/{}/schema", seg(parent))).await?;
+        Ok(roll_previews::mask::nosql_key_masks(&schema, columns))
     }
 
     /// NoSQL resets in place: same id, endpoint and credentials.
@@ -814,6 +849,8 @@ impl Brancher for Search {
         let _ = u.set_username("");
         let _ = u.set_password(None);
         let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(300)).build()?;
+        let send = |req: reqwest::RequestBuilder| if user.is_empty() { req } else { req.basic_auth(&user, pass.as_deref()) };
+        let mut masked: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         for (spec, rule) in fields {
             let Some((index, path)) = spec.split_once('.') else { anyhow::bail!("{spec:?} isn't index.field") };
             let target = u.join(&format!("{}/_update_by_query?conflicts=proceed&refresh=true", seg(index)))?;
@@ -821,11 +858,7 @@ impl Brancher for Search {
                 "query": { "exists": { "field": path } },
                 "script": { "lang": "painless", "source": SEARCH_MASK_SCRIPT, "params": { "path": path.split('.').collect::<Vec<_>>(), "rule": rule } },
             });
-            let mut req = http.post(target).json(&body);
-            if !user.is_empty() {
-                req = req.basic_auth(&user, pass.as_deref());
-            }
-            let res = req.send().await?;
+            let res = send(http.post(target).json(&body)).send().await?;
             let status = res.status();
             let v: Value = res.json().await.unwrap_or(Value::Null);
             // An index the branch doesn't have holds nothing to mask.
@@ -834,6 +867,19 @@ impl Brancher for Search {
             }
             let failures = v["failures"].as_array().map_or(0, Vec::len);
             anyhow::ensure!(status.is_success() && failures == 0, "masking {spec}: {status} {}", v.to_string().chars().take(300).collect::<String>());
+            masked.insert(index);
+        }
+        // The documents as they were stay in the segments the branch shares with its parent,
+        // marked deleted only in the branch, and a term dictionary keeps their terms
+        // (`_terms_enum`, suggesters): every segment that holds one is rewritten as the branch's
+        // own without it (as Postgres masking's VACUUM FULL), the parent's untouched.
+        for index in masked {
+            let settings = u.join(&format!("{}/_settings", seg(index)))?;
+            let res = send(http.put(settings).json(&json!({ "index.merge.policy.expunge_deletes_allowed": 0.0 }))).send().await?;
+            anyhow::ensure!(res.status().is_success(), "masking {index}: its merge policy: {}", res.status());
+            let merge = u.join(&format!("{}/_forcemerge?only_expunge_deletes=true", seg(index)))?;
+            let res = send(http.post(merge)).send().await?;
+            anyhow::ensure!(res.status().is_success(), "masking {index}: expunging what was masked: {} {}", res.status(), res.text().await.unwrap_or_default().chars().take(300).collect::<String>());
         }
         Ok(())
     }

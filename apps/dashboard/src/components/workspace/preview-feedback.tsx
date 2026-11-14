@@ -22,6 +22,12 @@ export function feedbackFrom(query: string): PreviewFeedback | undefined {
   return { path: s("fb_path"), selector: s("fb_selector"), box: s("fb_box") || undefined, viewport: s("fb_viewport") || undefined, note: s("fb_note") };
 }
 
+/** The note a preview page's Resolve opened roll for (`?fb_resolve=<review id>`), or none. */
+export function resolveFrom(query: string): string | undefined {
+  const id = new URLSearchParams(query).get("fb_resolve")?.trim() ?? "";
+  return /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : undefined;
+}
+
 /** The review's body: where on the preview, then the note. The page's own names (its path, the
  * element's selector) come from the preview's code, so they're kept to one inert line each. */
 export function feedbackBody(p: Preview, f: PreviewFeedback, note: string): string {

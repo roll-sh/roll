@@ -1,7 +1,8 @@
-import { Boxes, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
+import { Boxes, Check, Copy, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Smartphone, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
-import { a11yWords, duration, followLogs, openUrl, previewsApi, screenshotUrl, resourceId, thanMain, type PageCheck, type Preview, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
+import { a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, type PreviewFeedback } from "./preview-feedback";
@@ -48,6 +49,7 @@ export function PreviewSheet({
   onChange,
   onClose,
   feedback,
+  resolve,
   onFeedbackPosted,
 }: {
   preview: Preview;
@@ -60,11 +62,15 @@ export function PreviewSheet({
   onClose: () => void;
   /** A note from the preview page's feedback button, to post on the change. */
   feedback?: PreviewFeedback;
+  /** A note the preview page's Resolve names (its review id), to resolve on the change. */
+  resolve?: string;
   /** It was posted (the link that brought it is spent). */
   onFeedbackPosted?: () => void;
 }) {
   const [tab, setTab] = useState<"Overview" | "Activity" | "Logs">("Overview");
   const [busy, setBusy] = useState<string | null>(null);
+  // The service whose link is shown as a QR code, to open on a phone.
+  const [phoneFor, setPhoneFor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const gone = p.desired === "deleted";
@@ -123,6 +129,11 @@ export function PreviewSheet({
                 <FeedbackForm preview={p} feedback={feedback} onPosted={onFeedbackPosted} />
               </div>
             )}
+            {resolve && p.change && (
+              <div className="mb-3">
+                <ResolveNote previewId={p.id} change={p.change} review={resolve} onDone={onFeedbackPosted} />
+              </div>
+            )}
             {p.state === "awaiting_approval" && (
               <p className="mb-3 rounded-lg border border-accent/40 bg-accent/[0.06] px-2.5 py-2 text-[11.5px] text-muted">
                 A pull request from a fork: a writer approves its head (<span className="font-mono text-fg">approve-run</span>) before its services run.
@@ -139,10 +150,23 @@ export function PreviewSheet({
                       <span className="text-[11px] text-subtle">{s.state}</span>
                       {s.deployed && <span className="ml-auto font-mono text-[10.5px] text-subtle">{s.deployed.slice(0, 8)}</span>}
                     </div>
-                    <a href={openUrl(s)} target="_blank" rel="noreferrer" className="mt-0.5 flex items-center gap-1 font-mono text-[11px] text-accent hover:underline">
-                      <span className="truncate">{host(s.url)}</span>
-                      <ExternalLink className="size-3 shrink-0" />
-                    </a>
+                    <div className="mt-0.5 flex items-center gap-2">
+                      <a href={openUrl(s)} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-1 font-mono text-[11px] text-accent hover:underline">
+                        <span className="truncate">{host(s.url)}</span>
+                        <ExternalLink className="size-3 shrink-0" />
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => setPhoneFor((x) => (x === s.name ? null : s.name))}
+                        aria-pressed={phoneFor === s.name}
+                        aria-label={`Open ${s.name} on a phone`}
+                        title="Open it on a phone: scan the code"
+                        className="ml-auto shrink-0 text-muted hover:text-fg aria-pressed:text-fg"
+                      >
+                        <Smartphone className="size-3.5" strokeWidth={1.5} />
+                      </button>
+                    </div>
+                    {phoneFor === s.name && <PhoneCode id={p.id} service={s.name} />}
                     {s.error && <p className="mt-0.5 text-[11px] break-words text-danger">{s.error}</p>}
                   </div>
                 ))}
@@ -187,16 +211,24 @@ export function PreviewSheet({
                       <div className="min-w-0 flex-1 leading-tight">
                         <div className="flex items-center gap-1.5 text-[11.5px]">
                           <StateDot state={r.state} />
-                          <span className="truncate">{names.get(id) ?? r.parent}</span>
-                          <span className="text-subtle">→</span>
-                          <span className="truncate font-mono text-[11px]">{r.ref ?? "—"}</span>
+                          <span className="max-w-[50%] shrink-0 truncate">{names.get(id) ?? r.parent}</span>
+                          <span className="shrink-0 text-subtle">→</span>
+                          <span className="min-w-0 truncate font-mono text-[11px]">{r.ref ?? "—"}</span>
                         </div>
-                        <div className="mt-0.5 font-mono text-[10.5px] text-subtle">
-                          {KIND_NAME[r.kind]} · {r.mode === "schema" ? "schema only" : "branch"} · {formatBytes(r.bytes)}
-                          {masked?.get(id) ? ` · masked (${masked.get(id)})` : ""}
+                        <div className="mt-0.5 flex flex-wrap gap-x-1 font-mono text-[10.5px] text-subtle">
+                          <span className="whitespace-nowrap">
+                            {KIND_NAME[r.kind]} · {r.mode === "schema" ? "schema only" : "branch"} · {formatBytes(r.bytes)}
+                          </span>
+                          {!!masked?.get(id) && <span className="whitespace-nowrap">· masked ({masked.get(id)})</span>}
+                          {r.data === "real" && (
+                            <span className="whitespace-nowrap text-soft" title="Its branch holds the parent's data as it is: the preview's code reads it unmasked">
+                              · production data, unmasked
+                            </span>
+                          )}
                         </div>
                         {r.error && <p className="mt-0.5 text-[11px] break-words text-danger">{r.error}</p>}
                       </div>
+                      {!gone && r.ref && <CopyConnection previewId={p.id} kind={r.kind} parent={r.parent} name={names.get(id) ?? r.parent} />}
                       {!gone && (
                         <button
                           disabled={busy !== null}
@@ -216,6 +248,12 @@ export function PreviewSheet({
               <p className="text-[11.5px] text-subtle">No data branches.</p>
             )}
 
+            {p.release && (
+              <p className="mt-1.5 font-mono text-[11px] text-subtle tabular-nums" title="The project's release (migrations), run on this preview's data before its services">
+                release {duration(p.release.ms)}
+                {p.release.before_ms != null ? ` · ${thanMain(p.release.ms, p.release.before_ms, "the push before") ?? "as before"}` : ""}
+              </p>
+            )}
             {p.schema_changes && p.schema_changes.length > 0 && (
               <>
                 <Label>Schema changes</Label>
@@ -230,6 +268,7 @@ export function PreviewSheet({
             )}
 
             {p.screenshot_at ? <Screenshot id={p.id} at={p.screenshot_at} change={p.visual_change} phone={p.phone_screenshot} base={p.base_change} pages={p.pages} /> : null}
+            {p.base_change?.text && <TextAgainst diff={p.base_change.text} branch={p.base_change.branch} />}
             {p.visual_review && p.visual_review.state !== "unchanged" && (
               <div className="mt-1.5 flex items-center gap-2 text-[11.5px]">
                 {p.visual_review.state === "accepted" ? (
@@ -243,14 +282,37 @@ export function PreviewSheet({
                       type="button"
                       disabled={busy !== null || gone}
                       onClick={() => run("accept", () => previewsApi.acceptVisual(p.id, p.visual_review?.head))}
-                      className="ml-auto h-6 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
+                      className="ml-auto h-6 shrink-0 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
                     >
-                      {busy === "accept" ? "Accepting…" : "Accept"}
+                      {busy === "accept" ? "Accepting…" : p.visual_review.pages.length > 1 ? "Accept all" : "Accept"}
                     </button>
                   </>
                 )}
               </div>
             )}
+            {p.visual_review && p.visual_review.state === "changed" && p.visual_review.pages.length > 1 && (
+              <ul className="mt-1 space-y-0.5 text-[11.5px]" aria-label="Pages to review">
+                {p.visual_review.pages.map((pg) => (
+                  <li key={pg.path} className="flex min-w-0 items-center gap-2">
+                    <span className="truncate font-mono text-[11px] text-muted">{pageLabel(pg.path)}</span>
+                    <span className="shrink-0 font-mono text-[11px] tabular-nums text-subtle">{Math.max(pg.percent, 0.1).toFixed(1)}%</span>
+                    {pg.by ? (
+                      <span className="ml-auto shrink-0 text-subtle">accepted by {pg.by}</span>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={busy !== null || gone}
+                        onClick={() => run(`accept:${pg.path}`, () => previewsApi.acceptVisual(p.id, p.visual_review?.head, pg.path))}
+                        className="ml-auto h-6 shrink-0 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
+                      >
+                        {busy === `accept:${pg.path}` ? "Accepting…" : "Accept"}
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {(p.page_health || p.page_links || p.page_a11y || p.page_speed) && <ChecksHeading p={p} />}
             {p.page_health && (p.page_health.errors > 0 || p.page_health.failed > 0) && (
               <div className="mt-1.5 space-y-0.5 text-[11.5px] text-danger">
                 {p.page_health.errors > 0 && (
@@ -269,6 +331,19 @@ export function PreviewSheet({
                 )}
               </div>
             )}
+            {p.page_links && p.page_links.broken.length > 0 && (
+              <p className="mt-1.5 text-[11.5px] break-words text-danger">
+                {p.page_links.broken.length} broken {p.page_links.broken.length === 1 ? "link" : "links"} of {p.page_links.checked}:{" "}
+                <span className="font-mono text-[11px]">{p.page_links.broken.map((b) => `${b.path} ${b.status || "no answer"}`).join(", ")}</span>
+                {p.base_change?.links_added != null && ` (${p.base_change.links_added === 0 ? "none" : p.base_change.links_added} new against ${p.base_change.branch})`}
+              </p>
+            )}
+            {p.page_a11y?.seo && seoWords(p.page_a11y.seo).length > 0 && (
+              <p className="mt-1.5 text-[11.5px] text-muted">
+                SEO: {seoWords(p.page_a11y.seo).join(", ")}
+                {p.base_change?.seo_added != null && ` (${p.base_change.seo_added === 0 ? "none" : p.base_change.seo_added} new against ${p.base_change.branch})`}
+              </p>
+            )}
             {p.page_a11y && a11yWords(p.page_a11y).length > 0 && (
               <p className="mt-1.5 text-[11.5px] text-muted" title={p.page_a11y.issues.map((i) => i.first).filter(Boolean).join("\n")}>
                 Accessibility: {a11yWords(p.page_a11y).join(", ")}
@@ -286,7 +361,19 @@ export function PreviewSheet({
                 {p.base_change && thanMain(p.page_speed.now.load_ms, p.base_change.load_ms, p.base_change.branch) ? ` · ${thanMain(p.page_speed.now.load_ms, p.base_change.load_ms, p.base_change.branch)}` : ""}
               </p>
             )}
+            {p.page_speed && (p.page_speed.now.lcp_ms != null || p.page_speed.now.cls != null) && (
+              <p className="mt-0.5 font-mono text-[11px] text-subtle tabular-nums" title="Core Web Vitals, measured by the browser that took the screenshot">
+                {[
+                  p.page_speed.now.lcp_ms != null ? `LCP ${duration(p.page_speed.now.lcp_ms)}` : "",
+                  p.page_speed.now.lcp_ms != null && p.base_change ? thanMain(p.page_speed.now.lcp_ms, p.base_change.lcp_ms, p.base_change.branch) : "",
+                  p.page_speed.now.cls != null ? `CLS ${p.page_speed.now.cls.toFixed(2)}` : "",
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </p>
+            )}
 
+            <Mail id={p.id} />
             <Label>Cost</Label>
             <div className="grid grid-cols-3 gap-2">
               <Stat label="Asleep" value={money(p.cost.sleeping_usd_month)} note="a month" />
@@ -670,7 +757,7 @@ function Screenshot({
               aria-pressed={path === x}
               className={`h-6 max-w-40 truncate rounded-md border px-1.5 font-mono text-[11px] transition-colors ${path === x ? "border-line-2 bg-panel text-fg" : "border-transparent text-muted hover:text-fg"}`}
             >
-              {x}
+              {pageLabel(x)}
             </button>
           ))}
         </div>
@@ -681,6 +768,7 @@ function Screenshot({
           {other.errors} {other.errors === 1 ? "error" : "errors"} while it loaded.
         </p>
       )}
+      {other && <PageChecks page={other} branch={baseChange?.branch ?? "main"} />}
       {baseChange && (
         <p className="mb-1 text-[11.5px] text-subtle">
           {main
@@ -713,6 +801,227 @@ function Screenshot({
         <p className="text-[11.5px] text-muted">No screenshot of {path} yet.</p>
       )}
     </>
+  );
+}
+
+/** The "Checks" heading: what the screenshot's session found on the first page, problems first,
+ * and how many are new against main; the lines under it are each check's. */
+function ChecksHeading({ p }: { p: Preview }) {
+  const { problems, added } = checkSummary(p);
+  return (
+    <Label>
+      <span>Checks</span>
+      <span className={`ml-auto normal-case ${problems > 0 ? "text-danger" : "text-subtle"}`}>
+        {problems === 0 ? "nothing found" : `${problems} ${problems === 1 ? "problem" : "problems"}`}
+        {problems > 0 && added != null && p.base_change ? ` · ${added === 0 ? "none" : added} new against ${p.base_change.branch}` : ""}
+      </span>
+    </Label>
+  );
+}
+
+/** Another page's checks (the first page's, read on it too), with what's new against main's. */
+function PageChecks({ page, branch }: { page: PageCheck; branch: string }) {
+  const new_ = (n: number | null | undefined) => (n == null ? "" : n === 0 ? " (none new)" : ` (${n} new)`);
+  const a11y = page.a11y ? a11yWords(page.a11y) : [];
+  const seo = page.a11y?.seo ? seoWords(page.a11y.seo) : [];
+  const broken = page.links?.broken ?? [];
+  if (!a11y.length && !seo.length && !broken.length && !page.against?.text?.added_n && !page.against?.text?.removed_n) return null;
+  return (
+    <div className="mb-1.5 space-y-0.5 text-[11.5px]">
+      {broken.length > 0 && (
+        <p className="break-words text-danger">
+          {broken.length} broken {broken.length === 1 ? "link" : "links"}: <span className="font-mono text-[11px]">{broken.map((b) => `${b.path} ${b.status || "no answer"}`).join(", ")}</span>
+          {new_(page.against?.links_added)}
+        </p>
+      )}
+      {a11y.length > 0 && (
+        <p className="text-muted">
+          Accessibility: {a11y.join(", ")}
+          {new_(page.against?.a11y_added)}
+        </p>
+      )}
+      {seo.length > 0 && (
+        <p className="text-muted">
+          SEO: {seo.join(", ")}
+          {new_(page.against?.seo_added)}
+        </p>
+      )}
+      {page.against?.text && <TextAgainst diff={page.against.text} branch={branch} />}
+    </div>
+  );
+}
+
+/** The first page's words against the default branch's (Chromatic's DOM snapshots, in words):
+ * lines it lost and gained, as text. */
+export function TextAgainst({ diff, branch }: { diff: TextDiff; branch: string }) {
+  if (diff.added_n + diff.removed_n === 0) return null;
+  const more = diff.added_n + diff.removed_n - diff.added.length - diff.removed.length;
+  return (
+    <div className="mt-1.5 text-[11.5px]" aria-label={`Its words against ${branch}`}>
+      <p className="text-muted">
+        Its words against {branch}: {diff.added_n} new, {diff.removed_n} gone
+      </p>
+      <ul className="mt-0.5 space-y-0.5 font-mono text-[11px] [overflow-wrap:anywhere]">
+        {diff.removed.map((l, i) => (
+          <li key={`-${i}`} className="text-subtle line-through decoration-white/20">
+            − {l}
+          </li>
+        ))}
+        {diff.added.map((l, i) => (
+          <li key={`+${i}`} className="text-fg">
+            + {l}
+          </li>
+        ))}
+      </ul>
+      {more > 0 && <p className="mt-0.5 text-subtle">and {more} more lines</p>}
+    </div>
+  );
+}
+
+/** A note from the preview's page, resolved by someone on the project (Vercel Comments): the
+ * page's button stops listing it. Its words come from the change's review. */
+function ResolveNote({ previewId, change, review, onDone }: { previewId: string; change: string; review: string; onDone?: () => void }) {
+  const [note, setNote] = useState<string | null>(null);
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    codeApi.reviews(change).then(
+      (all) => {
+        const r = all.find((x) => x.id === review);
+        if (!r) return setError("That note isn't on this change.");
+        setNote(r.body.split("\n\n")[1] ?? r.body);
+      },
+      (e) => setError(errorText(e)),
+    );
+  }, [change, review]);
+  if (error) return <p className="text-[11.5px] text-danger">{error}</p>;
+  if (state === "done") return <p className="text-[11.5px] text-subtle">This note is resolved: the page no longer lists it.</p>;
+  return (
+    <div className="rounded-lg border border-line-2 bg-raised px-2.5 py-2 text-[11.5px] inset-shadow-highlight">
+      <p className="text-muted">Resolve this note from the preview's page?</p>
+      {note && <p className="mt-1 break-words text-fg">{note}</p>}
+      <div className="mt-2 flex justify-end">
+        <button
+          type="button"
+          disabled={state === "busy" || note === null}
+          onClick={async () => {
+            setState("busy");
+            try {
+              await previewsApi.resolveNote(previewId, review);
+              setState("done");
+              onDone?.();
+            } catch (e) {
+              setError(errorText(e));
+            }
+          }}
+          className="h-6 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
+        >
+          {state === "busy" ? "Resolving…" : "Resolve"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** The mail the preview's services sent, caught by roll (never delivered): who it was for and
+ * its subject, each opened as text (never rendered: it's the preview's own content). */
+function Mail({ id }: { id: string }) {
+  const [list, setList] = useState<CaughtMail[] | null>(null);
+  const [open, setOpen] = useState<{ id: string; text: string } | null>(null);
+  useEffect(() => {
+    let live = true;
+    previewsApi.mail(id).then(
+      (r) => live && setList(r.mail),
+      () => live && setList([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, [id]);
+  if (!list?.length) return null;
+  return (
+    <>
+      <Label>Mail caught ({list.length})</Label>
+      <div className="rounded-lg border border-line-2 bg-raised inset-shadow-highlight">
+        {list.map((m) => (
+          <div key={m.id} className="border-t border-line px-2.5 py-1.5 first:border-t-0">
+            <button
+              type="button"
+              onClick={async () => setOpen(open?.id === m.id ? null : { id: m.id, text: await previewsApi.mailText(id, m.id).catch(errorText) })}
+              aria-expanded={open?.id === m.id}
+              className="flex w-full min-w-0 items-center gap-2 text-left text-[11.5px]"
+            >
+              <span className="truncate">{m.subject ?? "(no subject)"}</span>
+              <span className="ml-auto shrink-0 truncate font-mono text-[10.5px] text-subtle">to {m.to.join(", ")}</span>
+            </button>
+            {open?.id === m.id && (
+              <pre className="mt-1 max-h-56 overflow-auto rounded-md border border-line px-2 py-1.5 font-mono text-[10.5px] whitespace-pre-wrap [overflow-wrap:anywhere] text-muted">{open.text}</pre>
+            )}
+          </div>
+        ))}
+      </div>
+      <p className="mt-1 text-[11px] text-subtle">Its services' mail stops here: nobody in its data got it.</p>
+    </>
+  );
+}
+
+/** Copy a data branch's connection (`DATABASE_URL`, …: the branch's own credentials), to query
+ * what the preview sees from a laptop (Neon's connection strings). Fetched only when asked. */
+function CopyConnection({ previewId, kind, parent, name }: { previewId: string; kind: PreviewKind; parent: string; name: string }) {
+  const [state, setState] = useState<"idle" | "busy" | "copied" | "none">("idle");
+  return (
+    <button
+      type="button"
+      disabled={state === "busy"}
+      onClick={async () => {
+        setState("busy");
+        try {
+          const { branches } = await previewsApi.connections(previewId);
+          const url = Object.values(branches.find((b) => b.kind === kind && b.parent === parent)?.vars ?? {})[0];
+          if (!url) return setState("none");
+          await navigator.clipboard.writeText(url);
+          setState("copied");
+          setTimeout(() => setState("idle"), 1500);
+        } catch {
+          setState("none");
+        }
+      }}
+      aria-label={`Copy ${name}'s connection`}
+      title={state === "copied" ? "Copied" : state === "none" ? "No connection to copy" : "Copy its connection (the branch's own credentials)"}
+      className="grid size-6 shrink-0 place-items-center rounded-md text-muted hover:bg-white/[0.06] hover:text-fg disabled:opacity-40"
+    >
+      {state === "copied" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+    </button>
+  );
+}
+
+/** A service's link, with the preview's access, as a QR code to scan (Vercel's toolbar): fetched
+ * when asked, released when closed. */
+export function PhoneCode({ id, service }: { id: string; service: string }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let url: string | null = null;
+    let live = true;
+    qrUrl(id, service).then(
+      (u) => {
+        url = u;
+        if (live) setSrc(u);
+        else URL.revokeObjectURL(u);
+      },
+      (e) => live && setError(errorText(e)),
+    );
+    return () => {
+      live = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [id, service]);
+  if (error) return <p className="mt-1 text-[11px] text-danger">{error}</p>;
+  return (
+    <div className="mt-1.5 flex items-center gap-2.5">
+      {src ? <img src={src} alt={`A QR code that opens ${service} on a phone`} className="size-28 rounded-md bg-white p-1" /> : <div className="size-28 rounded-md bg-white/[0.04]" />}
+      <p className="text-[11px] text-subtle">Scan it with a phone's camera: it opens with the preview's access, so share it only with people who may see it.</p>
+    </div>
   );
 }
 

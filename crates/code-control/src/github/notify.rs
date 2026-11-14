@@ -334,14 +334,20 @@ fn a11y_line(a: &crate::model::PreviewPageA11y) -> String {
         .filter(|i| i.count > 0)
         .map(|i| {
             let what = match (i.kind.as_str(), i.count == 1) {
-                ("images", true) => "image without alt text",
-                ("images", false) => "images without alt text",
-                ("fields", true) => "form field without a label",
-                ("fields", false) => "form fields without a label",
-                ("buttons", true) => "button without a name",
-                ("buttons", false) => "buttons without a name",
-                ("links", true) => "link without a name",
-                (_, _) => "links without a name",
+                ("images", true) => "image without alt text".to_string(),
+                ("images", false) => "images without alt text".to_string(),
+                ("fields", true) => "form field without a label".to_string(),
+                ("fields", false) => "form fields without a label".to_string(),
+                ("buttons", true) => "button without a name".to_string(),
+                ("buttons", false) => "buttons without a name".to_string(),
+                ("links", true) => "link without a name".to_string(),
+                ("links", false) => "links without a name".to_string(),
+                // An axe-core rule: its id (checked: letters, digits and dashes) and impact only.
+                (rule, one) => {
+                    let rule: String = rule.chars().filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-').take(60).collect();
+                    let impact = i.impact.as_deref().filter(|x| ["minor", "moderate", "serious", "critical"].contains(x)).map(|x| format!(", {x}")).unwrap_or_default();
+                    format!("{} failing `{rule}`{impact}", if one { "element" } else { "elements" })
+                }
             };
             let first = i.first.as_deref().map(|t| t.replace('`', "").replace('\n', " ").chars().take(120).collect::<String>()).filter(|t| !t.trim().is_empty()).map(|t| format!(" (first: `{t}`)")).unwrap_or_default();
             format!("{} {what}{first}", i.count)
@@ -385,7 +391,9 @@ fn speed_line(s: &crate::model::PreviewPageSpeed) -> String {
         None => String::new(),
     };
     let paint = s.fcp_ms.map(|f| format!(", first paint {}", t(f))).unwrap_or_default();
-    format!("Its first page loads in {}{moved}{paint}, {kb}, first byte {}.\n\n", t(s.load_ms), t(s.ttfb_ms))
+    let vitals = [s.lcp_ms.map(|l| format!("LCP {}", t(l))), s.cls.map(|c| format!("CLS {}", cls_words(c)))].into_iter().flatten().collect::<Vec<_>>();
+    let vitals = if vitals.is_empty() { String::new() } else { format!(" Core Web Vitals: {}.", vitals.join(", ")) };
+    format!("Its first page loads in {}{moved}{paint}, {kb}, first byte {}.{vitals}\n\n", t(s.load_ms), t(s.ttfb_ms))
 }
 
 /// A load time and a size as the comment says them.
@@ -413,13 +421,38 @@ fn over_budget(b: &crate::model::PreviewSpeedBudget, s: &crate::model::PreviewPa
     if b.bytes > 0 && s.bytes > b.bytes {
         over.push(byte_words(b.bytes));
     }
+    if b.lcp_ms > 0 && s.lcp_ms.is_some_and(|l| l > b.lcp_ms) {
+        over.push(format!("{} LCP", ms_words(b.lcp_ms)));
+    }
+    if b.cls > 0.0 && s.cls.is_some_and(|c| c > b.cls) {
+        over.push(format!("{} CLS", cls_words(b.cls)));
+    }
     over
+}
+
+/// A layout shift as Core Web Vitals prints it.
+fn cls_words(c: f64) -> String {
+    format!("{:.2}", c)
+}
+
+/// How long the release (migrations) took on the preview's data, against the run before when
+/// that differs past the noise.
+fn release_line(e: &crate::model::PreviewEnvironment) -> Option<String> {
+    let ms = u32::try_from(e.release_ms?).unwrap_or(u32::MAX);
+    let before = e.release_before_ms.and_then(|b| u32::try_from(b).ok()).and_then(|b| than_main(ms, b, "the push before"));
+    Some(format!("Its release (migrations) took {} on the preview's data{}.\n\n", ms_words(ms), before.map(|w| format!(", {w}")).unwrap_or_default()))
 }
 
 /// The `roll/speed` status, once the first page was timed under a budget.
 fn speed_status(e: &crate::model::PreviewEnvironment) -> Option<(&'static str, String)> {
     let (b, s) = (e.speed_budget.as_ref()?, e.page_speed.as_ref()?);
-    let took = format!("Loads in {}, {}", ms_words(s.load_ms), byte_words(s.bytes));
+    let mut took = format!("Loads in {}, {}", ms_words(s.load_ms), byte_words(s.bytes));
+    if let Some(l) = s.lcp_ms {
+        took.push_str(&format!(", LCP {}", ms_words(l)));
+    }
+    if let Some(c) = s.cls {
+        took.push_str(&format!(", CLS {}", cls_words(c)));
+    }
     let over = over_budget(b, s);
     Some(if over.is_empty() { ("success", format!("{took}: within its budget")) } else { ("failure", format!("{took}: over its budget ({})", over.join(", "))) })
 }
@@ -431,8 +464,9 @@ fn review_line(v: &crate::model::PreviewVisualReview, dashboard: Option<&str>) -
     let link = dashboard.filter(|u| (u.starts_with("https://") || u.starts_with("http://")) && !u.contains([')', ' ', '\n'])).map(|u| format!(" [Review it in roll]({u})")).unwrap_or_default();
     match v.state.as_str() {
         "changed" => Some(format!(
-            "**Visual review:** its pages differ from `{branch}` by {:.1}%{}.{link}\n\n",
+            "**Visual review:** its pages differ from `{branch}` by {:.1}%{}{}.{link}\n\n",
             v.percent.max(0.1),
+            v.partly().map(|(done, all)| format!(" ({done} of {all} accepted)")).unwrap_or_default(),
             if v.required { ", and it can't land until someone accepts them" } else { "" }
         )),
         "accepted" => Some(format!("Visual review: accepted by {by}.\n\n")),
@@ -481,7 +515,10 @@ fn visual_status(v: &crate::model::PreviewVisualReview) -> (&'static str, String
     let by: String = v.by.as_deref().unwrap_or("someone").chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).take(40).collect();
     match v.state.as_str() {
         "accepted" => ("success", format!("Accepted by {by}: differs from {branch} by {:.1}%", v.percent.max(0.1))),
-        "changed" => ("pending", format!("Differs from {branch} by {:.1}%: accept it in roll", v.percent.max(0.1))),
+        "changed" => match v.partly() {
+            Some((done, all)) => ("pending", format!("Differs from {branch} by {:.1}%: {done} of {all} pages accepted, accept the rest in roll", v.percent.max(0.1))),
+            None => ("pending", format!("Differs from {branch} by {:.1}%: accept it in roll", v.percent.max(0.1))),
+        },
         _ => ("success", format!("Looks the same as {branch}")),
     }
 }
@@ -521,11 +558,32 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
         }
         summary.push(part);
         details.push_str(&a11y_line(a));
+        if !a.seo.is_empty() {
+            let mut part = plural(a.seo.len() as u64, "SEO problem", "SEO problems");
+            if let Some((branch, added)) = e.base_change.as_ref().and_then(|b| Some((branch_name(&b.branch), b.seo_added?))) {
+                part.push_str(&if added == 0 { format!(", none new against {branch}") } else { format!(", {added} new against {branch}") });
+            }
+            summary.push(part);
+            // roll's own words, never the page's.
+            details.push_str(&format!("**SEO:** {}.\n\n", a.seo.iter().map(|s| s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == ' ').collect::<String>()).collect::<Vec<_>>().join(", ")));
+        }
+    }
+    if let Some(l) = e.page_links.as_ref().filter(|l| !l.broken.is_empty()) {
+        let mut part = plural(l.broken.len() as u64, "broken link", "broken links");
+        if let Some((branch, added)) = e.base_change.as_ref().and_then(|b| Some((branch_name(&b.branch), b.links_added?))) {
+            part.push_str(&if added == 0 { format!(", none new against {branch}") } else { format!(", {added} new against {branch}") });
+        }
+        summary.push(part);
+        details.push_str(&links_line(l));
     }
     if let Some(b) = &e.base_change {
         let branch = branch_name(&b.branch);
         summary.push(if b.percent <= 0.0 { format!("the same as {branch}") } else { format!("differs from {branch} by {}", pct(b.percent)) });
         details.push_str(&base_line(b));
+        if let Some(t) = b.text.as_ref().filter(|t| t.added_n + t.removed_n > 0) {
+            summary.push(format!("text +{} −{} against {branch}", t.added_n, t.removed_n));
+            details.push_str(&text_block(t, &branch));
+        }
         // roll's own signed link (a public preview's); nothing in it can end the image's markdown.
         if let Some(url) = e.diff_url.as_ref().filter(|u| (u.starts_with("https://") || u.starts_with("http://")) && !u.contains([')', ' ', '\n'])) {
             details.push_str(&format!("![Where it differs from {}]({url})\n\n", branch_name(&b.branch)));
@@ -562,6 +620,18 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
             if p.errors > 0 {
                 said.push(plural(p.errors as u64, "error while it loaded", "errors while it loaded"));
             }
+            // The first page's checks, on this page: what's new against main's same page said.
+            let new = |n: Option<u32>| n.map(|n| if n == 0 { " (none new)".to_string() } else { format!(" ({n} new)") }).unwrap_or_default();
+            if !p.broken_links.is_empty() {
+                let paths: Vec<String> = p.broken_links.iter().take(5).map(|b| format!("`{}`", page_path(&b.path))).collect();
+                said.push(format!("{}: {}{}", plural(p.broken_links.len() as u64, "broken link", "broken links"), paths.join(", "), new(p.links_added)));
+            }
+            if let Some(n) = p.a11y_problems.filter(|n| *n > 0) {
+                said.push(format!("{}{}", plural(n as u64, "accessibility problem", "accessibility problems"), new(p.a11y_added)));
+            }
+            if !p.seo.is_empty() {
+                said.push(format!("SEO: {}", p.seo.iter().map(|s| s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == ' ').collect::<String>()).collect::<Vec<_>>().join(", ")));
+            }
             if said.is_empty() {
                 said.push("taken".into());
             }
@@ -577,6 +647,10 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
         let main = e.base_change.as_ref().and_then(|b| Some((branch_name(&b.branch), b.load_ms?)));
         if let Some(words) = main.as_ref().and_then(|(branch, ms)| than_main(s.load_ms, *ms, branch)) {
             part.push_str(&format!(", {words}"));
+        }
+        let main_lcp = e.base_change.as_ref().and_then(|b| Some((branch_name(&b.branch), b.lcp_ms?)));
+        if let Some(words) = s.lcp_ms.zip(main_lcp).and_then(|(now, (branch, then))| than_main(now, then, &branch)) {
+            part.push_str(&format!(", LCP {words}"));
         }
         summary.push(part);
         details.push_str(&speed_line(s));
@@ -604,6 +678,31 @@ fn base_line(b: &crate::model::PreviewBaseChange) -> String {
     } else {
         format!("Against `{branch}`, the page differs by {}{phone}.\n\n", pct(b.percent))
     }
+}
+
+/// The first page's own links that are broken (paths in code spans: the page's own, kept to
+/// `page_path`'s characters).
+fn links_line(l: &crate::model::PreviewPageLinks) -> String {
+    let each: Vec<String> = l.broken.iter().take(10).map(|b| format!("`{}` {}", page_path(&b.path), if b.status == 0 { "no answer".to_string() } else { b.status.to_string() })).collect();
+    let more = l.broken.len().saturating_sub(10);
+    format!("**Broken links** (of {} checked on its first page): {}{}.\n\n", l.checked, each.join(", "), if more > 0 { format!(" and {more} more") } else { String::new() })
+}
+
+/// The first page's words against the branch's, as a diff block: the page's own text, so every
+/// line is one printable line with no backticks (nothing can close the fence) and the block says
+/// how many weren't shown.
+fn text_block(t: &crate::model::PreviewTextDiff, branch: &str) -> String {
+    let line = |prefix: char, l: &str| format!("{prefix} {}\n", l.chars().filter(|c| !c.is_control() && *c != '`').take(120).collect::<String>());
+    let mut out = format!("**Its words against `{branch}`:**\n\n```diff\n");
+    t.removed.iter().take(10).for_each(|l| out.push_str(&line('-', l)));
+    t.added.iter().take(10).for_each(|l| out.push_str(&line('+', l)));
+    out.push_str("```\n");
+    let more = (t.added_n + t.removed_n).saturating_sub(t.added.len().min(10) + t.removed.len().min(10));
+    if more > 0 {
+        out.push_str(&format!("\n{more} more lines differ (the sheet lists them).\n"));
+    }
+    out.push('\n');
+    out
 }
 
 /// The comment's line on how much the page changed since the screenshot at an earlier head.
@@ -682,6 +781,9 @@ fn preview_comment(c: &Change) -> String {
             if let Some(lines) = e.schema_changes.as_ref().filter(|l| !l.is_empty()) {
                 out.push_str(&schema_block(lines));
             }
+            if let Some(line) = release_line(e) {
+                out.push_str(&line);
+            }
             out.push_str(&format!(
                 "Costs about ${:.2} a month asleep and ${:.3} an hour in use. It sleeps when nobody visits; the first request wakes it.\n",
                 e.sleeping_usd_month, e.active_usd_hour
@@ -739,13 +841,15 @@ mod preview_tests {
             slug: "pr7-shop".into(),
             state: "ready".into(),
             services: vec![PreviewServiceLink { name: "web".into(), url: "https://web-pr7-shop.preview.roll.site".into(), state: "sleeping".into() }],
-            resources: vec![PreviewResourceLink { kind: "postgres".into(), parent: "prj_a".into(), r#ref: Some("br_b".into()) }],
+            resources: vec![PreviewResourceLink { kind: "postgres".into(), parent: "prj_a".into(), r#ref: Some("br_b".into()), data: None }],
             sleeping_usd_month: 0.0123,
             active_usd_hour: 0.0143,
             dashboard_url: Some("https://roll.sh/dashboard/projects/prj_x/previews".into()),
             github: PreviewGithub::default(),
             head: None,
             schema_changes: None,
+            release_ms: None,
+            release_before_ms: None,
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
@@ -753,6 +857,7 @@ mod preview_tests {
             page_speed: None,
             page_health: None,
             page_a11y: None,
+            page_links: None,
             base_change: None,
             diff_url: None,
             pages: Vec::new(),
@@ -779,18 +884,28 @@ mod preview_tests {
         assert_eq!(visual_line(&v(0.0)), "The page looks the same as at `1a2b3c4d5e`.\n\n");
         let both = crate::model::PreviewVisualChange { phone_percent: Some(3.44), ..v(12.34) };
         assert_eq!(visual_line(&both), "The page changed 12.3% since `1a2b3c4d5e` (its share of pixels). At a phone's width: 3.4%.\n\n");
-        let sp = |load_ms, before| crate::model::PreviewPageSpeed { ttfb_ms: 40, fcp_ms: Some(380), load_ms, bytes: 312_000, before_load_ms: before };
+        let sp = |load_ms, before| crate::model::PreviewPageSpeed { ttfb_ms: 40, fcp_ms: Some(380), load_ms, bytes: 312_000, before_load_ms: before, lcp_ms: None, cls: None };
         assert_eq!(speed_line(&sp(1200, Some(900))), "Its first page loads in 1.2 s (+300 ms since the push before), first paint 380 ms, 305 KB, first byte 40 ms.\n\n");
         assert_eq!(speed_line(&sp(800, None)), "Its first page loads in 800 ms, first paint 380 ms, 305 KB, first byte 40 ms.\n\n");
         let h = |errors, failed| crate::model::PreviewPageHealth { errors, first_error: Some("TypeError: `x` is undefined".into()), failed, first_failed: Some("500 http://x/api".into()) };
         assert_eq!(health_line(&h(2, 1)), "**While its first page loaded:** 2 errors (first: `TypeError: x is undefined`); 1 failed request (first: `500 http://x/api`).\n\n");
         assert_eq!(health_line(&h(0, 0)), "Its first page loaded without errors.\n\n");
-        let issue = |kind: &str, count, first: &str| crate::model::PreviewA11yIssue { kind: kind.into(), count, first: Some(first.into()) };
-        let a = crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img src=`x`>"), issue("buttons", 1, "<button></button>")], lang: false, title: true };
+        let issue = |kind: &str, count, first: &str| crate::model::PreviewA11yIssue { kind: kind.into(), count, first: Some(first.into()), impact: None, help: None };
+        let a = crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img src=`x`>"), issue("buttons", 1, "<button></button>")], lang: false, title: true, seo: vec![] };
         assert_eq!(a11y_line(&a), "**Accessibility:** 3 images without alt text (first: `<img src=x>`); 1 button without a name (first: `<button></button>`); no page language.\n\n");
-        assert_eq!(a11y_line(&crate::model::PreviewPageA11y { issues: vec![], lang: true, title: true }), "No accessibility problems found on its first page.\n\n");
-        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, a11y_added: None, errors_added: None };
+        assert_eq!(a11y_line(&crate::model::PreviewPageA11y { issues: vec![], lang: true, title: true, seo: vec![] }), "No accessibility problems found on its first page.\n\n");
+        // An axe-core rule: its id and impact, never the words its page-side run reported.
+        let mut contrast = issue("color-contrast", 4, "<p>");
+        (contrast.impact, contrast.help) = (Some("serious".into()), Some("[click](javascript:x)".into()));
+        let ax = crate::model::PreviewPageA11y { issues: vec![contrast], lang: true, title: true, seo: vec![] };
+        assert_eq!(a11y_line(&ax), "**Accessibility:** 4 elements failing `color-contrast`, serious (first: `<p>`).\n\n");
+        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None };
         assert_eq!(base_line(&b), "Against `mainx`, the page differs by 8.0%, at a phone's width the same.\n\n");
+        // Its words against main's: a diff block nothing in the page can close.
+        let words = crate::model::PreviewTextDiff { added: vec!["Pay ```now".into()], removed: vec!["Checkout".into()], added_n: 1, removed_n: 1 };
+        assert_eq!(text_block(&words, "main"), "**Its words against `main`:**\n\n```diff\n- Checkout\n+ Pay now\n```\n\n");
+        let links = crate::model::PreviewPageLinks { checked: 4, broken: vec![crate::model::PreviewBrokenLink { path: "/gone`)".into(), status: 404 }, crate::model::PreviewBrokenLink { path: "/slow".into(), status: 0 }] };
+        assert_eq!(links_line(&links), "**Broken links** (of 4 checked on its first page): `/gone` 404, `/slow` no answer.\n\n");
         // In the comment, one folded block whose summary is counts only.
         let mut e = p.environment.clone().unwrap();
         (e.page_health, e.page_a11y, e.base_change, e.visual_change, e.page_speed) = (Some(h(2, 1)), Some(a), Some(b), Some(v(12.34)), Some(sp(1200, Some(900))));
@@ -799,10 +914,23 @@ mod preview_tests {
             comment.starts_with("<details><summary>Page checks: 2 errors, 1 failed request · 5 accessibility problems · differs from mainx by 8.0% · changed 12.3% since the push before · loads in 1.2 s</summary>\n\n**While its first page loaded:**"),
             "{comment}"
         );
-        let page = |path: &str, percent, base_percent, errors| crate::model::PreviewPageCheck { path: path.into(), errors, percent, base_percent };
+        let page = |path: &str, percent, base_percent, errors| crate::model::PreviewPageCheck {
+            path: path.into(),
+            errors,
+            percent,
+            base_percent,
+            a11y_problems: None,
+            seo: vec![],
+            broken_links: vec![],
+            a11y_added: None,
+            links_added: None,
+        };
         e.pages = vec![page("/pricing", Some(40.0), Some(2.0), 1), page("/about", Some(0.0), None, 0)];
-        let review = |state: &str, by: Option<&str>| crate::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.04, by: by.map(Into::into), required: false, head: None };
+        let review = |state: &str, by: Option<&str>| crate::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.04, by: by.map(Into::into), required: false, head: None, pages: Vec::new() };
         assert_eq!(visual_status(&review("changed", None)), ("pending", "Differs from main by 8.0%: accept it in roll".into()));
+        let mut partly = review("changed", None);
+        partly.pages = [("", Some("ada")), ("/pricing", None)].map(|(path, by)| crate::model::PreviewPageReview { path: path.into(), percent: 8.0, by: by.map(Into::into) }).to_vec();
+        assert_eq!(visual_status(&partly), ("pending", "Differs from main by 8.0%: 1 of 2 pages accepted, accept the rest in roll".into()));
         assert_eq!(visual_status(&review("accepted", Some("ada"))), ("success", "Accepted by ada: differs from main by 8.0%".into()));
         assert_eq!(visual_status(&review("unchanged", None)).0, "success");
         assert_eq!(
@@ -813,15 +941,29 @@ mod preview_tests {
         assert_eq!(review_line(&review("unchanged", None), None), None);
         // A speed budget: within it, then over it (load and size).
         let mut timed = p.environment.clone().unwrap();
-        (timed.page_speed, timed.speed_budget) = (Some(sp(1200, None)), Some(crate::model::PreviewSpeedBudget { load_ms: 2000, bytes: 0 }));
+        (timed.page_speed, timed.speed_budget) = (Some(sp(1200, None)), Some(crate::model::PreviewSpeedBudget { load_ms: 2000, bytes: 0, lcp_ms: 0, cls: 0.0 }));
         assert_eq!(speed_status(&timed), Some(("success", "Loads in 1.2 s, 305 KB: within its budget".into())));
-        timed.speed_budget = Some(crate::model::PreviewSpeedBudget { load_ms: 1000, bytes: 100_000 });
+        timed.speed_budget = Some(crate::model::PreviewSpeedBudget { load_ms: 1000, bytes: 100_000, lcp_ms: 0, cls: 0.0 });
         assert_eq!(speed_status(&timed), Some(("failure", "Loads in 1.2 s, 305 KB: over its budget (1.0 s load, 98 KB)".into())));
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, over its budget</summary>"));
         // Against main's load where it was compared: only a difference past the noise counts.
         timed.speed_budget = None;
-        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), a11y_added: None, errors_added: None });
+        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None });
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, 300 ms slower than main</summary>"));
+        // Core Web Vitals: in the line, against main's paint, and in the budget.
+        let ps = timed.page_speed.as_mut().unwrap();
+        (ps.lcp_ms, ps.cls) = (Some(1300), Some(0.123));
+        timed.base_change.as_mut().unwrap().lcp_ms = Some(900);
+        let checks = page_checks(&timed).unwrap();
+        assert!(checks.contains("300 ms slower than main, LCP 400 ms slower than main</summary>"), "{checks}");
+        assert!(checks.contains("first byte 40 ms. Core Web Vitals: LCP 1.3 s, CLS 0.12."), "{checks}");
+        timed.speed_budget = Some(crate::model::PreviewSpeedBudget { load_ms: 0, bytes: 0, lcp_ms: 2500, cls: 0.1 });
+        assert_eq!(speed_status(&timed), Some(("failure", "Loads in 1.2 s, 305 KB, LCP 1.3 s, CLS 0.12: over its budget (0.10 CLS)".into())));
+        // The release's time on the preview's data, against the run before past the noise.
+        (timed.release_ms, timed.release_before_ms) = (Some(2400), Some(1100));
+        assert_eq!(release_line(&timed).as_deref(), Some("Its release (migrations) took 2.4 s on the preview's data, 1.3 s slower than the push before.\n\n"));
+        timed.release_before_ms = Some(2350);
+        assert_eq!(release_line(&timed).as_deref(), Some("Its release (migrations) took 2.4 s on the preview's data.\n\n"));
         // A public preview's diff against main goes inside, as an image; anything else, not.
         timed.diff_url = Some("https://api.roll.sh/v1/previews/pv_1/screenshot.png?diff=base&exp=1&sig=ab".into());
         assert!(page_checks(&timed).unwrap().contains("![Where it differs from main](https://api.roll.sh/v1/previews/pv_1/screenshot.png?diff=base&exp=1&sig=ab)"));
@@ -829,9 +971,11 @@ mod preview_tests {
         assert!(!page_checks(&timed).unwrap().contains("Where it differs"));
         timed.diff_url = None;
         // Accessibility against main: what the change added.
-        timed.page_a11y = Some(crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img>")], lang: true, title: true });
-        timed.base_change.as_mut().unwrap().a11y_added = Some(1);
-        assert!(page_checks(&timed).unwrap().contains("3 accessibility problems, 1 new against main"), "{}", page_checks(&timed).unwrap());
+        timed.page_a11y = Some(crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img>")], lang: true, title: true, seo: vec!["no meta description".into()] });
+        (timed.base_change.as_mut().unwrap().a11y_added, timed.base_change.as_mut().unwrap().seo_added) = (Some(1), Some(1));
+        let checks = page_checks(&timed).unwrap();
+        assert!(checks.contains("3 accessibility problems, 1 new against main · 1 SEO problem, 1 new against main"), "{checks}");
+        assert!(checks.contains("**SEO:** no meta description.\n\n"), "{checks}");
         timed.page_health = Some(h(2, 0));
         timed.base_change.as_mut().unwrap().errors_added = Some(0);
         assert!(page_checks(&timed).unwrap().contains("Page checks: 2 errors, none new against main · "), "{}", page_checks(&timed).unwrap());
@@ -839,6 +983,12 @@ mod preview_tests {
         assert_eq!(than_main(500, 900, "main").as_deref(), Some("400 ms faster than main"));
         let comment = page_checks(&e).unwrap();
         assert!(comment.contains(" · 2 more pages, most changed /pricing by 40.0%, 1 error on them · "), "{comment}");
+        // The first page's checks on another page, with what's new against main's same page.
+        let mut checked = e.clone();
+        (checked.pages[0].broken_links, checked.pages[0].links_added, checked.pages[0].a11y_problems, checked.pages[0].a11y_added) =
+            (vec![crate::model::PreviewBrokenLink { path: "/gone".into(), status: 404 }], Some(1), Some(2), Some(0));
+        let block = page_checks(&checked).unwrap();
+        assert!(block.contains("1 broken link: `/gone` (1 new)") && block.contains("2 accessibility problems (none new)"), "{block}");
         assert!(comment.contains("`/pricing`: changed 40.0% since the push before, differs from `mainx` by 2.0%, 1 error while it loaded.\n\n`/about`: unchanged since the push before."), "{comment}");
     }
 }

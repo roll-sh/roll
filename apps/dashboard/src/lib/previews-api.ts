@@ -35,6 +35,21 @@ export interface PreviewResource {
   error: string | null;
   /** Bytes the branch owns (not its parent's). */
   bytes: number;
+  /** What of the parent's data the preview's code gets: `real` is production data as it is. */
+  data: "none" | "masked" | "real";
+}
+
+/**
+ * What to tell someone about a resource whose previews would get its data as it is (the
+ * server's `data: "real"`, from the settings), with the way out; `null` when they wouldn't.
+ */
+export function unmaskedNote(kind: string, mode: "branch" | "schema" | "skip", masks: number): string | null {
+  // Queues and tasks never copy messages; a repo or a service holds no data to branch.
+  if (mode !== "branch" || ["queue", "tasks", "repo", "service"].includes(kind)) return null;
+  if (kind === "postgres" || kind === "nosql" || kind === "search")
+    return masks > 0 ? null : "Previews get its data as it is: mask what holds people's data, or use Schema only.";
+  if (kind === "stream") return "Previews get its messages as they are (they can't be masked): use Schema only, or skip it.";
+  return "Previews get its data as it is (it can't be masked): a seed can replace it with made-up data, or skip it.";
 }
 
 export interface PreviewCost {
@@ -73,6 +88,8 @@ export interface Preview {
   cost: PreviewCost;
   /** What the change did to the Postgres schema (`+ …`, `- …`), once read at `head`. */
   schema_changes?: string[] | null;
+  /** The project's release (migrations) at its last head: how long it took on this preview's data, and the run before's. */
+  release?: { head: string; ms: number; before_ms: number | null } | null;
   /** Kept past its TTL until then (epoch ms). */
   kept_until?: number | null;
   /** When it goes (its TTL, or a keep, running out), once that's close (a day ahead). */
@@ -80,11 +97,21 @@ export interface Preview {
   /** How much the page changed since the screenshot at an earlier head (`since`). */
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
   /** How much its page differs from the project's preview of the default branch. */
-  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; a11y_added?: number | null; errors_added?: number | null } | null;
+  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: TextDiff | null; links_added?: number | null; seo_added?: number | null } | null;
   /** The project's other pages (`github.pages`) at the latest screenshot. */
   pages?: PageCheck[];
   /** Its visual review (`github.visual_review`): whether how its pages look against the baseline was accepted at this head. */
-  visual_review?: { state: "unchanged" | "changed" | "accepted"; branch: string; percent: number; by: string | null; at: number | null; required: boolean; head: string } | null;
+  visual_review?: {
+    state: "unchanged" | "changed" | "accepted";
+    branch: string;
+    percent: number;
+    by: string | null;
+    at: number | null;
+    required: boolean;
+    head: string;
+    /** Each page that differs (`path` `""`: the first page) and who accepted it at this head: the change is accepted once every one is. */
+    pages: { path: string; percent: number; by: string | null; at: number | null }[];
+  } | null;
   /** It also has a phone-width screenshot. */
   phone_screenshot?: boolean;
   /** How fast its first page loaded at this head (timed with the screenshot), and at the one before. */
@@ -92,7 +119,9 @@ export interface Preview {
   /** What went wrong while that page loaded (the page's own words: shown as text only). */
   page_health?: { errors: number; first_error: string | null; failed: number; first_failed: string | null } | null;
   /** What a screen reader can't name on that page (`first`: its markup, shown as text only). */
-  page_a11y?: { issues: { kind: "images" | "fields" | "buttons" | "links"; count: number; first: string | null }[]; lang: boolean; title: boolean } | null;
+  page_a11y?: { issues: A11yIssue[]; lang: boolean; title: boolean; seo?: PageSeo | null } | null;
+  /** Its first page's own links that are broken (status 0: no answer), of those checked. */
+  page_links?: { checked: number; broken: { path: string; status: number }[] } | null;
   /** Earlier pushes of the change's services, still reachable on the same data (newest first). */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number }[];
   /** When its screenshot was taken (`screenshot` below), if it has one. */
@@ -139,6 +168,21 @@ export interface PageCheck {
   since: string | null;
   percent: number | null;
   base_percent: number | null;
+  /** The first page's checks, read on this page too (accessibility with SEO, broken links). */
+  a11y?: { issues: A11yIssue[]; lang: boolean; title: boolean; seo?: PageSeo | null } | null;
+  links?: { checked: number; broken: { path: string; status: number }[] } | null;
+  /** Against main's page at the same path. */
+  against?: { a11y_added: number | null; links_added: number | null; seo_added: number | null; text: TextDiff | null } | null;
+}
+
+/** How slow and heavy the first page may get (0: no limit): over it, `roll/speed` fails. */
+export interface SpeedBudget {
+  load_ms: number;
+  bytes: number;
+  /** Largest contentful paint (Core Web Vitals' "good": up to 2500). */
+  lcp_ms?: number;
+  /** Cumulative layout shift ("good": up to 0.1). */
+  cls?: number;
 }
 
 /** A page's load, as the browser that took its screenshot timed it. */
@@ -147,17 +191,90 @@ export interface PageSpeed {
   fcp_ms: number | null;
   load_ms: number;
   bytes: number;
+  /** Core Web Vitals: largest contentful paint, and cumulative layout shift (its largest session window). */
+  lcp_ms?: number | null;
+  cls?: number | null;
 }
 
 /** A preview page's accessibility problems in words ("3 images without alt text", "no title"). */
-export function a11yWords(a: NonNullable<Preview["page_a11y"]>): string[] {
-  const what = { images: "without alt text", fields: "without a label", buttons: "without a name", links: "without a name" } as const;
-  const noun = { images: ["image", "images"], fields: ["form field", "form fields"], buttons: ["button", "buttons"], links: ["link", "links"] } as const;
-  const words = a.issues.filter((i) => i.count > 0).map((i) => `${i.count} ${noun[i.kind][i.count === 1 ? 0 : 1]} ${what[i.kind]}`);
+/** One kind of accessibility problem: one of the session's own four, or an axe-core rule (`color-contrast`, with its impact and words). */
+export interface A11yIssue {
+  kind: string;
+  count: number;
+  first: string | null;
+  impact?: "minor" | "moderate" | "serious" | "critical" | null;
+  help?: string | null;
+}
+
+export function a11yWords(a: { issues: A11yIssue[]; lang: boolean; title: boolean }): string[] {
+  const what: Record<string, string> = { images: "without alt text", fields: "without a label", buttons: "without a name", links: "without a name" };
+  const noun: Record<string, [string, string]> = { images: ["image", "images"], fields: ["form field", "form fields"], buttons: ["button", "buttons"], links: ["link", "links"] };
+  const words = a.issues
+    .filter((i) => i.count > 0)
+    .map((i) =>
+      noun[i.kind]
+        ? `${i.count} ${noun[i.kind][i.count === 1 ? 0 : 1]} ${what[i.kind]}`
+        : `${i.count} ${i.count === 1 ? "element" : "elements"} failing ${i.help ? `“${i.help}”` : i.kind}${i.impact ? ` (${i.impact})` : ""}`,
+    );
   if (!a.lang) words.push("no page language");
   if (!a.title) words.push("no title");
   return words;
 }
+
+/** The first page's SEO basics (Lighthouse's SEO audit), from its screenshot's session. */
+export interface PageSeo {
+  description: boolean;
+  viewport: boolean;
+  h1: number;
+  noindex: boolean;
+}
+
+/** Its SEO problems in words, in the order roll compares them with main's. */
+export function seoWords(s: PageSeo): string[] {
+  const out: string[] = [];
+  if (!s.description) out.push("no meta description");
+  if (!s.viewport) out.push("no viewport");
+  if (s.h1 === 0) out.push("no h1");
+  else if (s.h1 > 1) out.push("more than one h1");
+  if (s.noindex) out.push("noindex in its markup");
+  return out;
+}
+
+/** A page's visible text against another's, by line: the page's own words, shown as text only. */
+export interface TextDiff {
+  added: string[];
+  removed: string[];
+  added_n: number;
+  removed_n: number;
+}
+
+/** A message a preview's services sent, caught instead of delivered. */
+export interface CaughtMail {
+  id: string;
+  at: number;
+  from: string;
+  to: string[];
+  subject: string | null;
+  size: number;
+}
+
+/**
+ * What the first page's checks found, for the sheet's "Checks" heading: problems (errors and
+ * failed requests, broken links, accessibility and SEO problems) and how many of them are new
+ * against main, where it was compared (`null`: not compared).
+ */
+export function checkSummary(p: Pick<Preview, "page_health" | "page_links" | "page_a11y" | "base_change">): { problems: number; added: number | null } {
+  const errors = (p.page_health?.errors ?? 0) + (p.page_health?.failed ?? 0);
+  const links = p.page_links?.broken.length ?? 0;
+  const a11y = p.page_a11y ? a11yWords(p.page_a11y).length : 0;
+  const seo = p.page_a11y?.seo ? seoWords(p.page_a11y.seo).length : 0;
+  const b = p.base_change;
+  const parts = b ? [b.errors_added, b.links_added, b.a11y_added, b.seo_added].filter((n): n is number => n != null) : [];
+  return { problems: errors + links + a11y + seo, added: parts.length ? parts.reduce((x, y) => x + y, 0) : null };
+}
+
+/** A page as people read it: the first page at another width (`@768`) is "768 px". */
+export const pageLabel = (path: string) => (/^@\d+$/.test(path) ? `${path.slice(1)} px` : path || "/");
 
 /** "1.2 s" or "380 ms". */
 export const duration = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
@@ -187,11 +304,15 @@ export interface PreviewSettings {
   secrets: { base: string; allow_production: boolean };
   /** A patch replaces the whole map. */
   env: Record<string, string>;
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: { load_ms: number; bytes: number } };
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[] };
   /** "link": a preview's URLs need its link (its access token once, then a cookie). */
   access: "link" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */
   visual_review?: "off" | "check" | "required";
+  /** `catch` (default): services send mail to roll's catcher, listed on the preview, never delivered; `deliver`: the project's own mail settings. */
+  mail?: "catch" | "deliver";
+  /** Branch the data as of a point in time where the product keeps history: `-24h`, `-30m`, `-7d`, or an RFC 3339 time (30 days back at most). */
+  data_at?: string | null;
   /** A feedback button on its pages for people who came in through roll (link access). */
   feedback: boolean;
   /** Variables for a family of branches: a branch glob → `{name: value}`, over `env`. */
@@ -248,6 +369,14 @@ function query(params: Record<string, string | number | undefined>) {
 /** The preview's screenshot as an object URL (the operator's headers, which an <img> can't send);
  * revoke it when done. */
 /** The preview's screenshot as an object URL; `previous`: the one at the head before; `phone`: at a phone's width; `base`: the default branch's preview's; `page`: another of the project's pages. */
+/** A service's link with the preview's access as a QR code (an object URL; revoke it when done): a phone opens it by scanning. */
+export async function qrUrl(id: string, service?: string): Promise<string> {
+  const res = await fetch(`${ROLL_API}${one(id)}/qr.png${service ? `?service=${encodeURIComponent(service)}` : ""}`, { headers: apiHeaders(), cache: "no-store" });
+  onApiStatus(res.status);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
+  return URL.createObjectURL(await res.blob());
+}
+
 export async function screenshotUrl(id: string, previous = false, phone = false, base = false, page?: string, diff?: "base" | "previous"): Promise<string> {
   const q = [previous ? "previous=1" : "", phone ? "view=phone" : "", base ? "base=1" : "", page ? `page=${encodeURIComponent(page)}` : "", diff ? `diff=${diff}` : ""].filter(Boolean).join("&");
   const res = await fetch(`${ROLL_API}${one(id)}/screenshot${q ? `?${q}` : ""}`, { headers: apiHeaders(), cache: "no-store" });
@@ -269,8 +398,9 @@ export const previewsApi = {
   /** Keep it past its TTL for `hours` (at most 720); 0 lets its rules decide again. */
   keep: (id: string, hours: number) => call<Preview>("POST", `${one(id)}/keep`, { hours }),
   /** Accept how a change's pages look at its latest screenshot (the `roll/visual` status). */
-  /** `head`: the screenshot's that was looked at (`visual_review.head`): refused (409) once a newer one came in. */
-  acceptVisual: (id: string, head?: string) => call<Preview>("POST", `${one(id)}/visual/accept`, head ? { head } : {}),
+  /** `head`: the screenshot's that was looked at (`visual_review.head`): refused (409) once a newer one came in. `path`: that page only (`""` the first), else every page. */
+  acceptVisual: (id: string, head?: string, path?: string) =>
+    call<Preview>("POST", `${one(id)}/visual/accept`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}) }),
   /** Its share links (never their tokens). */
   shares: (id: string) => call<PreviewShare[]>("GET", `${one(id)}/shares`),
   /** A link for someone outside the team, open for `hours`; `url` is in this answer only. */
@@ -278,6 +408,19 @@ export const previewsApi = {
   unshare: (id: string, share: string) => call<void>("DELETE", `${one(id)}/shares/${encodeURIComponent(share)}`),
   /** Its own variables, over the project's `env`. */
   vars: (id: string) => call<{ vars: Record<string, string> }>("GET", `${one(id)}/env`),
+  /** Resolve a note left on its page (the note's review id): the page's button stops listing it. */
+  resolveNote: (id: string, note: string) => call<{ resolved: string }>("POST", `${one(id)}/notes/${encodeURIComponent(note)}/resolve`, {}),
+  /** The mail its services sent, caught instead of delivered (newest first; the last 50). */
+  mail: (id: string) => call<{ mail: CaughtMail[] }>("GET", `${one(id)}/mail`),
+  /** One caught message as it was sent, as text. */
+  mailText: async (id: string, mail: string) => {
+    const res = await fetch(`${ROLL_API}${one(id)}/mail/${encodeURIComponent(mail)}`, { headers: apiHeaders(), cache: "no-store" });
+    onApiStatus(res.status);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
+    return res.text();
+  },
+  /** Each data branch's connection, as its services get it (its own credentials, never the parent's). */
+  connections: (id: string) => call<{ branches: { kind: PreviewKind; parent: string; vars: Record<string, string> }[] }>("GET", `${one(id)}/connect`),
   /** Set or (`null`) remove some of its own variables; its services redeploy with them. */
   setVars: (id: string, vars: Record<string, string | null>) => call<{ vars: Record<string, string> }>("PUT", `${one(id)}/env`, { vars }),
   sleep: (id: string) => call<Preview>("POST", `${one(id)}/sleep`),

@@ -1,6 +1,6 @@
 import { ExternalLink, GitBranch, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { openUrl, previewsApi, screenshotUrl, type Preview, type PreviewSettings, type PreviewUsage } from "@/lib/previews-api";
+import { checkSummary, openUrl, previewsApi, screenshotUrl, type Preview, type PreviewSettings, type PreviewUsage } from "@/lib/previews-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { Inspector } from "./inspector";
@@ -28,6 +28,7 @@ export function ProjectPreviews({
   open: initial,
   go,
   feedback,
+  resolve,
   onFeedbackPosted,
 }: {
   project: WorkspaceProject;
@@ -36,6 +37,8 @@ export function ProjectPreviews({
   go?: string;
   /** A note from a preview page's feedback button, for the preview `open` names. */
   feedback?: PreviewFeedback;
+  /** A note a preview page's Resolve names (its review id), for the preview `open` names. */
+  resolve?: string;
   /** The note was posted: drop it from the address, so it isn't offered again. */
   onFeedbackPosted?: () => void;
 }) {
@@ -50,7 +53,22 @@ export function ProjectPreviews({
   const repos = useMemo(() => project.resources.filter((r) => r.kind === "repo").map((r) => r.ref), [project.resources]);
   const data = useMemo(() => project.resources.filter((r) => r.kind !== "repo"), [project.resources]);
   const names = useMemo(() => resourceNames(project, inventory), [project, inventory]);
-  const opened = list?.find((p) => p.id === openId) ?? null;
+  const listed = list?.find((p) => p.id === openId) ?? null;
+  // The list is light (counts only): the sheet reads the preview's own view, again whenever the
+  // list says it changed, and shows the list's until that's in.
+  const [full, setFull] = useState<Preview | null>(null);
+  useEffect(() => {
+    if (!listed) return setFull(null);
+    let live = true;
+    previewsApi.get(listed.id).then(
+      (p) => live && setFull(p),
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [listed?.id, listed?.updated_at, listed?.screenshot_at, listed?.state]);
+  const opened = listed && full && full.id === listed.id && full.updated_at >= listed.updated_at ? full : listed;
   const act = usePreviewMark(opened ? [opened] : list);
 
   useEffect(() => setOpenId(initial ?? null), [initial]);
@@ -166,9 +184,13 @@ export function ProjectPreviews({
             names={names}
             masked={new Map(Object.entries(settings?.masking ?? {}).map(([k, cols]) => [k, Object.keys(cols).length]))}
             act={act}
-            onChange={put}
+            onChange={(p) => {
+              put(p);
+              setFull(p);
+            }}
             onClose={() => setOpenId(null)}
             feedback={opened.id === initial ? feedback : undefined}
+            resolve={opened.id === initial ? resolve : undefined}
             onFeedbackPosted={onFeedbackPosted}
           />
         )}
@@ -193,6 +215,18 @@ export function ProjectPreviews({
 /** Its pages differ from main's and nobody has accepted them yet (the `roll/visual` review). */
 const toReview = (p: Preview) => p.visual_review?.state === "changed" && p.desired !== "deleted";
 
+/** What the change's first page added against main (errors, broken links, accessibility and SEO
+ * problems), so a list of previews can be scanned without opening each. */
+function NewAgainstMain({ preview: p }: { preview: Preview }) {
+  const { added } = checkSummary(p);
+  if (!added || !p.base_change) return null;
+  return (
+    <span className="shrink-0 rounded border border-danger/40 px-1 text-[10.5px] text-danger" title={`Its first page has ${added} ${added === 1 ? "problem" : "problems"} ${p.base_change.branch}'s doesn't: open it for which`}>
+      {added} new {added === 1 ? "problem" : "problems"}
+    </span>
+  );
+}
+
 function Row({ preview: p, open, onOpen }: { preview: Preview; open: boolean; onOpen: () => void }) {
   const what = previewOf(p);
   return (
@@ -208,6 +242,7 @@ function Row({ preview: p, open, onOpen }: { preview: Preview; open: boolean; on
               to review
             </span>
           )}
+          <NewAgainstMain preview={p} />
           {p.baseline && (
             <span className="shrink-0 rounded border border-line-2 px-1 text-[10.5px] text-muted" title="roll keeps it to compare the project's changes with">
               baseline

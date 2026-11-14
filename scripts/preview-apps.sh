@@ -91,12 +91,18 @@ for _ in $(seq 1 600); do
 done
 T2=$(now_ms)
 VARS=$(api GET "/v1/apps/services/$SVC/environments/$ENV/variables" | jq_ "[v['name'] for v in d['vars']]")
+# Its mail goes to roll's catcher, as on roll's own runtime (and providers' keys are replaced).
+case "$VARS" in *"'SMTP_URL'"*"'SMTP_USER'"*) ;; *) echo "a pv- environment should get roll's SMTP: $VARS"; exit 1;; esac
+case "$VARS" in *"'SENDGRID_API_KEY'"*) ;; *) echo "a pv- environment should get the providers' keys replaced: $VARS"; exit 1;; esac
 HOSTPART=$(echo "$URL" | sed -E 's#^https?://##; s#/.*##; s#:.*##')
 T3=$(now_ms)
 BODY=$(curl -sS -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 120)
 WHERE=$(curl -sS -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/where" --max-time 30)
 T4=$(now_ms)
 [ "$BODY" = "preview of change 1" ] || { echo "the preview should serve the change's page: $BODY"; exit 1; }
+# Kept out of search engines on roll apps too (roll apps 3b7cd1ac5, #26).
+APPS_ROBOTS=$(curl -sS -o /dev/null -D - -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 30 | tr -d '\r' | sed -n 's/^x-robots-tag: //Ip')
+[ "$APPS_ROBOTS" = noindex ] || { echo "a pv- environment's page should carry X-Robots-Tag: noindex, not '$APPS_ROBOTS'"; exit 1; }
 
 say "a preview's own variable reaches its roll apps environment, and leaves it once removed"
 apps_vars() { api GET "/v1/apps/services/$SVC/environments/$ENV/variables" | jq_ "' '.join(sorted(v['name'] for v in d['vars']))"; }
@@ -171,6 +177,7 @@ cat <<EOF
 | The feedback button on the roll apps environment (a visitor through roll) / its notes | tagged / $NOTES |
 | … → its deploy active (a Docker build of the change's commit) | $((T2 - T0)) ms |
 | First request through roll apps (cold) | $((T4 - T3)) ms |
+| X-Robots-Tag on the pv- environment's page | $APPS_ROBOTS |
 | Body / the Redis host the service saw / the preview's Redis branch | $BODY / $WHERE / $BRANCH |
 | Variables on the environment | $VARS |
 | A preview's own variable on roll apps | $UNSET |

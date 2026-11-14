@@ -1,8 +1,8 @@
-import { ArrowUpRight, ExternalLink } from "lucide-react";
+import { ArrowUpRight, ExternalLink, Smartphone } from "lucide-react";
 import { useState } from "react";
 import type { PreviewEnvironment } from "@/lib/code-api";
 import type { PreviewKind } from "@/lib/previews-api";
-import { PREVIEW_KIND_ICON } from "../workspace/preview-sheet";
+import { PhoneCode, PREVIEW_KIND_ICON, TextAgainst } from "../workspace/preview-sheet";
 import { host, money, STATE_LABEL, StateDot } from "../workspace/previews-common";
 import { a11yWords, previewsApi, thanMain } from "@/lib/previews-api";
 import { errorText } from "../workspace/previews-common";
@@ -12,6 +12,8 @@ import { errorText } from "../workspace/previews-common";
  * it costs, and the way to its project's Previews tab. The change page's panel and its aside.
  */
 export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewEnvironment; compact?: boolean }) {
+  // The service whose link is shown as a QR code, to open on a phone.
+  const [phoneFor, setPhoneFor] = useState<string | null>(null);
   return (
     <div className={compact ? "space-y-2" : "space-y-3"}>
       <p className="flex items-center gap-2 text-[12px] text-muted">
@@ -22,13 +24,28 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
       {env.services.length > 0 && (
         <ul className="space-y-1">
           {env.services.map((s) => (
-            <li key={s.name} className="flex min-w-0 items-center gap-2 text-[12px]">
-              <StateDot state={s.state} />
-              <span className="shrink-0 text-muted">{s.name}</span>
-              <a href={s.url} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-1 font-mono text-[12px] text-accent hover:underline">
-                <span className="truncate">{host(s.url)}</span>
-                <ExternalLink className="size-3 shrink-0" />
-              </a>
+            <li key={s.name} className="text-[12px]">
+              <div className="flex min-w-0 items-center gap-2">
+                <StateDot state={s.state} />
+                <span className="shrink-0 text-muted">{s.name}</span>
+                <a href={s.url} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-1 font-mono text-[12px] text-accent hover:underline">
+                  <span className="truncate">{host(s.url)}</span>
+                  <ExternalLink className="size-3 shrink-0" />
+                </a>
+                {env.id && (
+                  <button
+                    type="button"
+                    onClick={() => setPhoneFor((x) => (x === s.name ? null : s.name))}
+                    aria-pressed={phoneFor === s.name}
+                    aria-label={`Open ${s.name} on a phone`}
+                    title="Open it on a phone: scan the code"
+                    className="ml-auto shrink-0 text-muted hover:text-fg aria-pressed:text-fg"
+                  >
+                    <Smartphone className="size-3.5" strokeWidth={1.5} />
+                  </button>
+                )}
+              </div>
+              {env.id && phoneFor === s.name && <PhoneCode id={env.id} service={s.name} />}
             </li>
           ))}
         </ul>
@@ -43,6 +60,11 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
                 <span className="truncate font-mono text-[11.5px]">{r.parent}</span>
                 <span>→</span>
                 <span className="truncate font-mono text-[11.5px] text-muted">{r.ref ?? "branching…"}</span>
+                {r.data === "real" && (
+                  <span className="shrink-0 text-soft" title="Its branch holds the parent's data as it is: the preview's code reads it unmasked">
+                    unmasked
+                  </span>
+                )}
               </li>
             );
           })}
@@ -51,11 +73,25 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
       <p className="font-mono text-[11px] text-subtle tabular-nums">
         {money(env.sleeping_usd_month)}/mo asleep · {money(env.active_usd_hour)}/h active
       </p>
+      {(env.page_health || env.page_links || env.page_a11y) && <EnvChecks env={env} />}
       {env.page_health && (env.page_health.errors > 0 || env.page_health.failed > 0) && (
         <p className="break-words text-[12px] text-danger">
           While its first page loaded: {[env.page_health.errors > 0 ? `${env.page_health.errors} ${env.page_health.errors === 1 ? "error" : "errors"}` : "", env.page_health.failed > 0 ? `${env.page_health.failed} failed ${env.page_health.failed === 1 ? "request" : "requests"}` : ""].filter(Boolean).join(", ")}
           {env.page_health.first_error ? ` (${env.page_health.first_error})` : ""}
           {env.base_change?.errors_added != null && `; ${env.base_change.errors_added === 0 ? "none" : env.base_change.errors_added} new against ${env.base_change.branch}`}
+        </p>
+      )}
+      {env.page_links && env.page_links.broken.length > 0 && (
+        <p className="break-words text-[12px] text-danger">
+          {env.page_links.broken.length} broken {env.page_links.broken.length === 1 ? "link" : "links"}:{" "}
+          <span className="font-mono text-[11.5px]">{env.page_links.broken.map((b) => `${b.path} ${b.status || "no answer"}`).join(", ")}</span>
+          {env.base_change?.links_added != null && ` (${env.base_change.links_added === 0 ? "none" : env.base_change.links_added} new against ${env.base_change.branch})`}
+        </p>
+      )}
+      {!!env.page_a11y?.seo?.length && (
+        <p className="text-[12px] text-muted">
+          SEO: {env.page_a11y.seo.join(", ")}
+          {env.base_change?.seo_added != null && ` (${env.base_change.seo_added === 0 ? "none" : env.base_change.seo_added} new against ${env.base_change.branch})`}
         </p>
       )}
       {env.page_a11y && a11yWords(env.page_a11y).length > 0 && (
@@ -73,6 +109,17 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
           {env.base_change && thanMain(env.page_speed.load_ms, env.base_change.load_ms, env.base_change.branch) ? ` · ${thanMain(env.page_speed.load_ms, env.base_change.load_ms, env.base_change.branch)}` : ""}
         </p>
       )}
+      {env.page_speed && (env.page_speed.lcp_ms != null || env.page_speed.cls != null) && (
+        <p className="font-mono text-[11px] text-subtle tabular-nums" title="Core Web Vitals">
+          {[
+            env.page_speed.lcp_ms != null ? `LCP ${env.page_speed.lcp_ms < 1000 ? `${env.page_speed.lcp_ms} ms` : `${(env.page_speed.lcp_ms / 1000).toFixed(1)} s`}` : "",
+            env.page_speed.lcp_ms != null && env.base_change ? thanMain(env.page_speed.lcp_ms, env.base_change.lcp_ms, env.base_change.branch) : "",
+            env.page_speed.cls != null ? `CLS ${env.page_speed.cls.toFixed(2)}` : "",
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </p>
+      )}
       {env.visual_change && (
         <p className="text-[12px] text-muted">
           {env.visual_change.percent > 0
@@ -85,7 +132,14 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
           {env.base_change.percent > 0 ? `Differs ${Math.max(env.base_change.percent, 0.1).toFixed(1)}% from ${env.base_change.branch}.` : `Looks the same as ${env.base_change.branch}.`}
         </p>
       )}
+      {env.base_change?.text && <TextAgainst diff={env.base_change.text} branch={env.base_change.branch} />}
       {env.visual_review && env.visual_review.state !== "unchanged" && <VisualReview previewId={env.id} review={env.visual_review} />}
+      {env.release_ms != null && (
+        <p className="font-mono text-[11px] text-subtle tabular-nums" title="The project's release (migrations), run on the preview's data">
+          release {env.release_ms < 1000 ? `${env.release_ms} ms` : `${(env.release_ms / 1000).toFixed(1)} s`}
+          {env.release_before_ms != null && thanMain(env.release_ms, env.release_before_ms, "the push before") ? ` · ${thanMain(env.release_ms, env.release_before_ms, "the push before")}` : ""}
+        </p>
+      )}
       {env.expires_at != null && (
         <p className="text-[12px] text-muted">
           It goes {new Date(env.expires_at).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}; keep it from Previews.
@@ -97,6 +151,21 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
         </a>
       )}
     </div>
+  );
+}
+
+/** The first page's checks in one line: how many problems, how many new against main. */
+function EnvChecks({ env }: { env: PreviewEnvironment }) {
+  const problems =
+    (env.page_health?.errors ?? 0) + (env.page_health?.failed ?? 0) + (env.page_links?.broken.length ?? 0) + (env.page_a11y ? a11yWords(env.page_a11y).length : 0) + (env.page_a11y?.seo?.length ?? 0);
+  const b = env.base_change;
+  const parts = b ? [b.errors_added, b.links_added, b.a11y_added, b.seo_added].filter((n): n is number => n != null) : [];
+  const added = parts.length ? parts.reduce((x, y) => x + y, 0) : null;
+  return (
+    <p className={`text-[12px] ${problems > 0 ? "text-soft" : "text-subtle"}`}>
+      Checks: {problems === 0 ? "nothing found" : `${problems} ${problems === 1 ? "problem" : "problems"}`}
+      {problems > 0 && added != null && b ? ` · ${added === 0 ? "none" : added} new against ${b.branch}` : ""}
+    </p>
   );
 }
 

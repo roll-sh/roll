@@ -82,6 +82,29 @@ pub const SCREENSHOT_IMAGE: &str = "mcr.microsoft.com/playwright:v1.64.1-noble";
 /// (`shot.js`, in `$ROLL_SHOT_JS`). A command of an operator's own only needs to write `$OUT`.
 pub const SCREENSHOT_COMMAND: &str = r#"CHROME="$(ls -d /ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell | head -1)" node -e "$ROLL_SHOT_JS""#;
 const SHOT_JS: &str = include_str!("shot.js");
+/// axe-core's WCAG rules for the screenshot's session (vendored, MPL-2.0): 640 KB, past what one
+/// environment variable may hold, so it goes in on the container's stdin.
+const AXE_JS: &str = include_str!("../vendor/axe-core/axe.min.js");
+
+/// `docker` with `input` on its stdin, written while its output is read.
+async fn docker_with_input(args: &[&str], input: &'static [u8]) -> anyhow::Result<String> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("docker")
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("docker's stdin"))?;
+    let feed = tokio::spawn(async move {
+        let _ = stdin.write_all(input).await;
+    });
+    let out = child.wait_with_output().await?;
+    let _ = feed.await;
+    anyhow::ensure!(out.status.success(), "docker {}: {}", args.first().unwrap_or(&""), String::from_utf8_lossy(&out.stderr).trim());
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
@@ -697,7 +720,7 @@ fn private_page(through: Option<&str>) -> Response {
 }
 
 /// Equal, in time that doesn't depend on where they differ.
-fn same(a: &str, b: &str) -> bool {
+pub(crate) fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
@@ -706,6 +729,10 @@ fn same(a: &str, b: &str) -> bool {
 fn reach_local(v: &str, docker: bool) -> String {
     if !docker {
         return v.to_string();
+    }
+    // A bare host (`SMTP_HOST=127.0.0.1`).
+    if ["127.0.0.1", "localhost", "0.0.0.0", "[::1]"].contains(&v) {
+        return "host.docker.internal".into();
     }
     let mut out = v.to_string();
     for local in ["127.0.0.1", "localhost", "0.0.0.0", "[::1]"] {
@@ -899,7 +926,7 @@ impl Runtime {
             code_preview::docker::docker(&["pull", "--quiet", &self.cfg.screenshot_image]).await?;
         }
         let shot = format!("roll-previews-shot-{}", name.trim_start_matches("roll-previews-"));
-        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), shot.clone(), "--network".into(), format!("container:{name}")];
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--name".into(), shot.clone(), "--network".into(), format!("container:{name}")];
         // Cleaned up with the runtime's own containers after a crash.
         args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL)]);
         if let Some(l) = code_preview::docker::home_label() {
@@ -909,8 +936,8 @@ impl Runtime {
         args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=256m".into()]);
         args.extend(code_preview::docker::limits(1024, 1.0));
         args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into(), "--env".into(), "HOME=/tmp".into()]);
-        args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}")]);
-        let pages: Vec<&String> = opts.pages.iter().filter(|p| crate::settings::page_path_ok(p)).take(crate::settings::MAX_PAGES).collect();
+        args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}"), "--env".into(), "AXE=/tmp/axe.js".into()]);
+        let pages: Vec<&String> = opts.pages.iter().filter(|p| crate::settings::page_path_ok(p) || crate::settings::width_entry(p).is_some()).take(crate::settings::MAX_PAGES).collect();
         args.extend(["--env".into(), format!("PAGES={}", serde_json::to_string(&pages)?)]);
         let hide: Vec<&String> = opts.hide.iter().filter(|s| crate::settings::selector_ok(s)).take(crate::settings::MAX_HIDE).collect();
         args.extend(["--env".into(), format!("HIDE={}", serde_json::to_string(&hide)?)]);
@@ -922,14 +949,15 @@ impl Runtime {
             "sh".into(),
             "-c".into(),
             format!(
-                "{} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
+                "cat > /tmp/axe.js; {} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
                  && echo && (cat /tmp/s.png.pages.json 2>/dev/null || true) && for n in 0 1 2 3 4; do echo; base64 -w0 /tmp/s.png.$n.png 2>/dev/null || true; done",
                 self.cfg.screenshot_command
             ),
         ]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        let within = Duration::from_secs(90 + 12 * pages.len() as u64);
-        let out = match tokio::time::timeout(within, code_preview::docker::docker(&argv)).await {
+        // Each other page is taken and checked too (accessibility, links up to 20 s, SEO, words).
+        let within = Duration::from_secs(90 + 30 * pages.len() as u64);
+        let out = match tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes())).await {
             Ok(r) => r?,
             Err(_) => {
                 code_preview::docker::remove(&shot).await;
@@ -943,7 +971,7 @@ impl Runtime {
         let png = b64e.decode(b64.trim()).map_err(|e| anyhow::anyhow!("the screenshot isn't a PNG: {e}"))?;
         anyhow::ensure!(png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX, "the screenshot isn't a PNG of at most {SCREENSHOT_MAX} bytes");
         let phone = b64e.decode(phone.trim()).ok().filter(|p| p.starts_with(b"\x89PNG") && p.len() <= SCREENSHOT_MAX);
-        Ok(crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed), a11y: crate::PageA11y::parse(speed), phone, pages: page_shots(&pages, said, lines) })
+        Ok(crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed), a11y: crate::PageA11y::parse(speed), text: crate::page_text(speed), links: crate::PageLinks::parse(speed), phone, pages: page_shots(&pages, said, lines) })
     }
 
     async fn seed_job(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {
@@ -987,13 +1015,27 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
         path: String,
         #[serde(default)]
         errors: u32,
+        #[serde(default)]
+        a11y: Option<serde_json::Value>,
+        #[serde(default)]
+        seo: Option<serde_json::Value>,
+        #[serde(default)]
+        links: Option<serde_json::Value>,
+        #[serde(default)]
+        text: Option<String>,
     }
     let said: Vec<Said> = serde_json::from_str(said.trim()).unwrap_or_default();
     let mut out: Vec<crate::ports::PageShot> = Vec::new();
     for (s, b64) in said.into_iter().zip(pngs).take(asked.len()) {
         let Ok(png) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else { continue };
         if png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX && asked.iter().any(|a| **a == s.path) && !out.iter().any(|p| p.path == s.path) {
-            out.push(crate::ports::PageShot { path: s.path, png, errors: s.errors.min(10_000) });
+            // Read as the first page's are (the same bounds), from what this page's run wrote.
+            let report = crate::PageReport {
+                a11y: s.a11y.and_then(|a| crate::PageA11y::parse(&serde_json::json!({ "a11y": a, "seo": s.seo }).to_string())),
+                links: s.links.and_then(|l| crate::PageLinks::parse(&serde_json::json!({ "links": l }).to_string())),
+                text: s.text.and_then(|t| crate::page_text(&serde_json::json!({ "text": t }).to_string())),
+            };
+            out.push(crate::ports::PageShot { path: s.path, png, errors: s.errors.min(10_000), report });
         }
     }
     out
@@ -1004,6 +1046,15 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
 pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> Response {
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().host().map(str::to_string));
     let Some((preview, service)) = host.and_then(|h| rt.service_for_host(&h)) else { return next.run(req).await };
+    let mut resp = serve(rt, preview, service, req).await;
+    // Kept out of search engines, whatever the service says (as Vercel's previews are): a public
+    // preview, a share link or an earlier push's URL is never what a search should land on.
+    resp.headers_mut().insert(header::HeaderName::from_static("x-robots-tag"), header::HeaderValue::from_static("noindex"));
+    resp
+}
+
+/// A request for a preview's service: through its gate, then to the service.
+async fn serve(rt: Arc<Runtime>, preview: String, service: String, req: Request) -> Response {
     if let Some(r) = rt.gate(&preview, &service, &req) {
         return r;
     }
@@ -1122,7 +1173,8 @@ mod tests {
             out
         };
         // Link access (the default): no token, no preview; the link's token turns into a cookie.
-        assert!(get("web-pr1-shop.preview.test:7070").await.starts_with("HTTP/1.1 401"));
+        let locked = get("web-pr1-shop.preview.test:7070").await;
+        assert!(locked.starts_with("HTTP/1.1 401") && locked.contains("x-robots-tag: noindex"), "{locked}");
         let token = rt.store.access(&row.id).unwrap().unwrap().token;
         let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
         s.write_all(format!("GET /hello?roll_access={token}&x=1 HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
@@ -1134,6 +1186,7 @@ mod tests {
         let mut out = String::new();
         s.read_to_string(&mut out).await.unwrap();
         assert!(out.ends_with("service saw /hello"), "{out}");
+        assert!(out.contains("x-robots-tag: noindex"), "never indexed, whatever the service says: {out}");
         // Automation: the project's bypass secret in a header, which the service never sees.
         let raw = |head: String| async move {
             let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -1232,6 +1285,7 @@ mod tests {
         assert_eq!(reach_local("http://localhost:7070/x", true), "http://host.docker.internal:7070/x");
         assert_eq!(reach_local("127.0.0.1:9092,localhost:9093", true), "host.docker.internal:9092,host.docker.internal:9093");
         assert_eq!(reach_local("db.roll.sh:5432", true), "db.roll.sh:5432");
+        assert_eq!((reach_local("127.0.0.1", true), reach_local("10.0.0.1", true)), ("host.docker.internal".to_string(), "10.0.0.1".to_string()));
         assert_eq!(reach_local("http://127.0.0.1:1", false), "http://127.0.0.1:1");
     }
 }

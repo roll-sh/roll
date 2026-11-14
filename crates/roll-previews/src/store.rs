@@ -140,12 +140,32 @@ CREATE TABLE IF NOT EXISTS base_history (
     at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, head)
 );
-CREATE TABLE IF NOT EXISTS visual_accepts (
-    preview_id TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS visual_page_accepts (
+    preview_id TEXT NOT NULL,
+    path TEXT NOT NULL,
     head TEXT NOT NULL,
     by TEXT NOT NULL,
-    at INTEGER NOT NULL
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, path)
 );
+CREATE TABLE IF NOT EXISTS resolved_notes (
+    preview_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, review_id)
+);
+CREATE TABLE IF NOT EXISTS mail (
+    id TEXT PRIMARY KEY,
+    preview_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    sender TEXT NOT NULL,
+    recipients TEXT NOT NULL,
+    subject TEXT,
+    size INTEGER NOT NULL,
+    raw TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS mail_by_preview ON mail (preview_id, at);
 CREATE TABLE IF NOT EXISTS budget_alerts (
     project_id TEXT NOT NULL,
     month INTEGER NOT NULL,
@@ -256,8 +276,12 @@ struct ShotFacts {
     prev_speed: Option<crate::PageSpeed>,
     health: Option<crate::PageHealth>,
     a11y: Option<crate::PageA11y>,
+    links: Option<crate::PageLinks>,
     base: Option<BaseRow>,
 }
+
+/// The most caught mail a preview keeps, in bytes (its messages as sent).
+pub const MAIL_BYTES: i64 = 10 << 20;
 
 /// How many of a baseline's heads keep their screenshots (to compare changes at their merge base).
 pub const BASE_HISTORY: usize = 10;
@@ -272,6 +296,12 @@ struct Shots {
     speed: Option<String>,
     a11y: Option<String>,
     health: Option<String>,
+    /// The first page's visible text.
+    text: Option<String>,
+    /// Its broken links (`PageLinks` JSON).
+    links: Option<String>,
+    /// The other pages' reports by path (`PageReport` JSON).
+    page_reports: std::collections::BTreeMap<String, String>,
 }
 
 /// Who made a baseline (`created_by`).
@@ -444,7 +474,7 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
-        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT"), ("base_preview", "TEXT"), ("base_branch", "TEXT"), ("base_change_bp", "INTEGER"), ("base_phone_bp", "INTEGER"), ("base_head", "TEXT"), ("base_speed", "TEXT"), ("base_a11y", "TEXT"), ("base_health", "TEXT")] {
+        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT"), ("base_preview", "TEXT"), ("base_branch", "TEXT"), ("base_change_bp", "INTEGER"), ("base_phone_bp", "INTEGER"), ("base_head", "TEXT"), ("base_speed", "TEXT"), ("base_a11y", "TEXT"), ("base_health", "TEXT"), ("text", "TEXT"), ("base_text", "TEXT"), ("links", "TEXT"), ("base_links", "TEXT")] {
             if !db.has_column("screenshots", col)? {
                 db.add_column("screenshots", col, ty)?;
             }
@@ -457,10 +487,25 @@ impl Store {
         if !db.has_column("resources", "mask_digest")? {
             db.add_column("resources", "mask_digest", "TEXT")?;
         }
+        for col in ["text", "links", "page_reports"] {
+            if !db.has_column("base_history", col)? {
+                db.add_column("base_history", col, "TEXT")?;
+            }
+        }
+        for col in ["report", "against"] {
+            if !db.has_column("page_shots", col)? {
+                db.add_column("page_shots", col, "TEXT")?;
+            }
+        }
         if !db.has_column("previews", "vars")? {
             db.add_column("previews", "vars", "TEXT")?;
         }
         for col in ["kept_until", "goes_at"] {
+            if !db.has_column("previews", col)? {
+                db.add_column("previews", col, "INTEGER")?;
+            }
+        }
+        for col in ["release_ms", "prev_release_ms"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "INTEGER")?;
             }
@@ -707,7 +752,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_accepts", "base_history", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -988,9 +1033,10 @@ impl Store {
         Ok(self.db.read(|c| c.query_row("SELECT released FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
     }
 
-    pub fn set_released(&self, id: &str, head: &str) -> Result<()> {
+    /// The release ran at `head` in `ms`; the run before's time is kept to compare.
+    pub fn set_released(&self, id: &str, head: &str, ms: i64) -> Result<()> {
         self.db.write(|c| {
-            c.execute("UPDATE previews SET released = ? WHERE id = ?", [head, id])?;
+            c.execute("UPDATE previews SET released = ?, prev_release_ms = release_ms, release_ms = ? WHERE id = ?", params![head, ms, id])?;
             Ok::<_, Error>(())
         })
     }
@@ -1055,10 +1101,11 @@ impl Store {
     }
 
     /// What went wrong while the latest screenshot's page loaded (after `set_screenshot`).
-    pub fn set_page_report(&self, id: &str, health: Option<&crate::PageHealth>, a11y: Option<&crate::PageA11y>) -> Result<()> {
+    pub fn set_page_report(&self, id: &str, health: Option<&crate::PageHealth>, a11y: Option<&crate::PageA11y>, text: Option<&str>, links: Option<&crate::PageLinks>) -> Result<()> {
         let health = health.and_then(|h| serde_json::to_string(h).ok());
         let a11y = a11y.and_then(|a| serde_json::to_string(a).ok());
-        self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE screenshots SET health = ?, a11y = ? WHERE preview_id = ?", params![health, a11y, id])?))?;
+        let links = links.and_then(|l| serde_json::to_string(l).ok());
+        self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE screenshots SET health = ?, a11y = ?, text = ?, links = ? WHERE preview_id = ?", params![health, a11y, text, links, id])?))?;
         Ok(())
     }
 
@@ -1092,13 +1139,14 @@ impl Store {
     pub fn keep_base_history(&self, id: &str, head: &str) -> Result<()> {
         let Some(shots) = self.latest_shots(id)? else { return Ok(()) };
         let pages = serde_json::to_string(&shots.pages).map_err(|e| Error::Internal(e.to_string()))?;
+        let page_reports = serde_json::to_string(&shots.page_reports).map_err(|e| Error::Internal(e.to_string()))?;
         let now = self.now_ms()?;
         self.db.write(|c| {
             c.execute(
-                "INSERT INTO base_history (preview_id, head, png, phone_png, pages, at, speed, a11y, health) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                "INSERT INTO base_history (preview_id, head, png, phone_png, pages, at, speed, a11y, health, text, links, page_reports) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT (preview_id, head) DO UPDATE SET png = excluded.png, phone_png = excluded.phone_png, pages = excluded.pages, at = excluded.at, speed = excluded.speed, \
-                 a11y = excluded.a11y, health = excluded.health",
-                params![id, head, shots.png, shots.phone, pages, now, shots.speed, shots.a11y, shots.health],
+                 a11y = excluded.a11y, health = excluded.health, text = excluded.text, links = excluded.links, page_reports = excluded.page_reports",
+                params![id, head, shots.png, shots.phone, pages, now, shots.speed, shots.a11y, shots.health, shots.text, shots.links, page_reports],
             )?;
             let old: Vec<String> = c.query(&format!("SELECT head FROM base_history WHERE preview_id = ? ORDER BY at DESC LIMIT -1 OFFSET {BASE_HISTORY}"), [id], |r| r.get(0))?;
             for h in &old {
@@ -1110,25 +1158,40 @@ impl Store {
 
     /// A preview's latest screenshots, base64: desktop, phone, and its other pages by path.
     fn latest_shots(&self, id: &str) -> Result<Option<Shots>> {
-        type Raw = (String, String, Option<String>, Option<String>, Option<String>, Option<String>);
+        type Raw = (String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
         let row: Option<Raw> = self.db.read(|c| {
-            c.query_row("SELECT head, png, phone_png, speed, a11y, health FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).optional()
+            c.query_row("SELECT head, png, phone_png, speed, a11y, health, text, links FROM screenshots WHERE preview_id = ?", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+            })
+            .optional()
         })?;
-        let Some((head, png, phone, speed, a11y, health)) = row else { return Ok(None) };
-        let pages: Vec<(String, String)> = self.db.read(|c| c.query("SELECT path, png FROM page_shots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))))?;
-        Ok(Some(Shots { head, png, phone, pages: pages.into_iter().collect(), speed, a11y, health }))
+        let Some((head, png, phone, speed, a11y, health, text, links)) = row else { return Ok(None) };
+        let pages: Vec<(String, String, Option<String>)> = self.db.read(|c| c.query("SELECT path, png, report FROM page_shots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
+        let page_reports = pages.iter().filter_map(|(p, _, r)| Some((p.clone(), r.clone()?))).collect();
+        Ok(Some(Shots { head, png, phone, pages: pages.into_iter().map(|(p, png, _)| (p, png)).collect(), speed, a11y, health, text, links, page_reports }))
     }
 
     /// Baseline `id`'s screenshots at `head`, from its history.
     fn shots_at(&self, id: &str, head: &str) -> Result<Option<Shots>> {
-        type Raw = (String, Option<String>, String, Option<String>, Option<String>, Option<String>);
+        type Raw = (String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
         let row: Option<Raw> = self.db.read(|c| {
-            c.query_row("SELECT png, phone_png, pages, speed, a11y, health FROM base_history WHERE preview_id = ? AND head = ?", [id, head], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            c.query_row("SELECT png, phone_png, pages, speed, a11y, health, text, links, page_reports FROM base_history WHERE preview_id = ? AND head = ?", [id, head], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
             })
             .optional()
         })?;
-        Ok(row.map(|(png, phone, pages, speed, a11y, health)| Shots { head: head.to_string(), png, phone, pages: serde_json::from_str(&pages).unwrap_or_default(), speed, a11y, health }))
+        Ok(row.map(|(png, phone, pages, speed, a11y, health, text, links, page_reports)| Shots {
+            head: head.to_string(),
+            png,
+            phone,
+            pages: serde_json::from_str(&pages).unwrap_or_default(),
+            speed,
+            a11y,
+            health,
+            text,
+            links,
+            page_reports: page_reports.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default(),
+        }))
     }
 
     /// Compare preview `id`'s latest screenshots (desktop, phone, other pages) with preview
@@ -1154,13 +1217,29 @@ impl Store {
         let (change, phone) = (bp(Some(&ours.png), Some(&theirs.png)), bp(ours.phone.as_ref(), theirs.phone.as_ref()));
         // The other pages, each against the baseline's page at the same path.
         let page_bps: Vec<(String, Option<i64>)> = ours.pages.iter().map(|(path, png)| (path.clone(), bp(Some(png), theirs.pages.get(path)))).collect();
+        // Each other page's checks against main's page at the same path.
+        let report = |m: &std::collections::BTreeMap<String, String>, p: &str| m.get(p).and_then(|r| serde_json::from_str::<crate::PageReport>(r).ok());
+        let page_against: Vec<(String, Option<String>)> = ours
+            .pages
+            .keys()
+            .map(|path| {
+                let against = report(&ours.page_reports, path).zip(report(&theirs.page_reports, path)).map(|(a, b)| a.against(&b));
+                (path.clone(), against.and_then(|a| serde_json::to_string(&a).ok()))
+            })
+            .collect();
+        // The first page's words against the baseline's (Chromatic's DOM snapshots), when both were read.
+        let text = ours.text.as_deref().zip(theirs.text.as_deref()).and_then(|(now, then)| serde_json::to_string(&crate::visual::text_diff(then, now)).ok());
         self.db.write(|c| {
             c.execute(
-                "UPDATE screenshots SET base_preview = ?, base_branch = ?, base_change_bp = ?, base_phone_bp = ?, base_head = ?, base_speed = ?, base_a11y = ?, base_health = ? WHERE preview_id = ?",
-                params![base, branch, change, phone, theirs.head, theirs.speed, theirs.a11y, theirs.health, id],
+                "UPDATE screenshots SET base_preview = ?, base_branch = ?, base_change_bp = ?, base_phone_bp = ?, base_head = ?, base_speed = ?, base_a11y = ?, base_health = ?, base_text = ?, \
+                 base_links = ? WHERE preview_id = ?",
+                params![base, branch, change, phone, theirs.head, theirs.speed, theirs.a11y, theirs.health, text, theirs.links, id],
             )?;
             for (path, bp) in &page_bps {
                 c.execute("UPDATE page_shots SET base_bp = ? WHERE preview_id = ? AND path = ?", params![bp, id, path])?;
+            }
+            for (path, against) in &page_against {
+                c.execute("UPDATE page_shots SET against = ? WHERE preview_id = ? AND path = ?", params![against, id, path])?;
             }
             Ok::<_, Error>(())
         })
@@ -1202,7 +1281,7 @@ impl Store {
         let row = self.db.read(|c| {
             c.query_row(
                 "SELECT CASE WHEN png <> '' THEN at END, head, prev_head, change_bp, phone_change_bp, phone_png IS NOT NULL, speed, prev_speed, health, a11y, \
-                 base_preview, base_branch, base_change_bp, base_phone_bp, base_head, base_speed, base_a11y, base_health FROM screenshots WHERE preview_id = ?",
+                 base_preview, base_branch, base_change_bp, base_phone_bp, base_head, base_speed, base_a11y, base_health, base_text, links, base_links FROM screenshots WHERE preview_id = ?",
                 [id],
                 |r| {
                     let base = match (r.get::<_, Option<String>>(10)?, r.get::<_, Option<String>>(11)?, r.get::<_, Option<i64>>(12)?) {
@@ -1215,6 +1294,8 @@ impl Store {
                             speed: json(r.get(15)?),
                             a11y: json(r.get(16)?),
                             health: json(r.get(17)?),
+                            text: json(r.get(18)?),
+                            links: json(r.get(20)?),
                         }),
                         _ => None,
                     };
@@ -1229,6 +1310,7 @@ impl Store {
                         prev_speed: json(r.get(7)?),
                         health: json(r.get(8)?),
                         a11y: json(r.get(9)?),
+                        links: json(r.get(19)?),
                         base,
                     })
                 },
@@ -1248,21 +1330,22 @@ impl Store {
             let before: Option<(String, String)> = self.db.read(|c| c.query_row("SELECT head, png FROM page_shots WHERE preview_id = ? AND path = ?", [id, &p.path], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
             let before = before.filter(|(h, _)| h != head);
             let change_bp = before.as_ref().and_then(|(_, old)| crate::visual::changed(&b64e.decode(old).ok()?, &p.png)).map(|f| (f * 10_000.0).round() as i64);
-            rows.push((p.path.clone(), b64e.encode(&p.png), p.errors as i64, before, change_bp));
+            let report = serde_json::to_string(&p.report).ok();
+            rows.push((p.path.clone(), b64e.encode(&p.png), p.errors as i64, before, change_bp, report));
         }
         self.db.write(|c| {
-            for (path, png, errors, before, change_bp) in &rows {
+            for (path, png, errors, before, change_bp, report) in &rows {
                 match before {
                     Some((prev_head, prev_png)) => c.execute(
-                        "INSERT INTO page_shots (preview_id, path, head, png, prev_head, prev_png, change_bp, errors) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                        "INSERT INTO page_shots (preview_id, path, head, png, prev_head, prev_png, change_bp, errors, report) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
                          ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, prev_head = excluded.prev_head, prev_png = excluded.prev_png, \
-                         change_bp = excluded.change_bp, errors = excluded.errors, base_bp = NULL",
-                        params![id, path, head, png, prev_head, prev_png, change_bp, errors],
+                         change_bp = excluded.change_bp, errors = excluded.errors, base_bp = NULL, report = excluded.report, against = NULL",
+                        params![id, path, head, png, prev_head, prev_png, change_bp, errors, report],
                     )?,
                     None => c.execute(
-                        "INSERT INTO page_shots (preview_id, path, head, png, errors) VALUES (?, ?, ?, ?, ?) \
-                         ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, errors = excluded.errors, base_bp = NULL",
-                        params![id, path, head, png, errors],
+                        "INSERT INTO page_shots (preview_id, path, head, png, errors, report) VALUES (?, ?, ?, ?, ?, ?) \
+                         ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, errors = excluded.errors, base_bp = NULL, report = excluded.report, against = NULL",
+                        params![id, path, head, png, errors, report],
                     )?,
                 };
             }
@@ -1276,88 +1359,121 @@ impl Store {
 
     /// The other pages' screenshots, by path: how each changed and compares with the baseline's.
     pub fn page_checks(&self, id: &str) -> Result<Vec<crate::PageCheck>> {
-        type Raw = (String, i64, Option<String>, Option<i64>, Option<i64>);
+        type Raw = (String, i64, Option<String>, Option<i64>, Option<i64>, Option<String>, Option<String>);
         let rows: Vec<Raw> = self.db.read(|c| {
-            c.query("SELECT path, errors, prev_head, change_bp, base_bp FROM page_shots WHERE preview_id = ? ORDER BY path", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            c.query("SELECT path, errors, prev_head, change_bp, base_bp, report, against FROM page_shots WHERE preview_id = ? ORDER BY path", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+            })
         })?;
         Ok(rows
             .into_iter()
-            .map(|(path, errors, since, change, base)| crate::PageCheck {
+            .map(|(path, errors, since, change, base, report, against)| {
+                let report: crate::PageReport = report.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default();
+                (path, errors, since, change, base, report, against.and_then(|a| serde_json::from_str(&a).ok()))
+            })
+            .map(|(path, errors, since, change, base, report, against)| crate::PageCheck {
                 path,
                 errors: errors as u32,
                 since: since.filter(|_| change.is_some()),
                 percent: change.map(|bp| bp as f64 / 100.0),
                 base_percent: base.map(|bp| bp as f64 / 100.0),
+                a11y: report.a11y,
+                links: report.links,
+                against,
             })
             .collect())
     }
 
     /// `by` accepted how the preview's pages look at the latest screenshot's head (`None`: no
-    /// screenshot to accept).
+    /// screenshot to accept): `page` only (`""` the first page, else another page's path), or
+    /// every page taken there.
     /// `seen`: the head whose screenshots were looked at; refused (`Conflict`) when a newer one
     /// came in meanwhile, so nobody accepts pages they didn't see.
-    pub fn accept_visual(&self, id: &str, by: &str, seen: Option<&str>) -> Result<Option<String>> {
+    pub fn accept_visual(&self, id: &str, by: &str, seen: Option<&str>, page: Option<&str>) -> Result<Option<String>> {
         let now = self.now_ms()?;
         // Read and written in one transaction: a screenshot landing in between can't be accepted.
         self.db.write(|c| {
             let head: Option<String> = c.query_row("SELECT head FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional()?;
-            let Some(head) = head else { return Ok(None) };
+            let Some(head) = head.filter(|h| !h.is_empty()) else { return Ok(None) };
             if seen.is_some_and(|s| s != head) {
                 return Err(Error::Conflict(format!("a newer screenshot came in (at {}): look at it first", head.chars().take(12).collect::<String>())));
             }
-            c.execute(
-                "INSERT INTO visual_accepts (preview_id, head, by, at) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, by = excluded.by, at = excluded.at",
-                params![id, head, by, now],
-            )?;
+            let others: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
+            let pages: Vec<String> = match page {
+                None => std::iter::once(String::new()).chain(others).collect(),
+                Some(p) if p.is_empty() || others.iter().any(|o| o == p) => vec![p.to_string()],
+                Some(p) => return Err(Error::NotFound(format!("the preview has no screenshot of {p:?}"))),
+            };
+            for path in pages {
+                c.execute(
+                    "INSERT INTO visual_page_accepts (preview_id, path, head, by, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, by = excluded.by, at = excluded.at",
+                    params![id, path, head, by, now],
+                )?;
+            }
             Ok::<_, Error>(Some(head))
         })
     }
 
-    /// After a screenshot: an acceptance of the head just before moves to this one when every page
-    /// looks exactly as it did there (Chromatic carries accepted baselines forward), so a push that
-    /// changes nothing visible isn't reviewed again. `true` when it moved.
-    pub fn carry_acceptance(&self, id: &str) -> Result<bool> {
+    /// After a screenshot: each page accepted at the head just before is accepted at this one when
+    /// it looks exactly as it did there (Chromatic carries accepted baselines forward), so a push
+    /// that changes nothing visible isn't reviewed again, and one that changes a page asks only
+    /// about that page. `true` when an acceptance moved.
+    /// `threshold`: the project's `github.visual_threshold`; a page that changed less is as it was.
+    pub fn carry_acceptance(&self, id: &str, threshold: f64) -> Result<bool> {
+        let as_was = move |bp: Option<i64>| bp.is_some_and(|bp| bp as f64 / 100.0 <= threshold);
         self.db.write(|c| {
-            let accepted: Option<String> = c.query_row("SELECT head FROM visual_accepts WHERE preview_id = ?", [id], |r| r.get(0)).optional()?;
             // (head, the head before, desktop change, phone change)
             type Shot = (String, Option<String>, Option<i64>, Option<i64>);
             let shot: Option<Shot> =
                 c.query_row("SELECT head, prev_head, change_bp, phone_change_bp FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
-            let (Some(accepted), Some((head, Some(prev), Some(0), phone))) = (accepted, shot) else { return Ok(false) };
-            if accepted != prev || head == accepted || phone.is_some_and(|p| p != 0) {
-                return Ok(false);
+            let Some((head, Some(prev), desktop, phone)) = shot else { return Ok(false) };
+            // Each page's (path, the head before, change): the first page's at both widths.
+            let mut same: Vec<String> = Vec::new();
+            if as_was(desktop) && (phone.is_none() || as_was(phone)) {
+                same.push(String::new());
             }
-            // Every other page was taken at both heads and is unchanged too.
-            let pages: Vec<(Option<String>, Option<i64>)> = c.query("SELECT prev_head, change_bp FROM page_shots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            if pages.iter().any(|(h, bp)| h.as_deref() != Some(prev.as_str()) || *bp != Some(0)) {
-                return Ok(false);
+            let pages: Vec<(String, Option<String>, Option<i64>)> = c.query("SELECT path, prev_head, change_bp FROM page_shots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            same.extend(pages.into_iter().filter(|(_, h, bp)| h.as_deref() == Some(prev.as_str()) && as_was(*bp)).map(|(p, _, _)| p));
+            let mut moved = false;
+            for path in same {
+                moved |= c.execute("UPDATE visual_page_accepts SET head = ? WHERE preview_id = ? AND path = ? AND head = ?", [head.as_str(), id, path.as_str(), prev.as_str()])? > 0;
             }
-            c.execute("UPDATE visual_accepts SET head = ? WHERE preview_id = ?", [head.as_str(), id])?;
-            Ok::<_, Error>(true)
+            Ok::<_, Error>(moved)
         })
     }
 
     /// The visual review of a change's preview (`github.visual_review`), once its pages were
-    /// compared with the baseline's: the most any of them differs, and who accepted that head.
-    fn visual_review(&self, r: &Row, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck], shot: Option<String>) -> Result<Option<crate::VisualReview>> {
-        let rule = self.settings(&r.project_id)?.visual_review;
+    /// compared with the baseline's: each page that differs, who accepted it at this head, and
+    /// the change accepted once every one of them is.
+    fn visual_review(&self, r: &Row, rule: crate::settings::VisualReviewRule, threshold: f64, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck], shot: Option<String>) -> Result<Option<crate::VisualReview>> {
         if r.change_id.is_none() || rule == crate::settings::VisualReviewRule::Off {
             return Ok(None);
         }
         let Some(base) = base else { return Ok(None) };
-        let percent = [Some(base.percent), base.phone_percent].into_iter().chain(pages.iter().map(|p| p.base_percent)).flatten().fold(0.0_f64, f64::max);
-        let accepted: Option<(String, String, i64)> = self.db.read(|c| c.query_row("SELECT head, by, at FROM visual_accepts WHERE preview_id = ?", [&r.id], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?))).optional())?;
-        let accepted = accepted.filter(|(h, _, _)| shot.as_deref() == Some(h.as_str()));
-        let state = match (&accepted, percent > 0.0) {
-            (_, false) => crate::VisualState::Unchanged,
-            (Some(_), true) => crate::VisualState::Accepted,
-            (None, true) => crate::VisualState::Changed,
+        let accepts: Vec<(String, String, String, i64)> = self.db.read(|c| c.query("SELECT path, head, by, at FROM visual_page_accepts WHERE preview_id = ?", [&r.id], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?, x.get(3)?))))?;
+        let accepted = |path: &str| accepts.iter().find(|(p, h, _, _)| p == path && shot.as_deref() == Some(h.as_str())).map(|(_, _, by, at)| (by.clone(), *at));
+        let first = base.percent.max(base.phone_percent.unwrap_or(0.0));
+        let changed: Vec<(String, f64)> =
+            std::iter::once((String::new(), first)).chain(pages.iter().filter_map(|p| Some((p.path.clone(), p.base_percent?)))).filter(|(_, pct)| *pct > threshold).collect();
+        let reviews: Vec<crate::PageReview> = changed
+            .iter()
+            .map(|(path, percent)| {
+                let a = accepted(path);
+                crate::PageReview { path: path.clone(), percent: *percent, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at) }
+            })
+            .collect();
+        let percent = changed.iter().map(|(_, p)| *p).fold(0.0_f64, f64::max);
+        let state = if reviews.is_empty() {
+            crate::VisualState::Unchanged
+        } else if reviews.iter().all(|p| p.by.is_some()) {
+            crate::VisualState::Accepted
+        } else {
+            crate::VisualState::Changed
         };
-        let (by, at) = match accepted.filter(|_| state == crate::VisualState::Accepted) {
-            Some((_, by, at)) => (Some(by), Some(at)),
-            None => (None, None),
-        };
-        Ok(Some(crate::VisualReview { state, branch: base.branch.clone(), percent, by, at, required: rule == crate::settings::VisualReviewRule::Required, head: shot.unwrap_or_default() }))
+        // Who accepted it: whoever accepted its last page.
+        let last = reviews.iter().filter(|_| state == crate::VisualState::Accepted).max_by_key(|p| p.at);
+        let (by, at) = (last.and_then(|p| p.by.clone()), last.and_then(|p| p.at));
+        Ok(Some(crate::VisualReview { state, branch: base.branch.clone(), percent, by, at, required: rule == crate::settings::VisualReviewRule::Required, head: shot.unwrap_or_default(), pages: reviews }))
     }
 
     /// Another page's screenshot (`previous`: the one before it).
@@ -1409,6 +1525,91 @@ impl Store {
     }
 
     /// The key screenshot links are signed with: made once, the same on every node.
+    /// The password of the preview's SMTP sign-in (`SMTP_PASSWORD`, its id the user): a keyed
+    /// hash only roll makes, so nothing needs storing and nobody else's code can send as it.
+    pub fn mail_password(&self, id: &str) -> Result<String> {
+        use hmac::Mac;
+        let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.signing_key()?).map_err(|e| Error::Internal(e.to_string()))?;
+        m.update(b"smtp:");
+        m.update(id.as_bytes());
+        Ok(hex::encode(&m.finalize().into_bytes()[..16]))
+    }
+
+    /// Whether `user`/`password` are a live preview's SMTP sign-in (compared in constant time).
+    pub fn mail_signs_in(&self, user: &str, password: &str) -> Result<bool> {
+        let Ok(r) = self.row(user) else { return Ok(false) };
+        if r.desired == crate::Desired::Deleted {
+            return Ok(false);
+        }
+        Ok(crate::runtime::same(&self.mail_password(&r.id)?, password))
+    }
+
+    /// `by` resolved a note left on the preview's page (its review's id): the page stops listing
+    /// it. Resolving one already resolved changes nothing.
+    pub fn resolve_note(&self, preview: &str, review: &str, by: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            c.execute("INSERT INTO resolved_notes (preview_id, review_id, by, at) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id, review_id) DO NOTHING", params![preview, review, by, now])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The notes resolved on a preview's page (their reviews' ids).
+    pub fn resolved_notes(&self, preview: &str) -> Result<std::collections::HashSet<String>> {
+        let ids: Vec<String> = self.db.read(|c| c.query("SELECT review_id FROM resolved_notes WHERE preview_id = ?", [preview], |r| r.get(0)))?;
+        Ok(ids.into_iter().collect())
+    }
+
+    /// A caught message, kept with its preview: its last 50, at most [`MAIL_BYTES`] of them in
+    /// all (the oldest go first), so a preview's code can't fill the store.
+    pub fn keep_mail(&self, preview: &str, mail: &crate::mail::Mail) -> Result<()> {
+        use base64::Engine as _;
+        let now = self.now_ms()?;
+        let id = format!("ml_{}", &new_token()[..16]);
+        let to = serde_json::to_string(&mail.to).unwrap_or_else(|_| "[]".into());
+        let raw = base64::engine::general_purpose::STANDARD.encode(&mail.raw);
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO mail (id, preview_id, at, sender, recipients, subject, size, raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, preview, now, mail.from, to, mail.subject(), mail.raw.len() as i64, raw],
+            )?;
+            c.execute(
+                "DELETE FROM mail WHERE preview_id = ? AND id NOT IN (SELECT id FROM mail WHERE preview_id = ? ORDER BY at DESC, id DESC LIMIT 50)",
+                params![preview, preview],
+            )?;
+            let kept: Vec<(String, i64)> = c.query("SELECT id, size FROM mail WHERE preview_id = ? ORDER BY at DESC, id DESC", [preview], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let mut total = 0i64;
+            for (mid, size) in kept {
+                total += size;
+                if total > MAIL_BYTES {
+                    c.execute("DELETE FROM mail WHERE id = ?", [mid.as_str()])?;
+                }
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The preview's caught mail, newest first (without the messages).
+    pub fn mails(&self, preview: &str) -> Result<Vec<crate::CaughtMail>> {
+        type Raw = (String, i64, String, String, Option<String>, i64);
+        let rows: Vec<Raw> = self.db.read(|c| {
+            c.query("SELECT id, at, sender, recipients, subject, size FROM mail WHERE preview_id = ? ORDER BY at DESC, id DESC", [preview], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            })
+        })?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, at, from, to, subject, size)| crate::CaughtMail { id, at, from, to: serde_json::from_str(&to).unwrap_or_default(), subject, size })
+            .collect())
+    }
+
+    /// One caught message as it was sent.
+    pub fn mail_raw(&self, preview: &str, id: &str) -> Result<Option<Vec<u8>>> {
+        use base64::Engine as _;
+        let raw: Option<String> = self.db.read(|c| c.query_row("SELECT raw FROM mail WHERE preview_id = ? AND id = ?", [preview, id], |r| r.get(0)).optional())?;
+        Ok(raw.and_then(|r| base64::engine::general_purpose::STANDARD.decode(r).ok()))
+    }
+
     fn signing_key(&self) -> Result<Vec<u8>> {
         if let Some(k) = self.signing.get() {
             return Ok(k.clone());
@@ -1490,9 +1691,15 @@ impl Store {
         })
     }
 
-    fn schema_changes(&self, id: &str) -> Result<Option<Vec<String>>> {
-        let raw: Option<String> = self.db.read(|c| c.query_row("SELECT schema_changes FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten();
-        Ok(raw.and_then(|j| serde_json::from_str(&j).ok()))
+    /// What the release last did, in one read: the schema's changes and how long it took.
+    fn release_facts(&self, id: &str) -> Result<(Option<Vec<String>>, Option<crate::ReleaseRun>)> {
+        type Raw = (Option<String>, Option<String>, Option<i64>, Option<i64>);
+        let raw: Option<Raw> = self.db.read(|c| {
+            c.query_row("SELECT schema_changes, released, release_ms, prev_release_ms FROM previews WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()
+        })?;
+        let Some((changes, head, ms, before)) = raw else { return Ok((None, None)) };
+        let run = head.zip(ms).map(|(head, ms)| crate::ReleaseRun { head, ms, before_ms: before });
+        Ok((changes.and_then(|j| serde_json::from_str(&j).ok()), run))
     }
 
     /// A preview's access token, and whether its project requires it.
@@ -1684,6 +1891,7 @@ impl Store {
     }
 
     pub fn view(&self, r: Row) -> Result<Preview> {
+        let settings = self.settings(&r.project_id)?;
         let resources = self.resources(&r.id)?;
         let services = self.services_with_time(&r.id)?;
         let cost = self.cost_of(&r, &resources, &services)?;
@@ -1698,7 +1906,7 @@ impl Store {
         };
         let url = services.first().map(|(s, _)| s.url.clone());
         let share_url = url.as_deref().map(share);
-        let schema_changes = self.schema_changes(&r.id)?;
+        let (schema_changes, release) = self.release_facts(&r.id)?;
         let kept_until = self.kept_until(&r.id)?;
         let goes_at = self.goes_at(&r.id)?;
         // The screenshot row in one read, without its images.
@@ -1709,7 +1917,7 @@ impl Store {
         let phone_screenshot = f.has_phone;
         let pages = self.page_checks(&r.id)?;
         let baseline = r.is_baseline();
-        let (page_a11y, page_health) = (f.a11y, f.health);
+        let (page_a11y, page_health, page_links) = (f.a11y, f.health, f.links);
         let base_row = f.base;
         let base_differs = base_row.as_ref().is_some_and(|b| b.change_bp > 0);
         let base_change = base_row.map(|b| crate::BaseChange {
@@ -1717,11 +1925,15 @@ impl Store {
             percent: b.change_bp as f64 / 100.0,
             phone_percent: b.phone_bp.map(|p| p as f64 / 100.0),
             head: b.head,
-            load_ms: b.speed.map(|s| s.load_ms),
+            load_ms: b.speed.as_ref().map(|s| s.load_ms),
+            lcp_ms: b.speed.and_then(|s| s.lcp_ms),
             a11y_added: page_a11y.as_ref().zip(b.a11y.as_ref()).map(|(ours, main)| ours.added_since(main)),
             errors_added: page_health.as_ref().zip(b.health.as_ref()).map(|(ours, main)| ours.added_since(main)),
+            text: b.text,
+            seo_added: page_a11y.as_ref().and_then(|a| a.seo.as_ref()).zip(b.a11y.as_ref().and_then(|a| a.seo.as_ref())).map(|(ours, main)| ours.added_since(main)),
+            links_added: page_links.as_ref().zip(b.links.as_ref()).map(|(ours, main)| ours.added_since(main)),
         });
-        let visual_review = self.visual_review(&r, base_change.as_ref(), &pages, f.head)?;
+        let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, f.head)?;
         let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
         let screenshot_link = screenshot_at.map(|at| self.link_at(&r.id, at, None)).transpose()?;
         let diff_link = match screenshot_at.filter(|_| base_differs) {
@@ -1760,10 +1972,14 @@ impl Store {
                 .collect(),
             resources: resources
                 .into_iter()
-                .map(|x| Resource { kind: x.kind, parent: x.parent, r#ref: x.r#ref, mode: x.mode, state: x.state, error: x.error, bytes: x.bytes })
+                .map(|x| {
+                    let masks = settings.masking.get(&format!("{}:{}", x.kind.as_str(), x.parent)).map_or(0, |m| m.len());
+                    Resource { data: crate::Data::of(x.kind, x.mode, masks), kind: x.kind, parent: x.parent, r#ref: x.r#ref, mode: x.mode, state: x.state, error: x.error, bytes: x.bytes }
+                })
                 .collect(),
             cost: cost.rounded(),
             schema_changes,
+            release,
             kept_until,
             goes_at,
             earlier,
@@ -1773,6 +1989,7 @@ impl Store {
             base_change,
             pages,
             visual_review,
+            page_links,
             page_speed,
             page_health,
             page_a11y,
@@ -1819,6 +2036,10 @@ pub struct BaseRow {
     pub health: Option<crate::PageHealth>,
     pub change_bp: i64,
     pub phone_bp: Option<i64>,
+    /// The first page's words against its (`visual::text_diff`).
+    pub text: Option<crate::TextDiff>,
+    /// Its first page's broken links there.
+    pub links: Option<crate::PageLinks>,
 }
 
 /// Live share links a preview may have at once.
@@ -1865,7 +2086,7 @@ mod tests {
         let (_dir, store) = store();
         let (row, _) = store.create(&new("chg_visual")).unwrap();
         let id = row.id.as_str();
-        let speed = |load_ms| crate::PageSpeed { ttfb_ms: 20, fcp_ms: Some(100), load_ms, bytes: 1000 };
+        let speed = |load_ms| crate::PageSpeed { ttfb_ms: 20, fcp_ms: Some(100), load_ms, bytes: 1000, lcp_ms: None, cls: None };
         store.set_screenshot(id, "cs_1", &png(0), Some(&speed(900)), Some(&png(0))).unwrap();
         assert_eq!(store.visual_change(id).unwrap(), None, "a first one: nothing to compare");
         assert_eq!(store.page_speed(id).unwrap(), Some(crate::PageSpeedView { now: speed(900), before: None }));
@@ -1882,7 +2103,7 @@ mod tests {
         store.set_screenshot(&main.id, "cs_m", &png(1), None, Some(&png(0))).unwrap();
         store.keep_base_history(&main.id, "cs_m").unwrap();
         store.compare_with_base(id, &main.id, "main", None).unwrap();
-        assert_eq!(store.base_change(id).unwrap(), Some(BaseRow { preview: main.id.clone(), branch: "main".into(), change_bp: 2000, phone_bp: Some(5000), head: Some("cs_m".into()), speed: None, a11y: None, health: None }));
+        assert_eq!(store.base_change(id).unwrap(), Some(BaseRow { preview: main.id.clone(), branch: "main".into(), change_bp: 2000, phone_bp: Some(5000), head: Some("cs_m".into()), speed: None, a11y: None, health: None, text: None, links: None }));
         // Main moves on (to what the change's page looks like): a change that left it at cs_m is
         // still compared with cs_m's, and shown that one.
         store.set_screenshot(&main.id, "cs_m2", &png(3), Some(&speed(700)), Some(&png(5))).unwrap();

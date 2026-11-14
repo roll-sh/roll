@@ -1,6 +1,6 @@
 import { AlertTriangle, Plus, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { isProduction, previewsApi, type PreviewBypass, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
+import { isProduction, previewsApi, unmaskedNote, type PreviewBypass, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
 import type { PlacedResource } from "@/lib/workspace-api";
 import { KIND_LABEL, resourceKey } from "@/lib/workspace-resources";
 import { Dialog } from "../agents/ui/dialog";
@@ -77,10 +77,12 @@ function Form({
   onSaved: (s: PreviewSettings) => void;
 }) {
   const [s, setS] = useState(saved);
+  const budget = s.github.budget ?? { load_ms: 0, bytes: 0 };
   const [branches, setBranches] = useState(saved.branches.join(", "));
   const [paths, setPaths] = useState(saved.paths.join(", "));
   const [ignorePaths, setIgnorePaths] = useState(saved.ignore_paths.join(", "));
   const [pages, setPages] = useState((saved.github.pages ?? []).join(", "));
+  const [widths, setWidths] = useState((saved.github.widths ?? []).join(", "));
   // Selectors can hold commas: one per line.
   const [hide, setHide] = useState((saved.github.hide ?? []).join("\n"));
   const [env, setEnv] = useState<[string, string][]>(Object.entries(saved.env));
@@ -90,7 +92,7 @@ function Form({
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof PreviewSettings>(k: K, v: PreviewSettings[K]) => setS((x) => ({ ...x, [k]: v }));
 
-  useEffect(() => setError(null), [s, branches, paths, ignorePaths, pages, hide, env, perBranch]);
+  useEffect(() => setError(null), [s, branches, paths, ignorePaths, pages, widths, hide, env, perBranch]);
 
   const next: PreviewSettings = {
     ...s,
@@ -100,6 +102,7 @@ function Form({
     github: {
       ...s.github,
       pages: words(pages),
+      widths: words(widths).map(Number),
       hide: hide
         .split("\n")
         .map((x) => x.trim())
@@ -169,6 +172,7 @@ function Form({
               const masks = Object.entries(s.masking?.[id] ?? {})
                 .map(([col, f]) => `${col} = ${f}`)
                 .join("\n");
+              const unmasked = unmaskedNote(r.kind, rule ?? (s.data === "branch" ? "branch" : schema ? "schema" : "skip"), Object.keys(s.masking?.[id] ?? {}).length);
               return (
                 <div key={id} className="border-t border-line first:border-t-0">
                   <div className="flex items-center gap-2 px-2.5 py-1.5">
@@ -193,6 +197,7 @@ function Form({
                       <option value="skip">Skip</option>
                     </select>
                   </div>
+                  {unmasked && <p className="px-2.5 pb-1.5 text-[11px] text-soft">{unmasked}</p>}
                   {(r.kind === "nosql" || r.kind === "postgres" || r.kind === "search") && (
                     <div className="px-2.5 pb-2">
                       <textarea
@@ -228,6 +233,15 @@ function Form({
             })}
           </div>
         )}
+        <Field label="Data as of" note="Branch the data as it was then, where the product keeps history (Postgres, NoSQL): -24h, -30m, -7d or a time. Empty: now.">
+          <input
+            value={s.data_at ?? ""}
+            onChange={(e) => set("data_at", e.target.value.trim() || null)}
+            placeholder="now"
+            className={`${field} h-8 w-full font-mono text-[12px]`}
+            spellCheck={false}
+          />
+        </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Reset every" note="Hours; 0 never.">
             <Num value={s.reset_every_hours} onChange={(v) => set("reset_every_hours", v)} />
@@ -365,6 +379,9 @@ function Form({
           <Choice value={s.access} options={["link", "public"]} onChange={(v) => set("access", v)} labels={{ link: "Private link", public: "Anyone with the URL" }} />
         </Field>
         {s.access === "link" && <Bypass projectId={projectId} />}
+        <Field group label="Mail" note="Previews run on copies of production's people. Caught: their services send mail to roll, where it's listed on the preview and goes no further (mail providers' API keys are removed).">
+          <Choice value={s.mail ?? "catch"} options={["catch", "deliver"]} onChange={(v) => set("mail", v)} labels={{ catch: "Caught by roll", deliver: "Delivered" }} />
+        </Field>
       </Section>
 
       <Section title="GitHub pull requests">
@@ -400,17 +417,30 @@ function Form({
           </Field>
         )}
         {s.github.screenshot && (
+          <Field label="More widths" note="The first page at these widths too, each compared and reviewed like a page (up to 3: 768 for a tablet, 1920).">
+            <input value={widths} onChange={(e) => setWidths(e.target.value)} placeholder="desktop and phone only" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
+          </Field>
+        )}
+        {s.github.screenshot && (
           <div className="grid grid-cols-2 gap-3">
             <Field label="Speed budget (ms)" note="Over it, roll/speed fails. 0 is no limit.">
-              <Num value={s.github.budget?.load_ms ?? 0} onChange={(v) => set("github", { ...s.github, budget: { load_ms: v, bytes: s.github.budget?.bytes ?? 0 } })} />
+              <Num value={s.github.budget?.load_ms ?? 0} onChange={(v) => set("github", { ...s.github, budget: { ...budget, load_ms: v } })} />
             </Field>
             <Field label="Size budget (KB)" note="The first page and what it loads.">
-              <Num
-                value={Math.round((s.github.budget?.bytes ?? 0) / 1024)}
-                onChange={(v) => set("github", { ...s.github, budget: { load_ms: s.github.budget?.load_ms ?? 0, bytes: v * 1024 } })}
-              />
+              <Num value={Math.round(budget.bytes / 1024)} onChange={(v) => set("github", { ...s.github, budget: { ...budget, bytes: v * 1024 } })} />
+            </Field>
+            <Field label="LCP budget (ms)" note="Largest contentful paint; Core Web Vitals call up to 2500 good.">
+              <Num value={budget.lcp_ms ?? 0} onChange={(v) => set("github", { ...s.github, budget: { ...budget, lcp_ms: v } })} />
+            </Field>
+            <Field label="Layout shift budget" note="Cumulative layout shift; up to 0.1 is good.">
+              <Num value={budget.cls ?? 0} step="any" onChange={(v) => set("github", { ...s.github, budget: { ...budget, cls: v } })} />
             </Field>
           </div>
+        )}
+        {s.github.screenshot && (
+          <Field label="Visual threshold (%)" note="A page counts as changed for the visual review only past this share of its pixels (up to 50). 0: any change counts.">
+            <Num value={s.github.visual_threshold ?? 0} step="any" onChange={(v) => set("github", { ...s.github, visual_threshold: Math.min(v, 50) })} />
+          </Field>
         )}
         {s.github.screenshot && (
           <Field label="Hidden in screenshots" note="CSS selectors blanked before each screenshot (a clock, an ad), one per line; animations always stop first.">

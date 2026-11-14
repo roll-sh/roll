@@ -167,25 +167,28 @@ impl roll_previews::ports::Apps for RollApps {
             if self.feedback && t.feedback { "f" } else { "" }
         );
         // The deployment previews last started for exactly this, still under way or live: wait on
-        // it (or it's done). The engine asks again while a deploy is in flight, and roll apps'
-        // redeploy has no idempotency key, so starting another would supersede it each time.
+        // it (or it's done). The engine asks again while a deploy is in flight, and a redeploy
+        // that starts another supersedes it each time.
         let mine = (t.preview.clone(), t.service.clone());
         let last = self.started.lock().unwrap_or_else(|p| p.into_inner()).get(&mine).cloned();
-        if let Some((id, _)) = last.filter(|(_, k)| *k == key) {
-            let under_way = env["latest"]["id"].as_str() == Some(id.as_str()) && matches!(env["latest"]["status"].as_str(), Some("queued" | "building" | "deploying"));
-            if under_way {
+        match already(last.as_ref(), &key, &env) {
+            Already::UnderWay => {
                 self.settle(&path, env["latest"].clone()).await?;
                 return Ok(s(&self.api.get(&path).await?["url"]));
             }
-            if env["active"]["id"].as_str() == Some(id.as_str()) {
-                return Ok(s(&env["url"]));
-            }
+            Already::Live => return Ok(s(&env["url"])),
+            Already::No => {}
         }
         // At the sha already (a reset's new URLs, say): run it again with the variables, no build.
         // Otherwise deploy, keyed so a retry after a crash returns the same deployment.
         let at_sha = t.git.is_some() && env["active"]["revision"].as_str() == t.git.as_deref();
         let deployment = if at_sha {
-            self.api.post(&format!("{path}/redeploy"), json!({ "message": format!("roll preview {}: new variables", t.preview) })).await?
+            // Keyed too (roll apps takes `Idempotency-Key` on a redeploy): what's deployed and the
+            // deployment it replaces, so a retry after a crash gets the same one, and variables
+            // that come back to an earlier set never get that earlier, superseded, redeploy back.
+            let idem = redeploy_key(&key, &s(&env["active"]["id"]).unwrap_or_default());
+            let body = json!({ "message": format!("roll preview {}: new variables", t.preview) });
+            self.api.call_with(Method::POST, &format!("{path}/redeploy"), Some(body), Some(&idem)).await?
         } else {
             let body = match &t.git {
                 Some(sha) => json!({ "revision": sha, "message": format!("roll preview {}", t.preview) }),
@@ -395,9 +398,59 @@ impl roll_previews::ports::Apps for Services {
     }
 }
 
+/// What a deploy of `key` finds of the one previews last started (`last`: its id and key).
+#[derive(Debug, PartialEq)]
+enum Already {
+    /// It's the environment's latest, and still going: wait on it.
+    UnderWay,
+    /// It's what the environment runs: nothing to do.
+    Live,
+    /// Something else (another key, a newer deployment, a failed one): start one.
+    No,
+}
+
+/// A redeploy's idempotency key: what it deploys and the deployment it replaces. A crash's retry
+/// gets the same redeploy; variables back to an earlier set (v1 → v2 → v1) a new one, never the
+/// earlier, superseded one.
+fn redeploy_key(key: &str, replaces: &str) -> String {
+    format!("redeploy:{key}:{replaces}")
+}
+
+fn already(last: Option<&(String, String)>, key: &str, env: &Value) -> Already {
+    let Some((id, _)) = last.filter(|(_, k)| k == key) else { return Already::No };
+    let going = matches!(env["latest"]["status"].as_str(), Some("queued" | "building" | "deploying"));
+    if going && env["latest"]["id"].as_str() == Some(id.as_str()) {
+        Already::UnderWay
+    } else if env["active"]["id"].as_str() == Some(id.as_str()) {
+        Already::Live
+    } else {
+        Already::No
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A poll while previews' own deploy is going waits on it, once it's live it's done, and only
+    /// a different set of variables (or a deployment that replaced it) starts another: one
+    /// deployment per change, not one per poll (26 a run before).
+    #[test]
+    fn a_poll_waits_on_its_own_deploy_and_starts_none_once_it_is_live() {
+        let last = ("dep_2".to_string(), "pv-1@abc@00ff".to_string());
+        let env = |latest: (&str, &str), active: &str| json!({ "latest": { "id": latest.0, "status": latest.1 }, "active": { "id": active } });
+        assert_eq!(already(Some(&last), "pv-1@abc@00ff", &env(("dep_2", "building"), "dep_1")), Already::UnderWay);
+        assert_eq!(already(Some(&last), "pv-1@abc@00ff", &env(("dep_2", "active"), "dep_2")), Already::Live);
+        assert_eq!(already(Some(&last), "pv-1@abc@11ee", &env(("dep_2", "active"), "dep_2")), Already::No, "new variables");
+        assert_eq!(already(Some(&last), "pv-1@abc@00ff", &env(("dep_3", "building"), "dep_2")), Already::Live, "someone else's on top: ours still runs");
+        assert_eq!(already(Some(&last), "pv-1@abc@00ff", &env(("dep_2", "failed"), "dep_1")), Already::No, "it failed: try again");
+        assert_eq!(already(None, "pv-1@abc@00ff", &env(("dep_1", "active"), "dep_1")), Already::No, "after a restart: start, keyed");
+        // v1 (dep_1 live) → v2 → back to v1: that last redeploy isn't the first one again.
+        let (v1, v2) = ("pv-1@abc@00ff", "pv-1@abc@11ee");
+        assert_ne!(redeploy_key(v1, "dep_1"), redeploy_key(v1, "dep_2"));
+        assert_ne!(redeploy_key(v1, "dep_2"), redeploy_key(v2, "dep_2"));
+        assert!(redeploy_key(v1, "dep_123456789abc").len() <= 200, "roll apps' limit");
+    }
 
     /// What roll set and no longer wants goes; what a person set stays; the list follows.
     #[test]

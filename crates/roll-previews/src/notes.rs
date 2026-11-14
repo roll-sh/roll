@@ -8,6 +8,8 @@ use serde::Serialize;
 /// A note on a page, as the page's feedback button lists it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Note {
+    /// The review it was posted as: what resolving it dismisses.
+    pub id: String,
     pub path: String,
     pub selector: String,
     pub note: String,

@@ -41,7 +41,7 @@ cleanup() {
     kill -9 "$PID" 2>/dev/null || true
     wait "$PID" 2>/dev/null || true
     # Only what this daemon made: its service containers and its Postgres computes.
-    for c in $(docker ps -aq --filter "label=sh.roll.code.home=$HOME_DIR") $(docker ps -aq --filter "label=roll.home=$HOME_DIR"); do docker rm -f "$c" >/dev/null; done
+    for c in $(docker ps -aq --filter "label=sh.roll.code.home=$HOME_DIR") $(docker ps -aq --filter "label=roll.home=$HOME_DIR"); do docker rm -f "$c" >/dev/null 2>&1 || true; done
   fi
 }
 trap cleanup EXIT
@@ -54,7 +54,7 @@ export ROLL_HOME=$HOME_DIR ROLL_API=$API ROLL_PROXY=127.0.0.1:${P}432 ROLL_REDIS
   ROLL_KAFKA=127.0.0.1:${P}092 ROLL_S3=127.0.0.1:${P}900 ROLL_STORAGE_API=127.0.0.1:${P}901 \
   ROLL_QUEUES_AMQP=127.0.0.1:${P}672 ROLL_QUEUES_MANAGEMENT=127.0.0.1:${P}673 ROLL_QUEUES_STOMP=127.0.0.1:${P}613 ROLL_QUEUES_WEB_STOMP=127.0.0.1:${P}674 \
   ROLL_QUEUES_MQTT=127.0.0.1:${P}883 ROLL_QUEUES_WEB_MQTT=127.0.0.1:${P}675 ROLL_QUEUES_STREAM=127.0.0.1:${P}552 ROLL_QUEUES_HTTP=127.0.0.1:${P}680 \
-  ROLL_SEARCH_HTTP=127.0.0.1:${P}200 \
+  ROLL_SEARCH_HTTP=127.0.0.1:${P}200 ROLL_PREVIEWS_SMTP=127.0.0.1:${P}525 \
   ROLL_NOSQL_CQL=127.0.0.1:${P}042 ROLL_NOSQL_CQL_SHARD_AWARE=127.0.0.1:${P}043 ROLL_NOSQL_ALTERNATOR=127.0.0.1:${P}000 ROLL_NOSQL_REST=127.0.0.1:${P}100 \
   ROLL_CODE_PREVIEW_DOMAIN=$DOMAIN ROLL_PRODUCTS=${PREVIEW_PRODUCTS:-code,postgres,redis,storage,nosql,queues,streams,tasks,search} RUST_LOG=${RUST_LOG:-info}
 unset ROLL_ADMIN_TOKEN ROLL_CODE_TOKEN
@@ -80,6 +80,11 @@ api POST /v1/code/repos/acme/wiki/land "{\"message\":\"init\",\"files\":{\"roll.
 REDIS=$(api POST /v1/redis/databases '{"name":"cache"}' | jq_ "d['id']")
 api POST /v1/storage/buckets '{"name":"assets"}' >/dev/null
 NOSQL=$(api POST /v1/nosql/databases '{"name":"events"}' | jq_ "d['id']")
+CQL() { api POST "/v1/nosql/databases/$1/cql" "$(python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1]}))' "$2")"; }
+CQL "$NOSQL" "CREATE KEYSPACE app WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1}" >/dev/null
+CQL "$NOSQL" "CREATE TABLE app.users (id int PRIMARY KEY, email text, name text)" >/dev/null
+CQL "$NOSQL" "INSERT INTO app.users (id, email, name) VALUES (1, 'alice@corp.example', 'Alice')" >/dev/null
+CQL "$NOSQL" "CREATE TABLE app.users_by_email (email text PRIMARY KEY, id int)" >/dev/null
 api POST /v1/queues/vhosts '{"name":"jobs"}' >/dev/null
 STREAM=$(api POST /v1/streams '{"name":"clicks"}' | jq_ "d['id']")
 # A search cluster with a document the preview's branch must read.
@@ -122,7 +127,12 @@ PRJ=$(api POST /v1/workspace/projects '{"name":"shop"}' | jq_ "d['id']")
 for r in "repo/acme%2Fweb" "repo/acme%2Fwiki" "postgres/$PG" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work" "search/$SEARCH"; do
   api PUT "/v1/workspace/projects/$PRJ/resources/$r" '{"x":0,"y":0}' >/dev/null
 done
-api PUT "/v1/previews/projects/$PRJ/settings" "{\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"},\"search:$SEARCH\":{\"products.name\":\"redact\"}}}" >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" "{\"env\":{\"SENDGRID_API_KEY\":\"SG.from-production\",\"SMTP_HOST\":\"smtp.sendgrid.net\"},\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"},\"search:$SEARCH\":{\"products.name\":\"redact\"}}}" >/dev/null
+# A mask on a key column can't hide it (the engine refuses to read such a table): the settings
+# name it instead of letting a preview's pages fail.
+KEY_MASK=$(curl -s -o /tmp/roll-previews-keymask.json -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' \
+  -d "{\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\",\"app.users_by_email.email\":\"mask_default()\"}}}")
+[ "$KEY_MASK" = 400 ] && grep -q "app.users_by_email's primary key" /tmp/roll-previews-keymask.json || { echo "a NoSQL mask on a key column should be refused, not $KEY_MASK $(cat /tmp/roll-previews-keymask.json)"; exit 1; }
 
 say "open a change"
 T0=$(now_ms)
@@ -161,10 +171,33 @@ PG_PARENT_KB=$(du -sk "$HOME_DIR/data/$(api GET "/v1/projects/$PG" | jq_ "[b['id
 PG_BRANCH_KB=$( [ -n "$PG_BRANCH" ] && du -sk "$HOME_DIR/data/$PG_BRANCH" | cut -f1 || echo 0)
 BRANCH_OBJECTS=$(api GET "/v1/storage/buckets/$BRANCH_BUCKET" | jq_ "d['bytes']")
 BRANCH_SEES=$($S3 ls --recursive "s3://$BRANCH_BUCKET/" | wc -l)
+# What each branch hands the preview's code: masked where masks are set, none where nothing is
+# copied, and production data as it is everywhere else, which the preview says.
+DATA=$(echo "$P" | jq_ "' '.join(sorted('%s=%s' % (r['kind'], r['data']) for r in d['resources']))")
+[ "$DATA" = "bucket=real nosql=masked postgres=masked queue=none redis=real search=masked stream=real tasks=none" ] || { echo "the preview should say what data each branch hands over: $DATA"; exit 1; }
+# How long the release (migrations) took on the preview's data, at the head it runs; the
+# change carries it too (its page and the pull request comment).
+RELEASE=$(echo "$P" | jq_ "'%s ms at %s' % (d['release']['ms'], d['release']['head'] == d['head']) if d.get('release') else ''")
+case "$RELEASE" in [0-9]*" ms at True") ;; *) echo "the preview should say how long its release took at its head: $RELEASE"; exit 1;; esac
+for _ in $(seq 1 60); do
+  CHG_RELEASE=$(api GET "/v1/code/changes/$CHG" | jq_ "((d.get('preview') or {}).get('environment') or {}).get('release_ms')")
+  case "$CHG_RELEASE" in [0-9]*) break;; esac
+  sleep 0.5
+done
+case "$CHG_RELEASE" in [0-9]*) ;; *) echo "the change should carry the release's time: $CHG_RELEASE"; exit 1;; esac
+# Its link with access as a QR code, for a phone (a PNG, never cached: it carries the token).
+QR=$(curl -sS -D "$HOME_DIR/qr.h" "http://$API/v1/previews/$PV/qr.png" | head -c 8 | od -An -c | tr -d ' \n')
+grep -qi '^cache-control: no-store' "$HOME_DIR/qr.h" && [ "$QR" = '211PNG\r\n032\n' ] || { echo "the preview's link should come as a QR code PNG, never cached: $QR"; exit 1; }
 # The preview's NoSQL branch reads masked; the parent's policy is untouched.
 BRANCH_NOSQL=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='nosql'][0]")
 MASKED=$(api GET "/v1/nosql/databases/$BRANCH_NOSQL" | jq_ "d['masking'].get('app.users.email')")
 PARENT_MASKED=$(api GET "/v1/nosql/databases/$NOSQL" | jq_ "len(d['masking'])")
+# What the preview's own code can ask its branch (the console is its superuser): the email reads
+# masked, and a filter on the real address finds nothing (the premise: on the parent it does).
+[ "$(CQL "$NOSQL" "SELECT name FROM app.users WHERE email = 'alice@corp.example' ALLOW FILTERING" | jq_ "d['rows']")" = "[['Alice']]" ] || { echo "the parent's filter should find Alice"; exit 1; }
+NOSQL_READ=$(CQL "$BRANCH_NOSQL" "SELECT email FROM app.users WHERE id = 1" | jq_ "d['rows'][0][0]")
+NOSQL_FILTER=$(CQL "$BRANCH_NOSQL" "SELECT name FROM app.users WHERE email = 'alice@corp.example' ALLOW FILTERING" | jq_ "d.get('rows', d)")
+[ "$NOSQL_READ" != "alice@corp.example" ] && [ "$NOSQL_FILTER" = "[]" ] || { echo "the NoSQL branch tells the masked email: read $NOSQL_READ, filter $NOSQL_FILTER"; exit 1; }
 # The preview's Postgres branch has the email rewritten; the parent's row is as it was.
 PG_BRANCH_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['id']=='$PG_BRANCH'][0]")
 PG_MASKED=$(api POST "/v1/endpoints/$PG_BRANCH_EP/query" '{"sql":"SELECT email FROM users WHERE id = 1"}' | jq_ "d['results'][0]['rows'][0][0]")
@@ -181,10 +214,40 @@ BODY=$(curl -sS -L -c "$JAR" -b "$JAR" -H "Host: $HOST" "http://$API/?$QUERY" --
 T3=$(now_ms)
 echo "$BODY" | grep -q "preview of change 1" || { echo "unexpected body: $BODY"; tail -30 "$HOME_DIR/rolld.log"; exit 1; }
 T4=$(now_ms); curl -sS -o /dev/null -b "$JAR" -H "Host: $HOST" "http://$API/"; T5=$(now_ms)
+# Never indexed: the service's page through roll says so, and so does the 401 without the link.
+ROBOTS=$(curl -sS -o /dev/null -D - -b "$JAR" -H "Host: $HOST" "http://$API/" | tr -d '\r' | sed -n 's/^x-robots-tag: //Ip')
+ROBOTS_LOCKED=$(curl -sS -o /dev/null -D - -H "Host: $HOST" "http://$API/" | tr -d '\r' | sed -n 's/^x-robots-tag: //Ip')
+[ "$ROBOTS" = noindex ] && [ "$ROBOTS_LOCKED" = noindex ] || { echo "a preview's pages should be kept out of search engines: '$ROBOTS' / '$ROBOTS_LOCKED'"; exit 1; }
 # The service's DATABASE_URL is the branch's own role, which can't read the WAL (where the pages
 # from before the mask are) and isn't a superuser.
 APP_DB=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
 case "$APP_DB" in postgres://br_*) ;; *) echo "the service's DATABASE_URL should be the branch's own role, not ${APP_DB%%@*}…"; exit 1;; esac
+# Its mail goes to roll's catcher, signed in as the preview, never to the provider production
+# uses: the key is gone, and what it sends is caught and listed (sent here as its service would).
+ENVTXT=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt")
+echo "$ENVTXT" | grep -q '^SENDGRID_API_KEY=' && { echo "a preview's service shouldn't get the mail provider's key"; exit 1; }
+SMTP_USER=$(echo "$ENVTXT" | sed -n 's/^SMTP_USER=//p'); SMTP_PASSWORD=$(echo "$ENVTXT" | sed -n 's/^SMTP_PASSWORD=//p'); SMTP_PORT=$(echo "$ENVTXT" | sed -n 's/^SMTP_PORT=//p')
+[ "$SMTP_USER" = "$PV" ] && [ "$(echo "$ENVTXT" | sed -n 's/^SMTP_HOST=//p')" = host.docker.internal ] || { echo "the service's SMTP should be roll's catcher, as the preview: $SMTP_USER"; exit 1; }
+python3 - "$SMTP_PORT" "$SMTP_USER" "$SMTP_PASSWORD" <<'PY'
+import smtplib, sys
+port, user, password = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+with smtplib.SMTP("127.0.0.1", port, timeout=10) as s:
+    s.login(user, password)
+    s.sendmail("shop@example.com", ["ada@corp.example"], "Subject: Your order\r\n\r\nThanks, Ada.\r\n")
+try:
+    with smtplib.SMTP("127.0.0.1", port, timeout=10) as s:
+        s.login(user, "guess")
+    sys.exit("a wrong password signed in")
+except smtplib.SMTPAuthenticationError:
+    pass
+PY
+MAIL=$(api GET "/v1/previews/$PV/mail" | jq_ "'%s to %s' % (d['mail'][0]['subject'], ','.join(d['mail'][0]['to'])) if d.get('mail') else ''")
+[ "$MAIL" = "Your order to ada@corp.example" ] || { echo "the preview's mail should be caught and listed: $MAIL"; exit 1; }
+# A reviewer's connection from a laptop (`roll preview connect`): the same role, never the parent's.
+CONNECT=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview connect "$PV" --kind postgres | sed -n 's/^DATABASE_URL=//p')
+case "$CONNECT" in postgres://br_*) ;; *) echo "roll preview connect should hand out the branch's own role, not ${CONNECT%%@*}…"; exit 1;; esac
+role() { echo "$1" | sed 's#^postgres://\([^:@]*\)[:@].*#\1#'; }
+[ "$(role "$CONNECT")" = "$(role "$APP_DB")" ] || { echo "the connection's role should be the service's: $(role "$CONNECT") / $(role "$APP_DB")"; exit 1; }
 # The service's ELASTICSEARCH_URL is the branch's: it reads the parent's document; a write stays in
 # the branch.
 APP_ES=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^ELASTICSEARCH_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
@@ -194,6 +257,13 @@ ES_READ=$(curl -sf "$APP_ES/products/_doc/1" | jq_ "d['_source']['name']")
 [ "$ES_READ" = "[masked]" ] || { echo "the search branch should read the parent's document with products.name masked, not $ES_READ"; exit 1; }
 ES_PARENT=$(curl -sf "$SEARCH_URL_PARENT/products/_doc/1" | jq_ "d['_source']['name']")
 [ "$ES_PARENT" = "parent" ] || { echo "masking the branch shouldn't touch the parent's document: $ES_PARENT"; exit 1; }
+# Nor can the preview's code read the masked value back out of the segments the branch shares
+# with its parent (a term dictionary keeps a replaced document's terms): the parent's has it,
+# the branch's doesn't.
+TERMS() { curl -sf -XPOST "$1/products/_terms_enum" -H 'content-type: application/json' -d '{"field":"name.keyword","string":"par"}' | jq_ "d.get('terms')"; }
+[ "$(TERMS "$SEARCH_URL_PARENT")" = "['parent']" ] || { echo "the parent's term dictionary should have the value (the check's premise): $(TERMS "$SEARCH_URL_PARENT")"; exit 1; }
+ES_TERMS=$(TERMS "$APP_ES")
+[ "$ES_TERMS" = "[]" ] || { echo "the masked value is still in the branch's term dictionary: $ES_TERMS"; exit 1; }
 # A field only the branch's documents have (price): its mapping gains it, and the next head's
 # schema changes say so.
 curl -sf -XPUT "$APP_ES/products/_doc/2?refresh=true" -H 'content-type: application/json' -d '{"name":"branch","price":9.5}' >/dev/null
@@ -225,6 +295,12 @@ NOTE_BODY='**Feedback on the preview** · [`/`](http://x/) · `body > h1`\n\nThe
 api POST "/v1/code/changes/$CHG/reviews" "{\"verdict\":\"comment\",\"body\":\"$NOTE_BODY\"}" >/dev/null
 NOTES=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F")
 echo "$NOTES" | grep -q "The heading is cut off" || { echo "the page's notes should list the feedback: $NOTES"; exit 1; }
+# Resolved (what the page's Resolve opens roll to do), it folds away there.
+NOTE_ID=$(echo "$NOTES" | jq_ "d[0]['id']")
+[ "$(api GET "/v1/previews/$PV/notes" | jq_ "[n['id'] for n in d['notes']]")" = "['$NOTE_ID']" ] || { echo "the preview's open notes should list the page's, with its id"; exit 1; }
+[ "$(api POST "/v1/previews/$PV/notes/$NOTE_ID/resolve" '{}' | jq_ "d.get('resolved')")" = "$NOTE_ID" ] || { echo "resolving the page's note should answer with it"; exit 1; }
+RESOLVED=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F" | jq_ "len(d)")
+[ "$RESOLVED" = 0 ] && [ "$(api GET "/v1/previews/$PV/notes" | jq_ "len(d['notes'])")" = 0 ] || { echo "a resolved note should fold away on the page and from the open notes: $RESOLVED left"; exit 1; }
 # A share link for someone outside the team: in through its own token (no preview cookie), out
 # once it's revoked.
 SHARE=$(api POST "/v1/previews/$PV/shares" '{"hours":1}')
@@ -243,7 +319,7 @@ ACTIVE=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
 
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
-api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"hide":[".clock"],"budget":{"load_ms":60000}}}' >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000}}}' >/dev/null
 # roll keeps a preview of the default branch (github.baseline): the change's screenshots are
 # compared with its.
 MAINPV=""
@@ -263,6 +339,9 @@ case "$SHOT" in *PNG) ;; *) echo "the screenshot should be a PNG: $SHOT"; exit 1
 # The same load timed the page (shot.js over the DevTools pipe).
 SPEED=$(api GET "/v1/previews/$PV" | jq_ "('load %s ms, first byte %s ms, %s bytes' % (d['page_speed']['now']['load_ms'], d['page_speed']['now']['ttfb_ms'], d['page_speed']['now']['bytes'])) if d.get('page_speed') and d['page_speed']['now']['load_ms'] > 0 else ''")
 [ -n "$SPEED" ] || { echo "the screenshot's load should have timed the page"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:6]]"; exit 1; }
+# Core Web Vitals from the same load: the page's text is its largest paint, and nothing shifts.
+VITALS=$(api GET "/v1/previews/$PV" | jq_ "'LCP %s ms, CLS %s' % (d['page_speed']['now'].get('lcp_ms'), d['page_speed']['now'].get('cls'))")
+case "$VITALS" in "LCP "[1-9]*" ms, CLS 0"*) ;; *) echo "the screenshot's load should measure Core Web Vitals: $VITALS"; exit 1;; esac
 # A public preview's change carries a signed link to it (the pull request comment's image),
 # which opens without credentials; a changed signature doesn't.
 api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"public"}' >/dev/null
@@ -363,7 +442,7 @@ RUNS=$(api GET "/v1/previews/$PV" | jq_ "d.get('runs') or ''")
 [ "$(bare "$RUNS")" = "$(bare "$BUILD")" ] || { echo "a docs-only push should keep the services on $BUILD, not $RUNS"; exit 1; }
 WAITED2=$(ROLL_API_URL="http://$API" "$ROLL_CLI" preview wait --change "$CHG" --timeout 30) || { echo "roll preview wait should pass for the docs-only head"; exit 1; }
 # This one's page logs an error, which its screenshot's load must catch.
-THIRD='preview of change 1, third<script>console.error(\"boom\")</script>'
+THIRD='preview of change 1, third<script>console.error(\"boom\")</script> <nav><a href=\"/gone\">a page that went</a></nav>'
 api POST "/v1/code/changes/$CHG/revise" "{\"base\":\"main\",\"message\":\"Code\",\"files\":{\"index.html\":{\"content\":\"$THIRD\"},\"docs/setup.md\":{\"content\":\"how to run it\"}}}" >/dev/null
 CODE_HEAD=$(api GET "/v1/code/changes/$CHG" | jq_ "d['head']")
 until_head "$CODE_HEAD"
@@ -379,7 +458,7 @@ for _ in $(seq 1 60); do
 done
 [ "$WARM" = yes ] || { echo "the service should be woken after the push, before any visit"; exit 1; }
 PAGE=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/")
-[ "$PAGE" = 'preview of change 1, third<script>console.error("boom")</script>' ] || { echo "a push that touches code should redeploy: the page says $PAGE"; exit 1; }
+[ "$PAGE" = 'preview of change 1, third<script>console.error("boom")</script> <nav><a href="/gone">a page that went</a></nav>' ] || { echo "a push that touches code should redeploy: the page says $PAGE"; exit 1; }
 KEPT="kept $(bare "$RUNS" | cut -c1-10) through a docs-only push; redeployed at $(bare "$CODE_HEAD" | cut -c1-10)"
 # The push before stays reachable at a URL of its own, on the same data (Vercel's per-push URLs).
 EARLIER_URL=$(api GET "/v1/previews/$PV" | jq_ "((d.get('earlier') or [{}])[0]).get('share_url') or ''")
@@ -411,9 +490,17 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 case "$HEALTH" in *boom*) ;; *) echo "the page's console.error should be caught: $(api GET "/v1/previews/$PV" | jq_ "d.get('page_health')")"; exit 1;; esac
+# Its link to a page that went is checked (HEAD), and broken; its 404 isn't the page's failed request.
+LINKS=$(api GET "/v1/previews/$PV" | jq_ "' '.join('%s %s' % (b['path'], b['status']) for b in (d.get('page_links') or {}).get('broken', []))")
+[ "$LINKS" = "/gone 404" ] || { echo "the page's broken link should be found: $LINKS"; exit 1; }
+# Against main's (which links nowhere): it's the change's.
+LINKS_NEW=$(api GET "/v1/previews/$PV" | jq_ "(d.get('base_change') or {}).get('links_added')")
+[ "$LINKS_NEW" = 1 ] || { echo "the broken link should be new against main: $LINKS_NEW"; exit 1; }
+case "$HEALTH" in *"; 0 failed") ;; *) echo "the link check's own requests aren't the page's: $HEALTH"; exit 1;; esac
 # The test page has no language and no title: the screenshot's browser says so.
-A11Y=$(api GET "/v1/previews/$PV" | jq_ "('lang %s, title %s, %d issue kinds' % (d['page_a11y']['lang'], d['page_a11y']['title'], len(d['page_a11y']['issues']))) if d.get('page_a11y') else ''")
-[ "$A11Y" = "lang False, title False, 0 issue kinds" ] || { echo "the page's accessibility should be checked (no lang, no title): $A11Y"; exit 1; }
+# By axe-core's rules (a bare text page breaks its landmark ones), with no lang and no title.
+A11Y=$(api GET "/v1/previews/$PV" | jq_ "('lang %s, title %s, axe %s: %s' % (d['page_a11y']['lang'], d['page_a11y']['title'], any(i.get('impact') for i in d['page_a11y']['issues']), ' '.join(sorted(i['kind'] for i in d['page_a11y']['issues'])))) if d.get('page_a11y') else ''")
+case "$A11Y" in "lang False, title False, axe True: "?*) ;; *) echo "the page's accessibility should be checked by axe-core (no lang, no title): $A11Y"; exit 1;; esac
 [ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?previous=1")" = image/png ] || { echo "the screenshot before should be there"; exit 1; }
 # And at a phone's width, with its own change.
 [ "$(api GET "/v1/previews/$PV" | jq_ "d.get('phone_screenshot')")" = True ] || { echo "a phone-width screenshot should be taken too"; exit 1; }
@@ -449,10 +536,16 @@ SWAPPED="/${SHOT_NOW#*://*/}"; SWAPPED="${SWAPPED/screenshot.png?/screenshot.png
 [ "$(curl -s -o /dev/null -w '%{http_code}' "http://$API$SWAPPED")" = 403 ] || { echo "the screenshot's signature shouldn't open the diff"; exit 1; }
 api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
 # Main's load where it was compared comes along (to say "300 ms slower than main").
+# Its words against main's: the change's line in, main's out.
+WORDS=$(api GET "/v1/previews/$PV" | jq_ "(lambda t: '+%s -%s' % (t['added'], t['removed']))(d['base_change'].get('text') or {'added': [], 'removed': []})")
+case "$WORDS" in "+['preview of change 1"*"-['main']") ;; *) echo "the page's words should be compared with main's: $WORDS"; exit 1;; esac
 MAIN_LOAD=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('load_ms')")
 case "$MAIN_LOAD" in [0-9]*) ;; *) echo "the comparison with main should carry main's load time: $MAIN_LOAD"; exit 1;; esac
 # Main's page misses a language and a title too: none of that is the change's.
 A11Y_NEW=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('a11y_added')")
+# SEO basics from the same session: the bare test page has none of them, nor main's.
+SEO=$(api GET "/v1/previews/$PV" | jq_ "(lambda s: 'description %s, viewport %s, h1 %s, noindex %s' % (s['description'], s['viewport'], s['h1'], s['noindex']))(d['page_a11y']['seo']) + '; new against main: %s' % d['base_change'].get('seo_added')")
+[ "$SEO" = "description False, viewport False, h1 0, noindex False; new against main: 0" ] || { echo "the page's SEO basics should be read and compared with main's: $SEO"; exit 1; }
 [ "$A11Y_NEW" = 0 ] || { echo "the change adds no accessibility problems main doesn't have: $A11Y_NEW"; exit 1; }
 # Its page logs "boom" and main's doesn't: that one is the change's.
 ERRORS_NEW=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('errors_added')")
@@ -460,12 +553,22 @@ case "$ERRORS_NEW" in [0-9]*) ;; *) echo "the comparison with main should count 
 # The other page, taken in the same session and compared with main's.
 PAGES=$(api GET "/v1/previews/$PV" | jq_ "'; '.join('%s: %d error(s), %s%% against main' % (x['path'], x['errors'], x['base_percent']) for x in d.get('pages', []))")
 case "$PAGES" in "/pricing: "[1-9]*" error(s), "*"% against main") ;; *) echo "/pricing should be taken, with its 404, and compared with main's: $PAGES"; exit 1;; esac
+# The first page's checks on /pricing too (the same 404 page as main's: nothing new against it).
+PRICING=$(api GET "/v1/previews/$PV" | jq_ "(lambda p: 'a11y %s, seo %s; new: a11y %s, seo %s, links %s' % (p.get('a11y') is not None, ((p.get('a11y') or {}).get('seo')) is not None, (p.get('against') or {}).get('a11y_added'), (p.get('against') or {}).get('seo_added'), (p.get('against') or {}).get('links_added')))([x for x in d['pages'] if x['path'] == '/pricing'][0])")
+[ "$PRICING" = "a11y True, seo True; new: a11y 0, seo 0, links 0" ] || { echo "/pricing should get the first page's checks, against main's /pricing: $PRICING"; exit 1; }
 case "$PAGES" in *"wiki:/: 0 error(s), "*"% against main"*) ;; *) echo "the wiki service's page should be taken in its own run and compared: $PAGES"; exit 1;; esac
+# The first page at a tablet's width too, compared with main's at that width.
+case "$PAGES" in *"@768: "*"% against main"*) ;; *) echo "the first page should be taken at 768 px and compared: $PAGES"; exit 1;; esac
 [ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?page=%2Fpricing")" = image/png ] || { echo "/pricing's screenshot should be there"; exit 1; }
 # Visual review: the change's page differs from main's, so it waits for someone; accepted, it's done.
 api PUT "/v1/previews/projects/$PRJ/settings" '{"visual_review":"required"}' >/dev/null
 REVIEW=$(api GET "/v1/previews/$PV" | jq_ "(d.get('visual_review') or {}).get('state')")
 [ "$REVIEW" = changed ] || { echo "a page that differs from main's should wait for a review: $REVIEW"; exit 1; }
+# Under the project's visual threshold (its pages differ by about 0.1%) nothing waits.
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"visual_threshold":5}}' >/dev/null
+UNDER=$(api GET "/v1/previews/$PV" | jq_ "(d.get('visual_review') or {}).get('state')")
+[ "$UNDER" = unchanged ] || { echo "a change under the visual threshold shouldn't wait for a review: $UNDER"; exit 1; }
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"visual_threshold":0}}' >/dev/null
 # Required: the change can't land in roll meanwhile.
 # (roll code hears of the rule with the preview's next report.)
 for _ in $(seq 1 120); do
@@ -477,6 +580,14 @@ case "$BLOCKED" in *visual*) ;; *) echo "a required visual review should keep th
 # Accepting what wasn't seen (an older screenshot's head) is refused; what was, accepted.
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$PV/visual/accept" -H 'content-type: application/json' -d '{"head":"cs_not_this_one"}')" = 409 ] || { echo "accepting an older screenshot should be refused"; exit 1; }
 SEEN=$(api GET "/v1/previews/$PV" | jq_ "d['visual_review']['head']")
+# One page at a time (the first page and web:/ both differ from main's): one accepted, the change
+# still waits for the other.
+CHANGED_PAGES=$(api GET "/v1/previews/$PV" | jq_ "len(d['visual_review']['pages'])")
+[ "$CHANGED_PAGES" -ge 2 ] || { echo "two pages should differ from main's to review them one at a time: $CHANGED_PAGES"; exit 1; }
+ONE=$(api GET "/v1/previews/$PV" | jq_ "d['visual_review']['pages'][0]['path']")
+PARTLY=$(api POST "/v1/previews/$PV/visual/accept" "$(python3 -c 'import json,sys; print(json.dumps({"head": sys.argv[1], "path": sys.argv[2]}))' "$SEEN" "$ONE")" | jq_ "'%s, %d of %d' % (d['visual_review']['state'], sum(1 for x in d['visual_review']['pages'] if x['by']), len(d['visual_review']['pages']))")
+case "$PARTLY" in "changed, 1 of "*) ;; *) echo "accepting one page should leave the others waiting: $PARTLY"; exit 1;; esac
+case "$(api GET "/v1/code/changes/$CHG" | jq_ "[b['kind'] for b in d.get('blockers', [])]")" in *visual*) ;; *) echo "a partly accepted required review should still block landing"; exit 1;; esac
 REVIEW=$(api POST "/v1/previews/$PV/visual/accept" "{\"head\":\"$SEEN\"}" | jq_ "'%s by %s' % (d['visual_review']['state'], d['visual_review']['by'])")
 [ "$REVIEW" = "accepted by operator" ] || { echo "accepting should settle the review: $REVIEW"; exit 1; }
 case "$(api GET "/v1/code/changes/$CHG" | jq_ "[b['kind'] for b in d.get('blockers', [])]")" in *visual*) echo "an accepted review shouldn't block landing"; exit 1;; esac
@@ -529,6 +640,21 @@ cat <<EOF
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
 | NoSQL branch's mask on app.users.email / masks on the parent | $MASKED / $PARENT_MASKED |
+| NoSQL: app.users.email in the branch / a filter on the real address there | $NOSQL_READ / $NOSQL_FILTER |
+| NoSQL: a mask on app.users_by_email's key, set | $KEY_MASK |
+| What each branch hands the preview's code | $DATA |
+| Core Web Vitals of the first page (the screenshot's load) | $VITALS |
+| The first page's words against main's | $WORDS |
+| SEO basics of the first page | $SEO |
+| /pricing's own checks (against main's /pricing) | $PRICING |
+| The first page's broken links (HEAD only) / new against main | $LINKS / $LINKS_NEW |
+| Visual review under a 5% visual threshold | $UNDER |
+| X-Robots-Tag on the service's page / on the 401 without the link | $ROBOTS / $ROBOTS_LOCKED |
+| The release's time on the preview's data (at its head) / on the change | $RELEASE / $CHG_RELEASE ms |
+| The preview's link as a QR code (PNG, no-store) | $QR |
+| Mail: the provider's key in the service / sent as the preview, caught | gone / $MAIL |
+| A page's note resolved in roll: notes the page lists after | $RESOLVED |
+| \`roll preview connect --kind postgres\`: the branch's own role | $(role "$CONNECT") |
 | Postgres users.email in the branch / in the parent | $PG_MASKED / $PG_PARENT |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |
@@ -550,10 +676,10 @@ cat <<EOF
 | The phone-width screenshot | $PHONE |
 | The change's page against main's preview | $BASE (main loads in $MAIN_LOAD ms) |
 | Another page (\`github.pages\`) | $PAGES |
-| Visual review (required): the change's page against main's, then accepted | changed (blockers $BLOCKED), then $REVIEW |
+| Visual review (required): the change's page against main's, one page accepted, then all | changed (blockers $BLOCKED), then $PARTLY, then $REVIEW |
 | Accessibility of the test page (it has no lang and no title) | $A11Y; new against main: $A11Y_NEW |
 | The first page's speed, timed with its screenshot | $SPEED |
 | The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |
-| Search: products.name in the branch / in the parent | $ES_READ / $ES_PARENT |
+| Search: products.name in the branch / in the parent / the branch's term dictionary | $ES_READ / $ES_PARENT / $ES_TERMS |
 | After landing: parents present / preview Redis branches left | $PARENTS_OK of 4 / $BRANCHES_LEFT |
 EOF

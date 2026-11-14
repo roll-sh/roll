@@ -15,7 +15,7 @@ vi.mock("@/lib/previews-api", async (orig) => {
 
 vi.mock("@/lib/code-api", async (orig) => {
   const real = await orig<typeof import("@/lib/code-api")>();
-  return { ...real, codeApi: { ...real.codeApi, submitReview: vi.fn() } };
+  return { ...real, codeApi: { ...real.codeApi, submitReview: vi.fn(), reviews: vi.fn() } };
 });
 
 const api = vi.mocked(previewsApi);
@@ -51,7 +51,7 @@ const preview: Preview = {
   url: "https://web-pr482-shop.preview.roll.site",
   share_url: null,
   services: [{ name: "web", repo: "acme/web", url: "https://web-pr482-shop.preview.roll.site", share_url: null, revision: "a1b2", deployed: "a1b2", state: "running", error: null }],
-  resources: [{ kind: "postgres", parent: "pgp_main", ref: "br_pv1", mode: "branch", state: "ready", error: null, bytes: 1 << 20 }],
+  resources: [{ kind: "postgres", parent: "pgp_main", ref: "br_pv1", mode: "branch", state: "ready", error: null, bytes: 1 << 20, data: "real" }],
   cost: { sleeping_usd_month: 0.02, active_usd_hour: 0.01, month_to_date_usd: 0.4, bytes: 1 << 20 },
   last_reset_at: null,
   last_active_at: T,
@@ -71,6 +71,9 @@ beforeEach(() => {
   api.activity.mockResolvedValue([]);
   api.vars.mockResolvedValue({ vars: {} });
   api.shares.mockResolvedValue([]);
+  api.mail.mockResolvedValue({ mail: [] });
+  // The sheet's full view: the list's item stands in where a test doesn't give one.
+  api.get.mockRejectedValue(new Error("not in this test"));
 });
 
 const view = () =>
@@ -104,13 +107,28 @@ describe("the Previews tab", () => {
   });
 
   it("lists the previews waiting for a visual review first, tagged", async () => {
-    const waiting: Preview = { ...preview, id: "pv_review", slug: "pr483-shop", title: "New header", visual_review: { state: "changed", branch: "main", percent: 8, by: null, at: null, required: false, head: "cs_1" } };
+    const waiting: Preview = { ...preview, id: "pv_review", slug: "pr483-shop", title: "New header", visual_review: { state: "changed", branch: "main", percent: 8, by: null, at: null, required: false, head: "cs_1", pages: [{ path: "", percent: 8, by: null, at: null }] } };
     api.list.mockResolvedValue([preview, waiting]);
     view();
     const list = await screen.findByRole("list", { name: "Previews" });
     const rows = within(list).getAllByRole("button", { name: /: Ready$/ });
     expect(rows.map((r) => r.getAttribute("aria-label"))).toEqual(["New header: Ready", "Checkout redesign: Ready"]);
     expect(within(list).getAllByText("to review")).toHaveLength(1);
+  });
+
+  it("tags a preview whose page added problems against main", async () => {
+    const worse: Preview = {
+      ...preview,
+      id: "pv_worse",
+      title: "New footer",
+      page_links: { checked: 2, broken: [{ path: "/gone", status: 404 }] },
+      base_change: { branch: "main", percent: 0, phone_percent: null, links_added: 1, errors_added: 1 },
+    };
+    api.list.mockResolvedValue([preview, worse]);
+    view();
+    const list = await screen.findByRole("list", { name: "Previews" });
+    expect(await within(list).findByText("2 new problems")).toBeInTheDocument();
+    expect(within(list).getAllByText(/new problems?$/)).toHaveLength(1);
   });
 
   it("posts a note from the preview page's feedback button on the change, once", async () => {
@@ -135,5 +153,22 @@ describe("the Previews tab", () => {
     });
     expect(await screen.findByText(/Posted on the change/)).toBeInTheDocument();
     expect(posted).toHaveBeenCalledOnce();
+  });
+
+  it("resolves a note from the preview page's Resolve, on the preview", async () => {
+    const u = userEvent.setup({ delay: null });
+    vi.mocked(codeApi.reviews).mockResolvedValue([{ id: "rv_1", body: "**Feedback on the preview** · `/`\n\nThe button is cut off", dismissed: false }] as never);
+    api.resolveNote.mockResolvedValue({ resolved: "rv_1" });
+    const done = vi.fn();
+    render(
+      <MarkStateProvider>
+        <ProjectPreviews project={project} inventory={new Map()} open="pv_abc" resolve="rv_1" onFeedbackPosted={done} />
+      </MarkStateProvider>,
+    );
+    expect(await screen.findByText("The button is cut off")).toBeInTheDocument();
+    await u.click(screen.getByRole("button", { name: "Resolve" }));
+    expect(api.resolveNote).toHaveBeenCalledWith("pv_abc", "rv_1");
+    expect(await screen.findByText(/This note is resolved/)).toBeInTheDocument();
+    expect(done).toHaveBeenCalledOnce();
   });
 });

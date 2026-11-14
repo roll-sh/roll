@@ -9,12 +9,36 @@ impl Engine {
     /// button that lists it: roll previews' own proxy, and roll apps' for its `pv-` environments.
     /// Nothing for a branch's preview (no change to read from) or one that doesn't exist.
     pub async fn notes_of(&self, preview: &str, path: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
-        let Ok(row) = self.store.row(preview) else { return Ok(Vec::new()) };
-        let Some(change) = &row.change_id else { return Ok(Vec::new()) };
-        let mut here: Vec<crate::notes::Note> = self.source.feedback(change).await?.into_iter().filter(|n| n.path == path).collect();
+        let mut here: Vec<crate::notes::Note> = self.open_notes(preview).await?.into_iter().filter(|n| n.path == path).collect();
         let skip = here.len().saturating_sub(50);
         here.drain(..skip);
         Ok(here)
+    }
+
+    /// The notes left on a preview's pages that nobody has resolved, every page's (the latest
+    /// 500, oldest first): `GET …/notes`, and the page's button by path.
+    pub async fn open_notes(&self, preview: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
+        let Ok(row) = self.store.row(preview) else { return Ok(Vec::new()) };
+        let Some(change) = &row.change_id else { return Ok(Vec::new()) };
+        let resolved = self.store.resolved_notes(preview)?;
+        let mut here: Vec<crate::notes::Note> = self.source.feedback(change).await?.into_iter().filter(|n| !resolved.contains(&n.id)).collect();
+        let skip = here.len().saturating_sub(500);
+        here.drain(..skip);
+        Ok(here)
+    }
+
+    /// `by` resolves a note on a change's preview page (Vercel Comments): it must be one of the
+    /// change's feedback notes; the page's button stops listing it.
+    pub async fn resolve_note(&self, id: &str, note: &str, by: &str) -> Result<()> {
+        let r = self.store.row(id)?;
+        let change = r.change_id.as_deref().ok_or_else(|| Error::BadRequest("only a change's preview has notes".into()))?;
+        let notes = self.source.feedback(change).await.map_err(|e| Error::Internal(format!("{e:#}")))?;
+        if !notes.iter().any(|n| n.id == note) {
+            return Err(Error::NotFound(format!("no note {note} on this preview's change")));
+        }
+        self.store.resolve_note(id, note, by)?;
+        self.store.log(id, &format!("{by} resolved a note on its page"))?;
+        Ok(())
     }
 
     /// [`Engine::notes_of`] by the preview's environment name (`pv-<id>`, as roll apps knows it).
@@ -181,10 +205,11 @@ impl Engine {
         self.store.view(self.store.row(id)?)
     }
 
-    /// `by` accepts how the change's pages look at its latest screenshot (`github.visual_review`);
-    /// a new head needs its own. The change and its pull request say so at once.
+    /// `by` accepts how the change's pages look at its latest screenshot (`github.visual_review`):
+    /// `page` only, or all of them; a new head needs its own. The change and its pull request
+    /// say so at once.
     /// `person`: not a token's; only a person (or the operator) accepts a required one.
-    pub async fn accept_visual(&self, id: &str, by: &str, person: bool, seen: Option<&str>) -> Result<Preview> {
+    pub async fn accept_visual(&self, id: &str, by: &str, person: bool, seen: Option<&str>, page: Option<&str>) -> Result<Preview> {
         let r = self.store.row(id)?;
         if r.change_id.is_none() {
             return Err(Error::BadRequest("only a change's preview has a visual review".into()));
@@ -199,10 +224,28 @@ impl Engine {
         {
             return Err(Error::Forbidden("the change's own author can't accept its visual change: someone else looks at it".into()));
         }
-        let head = self.store.accept_visual(id, by, seen)?.ok_or_else(|| Error::Conflict("the preview has no screenshot to accept yet".into()))?;
-        self.store.log(id, &format!("{by} accepted how its pages look at {}", short(&head)))?;
+        let head = self.store.accept_visual(id, by, seen, page)?.ok_or_else(|| Error::Conflict("the preview has no screenshot to accept yet".into()))?;
+        let what = match page {
+            None => "its pages look".to_string(),
+            Some("") => "its first page looks".to_string(),
+            Some(p) => format!("{p} looks"),
+        };
+        self.store.log(id, &format!("{by} accepted how {what} at {}", short(&head)))?;
         self.report(r.clone()).await;
         self.store.view(self.store.row(id)?)
+    }
+
+    /// Each data branch's connection, as the preview's services get it (Neon's connection
+    /// strings), so a reviewer queries what the preview sees: the branch's own credentials (a
+    /// Postgres branch's role), never the parent's or a superuser's. Read from the products each
+    /// time, as converges do; nothing is stored.
+    pub async fn connections(&self, id: &str) -> Result<Vec<crate::Connection>> {
+        let r = self.store.row(id)?;
+        if r.desired == Desired::Deleted {
+            return Err(Error::Conflict("the preview is being deleted".into()));
+        }
+        let vars = self.branch_vars(id).await.map_err(|e| Error::Internal(format!("{e:#}")))?;
+        Ok(vars.into_iter().map(|(kind, parent, vars)| crate::Connection { kind, parent, vars: vars.into_iter().collect() }).collect())
     }
 
     /// Set (`Some`) or remove (`None`) the preview's own variables, over the project's `env`

@@ -700,6 +700,8 @@ async fn connect_import_webhooks_and_mirror() {
             github: Default::default(),
             head: None,
             schema_changes: None,
+            release_ms: None,
+            release_before_ms: None,
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
@@ -707,6 +709,7 @@ async fn connect_import_webhooks_and_mirror() {
             page_speed: None,
             page_health: None,
             page_a11y: None,
+            page_links: None,
             base_change: None,
             diff_url: None,
             pages: Vec::new(),
@@ -735,7 +738,7 @@ async fn connect_import_webhooks_and_mirror() {
     a.code.set_preview_backend(accepted.clone());
     let mut waiting = env("ready");
     waiting.environment.as_mut().unwrap().visual_review =
-        Some(code_control::model::PreviewVisualReview { state: "changed".into(), branch: "main".into(), percent: 8.0, by: None, required: false, head: Some("cs_seen".into()) });
+        Some(code_control::model::PreviewVisualReview { state: "changed".into(), branch: "main".into(), percent: 8.0, by: None, required: false, head: Some("cs_seen".into()), pages: Vec::new() });
     a.code.report_environment(c5_id, Some(&waiting)).unwrap();
     let visual = || g.mock.calls.lock().iter().filter(|(m, p, b)| m == "POST" && p.ends_with("/check-runs") && b["name"] == "roll/visual").map(|(_, _, b)| b.clone()).collect::<Vec<_>>();
     until("the roll/visual check run", || async { !visual().is_empty() }).await;

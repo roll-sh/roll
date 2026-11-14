@@ -71,8 +71,15 @@ pub enum Preview {
         release: bool,
     },
     /// Accept how a change's pages look at its latest screenshot (the `roll/visual` status,
-    /// `github.visual_review`); each new push is reviewed again.
-    Accept { preview: String },
+    /// `github.visual_review`): every page, --page one of `github.pages`, or --first the first
+    /// page only. A push asks again about the pages it changes.
+    Accept {
+        preview: String,
+        #[arg(long, conflicts_with = "first")]
+        page: Option<String>,
+        #[arg(long)]
+        first: bool,
+    },
     /// Save its screenshot (a PNG) to --out: the first page, --page another of `github.pages`,
     /// --phone at a phone's width, --base the default branch's it was compared with, --previous
     /// the one before, or --diff base|previous where it differs from those.
@@ -110,6 +117,14 @@ pub enum Preview {
         set: Vec<String>,
         #[arg(long)]
         unset: Vec<String>,
+    },
+    /// Each data branch's connection, as its services get it (its own credentials, never the
+    /// parent's): `NAME=value` lines per branch, or --kind postgres for that kind's only, e.g.
+    /// `psql "$(roll preview connect pv_… --kind postgres | sed -n 's/^DATABASE_URL=//p')"`.
+    Connect {
+        preview: String,
+        #[arg(long)]
+        kind: Option<String>,
     },
     /// Re-branch its data from the parents (every resource, or the ones named).
     Reset {
@@ -420,7 +435,14 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             std::fs::write(&out, &png).map_err(|e| anyhow::anyhow!("writing {}: {e}", out.display()))?;
             json!({ "saved": out.display().to_string(), "bytes": png.len() })
         }
-        Preview::Accept { preview } => api.post(&format!("/v1/previews/{preview}/visual/accept"), json!({})).await?,
+        Preview::Accept { preview, page, first } => {
+            let body = match (page, first) {
+                (Some(p), _) => json!({ "path": p }),
+                (None, true) => json!({ "path": "" }),
+                (None, false) => json!({}),
+            };
+            api.post(&format!("/v1/previews/{preview}/visual/accept"), body).await?
+        }
         Preview::Keep { preview, hours, release } => api.post(&format!("/v1/previews/{preview}/keep"), json!({ "hours": if release { 0 } else { hours } })).await?,
         Preview::Share { preview, hours, list, revoke } => {
             let path = format!("/v1/previews/{preview}/shares");
@@ -470,6 +492,25 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 match v["vars"].as_object().filter(|m| !m.is_empty()) {
                     Some(m) => m.iter().for_each(|(k, v)| println!("{k}={}", v.as_str().unwrap_or_default())),
                     None => println!("no variables of its own (the project's `env` applies)"),
+                }
+                return Ok(());
+            }
+            v
+        }
+        Preview::Connect { preview, kind } => {
+            let v = api.get(&format!("/v1/previews/{preview}/connect")).await?;
+            if !as_json {
+                let branches: Vec<&Value> = v["branches"].as_array().into_iter().flatten().filter(|b| kind.as_deref().is_none_or(|k| b["kind"] == k)).collect();
+                if branches.is_empty() {
+                    anyhow::bail!("no {}branch in this preview", kind.as_deref().map(|k| format!("{k} ")).unwrap_or_default());
+                }
+                for b in &branches {
+                    if kind.is_none() {
+                        println!("# {} {}", s(&b["kind"]), s(&b["parent"]));
+                    }
+                    for (k, val) in b["vars"].as_object().into_iter().flatten() {
+                        println!("{k}={}", val.as_str().unwrap_or_default());
+                    }
                 }
                 return Ok(());
             }

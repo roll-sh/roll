@@ -26,6 +26,13 @@
 //! `int`) masks with `mask_default` instead, so a mistake never shows real data. A table's entries
 //! also cover the columns of its materialized views, index views and CDC log
 //! (`cdc$deleted_elements_<c>` with `c`'s entry, which falls back to `mask_default`).
+//!
+//! The policy holds against the reader's own queries, as a copy with the masked columns rewritten
+//! would: the row filter compares a masked column's masked value (an index lookup on it keeps its
+//! restriction in the filter), so a real value finds nothing and a range can't narrow it; a table
+//! whose policy masks a primary key column can't be read or written conditionally
+//! ([`check_platform_keys`]), since keys reach the reader through lookups, token ranges and
+//! paging states; and a masked column can't be in an `IF` ([`check_platform_conditions`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -116,11 +123,26 @@ impl Masker {
 #[derive(Debug, Default)]
 pub struct ReadMasks {
     pub columns: HashMap<usize, Masker>,
+    /// The columns of `columns` the platform policy masks: the row filter compares their masked
+    /// values ([`ReadMasks::filtered`]).
+    pub platform: std::collections::HashSet<usize>,
 }
 
 impl ReadMasks {
     pub fn get(&self, column: usize) -> Option<&Masker> {
         self.columns.get(&column)
+    }
+
+    /// The value the row filter compares for column `column`: the platform's masked value, as a
+    /// copy of the data with that column rewritten would hold, so a restriction never tells a
+    /// role anything about the real value. A masking function that fails hides the value.
+    pub fn filtered(&self, d: Dialect, column: usize, value: Option<Bytes>) -> Option<Bytes> {
+        match self.columns.get(&column) {
+            Some(m) if self.platform.contains(&column) => m
+                .mask(&FnCtx { dialect: d, protocol_version: 4 }, value)
+                .unwrap_or(None),
+            _ => value,
+        }
     }
 }
 
@@ -513,6 +535,7 @@ pub fn read_masks(
         if has_platform && let Some(call) = policy_call(&policy, t, &c.name) {
             if let Some(m) = platform(db, &schema, t, &c.ty, call) {
                 out.columns.insert(i, m);
+                out.platform.insert(i);
             }
             continue;
         }
@@ -558,6 +581,54 @@ pub fn mask_conditional_rows(db: &Database, t: &Table, rows: &mut crate::respons
                 *v = m.mask(&ctx, v.take()).unwrap_or(None);
             }
         }
+    }
+}
+
+/// The platform policy's rule for keys: a table (or view, index view or CDC log) whose policy
+/// masks a primary key column can't be read, nor written conditionally, by any role. A key
+/// reaches its reader through lookups, token ranges, paging states and `[applied]` whatever is
+/// masked in the rows, so no read of it can keep the real value hidden.
+pub fn check_platform_keys(db: &Database, t: &Table) -> Result<()> {
+    let policy = db.masking();
+    if policy.is_empty() {
+        return Ok(());
+    }
+    let masked = t
+        .partition_key
+        .iter()
+        .chain(&t.clustering)
+        .map(|&ci| &t.columns[ci].name)
+        .find(|c| policy_call(&policy, t, c).is_some());
+    match masked {
+        Some(c) => Err(Error::unauthorized(format!(
+            "Table {}.{} can't be read: its primary key column {c} is masked by the database's masking policy",
+            t.keyspace, t.name
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// The platform policy's rule for conditions: an `IF` on a masked column would answer with the
+/// real value (`[applied]`), so it's refused for every role.
+pub fn check_platform_conditions(
+    db: &Database,
+    t: &Table,
+    columns: impl IntoIterator<Item = usize>,
+) -> Result<()> {
+    let policy = db.masking();
+    if policy.is_empty() {
+        return Ok(());
+    }
+    match columns
+        .into_iter()
+        .map(|ci| &t.columns[ci].name)
+        .find(|c| policy_call(&policy, t, c).is_some())
+    {
+        Some(c) => Err(Error::unauthorized(format!(
+            "Column {c} of {}.{} is masked by the database's masking policy: it can't be in a condition",
+            t.keyspace, t.name
+        ))),
+        None => Ok(()),
     }
 }
 

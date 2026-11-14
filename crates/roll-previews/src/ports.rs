@@ -49,6 +49,17 @@ pub trait Brancher: Send + Sync {
     /// Make `branch` the parent's current state again. Its ref may be new.
     async fn reset(&self, parent: &str, branch: &str, kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched>;
 
+    /// [`Brancher::branch`] from the parent as it was at `at` (unix seconds), where the product
+    /// keeps history: `None` from one that doesn't (the caller branches as of now and says so).
+    async fn branch_at(&self, _parent: &str, _name: &str, _mode: Mode, _at: i64) -> anyhow::Result<Option<Branched>> {
+        Ok(None)
+    }
+
+    /// [`Brancher::reset`] to the parent as it was at `at`, the same way.
+    async fn reset_at(&self, _parent: &str, _branch: &str, _kept: Option<&str>, _name: &str, _mode: Mode, _at: i64) -> anyhow::Result<Option<Branched>> {
+        Ok(None)
+    }
+
     /// Delete `branch`, which must be the child of `parent` named `name` (anything else is
     /// refused). Ok when it's already gone. Never touches `parent`.
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()>;
@@ -71,6 +82,12 @@ pub trait Brancher: Send + Sync {
     /// Products that can't, refuse.
     async fn mask(&self, _parent: &str, _branch: &str, _kept: Option<&str>, _columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
         anyhow::bail!("this product's branches can't mask columns")
+    }
+
+    /// What's wrong with masking `columns` of `parent` that only the product can tell (a NoSQL
+    /// mask on a key column, which makes its table unreadable): one line each, none when fine.
+    async fn mask_problems(&self, _parent: &str, _columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
     }
 
     /// The preview has been idle a while: drop what the branch keeps for a quick start (a
@@ -147,6 +164,10 @@ pub struct Shot {
     pub phone: Option<Vec<u8>>,
     /// The project's other pages (`github.pages`) the backend took, in the same session.
     pub pages: Vec<PageShot>,
+    /// The first page's visible text, as the browser read it (`page_text`).
+    pub text: Option<String>,
+    /// Its own links that are broken (`PageLinks::parse`).
+    pub links: Option<crate::PageLinks>,
 }
 
 /// What a screenshot run takes: the project's other pages, and what it blanks first.
@@ -162,6 +183,8 @@ pub struct PageShot {
     pub path: String,
     pub png: Vec<u8>,
     pub errors: u32,
+    /// What its session found besides the picture.
+    pub report: crate::PageReport,
 }
 
 /// roll code, as previews read it and report to it.

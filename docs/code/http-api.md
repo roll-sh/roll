@@ -144,7 +144,7 @@ Check   = {name, status: "queued" | "running" | "success" | "failure" | "cancell
 Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | null,
            postgres: {project_id, branch_id} | null, redis: {db_id} | null, error: string | null, created_at,
            environment?: {id /* pv_… */, slug, state /* roll previews' Preview.state */,
-                          services: [{name, url, state}], resources: [{kind, parent, ref: string | null}],
+                          services: [{name, url, state}], resources: [{kind, parent, ref: string | null, data?: "none" | "masked" | "real" /* what of the parent's data it gets; real: as it is */}],
                           sleeping_usd_month, active_usd_hour, dashboard_url: string | null,
                           github: {comment, status, deployment},
                           head?: string /* the changeset it's for: statuses are about it (after pushes that touched only ignored paths its services run an earlier one) */,
@@ -160,7 +160,7 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           base_change?: {branch, percent, phone_percent: number | null, head?: string | null, load_ms?: number, a11y_added?: number, errors_added?: number} /* how much the page differs from the project's preview of the default branch */,
                           pages?: [{path, errors, percent: number | null, base_percent: number | null}] /* the project's other pages (github.pages): errors while each loaded, its change since the push before, against the default branch */,
                           speed_budget?: {load_ms, bytes} /* the project's github.budget (0: no limit), for roll/speed */,
-                          visual_review?: {state: 'unchanged' | 'changed' | 'accepted', branch, percent, by: string | null, required} /* the roll/visual status (the project's visual_review; required: a visual blocker too) */} /* roll previews (docs/previews.md) */}
+                          visual_review?: {state: 'unchanged' | 'changed' | 'accepted', branch, percent, by: string | null, required, head?, pages?: {path /* '': the first page */, percent, by: string | null}[] /* each page that differs, accepted per page */} /* the roll/visual status (the project's visual_review; required: a visual blocker too) */} /* roll previews (docs/previews.md) */}
 Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, title, body, author,
            state: "open" | "queued" | "landed" | "conflict" | "closed",
            base, head, revision, work_item: string | null, branch: string | null /* git branch it was pushed as */,

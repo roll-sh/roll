@@ -477,7 +477,6 @@ async fn platform_policy_masks_every_role() {
             ("ks", "t", "email", "mask_inner(1, 1)"),
             ("ks", "t", "n", "mask_hash('MD5')"),
             ("ks", "t", "ssn", "DEFAULT"),
-            ("ks", "t", "pk", "mask_replace(0)"),
         ]);
         let (db, _store) = open(cfg).await;
         let mut su = login(&db, "cassandra", "cassandra").await;
@@ -491,21 +490,8 @@ async fn platform_policy_masks_every_role() {
         // `mask_hash` returns a blob: it doesn't fit an int column, which gets mask_default.
         assert_eq!(
             rows(&mut su, "SELECT pk, email, n, ssn, plain FROM ks.t").await,
-            table(&[&["0", "a***************m", "0", "****", "p"]]),
+            table(&[&["1", "a***************m", "0", "****", "p"]]),
             "{d}"
-        );
-        // Filtering and keys use the real values.
-        assert_eq!(
-            rows(&mut su, "SELECT email FROM ks.t WHERE pk = 1").await,
-            table(&[&["a***************m"]])
-        );
-        assert_eq!(
-            rows(
-                &mut su,
-                "SELECT plain FROM ks.t WHERE email = 'alice@example.com' ALLOW FILTERING"
-            )
-            .await,
-            table(&[&["p"]])
         );
         // Live changes.
         db.set_masking(policy(&[("ks", "t", "plain", "mask_null")]));
@@ -518,6 +504,57 @@ async fn platform_policy_masks_every_role() {
             rows(&mut su, "SELECT plain FROM ks.t").await,
             table(&[&["p"]])
         );
+    }
+}
+
+/// A preview's own code reads its branch as a superuser: nothing it asks tells it a masked value,
+/// as with a copy whose masked columns were rewritten.
+#[tokio::test]
+async fn platform_policy_tells_no_role_a_masked_value() {
+    for d in BOTH {
+        let mut cfg = auth_config("db", d);
+        cfg.masking = policy(&[
+            ("ks", "t", "email", "mask_inner(1, 1)"),
+            ("ks", "by_email", "email", "DEFAULT"),
+        ]);
+        let (db, _store) = open(cfg).await;
+        let mut su = login(&db, "cassandra", "cassandra").await;
+        ok(&mut su, KS).await;
+        ok(&mut su, "CREATE TABLE ks.t (pk int PRIMARY KEY, email text, plain text)").await;
+        ok(&mut su, "CREATE TABLE ks.by_email (email text PRIMARY KEY, pk int)").await;
+        ok(&mut su, "INSERT INTO ks.t (pk, email, plain) VALUES (1, 'alice@example.com', 'p')").await;
+        ok(&mut su, "INSERT INTO ks.by_email (email, pk) VALUES ('alice@example.com', 1)").await;
+        // Filters compare the masked value: the real one finds nothing, a range can't narrow it.
+        for q in [
+            "SELECT plain FROM ks.t WHERE email = 'alice@example.com' ALLOW FILTERING",
+            "SELECT plain FROM ks.t WHERE email > 'alice' AND email < 'alicf' ALLOW FILTERING",
+        ] {
+            assert!(rows(&mut su, q).await.is_empty(), "{d}: {q}");
+        }
+        assert_eq!(
+            rows(&mut su, "SELECT plain FROM ks.t WHERE email = 'a***************m' ALLOW FILTERING").await,
+            table(&[&["p"]]),
+            "{d}"
+        );
+        // So does an index, which finds rows by the real value.
+        ok(&mut su, "CREATE INDEX ON ks.t (email)").await;
+        assert!(
+            rows(&mut su, "SELECT plain FROM ks.t WHERE email = 'alice@example.com'").await.is_empty(),
+            "{d}"
+        );
+        // A masked key can't be read at all, nor a masked column be in a condition.
+        for q in [
+            "SELECT pk FROM ks.by_email WHERE email = 'alice@example.com'",
+            "SELECT pk FROM ks.by_email",
+            "INSERT INTO ks.by_email (email, pk) VALUES ('alice@example.com', 2) IF NOT EXISTS",
+            "UPDATE ks.t SET plain = 'q' WHERE pk = 1 IF email = 'alice@example.com'",
+        ] {
+            assert!(
+                err(&mut su, q).await.to_string().contains("masking policy"),
+                "{d}: {q}"
+            );
+        }
+        assert_eq!(rows(&mut su, "SELECT plain FROM ks.t WHERE pk = 1").await, table(&[&["p"]]));
     }
 }
 
@@ -717,7 +754,7 @@ async fn stored_masks_survive_reopen() {
 /// The platform policy of a table covers its views, index views and CDC log, and the rows of a
 /// failed conditional statement.
 #[tokio::test]
-async fn platform_policy_covers_derived_tables_and_lwt() {
+async fn platform_policy_covers_derived_tables() {
     for d in BOTH {
         let mut cfg = auth_config("db", d);
         cfg.settings.materialized_views_enabled = true;
@@ -746,35 +783,12 @@ async fn platform_policy_covers_derived_tables_and_lwt() {
             "INSERT INTO ks.t (pk, email, tags, n) VALUES (1, 'alice@example.com', {'x'}, 5)",
         )
         .await;
-        assert_eq!(
-            rows(&mut su, "SELECT email, pk FROM ks.tv").await,
-            table(&[&["a***************m", "1"]]),
-            "{d}"
-        );
-        // The policy doesn't change the keys or the filtering.
-        assert_eq!(
-            rows(
-                &mut su,
-                "SELECT pk FROM ks.tv WHERE email = 'alice@example.com'"
-            )
-            .await,
-            table(&[&["1"]]),
-            "{d}"
-        );
-        let lwt = fmt_rows(
-            &ok(
-                &mut su,
-                "UPDATE ks.t SET n = 6 WHERE pk = 1 IF email = 'nope' AND n = 5",
-            )
-            .await,
-        );
-        assert_eq!(lwt, table(&[&["False", "a***************m", "5"]]), "{d}");
+        // A view keyed by a masked column has a masked key: it can't be read
+        // (`platform_policy_tells_no_role_a_masked_value`), and neither can ScyllaDB's index view.
+        assert!(err(&mut su, "SELECT email, pk FROM ks.tv").await.to_string().contains("masking policy"), "{d}");
         if d.is_scylla() {
             ok(&mut su, "CREATE INDEX t_email ON ks.t (email)").await;
-            assert_eq!(
-                rows(&mut su, "SELECT email FROM ks.t_email_index").await,
-                table(&[&["a***************m"]])
-            );
+            assert!(err(&mut su, "SELECT email FROM ks.t_email_index").await.to_string().contains("masking policy"));
             ok(&mut su, "UPDATE ks.t SET tags = tags - {'x'} WHERE pk = 1").await;
             let log = rows(
                 &mut su,

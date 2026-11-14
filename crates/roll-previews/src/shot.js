@@ -44,11 +44,37 @@ const once = (method) =>
     listeners.add(l);
   });
 const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
+// Core Web Vitals, observed from before the page's first script (they aren't in the timeline's
+// entries): the last largest-contentful-paint candidate, and the largest session window of layout
+// shifts (shifts under 1 s apart, 5 s at most, none right after input), as web-vitals counts it.
+const VITALS = `(() => {
+  const v = (window.__rollVitals = { lcp: null, cls: 0 });
+  try {
+    new PerformanceObserver((l) => { for (const e of l.getEntries()) v.lcp = e.startTime; }).observe({ type: "largest-contentful-paint", buffered: true });
+  } catch {}
+  let win = 0, first = 0, last = 0;
+  try {
+    new PerformanceObserver((l) => {
+      for (const e of l.getEntries()) {
+        if (e.hadRecentInput) continue;
+        if (win && e.startTime - last < 1000 && e.startTime - first < 5000) win += e.value;
+        else { win = e.value; first = e.startTime; }
+        last = e.startTime;
+        v.cls = Math.max(v.cls, win);
+      }
+    }).observe({ type: "layout-shift", buffered: true });
+  } catch {}
+})()`;
 const SPEED = `JSON.stringify((() => {
   const n = performance.getEntriesByType("navigation")[0] || {};
   const fcp = performance.getEntriesByName("first-contentful-paint")[0];
   const bytes = [n, ...performance.getEntriesByType("resource")].reduce((s, e) => s + (e.transferSize || 0), 0);
-  return { ttfb_ms: Math.round(n.responseStart || 0), fcp_ms: fcp ? Math.round(fcp.startTime) : null, load_ms: Math.round(n.loadEventEnd || n.duration || 0), bytes };
+  const v = window.__rollVitals;
+  return {
+    ttfb_ms: Math.round(n.responseStart || 0), fcp_ms: fcp ? Math.round(fcp.startTime) : null, load_ms: Math.round(n.loadEventEnd || n.duration || 0), bytes,
+    lcp_ms: v && typeof v.lcp === "number" ? Math.round(v.lcp) : null, cls: v && typeof v.cls === "number" ? Math.round(v.cls * 1000) / 1000 : null,
+    text: document.body ? String(document.body.innerText || "").slice(0, 40000) : "",
+  };
 })())`;
 const errors = [];
 const failed = [];
@@ -75,6 +101,74 @@ const A11Y = `JSON.stringify((() => {
   const links = [...document.querySelectorAll("a[href]")].filter((a) => !named(a) && !text(a));
   return { images: out(images), fields: out(fields), buttons: out(buttons), links: out(links), lang: !!document.documentElement.getAttribute("lang"), title: !!document.title.trim() };
 })())`;
+// axe-core's WCAG rules (vendor/axe-core, handed to the container in $AXE), when it's there:
+// the violations by rule (a language and a title are read as above, so not twice), else the
+// checks above. The page can't stop it loading (DevTools evaluation is outside its CSP).
+// What search engines look for on the page (Lighthouse's SEO audit): a description, a viewport,
+// one h1, and no noindex in the page's own markup (roll's header keeps previews unindexed; the
+// app's would hide production).
+const SEO = `JSON.stringify({
+  description: !!(document.querySelector('meta[name="description" i]')?.getAttribute("content") || "").trim(),
+  viewport: !!document.querySelector('meta[name="viewport" i]'),
+  h1: document.querySelectorAll("h1").length,
+  noindex: [...document.querySelectorAll('meta[name="robots" i], meta[name="googlebot" i]')].some((m) => /noindex/i.test(m.getAttribute("content") || "")),
+})`;
+const AXE_SRC = (() => {
+  try {
+    return process.env.AXE ? fs.readFileSync(process.env.AXE, "utf8") : "";
+  } catch {
+    return "";
+  }
+})();
+const AXE_RUN = `axe.run(document, { resultTypes: ["violations"] }).then((r) => JSON.stringify({
+  issues: r.violations.filter((v) => v.id !== "html-has-lang" && v.id !== "document-title").slice(0, 50).map((v) => ({
+    kind: v.id, count: v.nodes.length, first: v.nodes[0] ? String(v.nodes[0].html).slice(0, 120) : null, impact: v.impact || null, help: String(v.help || "").slice(0, 200),
+  })),
+  lang: !!document.documentElement.getAttribute("lang"), title: !!document.title.trim(),
+}))`;
+const axeReport = async (sessionId) => {
+  if (!AXE_SRC) return null;
+  const loaded = await send("Runtime.evaluate", { expression: AXE_SRC + "\n;typeof axe === 'object'", returnByValue: true }, sessionId).catch(() => null);
+  if (loaded?.result?.value !== true) return null;
+  const ran = await Promise.race([send("Runtime.evaluate", { expression: AXE_RUN, awaitPromise: true, returnByValue: true }, sessionId).catch(() => null), sleep(20000).then(() => null)]);
+  try {
+    return JSON.parse(ran?.result?.value || "null");
+  } catch {
+    return null;
+  }
+};
+// The page's links on its own origin, each asked with HEAD only (never followed with a GET, so a
+// `/logout` link logs nothing out), at most 50, five at a time, 5 s each: the ones that answer
+// 4xx/5xx or nothing (Netlify's link checker). A 405 means it's there.
+const LINKS = `(async () => {
+  const seen = new Set();
+  for (const a of document.querySelectorAll("a[href]")) {
+    let u;
+    try { u = new URL(a.getAttribute("href"), location.href); } catch { continue; }
+    if (u.origin !== location.origin || !/^https?:$/.test(u.protocol)) continue;
+    u.hash = "";
+    seen.add(u.href);
+    if (seen.size >= 50) break;
+  }
+  const urls = [...seen];
+  const check = async (u) => {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 5000);
+    try {
+      return (await fetch(u, { method: "HEAD", redirect: "follow", signal: c.signal, credentials: "same-origin" })).status;
+    } catch {
+      return 0;
+    } finally {
+      clearTimeout(t);
+    }
+  };
+  const broken = [];
+  for (let i = 0; i < urls.length; i += 5) {
+    const got = await Promise.all(urls.slice(i, i + 5).map(check));
+    got.forEach((s, k) => { if (s === 0 || (s >= 400 && s !== 405 && s !== 501)) broken.push({ path: new URL(urls[i + k]).pathname, status: s }); });
+  }
+  return JSON.stringify({ checked: urls.length, broken: broken.slice(0, 20) });
+})()`;
 // Before each capture: animations, transitions and the caret stopped, videos paused, and the
 // project's $HIDE selectors blanked (their box kept), so only real changes count.
 const HIDE = (() => {
@@ -102,6 +196,7 @@ const still = async (sessionId) => {
   await send("Page.enable", {}, sessionId);
   await send("Runtime.enable", {}, sessionId);
   await send("Network.enable", {}, sessionId);
+  await send("Page.addScriptToEvaluateOnNewDocument", { source: VITALS }, sessionId).catch(() => null);
   const loaded = once("Page.loadEventFired");
   await send("Page.navigate", { url: process.env.URL }, sessionId);
   await Promise.race([loaded, sleep(45000)]);
@@ -114,12 +209,24 @@ const still = async (sessionId) => {
   try {
     report = JSON.parse(speed?.result?.value || "{}");
   } catch {}
-  report.errors = errors;
-  report.failed = failed;
-  const a11y = await send("Runtime.evaluate", { expression: A11Y, returnByValue: true }, sessionId).catch(() => null);
+  // Copies: what's caught later (the link check's own requests, other pages) isn't this page's.
+  report.errors = errors.slice();
+  report.failed = failed.slice();
+  const links = await Promise.race([send("Runtime.evaluate", { expression: LINKS, awaitPromise: true, returnByValue: true }, sessionId).catch(() => null), sleep(30000).then(() => null)]);
   try {
-    report.a11y = JSON.parse(a11y?.result?.value || "null");
+    report.links = JSON.parse(links?.result?.value || "null");
   } catch {}
+  const seo = await send("Runtime.evaluate", { expression: SEO, returnByValue: true }, sessionId).catch(() => null);
+  try {
+    report.seo = JSON.parse(seo?.result?.value || "null");
+  } catch {}
+  report.a11y = await axeReport(sessionId);
+  if (!report.a11y) {
+    const a11y = await send("Runtime.evaluate", { expression: A11Y, returnByValue: true }, sessionId).catch(() => null);
+    try {
+      report.a11y = JSON.parse(a11y?.result?.value || "null");
+    } catch {}
+  }
   fs.writeFileSync(process.env.OUT + ".json", JSON.stringify(report));
   // The same page at a phone's width (390 × 844, at twice the density), to $OUT.phone.png. Best
   // effort: the desktop one is kept whatever happens here.
@@ -133,21 +240,39 @@ const still = async (sessionId) => {
     const phone = await send("Page.captureScreenshot", { format: "png" }, sessionId);
     fs.writeFileSync(process.env.OUT + ".phone.png", Buffer.from(phone.data, "base64"));
   } catch {}
-  // The project's other pages ($PAGES, paths roll checked), at the desktop width, each to
-  // $OUT.<n>.png, and what went wrong while each loaded to $OUT.pages.json. Best effort too.
+  // The project's other pages ($PAGES, paths roll checked), at the desktop width, and the first
+  // page at its other widths (`@768`), each to $OUT.<n>.png, and what went wrong while each
+  // loaded to $OUT.pages.json. Best effort too.
   const pages = [];
   try {
-    await send("Emulation.clearDeviceMetricsOverride", {}, sessionId);
     for (const [n, path] of JSON.parse(process.env.PAGES || "[]").slice(0, 5).entries()) {
+      const width = /^@[1-9][0-9]*$/.test(path) ? Number(path.slice(1)) : null;
+      if (width) await send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: width < 600 }, sessionId);
+      else await send("Emulation.clearDeviceMetricsOverride", {}, sessionId);
       const before = errors.length + failed.length;
       const done = once("Page.loadEventFired");
-      await send("Page.navigate", { url: new URL(path, process.env.URL).href }, sessionId);
+      await send("Page.navigate", { url: width ? process.env.URL : new URL(path, process.env.URL).href }, sessionId);
       await Promise.race([done, sleep(10000)]);
       await sleep(300);
       await still(sessionId);
       const shot = await send("Page.captureScreenshot", { format: "png" }, sessionId);
       fs.writeFileSync(`${process.env.OUT}.${n}.png`, Buffer.from(shot.data, "base64"));
-      pages.push({ path, errors: errors.length + failed.length - before });
+      const page = { path, errors: errors.length + failed.length - before };
+      // The same checks as the first page's, each bounded in time.
+      const value = async (expression, wait) => {
+        const r = await Promise.race([send("Runtime.evaluate", { expression, awaitPromise: !!wait, returnByValue: true }, sessionId).catch(() => null), sleep(wait || 5000).then(() => null)]);
+        try {
+          return JSON.parse(r?.result?.value || "null");
+        } catch {
+          return null;
+        }
+      };
+      const textOf = await value(`JSON.stringify(document.body ? String(document.body.innerText || "").slice(0, 40000) : "")`);
+      if (typeof textOf === "string") page.text = textOf;
+      page.seo = await value(SEO);
+      page.links = await value(LINKS, 20000);
+      page.a11y = (await axeReport(sessionId)) || (await value(A11Y));
+      pages.push(page);
     }
   } catch {}
   fs.writeFileSync(process.env.OUT + ".pages.json", JSON.stringify(pages));

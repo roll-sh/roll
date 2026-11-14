@@ -106,7 +106,16 @@ impl CodeSource {
                     .iter()
                     .map(|x| PreviewServiceLink { name: x.name.clone(), url: x.url.clone(), state: x.state.as_str().to_string() })
                     .collect(),
-                resources: p.resources.iter().map(|x| PreviewResourceLink { kind: x.kind.as_str().to_string(), parent: x.parent.clone(), r#ref: x.r#ref.clone() }).collect(),
+                resources: p.resources.iter().map(|x| PreviewResourceLink {
+                        kind: x.kind.as_str().to_string(),
+                        parent: x.parent.clone(),
+                        r#ref: x.r#ref.clone(),
+                        data: Some(match x.data {
+                            crate::Data::None => "none",
+                            crate::Data::Masked => "masked",
+                            crate::Data::Real => "real",
+                        }.into()),
+                    }).collect(),
                 // As precise as the comment shows: a usage reading that moves a cost by a hair
                 // doesn't make a new event for every webhook and the pull request.
                 sleeping_usd_month: (p.cost.sleeping_usd_month * 100.0).round() / 100.0,
@@ -115,13 +124,29 @@ impl CodeSource {
                 github: PreviewGithub { comment: s.github.comment, status: s.github.status, deployment: s.github.deployment },
                 head: Some(p.head.clone()),
                 schema_changes: p.schema_changes.clone(),
+                release_ms: p.release.as_ref().map(|x| x.ms),
+                release_before_ms: p.release.as_ref().and_then(|x| x.before_ms),
                 expires_at: p.goes_at,
-                base_change: p.base_change.as_ref().map(|b| code_control::model::PreviewBaseChange { branch: b.branch.clone(), percent: b.percent, phone_percent: b.phone_percent, load_ms: b.load_ms, a11y_added: b.a11y_added, errors_added: b.errors_added }),
-                speed_budget: Some(code_control::model::PreviewSpeedBudget { load_ms: s.github.budget.load_ms, bytes: s.github.budget.bytes }).filter(|b| b.load_ms > 0 || b.bytes > 0),
+                base_change: p.base_change.as_ref().map(|b| code_control::model::PreviewBaseChange { branch: b.branch.clone(), percent: b.percent, phone_percent: b.phone_percent, load_ms: b.load_ms, lcp_ms: b.lcp_ms, a11y_added: b.a11y_added, errors_added: b.errors_added,
+                    text: b.text.as_ref().map(|t| code_control::model::PreviewTextDiff { added: t.added.clone(), removed: t.removed.clone(), added_n: t.added_n, removed_n: t.removed_n }),
+                    links_added: b.links_added,
+                    seo_added: b.seo_added }),
+                speed_budget: Some(code_control::model::PreviewSpeedBudget { load_ms: s.github.budget.load_ms, bytes: s.github.budget.bytes, lcp_ms: s.github.budget.lcp_ms, cls: s.github.budget.cls })
+                    .filter(|b| b.load_ms > 0 || b.bytes > 0 || b.lcp_ms > 0 || b.cls > 0.0),
                 pages: p
                     .pages
                     .iter()
-                    .map(|x| code_control::model::PreviewPageCheck { path: x.path.clone(), errors: x.errors, percent: x.percent, base_percent: x.base_percent })
+                    .map(|x| code_control::model::PreviewPageCheck {
+                        path: x.path.clone(),
+                        errors: x.errors,
+                        percent: x.percent,
+                        base_percent: x.base_percent,
+                        a11y_problems: x.a11y.as_ref().map(|a| a.problems()),
+                        seo: x.a11y.as_ref().and_then(|a| a.seo.as_ref()).map(|s| s.problems().into_iter().map(String::from).collect()).unwrap_or_default(),
+                        broken_links: x.links.as_ref().map(|l| l.broken.iter().map(|b| code_control::model::PreviewBrokenLink { path: b.path.clone(), status: b.status }).collect()).unwrap_or_default(),
+                        a11y_added: x.against.as_ref().and_then(|a| a.a11y_added),
+                        links_added: x.against.as_ref().and_then(|a| a.links_added),
+                    })
                     .collect(),
                 visual_review: p.visual_review.as_ref().map(|v| code_control::model::PreviewVisualReview {
                     state: match v.state {
@@ -136,11 +161,17 @@ impl CodeSource {
                     by: v.by.clone(),
                     required: v.required,
                     head: Some(v.head.clone()).filter(|h| !h.is_empty()),
+                    pages: v.pages.iter().map(|p| code_control::model::PreviewPageReview { path: p.path.clone(), percent: (p.percent * 10.0).round() / 10.0, by: p.by.clone() }).collect(),
                 }),
                 page_a11y: p.page_a11y.as_ref().map(|a| code_control::model::PreviewPageA11y {
-                    issues: a.issues.iter().map(|i| code_control::model::PreviewA11yIssue { kind: i.kind.clone(), count: i.count, first: i.first.clone() }).collect(),
+                    issues: a.issues.iter().map(|i| code_control::model::PreviewA11yIssue { kind: i.kind.clone(), count: i.count, first: i.first.clone(), impact: i.impact.clone(), help: i.help.clone() }).collect(),
                     lang: a.lang,
                     title: a.title,
+                    seo: a.seo.as_ref().map(|s| s.problems().into_iter().map(String::from).collect()).unwrap_or_default(),
+                }),
+                page_links: p.page_links.as_ref().map(|l| code_control::model::PreviewPageLinks {
+                    checked: l.checked,
+                    broken: l.broken.iter().map(|b| code_control::model::PreviewBrokenLink { path: b.path.clone(), status: b.status }).collect(),
                 }),
                 page_health: p.page_health.as_ref().map(|h| code_control::model::PreviewPageHealth { errors: h.errors, first_error: h.first_error.clone(), failed: h.failed, first_failed: h.first_failed.clone() }),
                 page_speed: p.page_speed.as_ref().map(|v| code_control::model::PreviewPageSpeed {
@@ -149,6 +180,8 @@ impl CodeSource {
                     load_ms: v.now.load_ms,
                     bytes: v.now.bytes,
                     before_load_ms: v.before.as_ref().map(|b| b.load_ms),
+                    lcp_ms: v.now.lcp_ms,
+                    cls: v.now.cls,
                 }),
                 visual_change: p.visual_change.as_ref().map(|v| code_control::model::PreviewVisualChange { since: v.since.clone(), percent: v.percent, phone_percent: v.phone_percent }),
                 earlier: p.earlier.iter().map(|x| code_control::model::PreviewEarlier { service: x.service.clone(), head: x.revision.clone(), url: x.url.clone() }).collect(),
@@ -266,7 +299,7 @@ impl Source for CodeSource {
             .filter(|r| !r.dismissed && r.verdict == code_control::review::Verdict::Comment)
             .filter_map(|r| {
                 let (path, selector, note) = crate::notes::parse(&r.body)?;
-                Some(crate::notes::Note { path, selector, note, by: r.reviewer.name, at: r.created_at })
+                Some(crate::notes::Note { id: r.id, path, selector, note, by: r.reviewer.name, at: r.created_at })
             })
             .collect())
     }
@@ -373,7 +406,7 @@ impl PreviewBackend for Backend {
     async fn accept_visual(&self, change: &code_control::model::Change, by: &str, head: &str) -> anyhow::Result<()> {
         let engine = self.engine.get().and_then(Weak::upgrade).ok_or_else(|| anyhow::anyhow!("previews aren't running"))?;
         let row = engine.store.row_by_change(&change.id)?.ok_or_else(|| anyhow::anyhow!("the change has no preview"))?;
-        engine.accept_visual(&row.id, by, true, Some(head)).await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
+        engine.accept_visual(&row.id, by, true, Some(head), None).await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     async fn delete(&self, repo: &RepoRow, change: &code_control::model::Change) -> anyhow::Result<()> {

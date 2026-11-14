@@ -52,6 +52,16 @@ pub struct Settings {
     /// `roll/visual` commit status), pending while its pages differ from the baseline's and
     /// nobody has accepted them at that head; `required` also keeps it from landing in roll.
     pub visual_review: VisualReviewRule,
+    /// `catch` (the default): services send mail to roll's catcher (`SMTP_*` are roll's, mail
+    /// providers' API keys are removed), listed on the preview, never delivered; `deliver`: the
+    /// project's own mail settings reach previews.
+    #[serde(default)]
+    pub mail: MailRule,
+    /// Branch the data as of a point in time (Neon's time-travel branches), where the product
+    /// keeps history: `-24h` (`-30m`, `-7d`) before each branching or reset, or an RFC 3339 time;
+    /// at most 30 days back. Products without history branch as of now and say so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_at: Option<String>,
     /// A feedback button on the pages of people who came in through roll (link access): it pins a
     /// note to an element and posts it on the change, from roll.
     pub feedback: bool,
@@ -90,6 +100,14 @@ fn seed_timeout() -> u32 {
 
 fn seed_memory() -> u32 {
     1024
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MailRule {
+    #[default]
+    Catch,
+    Deliver,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +168,43 @@ pub struct GithubRule {
     /// commit status fails. 0 is no limit.
     #[serde(default)]
     pub budget: Budget,
+    /// A page counts as changed for the visual review only past this share of its pixels (a
+    /// percent, up to 50; Chromatic's `diffThreshold`, Percy's sensitivity): for what `hide`
+    /// can't name. 0: any change counts.
+    #[serde(default)]
+    pub visual_threshold: f64,
+    /// More widths the first page is taken at (Percy's widths: a tablet's 768), each compared
+    /// and reviewed like another page (kept as `@768`). Up to 3, 320 to 2560 pixels; they share
+    /// a run's five other pages with `pages`.
+    #[serde(default)]
+    pub widths: Vec<u32>,
+}
+
+/// The unix second `data_at` means at `now` (unix seconds): `-24h`/`-30m`/`-7d` back from now, or
+/// an RFC 3339 time; `None` for anything else or more than 30 days back.
+pub fn data_at_secs(rule: &str, now: i64) -> Option<i64> {
+    const MAX: i64 = 30 * 86_400;
+    let rule = rule.trim();
+    let at = match rule.strip_prefix('-') {
+        Some(rel) => {
+            let (n, unit) = rel.split_at(rel.len().checked_sub(1)?);
+            let n: i64 = n.parse().ok().filter(|n| *n > 0)?;
+            let per = match unit {
+                "m" => 60,
+                "h" => 3_600,
+                "d" => 86_400,
+                _ => return None,
+            };
+            now - n.checked_mul(per)?
+        }
+        None => humantime::parse_rfc3339_weak(rule).ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64,
+    };
+    (at <= now && now - at <= MAX).then_some(at)
+}
+
+/// A width's page entry (`@768`): the first page at that width.
+pub fn width_entry(e: &str) -> Option<u32> {
+    e.strip_prefix('@').filter(|n| !n.starts_with('0')).and_then(|n| n.parse::<u32>().ok()).filter(|w| (320..=2560).contains(w))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -157,6 +212,10 @@ pub struct GithubRule {
 pub struct Budget {
     pub load_ms: u32,
     pub bytes: u64,
+    /// Largest contentful paint (Core Web Vitals' "good" is up to 2500).
+    pub lcp_ms: u32,
+    /// Cumulative layout shift ("good" is up to 0.1).
+    pub cls: f64,
 }
 
 pub const MAX_HIDE: usize = 20;
@@ -218,6 +277,8 @@ impl Default for Settings {
             github: GithubRule::default(),
             access: Access::Link,
             visual_review: VisualReviewRule::Off,
+            mail: MailRule::Catch,
+            data_at: None,
             feedback: true,
             warm: true,
             seed: None,
@@ -235,7 +296,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default() }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new() }
     }
 }
 
@@ -376,8 +437,22 @@ impl Settings {
         if self.github.hide.len() > MAX_HIDE || !self.github.hide.iter().all(|s| selector_ok(s)) {
             return bad(format!("github.hide: at most {MAX_HIDE} CSS selectors of up to 200 characters (no braces, semicolons or comments)"));
         }
-        if self.github.budget.load_ms > 600_000 || self.github.budget.bytes > 10 << 30 {
-            return bad("github.budget: load_ms up to 600000, bytes up to 10 GiB".into());
+        if let Some(at) = &self.data_at {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+            if data_at_secs(at, now).is_none() {
+                return bad(format!("data_at: {at:?} isn't -<n>m, -<n>h, -<n>d or an RFC 3339 time within 30 days"));
+            }
+        }
+        let w = &self.github.widths;
+        if w.len() > 3 || w.iter().any(|x| width_entry(&format!("@{x}")).is_none()) || (1..w.len()).any(|i| w[..i].contains(&w[i])) {
+            return bad("github.widths: up to 3 different widths, 320 to 2560 pixels".into());
+        }
+        if !(0.0..=50.0).contains(&self.github.visual_threshold) {
+            return bad("github.visual_threshold: a percent from 0 to 50".into());
+        }
+        let b = &self.github.budget;
+        if b.load_ms > 600_000 || b.bytes > 10 << 30 || b.lcp_ms > 600_000 || !(0.0..=100.0).contains(&b.cls) {
+            return bad("github.budget: load_ms and lcp_ms up to 600000, bytes up to 10 GiB, cls from 0 to 100".into());
         }
         let pages = &self.github.pages;
         if pages.len() > MAX_PAGES || pages.iter().any(|p| page_entry(p).is_none() || p == "/") || pages.iter().enumerate().any(|(i, p)| pages[..i].contains(p)) {
@@ -427,6 +502,19 @@ mod tests {
 
     #[test]
     fn patches_merge_and_production_needs_a_yes() {
+        // A point in time for the data: a while back (at most 30 days), or a time.
+        assert_eq!(data_at_secs("-24h", 1_000_000), Some(1_000_000 - 86_400));
+        assert_eq!(data_at_secs("1970-01-12T00:00:00Z", 1_000_000), Some(950_400));
+        for bad in ["-31d", "-0h", "24h", "-5w", "yesterday"] {
+            assert_eq!(data_at_secs(bad, 10_000_000), None, "{bad}");
+        }
+        assert!(Settings::default().patched(&json!({ "data_at": "soon" })).is_err());
+        // Widths: up to three different ones a tablet or a wide screen has, kept as `@<width>`.
+        assert!(Settings::default().patched(&json!({ "github": { "widths": [768, 1920] } })).is_ok());
+        for bad in [json!([768, 768]), json!([100]), json!([400, 500, 600, 700])] {
+            assert!(Settings::default().patched(&json!({ "github": { "widths": bad } })).is_err(), "{bad}");
+        }
+        assert_eq!((width_entry("@768"), width_entry("@0768"), width_entry("/pricing")), (Some(768), None, None));
         let s = Settings::default().patched(&json!({ "enabled": true, "github": { "comment": false } })).unwrap();
         assert!(s.enabled && !s.github.comment && s.github.status);
         assert!(Settings::default().patched(&json!({ "secrets": { "base": "production" } })).is_err());
