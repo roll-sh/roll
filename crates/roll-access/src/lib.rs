@@ -203,8 +203,13 @@ pub struct Config {
     pub locked: bool,
     /// Days of audit log kept.
     pub audit_days: i64,
-    /// Take the client's address from `X-Forwarded-For`'s first entry (behind roll's edge).
+    /// Take the client's address from `X-Forwarded-For` (behind roll's edge): its first entry, or,
+    /// with `trusted_proxies`, the right-most one that isn't a proxy.
     pub trust_forwarded_for: bool,
+    /// When set, `X-Forwarded-For` counts only from these peers (the edge's addresses), and the
+    /// client is the right-most address in it that isn't one of them: what a client wrote into the
+    /// header itself is never taken (`ROLL_TRUSTED_PROXIES`).
+    pub trusted_proxies: Vec<ipnet::IpNet>,
     /// How long a request waits for an approval before answering `approval_pending`.
     pub approval_wait: std::time::Duration,
     /// A spent refresh token presented again within this is a retry, not a stolen copy.
@@ -224,6 +229,7 @@ impl Default for Config {
             locked: false,
             audit_days: 90,
             trust_forwarded_for: false,
+            trusted_proxies: Vec::new(),
             approval_wait: std::time::Duration::from_secs(55),
             refresh_grace: std::time::Duration::from_millis(store::REFRESH_GRACE_MS as u64),
             metadata_allow_private: false,

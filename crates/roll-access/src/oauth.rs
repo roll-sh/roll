@@ -119,7 +119,7 @@ const REGISTER_PER_MINUTE: u32 = 20;
 
 /// RFC 7591: open registration of public clients (PKCE, no secret).
 async fn register(State(a): S, req: axum::extract::Request) -> Response {
-    let ip = crate::evaluate::client_ip(&req, a.config.trust_forwarded_for);
+    let ip = crate::evaluate::client_ip(&req, &a.config);
     let network = ip.and_then(|i| crate::store::network_of(&i.to_string())).unwrap_or_else(|| "unknown".into());
     {
         let now = code_sql::now_ms() / 60_000;

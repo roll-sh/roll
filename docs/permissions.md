@@ -316,7 +316,10 @@ One function, `roll_access::evaluate`, in front of every route rolld serves. On 
    credentials skip this; a request with neither passes or fails as it always has.
 2. **The grant.** It must not be revoked or expired. The client's address must be in `ip_allow`
    when that's set (the peer address, or the edge's forwarded address when rolld is behind the
-   edge).
+   edge). With `ROLL_TRUSTED_PROXIES` (CIDRs: the edge's or load balancer's addresses),
+   `X-Forwarded-For` counts only from those peers, and the client is its right-most entry that
+   isn't one of them, so a request that reaches the API listener directly can't name its own
+   address; the same address is what open registration's per-network limit counts.
 3. **The route.** The matched route pattern and method find the catalogue row: an exact row (one
    naming the method beats `*`), else the longest prefix row. Routes that are a product's own
    router in disguise (tasks' `{*rest}`, storage's `nest_service`) are matched by the request's
