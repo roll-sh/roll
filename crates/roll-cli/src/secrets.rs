@@ -282,6 +282,10 @@ pub enum Secrets {
     Tokens(Tokens),
     /// Where a key is set, in every project you can read (`STRIPE_*` for a prefix). Never values.
     Find { key: String },
+    /// GCP and Azure accounts that trust roll's token for this project: list (with the issuer and
+    /// subject to trust), add, remove.
+    #[command(subcommand)]
+    Clouds(CloudsCmd),
     /// A key pair for backups: the secret key written to a file only you can read, the public key
     /// printed (give it to `backup --to`).
     Keygen {
@@ -494,6 +498,33 @@ pub enum Requests {
         bypass: bool,
     },
     Close { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum CloudsCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// A GCP service account behind a workload identity pool provider for roll's issuer.
+    AddGcp {
+        name: String,
+        /// The provider: //iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
+        #[arg(long)]
+        audience: String,
+        #[arg(long)]
+        service_account: String,
+    },
+    /// An Entra app with a federated credential for roll's issuer.
+    AddAzure {
+        name: String,
+        #[arg(long)]
+        tenant: String,
+        #[arg(long)]
+        client_id: String,
+        /// What its tokens are for (https://management.azure.com/.default by default).
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    Rm { id: String },
 }
 
 #[derive(Subcommand)]
@@ -1164,6 +1195,45 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 return print(&v);
             }
             println!("{} is {}", s(&v["id"]), s(&v["state"]));
+        }
+        Secrets::Clouds(cmd) => {
+            let cr = &c;
+            let add = |body: Value| async move {
+                let v = cr.call(Method::POST, &format!("{}/cloud-accounts", cr.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link a key to it (access_token, dynamic) and each resolve gets a token of its own.", s(&v["name"]), s(&v["id"]));
+                Ok(())
+            };
+            match cmd {
+                CloudsCmd::Ls => {
+                    let v = c.call(Method::GET, &format!("{}/cloud-accounts", c.base()), None).await?;
+                    if json_out {
+                        return print(&v);
+                    }
+                    for a in v.as_array().into_iter().flatten() {
+                        let what = if a["cloud"] == "gcp" { s(&a["service_account"]).to_string() } else { format!("{} in {}", s(&a["client_id"]), s(&a["tenant"])) };
+                        println!("{}  {:<6} {:<16} {what}", s(&a["id"]), s(&a["cloud"]), s(&a["name"]));
+                    }
+                    let issuer = c.call(Method::GET, "/v1/secrets/oidc/.well-known/openid-configuration", None).await.ok();
+                    if let Some(i) = issuer {
+                        eprintln!("Trust issuer {} with subject roll-secrets:{} (Azure's audience: api://AzureADTokenExchange)", s(&i["issuer"]), c.project);
+                    }
+                }
+                CloudsCmd::AddGcp { name, audience, service_account } => add(json!({ "name": name, "cloud": "gcp", "audience": audience, "service_account": service_account })).await?,
+                CloudsCmd::AddAzure { name, tenant, client_id, scope } => {
+                    let mut body = json!({ "name": name, "cloud": "azure", "tenant": tenant, "client_id": client_id });
+                    if let Some(scope) = scope {
+                        body["scope"] = json!(scope);
+                    }
+                    add(body).await?
+                }
+                CloudsCmd::Rm { id } => {
+                    c.call(Method::DELETE, &format!("{}/cloud-accounts/{}", c.base(), enc(&id)), None).await?;
+                    println!("Removed {id}");
+                }
+            }
         }
         Secrets::Tokens(t) => match t {
             Tokens::Ls => {

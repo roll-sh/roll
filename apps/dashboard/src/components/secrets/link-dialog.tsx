@@ -14,6 +14,8 @@ const OWN_KINDS: Record<string, { icon: LucideIcon; label: string }> = {
   aws: { icon: Cloud, label: "AWS role" },
   aws_iam_user: { icon: KeyRound, label: "IAM user" },
   outside_database: { icon: Database, label: "Database outside roll" },
+  gcp: { icon: Cloud, label: "GCP account" },
+  azure: { icon: Cloud, label: "Azure account" },
 };
 
 /** A link target's kind: a canvas resource's icon, roll secrets' own, or a plain link for one this dashboard doesn't know yet. */

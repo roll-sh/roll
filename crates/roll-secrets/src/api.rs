@@ -76,6 +76,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/identities"), get(identities).post(create_identity))
         .route(&format!("{P}/identities/{{id}}"), axum::routing::delete(delete_identity))
         .route("/v1/secrets/login", post(login))
+        .route("/v1/secrets/oidc/.well-known/openid-configuration", get(oidc_discovery))
+        .route("/v1/secrets/oidc/jwks", get(oidc_jwks))
         .route(&format!("{P}/audit"), get(audit))
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
         .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
@@ -84,6 +86,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/findings", get(all_health))
         .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
+        .route(&format!("{P}/cloud-accounts"), get(cloud_accounts).post(add_cloud_account))
+        .route(&format!("{P}/cloud-accounts/{{id}}"), axum::routing::delete(delete_cloud_account))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
@@ -746,6 +750,29 @@ struct LoginBody {
 }
 
 /// A workload's OIDC token for a short-lived scoped token (public: the token is the credential).
+/// roll's OIDC issuer (public: clouds fetch it anonymously).
+async fn oidc_discovery(State(s): S) -> crate::Result<Response> {
+    Ok(ok(blocking(s, |s| s.oidc_discovery()).await?))
+}
+
+async fn oidc_jwks(State(s): S) -> crate::Result<Response> {
+    Ok(ok(blocking(s, |s| s.oidc_jwks()).await?))
+}
+
+async fn cloud_accounts(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.cloud_accounts(&project, &c)).await?))
+}
+
+async fn add_cloud_account(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::clouds::NewCloudAccount = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_cloud_account(&project, n, &c)).await?))
+}
+
+async fn delete_cloud_account(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_cloud_account(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn login(State(s): S, parts: Parts, b: Bytes) -> crate::Result<Response> {
     let l: LoginBody = body(&b)?;
     let ip = s.client_ip(&parts);

@@ -555,6 +555,40 @@ only the host is shown. An answer is read once, never logged, and never part of 
 a key still links to can't be deleted, nor one with a retired credential still waiting out its
 grace period (its revocation goes through the rotator).
 
+### GCP and Azure
+
+Short-lived GCP and Azure access tokens for each lease, as Vault's GCP and Azure engines give, with
+no key of the customer's stored anywhere: **roll is an OpenID Connect issuer**, and the customer's
+cloud trusts roll's token for one project the way it trusts GitHub Actions' tokens.
+
+- **The issuer** is `<rolld's public URL>/v1/secrets/oidc` (`ROLL_CODE_PUBLIC_URL`; the clouds must
+  reach it over HTTPS). Its discovery document and keys (`…/.well-known/openid-configuration`,
+  `…/jwks`) are public. Tokens are RS256 (Azure takes nothing else), live five minutes, and carry
+  `sub = roll-secrets:<project>` (and `project`). The signing key (RSA 2048) is made at startup,
+  sealed with the deployment key, and shared by every node; every published key verifies, and the
+  public routes read only public halves. After a deployment-key rotation it's resealed like
+  projects' keys (health's `resealed` counts it).
+- **GCP**: a workload identity pool provider for roll's issuer whose attribute condition pins
+  `assertion.sub == "roll-secrets:<project>"`, and a service account that lets that principal
+  impersonate it (`roles/iam.workloadIdentityUser`). Register it with `POST …/cloud-accounts {name,
+  cloud: "gcp", audience: "//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>",
+  service_account}`. Each lease: STS token exchange, then `generateAccessToken` for the service
+  account, for the lease's TTL plus five minutes (an hour at most).
+- **Azure**: an Entra app with a federated credential for roll's issuer, subject
+  `roll-secrets:<project>`, audience `api://AzureADTokenExchange`. Register it with `{name, cloud:
+  "azure", tenant, client_id, scope?}` (`https://management.azure.com/.default` by default). Each
+  lease: client credentials with roll's token as the assertion.
+- **The trust must name this project.** Registering an account (admin) first exchanges a token for a
+  made-up project: one the cloud takes is refused, naming the condition to add, so no tenant can
+  register (and use) another customer's account that trusts roll. Only a definite refusal
+  (`invalid_grant`, `PERMISSION_DENIED`, `AADSTS70021`…) passes; a timeout or an outage fails the
+  registration. Then this project's token must work.
+- A key links to an account's `access_token` in `dynamic` mode, with a lease of 55 minutes at most
+  (so it ends before its token; a longer one is refused when it's linked). A token can't be ended
+  early or extended: a lease that ends leaves it valid until it expires, an hour at most; resolve again for a
+  new one. An account a key links to can't be deleted. `roll secrets clouds ls` prints the issuer and
+  subject to trust; `roll secrets clouds add-gcp` / `add-azure` register one.
+
 ## Consumption
 
 ### `roll secrets` and `roll run`
@@ -583,6 +617,7 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
+roll secrets clouds  ls | add-gcp NAME --audience A --service-account SA | add-azure NAME --tenant T --client-id C [--scope S] | rm ID
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -1419,6 +1454,11 @@ isn't in the workspace is 404.
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `GET /cloud-accounts` | | `CloudAccount[]` (`read` on the project) |
+| `POST /cloud-accounts` | `{name, cloud: "gcp", audience, service_account}` or `{name, cloud: "azure", tenant, client_id, scope?}` | 201 `CloudAccount` (`admin`; 400 when a made-up project's token is taken, or this project's isn't) |
+| `DELETE /cloud-accounts/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `GET /v1/secrets/oidc/.well-known/openid-configuration` | | roll's issuer's discovery document (public) |
+| `GET /v1/secrets/oidc/jwks` | | roll's issuer's public keys (public) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
 
