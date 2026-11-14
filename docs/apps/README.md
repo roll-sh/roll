@@ -1421,6 +1421,12 @@ feature/roll-search 7f92c2f28, the held apps work being wip/roll-apps-next (pair
     reads as no secrets (previews ensures its `pv-` ones with their base and trust; ensuring
     again with other values would be a 409 `mismatch`), and a person adds one in roll secrets
     when they want secrets there.
+  - Done on apps' side: `SecretSource::digest(project, env)` (secrets' digest of an environment's
+    values: versions and keyed fingerprints, no value; `None` by default). Kept with each
+    deployment at its switch (`deploy_secrets`); `…/pending` answers `secrets: true` when it moved
+    since, the dashboard says "the project's secrets changed" under Redeploy, and `needs_deploy`
+    is worked out again the moment it moves instead of after its minute's cache. Secrets' `ForApps`
+    answers it with `Secrets::digest(project, env, "/")`.
   - Done on apps' side: `SecretVar.sensitive` (secrets' #46: a key tagged `sensitive` reaches only
     runtimes, as Vercel's sensitive variables): apps treats it as a sealed variable, in builds and
     instances, never in an answer (`sealed` in the listing, out of `…/variables/values` for

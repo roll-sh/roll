@@ -99,6 +99,7 @@ describe("pending changes", () => {
   it("name what the next deploy does", () => {
     expect(describePending({ variables: { added: ["ADDED"], removed: ["GONE"], changed: ["MODE"] }, run: ["memory_mb"] })).toBe("MODE changed, ADDED added, GONE removed, memory mb set");
     expect(describePending({ variables: null, run: [] })).toBeNull();
+    expect(describePending({ variables: null, run: [], secrets: true })).toBe("the project's secrets changed");
   });
 });
 

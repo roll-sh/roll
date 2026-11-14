@@ -96,6 +96,13 @@ pub trait SecretSource: Send + Sync {
     async fn may_reveal(&self, _who: Asker<'_>, _project: &str, _env: &str) -> bool {
         false
     }
+    /// What the project's secrets in `env` are, as a digest with no value in it (roll secrets'
+    /// versions and keyed fingerprints): it changes when one of them does. Kept with each
+    /// deployment that goes live, so an environment can say its secrets changed since. None: no
+    /// such digest.
+    async fn digest(&self, _project: &str, _env: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// What's been said about a preview's page (roll previews' notes: docs/previews.md, "Feedback on

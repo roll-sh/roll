@@ -155,6 +155,10 @@ CREATE TABLE IF NOT EXISTS apps_sites (
 CREATE TABLE IF NOT EXISTS deploy_no_traffic (
     deployment TEXT PRIMARY KEY
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS deploy_secrets (
+    deployment TEXT PRIMARY KEY,
+    digest TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS deploy_no_cache (
     deployment TEXT PRIMARY KEY
 ) WITHOUT ROWID;
@@ -1163,6 +1167,17 @@ impl Store {
             (Some(mine), Some(theirs)) => theirs > mine,
             _ => *at > after,
         }))
+    }
+
+    /// The project's secrets' digest ([`crate::integrations::SecretSource::digest`]) a deployment
+    /// went live with.
+    pub fn set_secrets_digest(&self, deployment: &str, digest: &str) -> Result<()> {
+        self.db.execute("INSERT INTO deploy_secrets (deployment, digest) VALUES (?, ?) ON CONFLICT (deployment) DO UPDATE SET digest = excluded.digest", params![deployment, digest])?;
+        Ok(())
+    }
+
+    pub fn secrets_digest(&self, deployment: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT digest FROM deploy_secrets WHERE deployment = ?", [deployment], |r| r.get(0)).optional()?)
     }
 
     pub fn no_cache(&self, id: &str) -> Result<bool> {

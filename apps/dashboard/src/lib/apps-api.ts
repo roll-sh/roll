@@ -194,6 +194,8 @@ export interface IpRule {
 export interface Pending {
   variables: { added: string[]; removed: string[]; changed: string[] } | null;
   run: string[];
+  /** The project's secrets changed since the live deployment (roll secrets' digest); null: nothing to compare. */
+  secrets?: boolean | null;
 }
 
 /** The changes as a line ("MODE changed, ADDED added, memory_mb"), or null when there are none to name. */
@@ -203,6 +205,7 @@ export function describePending(p: Pending): string | null {
     ...(p.variables?.added ?? []).map((n) => `${n} added`),
     ...(p.variables?.removed ?? []).map((n) => `${n} removed`),
     ...p.run.map((f) => `${f.replaceAll("_", " ")} set`),
+    ...(p.secrets ? ["the project's secrets changed"] : []),
   ];
   return parts.length ? parts.join(", ") : null;
 }

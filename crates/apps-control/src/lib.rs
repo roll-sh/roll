@@ -194,7 +194,7 @@ pub struct Apps {
     /// Each environment's `needs_deploy` as last worked out (it decrypts every variable and asks
     /// each linked product for its own): when, the settings generation and active deployment it
     /// was for, and the answer. Good for a minute, or until either moves.
-    needs: Mutex<HashMap<String, (std::time::Instant, u64, String, bool)>>,
+    needs: Mutex<HashMap<String, NeedsDeploy>>,
     /// Bumped by every change a deployment's fingerprint reads (settings, variables, links).
     settings_gen: std::sync::atomic::AtomicU64,
     /// A service changed (a deploy moved, someone changed something): its id, for the pages
@@ -270,6 +270,10 @@ fn hex(b: &[u8]) -> String {
 }
 
 /// What makes up an environment's variables, highest precedence last.
+/// An environment's `needs_deploy`, worked out: when, at which settings generation, for which
+/// active deployment and secrets' digest, and the answer.
+type NeedsDeploy = (std::time::Instant, u64, String, Option<String>, bool);
+
 /// A service id looked up by name, as of when (none: no such web service).
 type NameLookup = (std::time::Instant, Option<String>);
 
@@ -707,9 +711,14 @@ impl Apps {
     /// deployment doesn't run with. Links and project secrets move `needs_deploy` too, unnamed.
     pub async fn pending(self: &Arc<Self>, service: &str, env: &str) -> Result<Value> {
         let (svc, row) = self.service_env(service, env).await?;
-        let Some(active) = row.active.clone() else { return Ok(json!({ "variables": null, "run": [] })) };
+        let Some(active) = row.active.clone() else { return Ok(json!({ "variables": null, "run": [], "secrets": null })) };
         let a = active.clone();
-        let (dep, then) = self.db(move |s| Ok((s.deployment(&a)?, s.snapshot(&a)?))).await?;
+        let (dep, then, digest_then) = self.db(move |s| Ok((s.deployment(&a)?, s.snapshot(&a)?, s.secrets_digest(&a)?))).await?;
+        // The project's secrets since it went live (null: no digest to compare).
+        let secrets = match (digest_then, self.deps.secrets.digest(&svc.project, env).await.ok().flatten()) {
+            (Some(then), Some(now)) => Value::Bool(then != now),
+            _ => Value::Null,
+        };
         let (sid, e) = (service.to_string(), env.to_string());
         let now = self.db(move |s| s.variables(&sid, &e)).await?;
         let variables = then.map(|then| {
@@ -725,7 +734,7 @@ impl Apps {
         let want = serde_json::to_value(svc.for_env(&row).map_or(svc.run.clone(), |s| s.run)).unwrap_or_default();
         let has = serde_json::to_value(&dep.run).unwrap_or_default();
         let run: Vec<&String> = want.as_object().into_iter().flatten().filter(|(k, v)| has.get(k.as_str()) != Some(*v)).map(|(k, _)| k).collect();
-        Ok(json!({ "variables": variables, "run": run }))
+        Ok(json!({ "variables": variables, "run": run, "secrets": secrets }))
     }
 
     /// Whether the environment's settings, variables or links changed since its active
@@ -735,9 +744,12 @@ impl Apps {
         use std::sync::atomic::Ordering::SeqCst;
         let key = env_key(&r.service, &r.name);
         let seen = self.settings_gen.load(SeqCst);
-        if let Some((at, g, a, v)) = self.needs.lock().get(&key)
+        // The project's secrets moved: worked out again at once, not after the minute.
+        let digest = self.deps.secrets.digest(&svc.project, &r.name).await.ok().flatten();
+        if let Some((at, g, a, d, v)) = self.needs.lock().get(&key)
             && *g == seen
             && a == active
+            && *d == digest
             && at.elapsed() < Duration::from_secs(60)
         {
             return Ok(*v);
@@ -750,7 +762,7 @@ impl Apps {
         };
         // Kept only if nothing changed while it was worked out.
         if self.settings_gen.load(SeqCst) == seen {
-            self.needs.lock().insert(key, (std::time::Instant::now(), seen, active.to_string(), v));
+            self.needs.lock().insert(key, (std::time::Instant::now(), seen, active.to_string(), digest, v));
         }
         Ok(v)
     }
