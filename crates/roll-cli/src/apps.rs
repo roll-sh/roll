@@ -91,6 +91,19 @@ pub struct Logs {
     /// Only lines from this long ago on: `30m`, `2h`, `7d`.
     #[arg(long)]
     pub since: Option<String>,
+    /// Only lines from before this long ago (`2h`: what happened until two hours ago), read
+    /// back through the stored logs.
+    #[arg(long, conflicts_with = "follow")]
+    pub before: Option<String>,
+    /// Only this instance's lines (its name, or the number it ends with).
+    #[arg(long)]
+    pub instance: Option<String>,
+    /// Only this deployment's instances' lines.
+    #[arg(long)]
+    pub deployment: Option<String>,
+    /// Only this stream: `stdout`, `stderr` or `system`.
+    #[arg(long)]
+    pub stream: Option<String>,
     /// The requests instead (the proxy's access log): method, path, status, time.
     #[arg(long, conflicts_with = "build")]
     pub http: bool,
@@ -1664,10 +1677,29 @@ pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
         }
         None => format!("{base}/logs"),
     };
-    let since = match &l.since {
+    let mut since = match &l.since {
         Some(d) => format!("&since={}", chrono::Utc::now().timestamp_millis() - ago_ms(d)?),
         None => String::new(),
     };
+    if let Some(d) = &l.before {
+        since.push_str(&format!("&before={}", chrono::Utc::now().timestamp_millis() - ago_ms(d)?));
+    }
+    // An instance by the number its name ends with: the environment's own prefix is the API's.
+    if let Some(i) = &l.instance {
+        let name = match i.parse::<u64>() {
+            Ok(n) => {
+                let now = api.get(&base).await?;
+                now["instances"].as_array().into_iter().flatten().filter_map(|x| x["id"].as_str()).find(|x| x.rsplit('-').next() == Some(&n.to_string())).map(str::to_string).unwrap_or_else(|| i.clone())
+            }
+            Err(_) => i.clone(),
+        };
+        since.push_str(&format!("&instance={}", enc(&name)));
+    }
+    for (k, v) in [("deployment", &l.deployment), ("stream", &l.stream)] {
+        if let Some(v) = v {
+            since.push_str(&format!("&{k}={}", enc(v)));
+        }
+    }
     let mut http = String::new();
     if l.http {
         http.push_str("&http=1");

@@ -655,8 +655,18 @@ export const appsApi = {
   logs: (id: string, e: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${env(id, e)}/logs${qs({ tail: q.tail, since: q.since })}`),
   /** Lines that contain `q` (any case), back through the stored logs (7 days), newest last. */
   /** `truncated`: more matched than came back (the newest are shown). */
-  searchLogs: async (id: string, e: string, q: string, since?: number): Promise<{ lines: LogLine[]; truncated: boolean }> => {
-    const res = await fetch(`${ROLL_API}${env(id, e)}/logs${qs({ q, since, tail: 2000 })}`, { headers: apiHeaders(), cache: "no-store" });
+  searchLogs: (id: string, e: string, q: string, since?: number) => appsApi.readLogs(id, e, { q, since, tail: 2000 }),
+  /**
+   * Lines read back through the stored logs (7 days), newest last: `before` (unix ms) a time
+   * window's end, `instance`, `deployment`, `stream` narrowing it, `q` a search. `truncated`: the
+   * read stopped before it reached them all.
+   */
+  readLogs: async (
+    id: string,
+    e: string,
+    q: { q?: string; since?: number; before?: number; instance?: string; deployment?: string; stream?: string; http?: boolean; tail?: number },
+  ): Promise<{ lines: LogLine[]; truncated: boolean }> => {
+    const res = await fetch(`${ROLL_API}${env(id, e)}/logs${qs({ ...q, http: q.http || undefined, tail: q.tail ?? 500 })}`, { headers: apiHeaders(), cache: "no-store" });
     onApiStatus(res.status);
     const data = await res.json().catch(() => null);
     if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());

@@ -1444,6 +1444,11 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     let (_, next) = call(&w.api, "POST", &format!("{base}/runs"), None).await;
     assert_eq!(next["status"], "running", "not skipped: {next}");
     call(&w.api, "POST", &format!("{base}/runs/{}/cancel", next["id"].as_str().unwrap()), None).await;
+    // A search of one run's output is of its own lines only (other runs said the same).
+    let (_, found) = call(&w.api, "GET", &format!("{base}/runs/{rid}/logs?q=job%20ran"), None).await;
+    assert_eq!(found.as_array().unwrap().len(), 1, "{found}");
+    let (_, all) = call(&w.api, "GET", &format!("{base}/logs?q=job%20ran"), None).await;
+    assert!(all.as_array().unwrap().len() >= 2, "{all}");
     let _ = Ordering::SeqCst;
 }
 

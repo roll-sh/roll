@@ -484,6 +484,12 @@ struct LogQuery {
     /// Access lines of answers roll gave itself, and why (`firewall`, `rate_limit`, `wake`…; `any`:
     /// every one of them).
     by: Option<String>,
+    /// Lines made before then (unix ms): reading back through the stored chunks.
+    before: Option<i64>,
+    /// One instance's lines, or one deployment's, or one stream's (`stdout`, `stderr`, `system`).
+    instance: Option<String>,
+    deployment: Option<String>,
+    stream: Option<String>,
 }
 
 /// Which access lines `status` and `min_ms` keep (`None`: all of them).
@@ -526,11 +532,29 @@ type Keep = Option<Box<dyn Fn(&LogLine) -> bool + Send + Sync>>;
 
 async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tokio::sync::watch::Receiver<bool>>, keep: Keep) -> R {
     let tail = q.tail.unwrap_or(500).min(crate::logs::RING);
-    if let Some(text) = q.q.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-        if text.len() > 200 {
-            return Err(Error::BadRequest("q is at most 200 characters".into()));
-        }
-        let (lines, cut) = apps.logs.search(&key, text, q.since, tail).await;
+    let text = q.q.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_lowercase);
+    if text.as_ref().is_some_and(|t| t.len() > 200) {
+        return Err(Error::BadRequest("q is at most 200 characters".into()));
+    }
+    let stream = match q.stream.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => None,
+        Some(s) => Some(serde_json::from_value::<crate::logs::Stream>(json!(s)).map_err(|_| Error::BadRequest("stream is stdout, stderr, system, http or build".into()))?),
+    };
+    // Every filter in one: the route's own (`keep`), then the asker's.
+    let (instance, deployment) = (q.instance.clone().filter(|s| !s.is_empty()), q.deployment.clone().filter(|s| !s.is_empty()));
+    let narrowed = keep.is_some() || instance.is_some() || deployment.is_some() || stream.is_some();
+    let keep: Keep = narrowed.then(|| {
+        let k = keep;
+        Box::new(move |l: &LogLine| {
+            k.as_ref().is_none_or(|k| k(l))
+                && instance.as_deref().is_none_or(|i| l.instance.as_deref() == Some(i))
+                && deployment.as_deref().is_none_or(|d| l.deployment.as_deref() == Some(d))
+                && stream.is_none_or(|s| l.stream == s)
+        }) as Box<dyn Fn(&LogLine) -> bool + Send + Sync>
+    });
+    // Read back (a search, a time window, or filtered): memory, then the stored chunks.
+    if text.is_some() || q.before.is_some() || (keep.is_some() && !truthy(&q.follow)) {
+        let (lines, cut) = apps.logs.read(&key, |l| keep.as_ref().is_none_or(|k| k(l)) && text.as_ref().is_none_or(|t| l.text.to_lowercase().contains(t)), q.since, q.before, tail).await;
         let mut r = Json(lines).into_response();
         if cut {
             r.headers_mut().insert("x-roll-search-truncated", axum::http::HeaderValue::from_static("1"));
@@ -538,12 +562,7 @@ async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tok
         return Ok(r);
     }
     if !truthy(&q.follow) {
-        let Some(k) = &keep else { return ok(apps.logs.tail(&key, tail, q.since).await) };
-        // Filtered: read back as far as memory holds, then the newest `tail` matches.
-        let mut lines = apps.logs.tail(&key, crate::logs::RING, q.since).await;
-        lines.retain(|l| k(l));
-        let cut = lines.len().saturating_sub(tail);
-        return ok(lines.split_off(cut));
+        return ok(apps.logs.tail(&key, tail, q.since).await);
     }
     // A finished build's log is read, not followed: nothing more comes, and following would
     // bring a retired log back into memory.
