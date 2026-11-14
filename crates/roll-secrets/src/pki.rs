@@ -139,6 +139,7 @@ impl Policy {
 pub(crate) struct Provider {
     pub db: Db,
     pub keys: Keyring,
+    pub unwrap: crate::kms::Unwrapper,
     pub public_api: std::sync::Arc<std::sync::OnceLock<String>>,
     pub crls: Crls,
 }
@@ -156,7 +157,8 @@ impl Provider {
             )
         })?;
         let (project, cert, key, policy, dek) = row.ok_or_else(|| Error::Link(format!("CA {id} doesn't exist any more")))?;
-        let (dek, _) = self.keys.open_dek(&project, &dek)?;
+        let inner = self.unwrap.inner(&project, &dek)?;
+        let (dek, _) = self.keys.open_dek(&project, &inner)?;
         Ok((cert, dek.open(&aad(&project, id), &key)?, serde_json::from_str(&policy).map_err(|_| Error::Internal("a CA's policy isn't JSON".into()))?))
     }
 }
@@ -555,7 +557,7 @@ impl Secrets {
     }
 
     pub(crate) fn pki(&self) -> Result<Provider> {
-        Ok(Provider { db: self.db.clone(), keys: self.keys()?.clone(), public_api: self.public_api.clone(), crls: self.crls.clone() })
+        Ok(Provider { db: self.db.clone(), keys: self.keys()?.clone(), unwrap: self.unwrap.clone(), public_api: self.public_api.clone(), crls: self.crls.clone() })
     }
 
     /// Where clients reach rolld's API (`ROLL_CODE_PUBLIC_URL`), for certificates' CRL distribution

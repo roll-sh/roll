@@ -206,6 +206,7 @@ const SLACK_MS: i64 = 5 * 60_000;
 pub(crate) struct Provider {
     pub db: Db,
     pub keys: Keyring,
+    pub unwrap: crate::kms::Unwrapper,
     pub outside: Arc<dyn OutsideDb>,
 }
 
@@ -221,7 +222,8 @@ impl Provider {
             )
         })?;
         let (project, url, ca, roles, group, dek) = row.ok_or_else(|| Error::Link(format!("database {id} doesn't exist any more")))?;
-        let (dek, _) = self.keys.open_dek(&project, &dek)?;
+        let inner = self.unwrap.inner(&project, &dek)?;
+        let (dek, _) = self.keys.open_dek(&project, &inner)?;
         Ok(Opened { url: dek.open(&aad(&project, id), &url)?, ca, roles: serde_json::from_str(&roles).unwrap_or_default(), group })
     }
 

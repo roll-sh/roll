@@ -444,11 +444,11 @@ impl Secrets {
         let public_api: Arc<std::sync::OnceLock<String>> = Default::default();
         let crls = pki::Crls::default();
         if let Ok(keys) = &opts.keyring {
-            links.register(Arc::new(pki::Provider { db: db.clone(), keys: keys.clone(), public_api: public_api.clone(), crls: crls.clone() }));
+            links.register(Arc::new(pki::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), public_api: public_api.clone(), crls: crls.clone() }));
         }
         db.ensure_schema(outside::SCHEMA)?;
         if let (Some(outside), Ok(keys)) = (&opts.outside, &opts.keyring) {
-            links.register(Arc::new(outside::Provider { db: db.clone(), keys: keys.clone(), outside: outside.clone() }));
+            links.register(Arc::new(outside::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), outside: outside.clone() }));
         }
         Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls })
     }
