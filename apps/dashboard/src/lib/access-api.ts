@@ -354,6 +354,8 @@ export const accessApi = {
   authorize: (c: Consent) => call<{ redirect: string }>("POST", "/v1/access/oauth/authorize", c),
   /** A search cluster's indices by name (search's own route; it wakes the cluster), for the builder. */
   searchIndices: (cluster: string) => call<{ index: string }[]>("GET", `/v1/search/clusters/${encodeURIComponent(cluster)}/indices`),
+  /** A secrets project's encryption keys by name (secrets' own route), for the builder. */
+  encryptionKeys: (project: string) => call<{ name: string }[]>("GET", `/v1/secrets/projects/${encodeURIComponent(project)}/transit`),
 };
 
 // ── pure helpers (tested in access-api.test.ts) ──
