@@ -1098,6 +1098,12 @@ async fn a_projects_ca_signs_short_lived_certificates_for_its_names_only() {
     api.call(Method::POST, &format!("/cas/{dev_id}/revoke"), Some(json!({ "serial": one["serial"] }))).await;
     let (s, e) = api.call(Method::DELETE, &format!("/cas/{dev_id}"), None).await;
     assert!(s == StatusCode::CONFLICT && e.to_string().contains("revocation list"), "{e}");
+    // A CSR's certificate ending within two weeks is health's to say (nothing renews it); a
+    // revoked one isn't.
+    api.ok(Method::POST, &format!("/cas/{dev_id}/sign"), Some(json!({ "csr": csr(&["d2.dev.internal"]), "days": 5 }))).await;
+    let health = api.ok(Method::GET, "/health", None).await;
+    let ending: Vec<&Value> = health.as_array().unwrap().iter().filter(|f| f["issue"] == "certificate_expiring").collect();
+    assert_eq!(ending.iter().map(|f| (f["key"].as_str().unwrap(), f["path"].as_str().unwrap())).collect::<Vec<_>>(), [("d2.dev.internal", "devices")], "{health}");
     // A CA a key links to stays.
     assert_eq!(api.call(Method::DELETE, &format!("/cas/{}", ca["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
 }
