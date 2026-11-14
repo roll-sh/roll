@@ -295,7 +295,8 @@ A rule can grant some indices of a search cluster: `{id: "cl_1", index: "logs-*,
 ### Secrets' encryption keys
 
 A rule can grant some of a project's encryption keys the same way, matched as index names are:
-`{id: "prj_1", index: "payments,pay-*"}` (the builder writes it `prj_1/payments,pay-*`). It
+`{id: "prj_1", index: "payments,pay-*"}` (the builder writes it `prj_1/payments,pay-*`, and lists
+a project's keys to tick, as it lists a cluster's indices). It
 covers the routes of one key (`/v1/secrets/projects/{project}/transit/{name}/…`: encrypt,
 decrypt, sign, verify, HMAC, the public key), at their own actions, so a service that signs with
 one key needs write on that key only, not on the project. Listing, creating, rotating and deleting
