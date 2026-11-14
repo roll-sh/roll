@@ -184,6 +184,8 @@ export function secretsApi(project: string) {
     required: () => req<Required[]>("GET", `${P}/required`),
     setRequired: (list: Required[]) => req<Required[]>("PUT", `${P}/required`, list),
     identities: () => req<Identity[]>("GET", `${P}/identities`),
+    /** Replace an identity's pinned keys (its id stays). */
+    setIdentityKeys: (id: string, jwks: string) => req<Identity>("PUT", `${P}/identities/${enc(id)}/jwks`, { jwks }),
     createIdentity: (i: NewIdentity) => req<Identity>("POST", `${P}/identities`, i),
     deleteIdentity: (id: string) => req<null>("DELETE", `${P}/identities/${enc(id)}`),
 

@@ -79,6 +79,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/tokens/{{id}}"), axum::routing::delete(revoke_token))
         .route(&format!("{P}/identities"), get(identities).post(create_identity))
         .route(&format!("{P}/identities/{{id}}"), axum::routing::delete(delete_identity))
+        .route(&format!("{P}/identities/{{id}}/jwks"), axum::routing::put(set_identity_keys))
         .route("/v1/secrets/login", post(login))
         .route("/v1/secrets/oidc/.well-known/openid-configuration", get(oidc_discovery))
         .route("/v1/secrets/oidc/jwks", get(oidc_jwks))
@@ -810,6 +811,16 @@ async fn create_token(State(s): S, Who(c): Who, Path(project): Path<String>, b: 
 async fn revoke_token(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.revoke_token(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+struct KeysBody {
+    jwks: String,
+}
+
+async fn set_identity_keys(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let k: KeysBody = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.set_identity_keys(&project, &id, &k.jwks, &c)).await?))
 }
 
 async fn identities(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
