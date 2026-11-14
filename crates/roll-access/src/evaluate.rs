@@ -285,7 +285,9 @@ impl Ctx {
 async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     let started = Instant::now();
     let Some(token) = roll_auth::grant_credential(req.headers()) else { return invalid_token(&access) };
-    if token.starts_with(REFRESH_PREFIX) {
+    // A refresh token opens nothing here; one whose checksum is wrong isn't roll's (no lookup: a
+    // flood of made-up tokens costs nothing).
+    if token.starts_with(REFRESH_PREFIX) || !crate::checksum_ok(&token) {
         return invalid_token(&access);
     }
     let lookup = {
@@ -312,6 +314,15 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     };
     let ip = client_ip(&req, &access.config);
     let route = req.extensions().get::<MatchedPath>().map_or_else(|| "unmatched".to_string(), |m| m.as_str().to_string());
+    // A secret a rotation left working for a while (it may have leaked: that's why one rotates)
+    // keeps calling products, but manages no tokens: it can't rotate, change or make one that
+    // outlives its grace.
+    if route.starts_with("/v1/access") {
+        let (a, t) = (access.clone(), token.clone());
+        if blocking(move || a.store.in_grace(&t)).await.unwrap_or(true) {
+            return deny(StatusCode::FORBIDDEN, "rotated_secret", "this secret was rotated: it works until its grace ends, but can't manage tokens (use the new one)".into(), json!({}));
+        }
+    }
     // Forwarded by a node that decided it for this grant already (a signed hop to an owner): a
     // person isn't asked twice, and the first node logs it. Everything else is decided again.
     let decided_before = req.extensions().get::<roll_cluster::Forwarded>().and_then(|f| f.decided.as_deref()) == Some(grant.id.as_str());
