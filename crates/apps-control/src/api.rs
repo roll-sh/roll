@@ -66,6 +66,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/notifications", get(targets).post(add_target))
         .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
+        .route("/v1/apps/projects/{project}/export", post(export_project))
         .route("/v1/apps/projects/{project}/drains/{did}", axum::routing::delete(delete_drain).patch(update_drain))
         .route("/v1/apps/projects/{project}/drains/{did}/test", post(test_drain))
         .route("/v1/apps/projects/{project}/notifications/{nid}", axum::routing::delete(delete_target).patch(update_target))
@@ -346,6 +347,10 @@ async fn update_drain(State(apps): S, Path((project, did)): Path<(String, String
 
 async fn test_drain(State(apps): S, Path((project, did)): Path<(String, String)>) -> R {
     ok(apps.test_drain(&project, &did).await?)
+}
+
+async fn export_project(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
+    ok(apps.export_project(&project, body(&b)?).await?)
 }
 
 async fn drains(State(apps): S, Path(project): Path<String>) -> R {

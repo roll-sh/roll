@@ -712,6 +712,8 @@ export interface LogQuery {
 export const appsApi = {
   overview: () => call<Overview>("GET", "/v1/apps"),
   plan: (req: PlanRequest) => call<Plan>("POST", "/v1/apps/plan", req),
+  /** The project as roll.toml: `databases` names what its services link (`{"postgres:<id>": "db"}`). */
+  exportProject: (project: string, databases: Record<string, string>) => call<{ roll_toml: string; notes: string[] }>("POST", `/v1/apps/projects/${enc(project)}/export`, { databases }),
   /** A roll.toml or Compose file read as a project (nothing made). */
   importProject: (file: { roll_toml: string } | { compose: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
 

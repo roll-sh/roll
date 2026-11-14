@@ -1026,7 +1026,15 @@ again. A Compose file is read on the server, so its aliases are counted as they'
 any value is built: past 100,000 nodes it's refused (a few KB of YAML aliases can be gigabytes). A `root` service is made as an
 upload service: the browser can't send a directory, so `roll up --all` uploads it. A Compose
 file's roll.toml can be saved from there. The plan is tested in `import.test.ts`, the route in
-`a_compose_file_is_read_as_a_project_without_making_anything`. The plan, the checks and the import are unit-tested in roll-cli and apps-build, and the whole run was
+`a_compose_file_is_read_as_a_project_without_making_anything`. The other way (Fly's `fly config save`):
+`POST …/projects/{project}/export` (`roll apps export [-o roll.toml]`, Project settings →
+Services → Download roll.toml) writes the project as that file, its services' sources and
+branches, the run settings that differ from a new service's, and the postgres and redis
+databases they link (named by the caller, who lists those products; roll apps keeps their ids).
+A value is never written: variables go by name in the file's header, with what a file doesn't
+declare (other links, an upload service's directory). It's parsed back before it's answered, so
+what's written is what `roll up --all` and the import read.
+`a_project_is_written_as_roll_toml_that_reads_back`. The plan, the checks and the import are unit-tested in roll-cli and apps-build, and the whole run was
 checked against a live rolld (apps and Redis on Docker, 2026-11-13): the plan, a Redis database
 made and placed, the image service made with its link, port and variables and deployed, and a
 second run finding everything there. The calls are the API's routes
@@ -1804,44 +1812,42 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (a second product review of the experience, a product review of what one engineer can close here now, bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **A project as roll.toml** (Fly's `fly config save`): `roll apps export` and Project settings'
-   Download, parsed back with `parse_project` in its test; variables by name only.
-2. **More builds**: Elixir/Phoenix, Deno and .NET providers, and `NothingDetected` naming what it
+1. **More builds**: Elixir/Phoenix, Deno and .NET providers, and `NothingDetected` naming what it
    did find (`mix.exs`, `deno.json`, `*.csproj`).
-3. **The project Logs view in a browser**: checked by typecheck and the suite only (rolld wasn't
+2. **The project Logs view in a browser**: checked by typecheck and the suite only (rolld wasn't
    built when it landed); look at it against a live rolld with several services, phone width too.
-4. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+3. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-5. **Region**: the region shown on the overview and each environment, defaulting to the project's
+4. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-6. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+5. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-7. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+6. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-8. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+7. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-9. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+8. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-10. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-11. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+9. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+10. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-12. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+11. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-13. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+12. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-14. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+13. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-15. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+14. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

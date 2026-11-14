@@ -28,6 +28,7 @@ pub mod config;
 pub mod cron;
 pub mod deploy;
 pub mod drains;
+pub mod export;
 pub mod integrations;
 pub mod jobs;
 pub mod live;

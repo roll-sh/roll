@@ -3347,3 +3347,24 @@ async fn a_failed_cron_run_is_retried_and_only_the_last_failure_is_an_incident()
     let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{cid}"), Some(json!({ "run": {"retries": 9} }))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
 }
+
+/// A project written as roll.toml reads back as the project: its services, their sources and the
+/// settings that differ from a new one's, a variable by name and never its value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_project_is_written_as_roll_toml_that_reads_back() {
+    let w = world().await;
+    let (web, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1, "health_path": "/healthz"})).await;
+    let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "nightly", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "0 3 * * *"} }))).await;
+    assert!(cron["id"].is_string(), "{cron}");
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{}/environments/production/variables", web["id"].as_str().unwrap()), Some(json!({"set": {"API_KEY": "sk-live-123"}}))).await;
+    let (st, out) = call(&w.api, "POST", &format!("/v1/apps/projects/{}/export", w.project), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::OK, "{out}");
+    let text = out["roll_toml"].as_str().unwrap();
+    assert!(text.contains("API_KEY") && !text.contains("sk-live-123"), "a variable by name, never its value:\n{text}");
+    // Read back by the parser roll up --all and the import use.
+    let (st, back) = call(&w.api, "POST", "/v1/apps/import", Some(json!({ "roll_toml": text }))).await;
+    assert_eq!(st, StatusCode::OK, "{back}\n{text}");
+    assert_eq!(back["apps"]["web"]["source"], json!({"kind": "image", "image": "nginx:1.27"}), "{back}");
+    assert_eq!((back["apps"]["web"]["run"]["port"].as_u64(), back["apps"]["web"]["run"]["min_instances"].as_u64(), back["apps"]["web"]["run"]["health_path"].as_str()), (Some(80), Some(1), Some("/healthz")), "{back}");
+    assert_eq!((back["apps"]["nightly"]["run"]["type"].as_str(), back["apps"]["nightly"]["run"]["schedule"].as_str()), (Some("cron"), Some("0 3 * * *")), "{back}");
+}

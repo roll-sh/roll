@@ -1056,6 +1056,8 @@ static ROWS: &[Row] = &[
     // runtime output elsewhere and its signing secret comes back once: reveal. The URL is never
     // answered (only its host).
     row("GET", "/v1/apps/projects/{project}/drains", "apps", R, one(&["project"], "project")),
+    // Its services as roll.toml: settings and variables' names, never a value.
+    row("POST", "/v1/apps/projects/{project}/export", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/drains/{did}", "apps", W, one(&["project"], "project")),
     // An edit can send more out (another source, every environment): reveal, as making one is.

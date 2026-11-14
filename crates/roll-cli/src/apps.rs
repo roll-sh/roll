@@ -608,6 +608,19 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// The project as roll.toml (Fly's `fly config save`): its services, the settings that differ
+    /// from a new one's, and the databases they link; variables by name only. Printed, or
+    /// written with `-o` (`roll up --all` makes what's missing from it).
+    Export {
+        /// The project (default: this directory's link's).
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        /// Write it here (refused if it exists, unless `--force`).
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+        #[arg(long, requires = "output")]
+        force: bool,
+    },
     /// A Compose file as roll.toml's `[apps]` and `[databases]` (Railway's Compose import):
     /// printed, or appended to ./roll.toml with `--write`; `roll up --all` applies it.
     ImportCompose {
@@ -2236,6 +2249,34 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 Some(code) => std::process::exit(code),
                 None => bail!("{} was killed by a signal", command[0]),
             }
+        }
+        AppsCmd::Export { project, output, force } => {
+            let project = match project {
+                Some(p) => project_id(api, &p).await?,
+                None => match find_link(&std::env::current_dir()?) {
+                    Some(l) => s(&l["project"]),
+                    None => bail!("which project? pass --project, or run it in a directory linked to one of its services"),
+                },
+            };
+            // The databases' names from their products (roll apps keeps their ids).
+            let mut names = serde_json::Map::new();
+            for (kind, path) in [("postgres", "/v1/projects"), ("redis", "/v1/redis/databases")] {
+                for d in api.get(path).await.ok().and_then(|v| v.as_array().cloned()).unwrap_or_default() {
+                    names.insert(format!("{kind}:{}", s(&d["id"])), d["name"].clone());
+                }
+            }
+            let out = api.post(&format!("/v1/apps/projects/{}/export", enc(&project)), json!({ "databases": names })).await?;
+            let text = s(&out["roll_toml"]);
+            match output {
+                Some(path) => {
+                    anyhow::ensure!(force || !path.exists(), "{} exists: --force writes over it", path.display());
+                    std::fs::write(&path, &text)?;
+                    eprintln!("wrote {}", path.display());
+                }
+                None if json_out => println!("{}", serde_json::to_string_pretty(&out)?),
+                None => print!("{text}"),
+            }
+            return Ok(());
         }
         AppsCmd::Delete { target, yes } => {
             let svc = service(api, &target).await?;
