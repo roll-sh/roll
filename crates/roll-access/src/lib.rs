@@ -754,6 +754,22 @@ impl Access {
     /// Nothing without accounts or a runtime.
     /// At most [`MAIL_PER_HOUR`] mails a person an hour on a node, and `key`'s at most once per its
     /// interval: what's held back is on roll's pages.
+    /// Tell every admin (a person's token waits for one), each held back by the same mail gate.
+    pub(crate) fn tell_admins(self: &Arc<Self>, key: &str, subject: String, text: String) {
+        let (Some(people), Ok(rt)) = (self.people.get().cloned(), tokio::runtime::Handle::try_current()) else { return };
+        let (me, key) = (self.clone(), key.to_string());
+        rt.spawn(async move {
+            match people.admins().await {
+                Ok(admins) => {
+                    for admin in admins {
+                        me.tell(Some(&admin), Some((&key, 0)), subject.clone(), text.clone());
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "listing admins to tell"),
+            }
+        });
+    }
+
     fn tell(&self, user: Option<&str>, key: Option<(&str, i64)>, subject: String, text: String) {
         let (Some(user), Some(people), Ok(rt)) = (user, self.people.get().cloned(), tokio::runtime::Handle::try_current()) else { return };
         if !self.mail_gate.lock().unwrap_or_else(|e| e.into_inner()).admit(user, key, code_sql::now_ms()) {

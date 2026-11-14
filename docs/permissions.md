@@ -559,6 +559,7 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   A person's own token whose rules reach one of them, or that asks for anything else, is made
   `pending`: it answers 401 `pending_approval` until an admin approves it
   (`POST /v1/access/tokens/{id}/approve`) or denies it (`…/deny`: revoked, "an admin denied it").
+  Admins are mailed when one waits (who asked, what it may do, where to decide; never a secret).
   Only an admin decides, never the person or a token, and the person is mailed either way
   (`roll token list --pending`, `roll token approve|deny <id>` from the CLI).
   Widening an approved token's rules past the policy makes it wait again. One their token makes

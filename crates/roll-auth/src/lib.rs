@@ -241,6 +241,11 @@ pub trait Sessions: Send + Sync + 'static {
         let _ = (user, subject, text);
         Box::pin(async { Ok(()) })
     }
+    /// The admins who can sign in now (ids), to be told of what waits for one (a person's token
+    /// waiting for approval). None without accounts.
+    fn admins(&self) -> BoxFuture<'_, Result<Vec<String>, String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
 }
 
 /// In the request an [`Authorizer`] decides: who the gate's rules let call its route, so a user's
