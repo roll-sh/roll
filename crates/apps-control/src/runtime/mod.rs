@@ -165,6 +165,9 @@ pub trait Runtime: Send + Sync {
     async fn adopt(&self, _spec: &InstanceSpec, _log: LogSink) -> Option<Adopted> {
         None
     }
+    /// Clean up what a node that died left behind outside its instances (Fargate: environment
+    /// files no task will read). Every ten minutes, on every node (it only deletes).
+    async fn sweep(&self) {}
     /// Whether what one node made, another can see and run (Fargate; not one host's Docker per
     /// node): a node giving a service up then leaves its instances for the next to keep.
     fn shares_instances(&self) -> bool {

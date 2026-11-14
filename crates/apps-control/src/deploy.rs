@@ -1422,6 +1422,10 @@ impl Apps {
                 self.flush_meters(false).await;
                 self.cron_pass(code_sql::now_ms()).await;
             }
+            if n.is_multiple_of(600) {
+                let runtime = self.deps.runtime.clone();
+                tokio::spawn(async move { runtime.sweep().await });
+            }
             if n.is_multiple_of(60) {
                 self.sweep_uploads().await;
                 for l in self.lives().into_iter().filter(|l| self.owns(&l.service)) {

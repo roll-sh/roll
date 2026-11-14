@@ -205,6 +205,20 @@ impl Bucket {
         Ok(())
     }
 
+    /// The keys under `prefix` last written more than `age` ago.
+    pub(crate) async fn older_than(&self, prefix: &str, age: std::time::Duration) -> Vec<String> {
+        use futures::TryStreamExt;
+        use object_store::ObjectStore;
+        let cutoff = chrono::Utc::now() - chrono::Duration::from_std(age).unwrap_or(chrono::Duration::zero());
+        match self.0.list(Some(&ObjPath::from(prefix))).try_collect::<Vec<_>>().await {
+            Ok(objects) => objects.into_iter().filter(|o| o.last_modified < cutoff).map(|o| o.location.to_string()).collect(),
+            Err(e) => {
+                warn!(prefix, error = %e, "apps: listing objects");
+                Vec::new()
+            }
+        }
+    }
+
     pub(crate) async fn delete(&self, key: &str) {
         match self.0.delete(&ObjPath::from(key)).await {
             Ok(()) | Err(object_store::Error::NotFound { .. }) => {}

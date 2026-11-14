@@ -334,6 +334,7 @@ type Objects = Arc<Mutex<BTreeMap<String, Vec<u8>>>>;
 
 async fn s3(State(o): State<Objects>, req: Request<Body>) -> Response {
     let key = req.uri().path().trim_start_matches('/').to_string();
+    let uri_query = req.uri().query().unwrap_or("").to_string();
     let bulk_delete = req.uri().query().is_some_and(|q| q.split('&').any(|p| p == "delete" || p == "delete="));
     let method = req.method().clone();
     let body = axum::body::to_bytes(req.into_body(), 1 << 30).await.unwrap();
@@ -356,6 +357,13 @@ async fn s3(State(o): State<Objects>, req: Request<Body>) -> Response {
         Method::DELETE => {
             o.lock().remove(&key);
             StatusCode::NO_CONTENT.into_response()
+        }
+        // ListObjectsV2 (`?list-type=2&prefix=…`): every object written long ago.
+        Method::GET if uri_query.contains("list-type=2") => {
+            let prefix = uri_query.split('&').find_map(|p| p.strip_prefix("prefix=")).map(|p| percent_encoding::percent_decode_str(p).decode_utf8_lossy().into_owned()).unwrap_or_default();
+            let keys: Vec<String> = o.lock().keys().filter_map(|k| k.strip_prefix(&format!("{key}/")).map(str::to_string)).filter(|k| k.starts_with(&prefix)).collect();
+            let contents: String = keys.iter().map(|k| format!("<Contents><Key>{k}</Key><LastModified>2020-01-01T00:00:00.000Z</LastModified><ETag>\"e\"</ETag><Size>1</Size></Contents>")).collect();
+            (StatusCode::OK, format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult><Name>{key}</Name><Prefix>{prefix}</Prefix><KeyCount>{}</KeyCount><IsTruncated>false</IsTruncated>{contents}</ListBucketResult>", keys.len())).into_response()
         }
         _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
     }
@@ -721,4 +729,16 @@ async fn a_restart_keeps_the_running_task() {
     // It's this process's own now: a sleep stops it.
     w.apps.live(&id, "production").sleep().await;
     assert_eq!(w.fake.calls("StopTask").len(), stops + 1);
+}
+
+/// An environment file a node wrote and died before deleting (its variables, secrets among
+/// them) is swept: nothing waits on it any more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environment_file_a_dead_node_left_is_swept() {
+    let w = world().await;
+    w.fake.objects.lock().insert(format!("{BUCKET}/apps/env/roll-apps-x-production-abcdef-0-zz.env"), b"SECRET=left-behind".to_vec());
+    w.fake.objects.lock().insert(format!("{BUCKET}/apps/other/keep.txt"), b"not an env file".to_vec());
+    w.apps.deps.runtime.sweep().await;
+    assert_eq!(w.fake.keys("apps/env/"), Vec::<String>::new());
+    assert_eq!(w.fake.keys("apps/other/"), vec!["apps/other/keep.txt".to_string()], "only environment files");
 }

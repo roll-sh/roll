@@ -678,6 +678,18 @@ impl Runtime for Fargate {
         true
     }
 
+    /// Environment files (variables, secrets among them) a node wrote for a task and died
+    /// before deleting: older than twice the start timeout, a task either read it long ago or
+    /// never will. This node's own still waiting are spared.
+    async fn sweep(&self) {
+        let ours: Vec<String> = self.instances.lock().values().filter_map(|i| i.task.as_ref().and_then(|t| t.env_key.clone())).collect();
+        for key in self.bucket.older_than(&format!("{}env/", self.cfg.prefix), self.cfg.start_timeout * 2).await {
+            if !ours.contains(&key) {
+                self.bucket.delete(&key).await;
+            }
+        }
+    }
+
     async fn running(&self, name: &str) -> bool {
         let Some(s) = self.started(name) else { return false };
         if let Some((at, up)) = s.seen
