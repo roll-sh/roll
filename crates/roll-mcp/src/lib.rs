@@ -612,14 +612,15 @@ fn initialize(ctx: &Ctx, params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false }, "completions": {} },
         "serverInfo": { "name": "roll", "title": "roll", "version": env!("CARGO_PKG_VERSION"), "icons": [server_icon()] },
-        "instructions": format!(
+        // The token's name is a person's: what it might hide stays visible.
+        "instructions": visible(&format!(
             "roll: serverless Postgres, Redis, storage, streams, queues, tasks, NoSQL, source control (roll code) and coding agents, grouped into workspace projects. \
 Tools are named <product>_<verb>. Ids are each product's own (Postgres projects prj_…, Redis rdb_…, streams st_…, buckets by name, repos owner/name). \
 {who} Some actions ask a person first: such a call waits up to a minute, then returns status \"approval_pending\" with an approval id and a link. \
 Tell the user, then call the same tool again with the same arguments plus \"approval\": \"apr_…\": it waits for the decision and runs once approved. \
 postgres_query is read-only (postgres_execute changes data). Credentials come back as [redacted] unless the token may reveal them. \
 Read the resource roll://access/me for what this connection may do, in words, and roll://guide for more."
-        ),
+        )),
     })
 }
 
