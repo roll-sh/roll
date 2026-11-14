@@ -1,0 +1,333 @@
+{
+  "diff": {
+    "es": "dfs_query",
+    "path": ".error.phase",
+    "roll": "query"
+  },
+  "found": {
+    "case": 62,
+    "case_seed": 4000074,
+    "seed": 4
+  },
+  "roll": {
+    "body": {
+      "error": {
+        "caused_by": {
+          "caused_by": {
+            "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [TermsAggregatorFactory]",
+            "type": "illegal_argument_exception"
+          },
+          "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [TermsAggregatorFactory]",
+          "type": "illegal_argument_exception"
+        },
+        "failed_shards": [
+          {
+            "index": "diff-m5-a",
+            "node": "0Zr0L-l4THmSU_MWbe51EQ",
+            "reason": {
+              "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [TermsAggregatorFactory]",
+              "type": "illegal_argument_exception"
+            },
+            "shard": 0
+          },
+          {
+            "index": "diff-m5-b",
+            "node": "0Zr0L-l4THmSU_MWbe51EQ",
+            "reason": {
+              "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [TermsAggregatorFactory]",
+              "type": "illegal_argument_exception"
+            },
+            "shard": 0
+          }
+        ],
+        "grouped": true,
+        "phase": "query",
+        "reason": "all shards failed",
+        "root_cause": [
+          {
+            "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [TermsAggregatorFactory]",
+            "type": "illegal_argument_exception"
+          },
+          {
+            "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [TermsAggregatorFactory]",
+            "type": "illegal_argument_exception"
+          }
+        ],
+        "type": "search_phase_execution_exception"
+      },
+      "status": 400
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+  },
+  "signature": "POST _search .error.phase",
+  "steps": [
+    {
+      "body": {
+        "mappings": {
+          "properties": {
+            "date0": {
+              "format": "strict_date_optional_time||epoch_millis",
+              "type": "date"
+            },
+            "geo0": {
+              "type": "geo_point"
+            },
+            "int0": {
+              "type": "integer"
+            },
+            "kw0": {
+              "type": "keyword"
+            },
+            "long0": {
+              "type": "long"
+            },
+            "n": {
+              "properties": {
+                "kw0": {
+                  "type": "keyword"
+                },
+                "long0": {
+                  "type": "long"
+                },
+                "text0": {
+                  "analyzer": "simple",
+                  "fields": {
+                    "raw": {
+                      "ignore_above": 32,
+                      "type": "keyword"
+                    }
+                  },
+                  "type": "text"
+                }
+              },
+              "type": "nested"
+            },
+            "o": {
+              "properties": {
+                "int0": {
+                  "type": "integer"
+                },
+                "kw0": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "text0": {
+              "analyzer": "simple",
+              "term_vector": "with_positions_offsets",
+              "type": "text"
+            },
+            "text1": {
+              "analyzer": "stop",
+              "fields": {
+                "raw": {
+                  "ignore_above": 32,
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            },
+            "wild0": {
+              "type": "wildcard"
+            }
+          }
+        },
+        "settings": {
+          "number_of_replicas": 0,
+          "number_of_shards": 3,
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m5-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m5-a"
+    },
+    {
+      "body": {
+        "mappings": {
+          "properties": {
+            "date0": {
+              "format": "strict_date_optional_time||epoch_millis",
+              "type": "date"
+            },
+            "geo0": {
+              "type": "geo_point"
+            },
+            "int0": {
+              "type": "integer"
+            },
+            "kw0": {
+              "type": "keyword"
+            },
+            "long0": {
+              "type": "long"
+            },
+            "n": {
+              "properties": {
+                "kw0": {
+                  "type": "keyword"
+                },
+                "long0": {
+                  "type": "long"
+                },
+                "text0": {
+                  "analyzer": "simple",
+                  "fields": {
+                    "raw": {
+                      "ignore_above": 32,
+                      "type": "keyword"
+                    }
+                  },
+                  "type": "text"
+                }
+              },
+              "type": "nested"
+            },
+            "o": {
+              "properties": {
+                "int0": {
+                  "type": "integer"
+                },
+                "kw0": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "text0": {
+              "analyzer": "simple",
+              "term_vector": "with_positions_offsets",
+              "type": "text"
+            },
+            "text1": {
+              "analyzer": "stop",
+              "fields": {
+                "raw": {
+                  "ignore_above": 32,
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            },
+            "wild0": {
+              "type": "wildcard"
+            }
+          }
+        },
+        "settings": {
+          "number_of_replicas": 0,
+          "number_of_shards": 5,
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m5-b",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m5-b"
+    },
+    {
+      "body": {
+        "aggs": {
+          "terms_17": {
+            "aggs": {
+              "composite_19": {
+                "composite": {
+                  "sources": [
+                    {
+                      "h": {
+                        "histogram": {}
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "terms": {
+              "field": "o.int0"
+            }
+          }
+        }
+      },
+      "es": {
+        "body": {
+          "error": {
+            "caused_by": {
+              "caused_by": {
+                "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [TermsAggregatorFactory]",
+                "type": "illegal_argument_exception"
+              },
+              "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [TermsAggregatorFactory]",
+              "type": "illegal_argument_exception"
+            },
+            "failed_shards": [
+              {
+                "index": "diff-m5-a",
+                "node": "2MksL5cxRQqMwsHC8Xx-Sg",
+                "reason": {
+                  "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [TermsAggregatorFactory]",
+                  "type": "illegal_argument_exception"
+                },
+                "shard": 0
+              },
+              {
+                "index": "diff-m5-b",
+                "node": "2MksL5cxRQqMwsHC8Xx-Sg",
+                "reason": {
+                  "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [TermsAggregatorFactory]",
+                  "type": "illegal_argument_exception"
+                },
+                "shard": 0
+              }
+            ],
+            "grouped": true,
+            "phase": "dfs_query",
+            "reason": "all shards failed",
+            "root_cause": [
+              {
+                "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [TermsAggregatorFactory]",
+                "type": "illegal_argument_exception"
+              },
+              {
+                "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [TermsAggregatorFactory]",
+                "type": "illegal_argument_exception"
+              }
+            ],
+            "type": "search_phase_execution_exception"
+          },
+          "status": 400
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 400
+      },
+      "method": "POST",
+      "path": "/diff-m5-a,diff-m5-b/_search?search_type=dfs_query_then_fetch"
+    }
+  ]
+}

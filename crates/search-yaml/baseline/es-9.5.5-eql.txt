@@ -1,0 +1,42 @@
+# Tests of Elasticsearch 9.5.5's `eql` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (basic).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+eql:eql/10_basic/EQL status API
+eql:eql/10_basic/Error message missing column - did you mean functionality
+eql:eql/10_basic/Error message missing column - no suggestion
+eql:eql/10_basic/Execute EQL events query with fields filtering
+eql:eql/10_basic/Execute EQL events query with filter_path
+eql:eql/10_basic/Execute EQL events query with wildcard (*) fields filtering.
+eql:eql/10_basic/Execute EQL sequence by default ignores unavailable index pattern.
+eql:eql/10_basic/Execute EQL sequence by default ignores unavailable index.
+eql:eql/10_basic/Execute EQL sequence with boolean key.
+eql:eql/10_basic/Execute EQL sequence with custom format for timestamp field.
+eql:eql/10_basic/Execute EQL sequence with fields filtering.
+eql:eql/10_basic/Execute EQL sequence with filter_path
+eql:eql/10_basic/Execute EQL sequence with numeric key.
+eql:eql/10_basic/Execute EQL sequence with string key.
+eql:eql/10_basic/Execute EQL sequence with wildcard (*) fields filtering.
+eql:eql/10_basic/Execute query shard failures
+eql:eql/10_basic/Execute query shard failures and with allow_partial_search_results
+eql:eql/10_basic/Execute query shard failures and with allow_partial_search_results as request param
+eql:eql/10_basic/Execute sequence with shard failures and allow_partial_search_results=true
+eql:eql/10_basic/Execute sequence with shard failures, allow_partial_search_results=true and allow_partial_sequence_results=true
+eql:eql/10_basic/Execute sequence with shard failures, allow_partial_search_results=true and allow_partial_sequence_results=true as query params
+eql:eql/10_basic/Execute some EQL in async mode.
+eql:eql/10_basic/Execute some EQL.
+eql:eql/10_basic/Sequence checking correct join key ordering.
+eql:eql/10_basic/Sequence with missing events.
+eql:eql/20_runtime_mappings/Execute EQL events query with search time ip runtime field
+eql:eql/20_runtime_mappings/Execute EQL events query with search time keyword runtime field
+eql:eql/20_runtime_mappings/Execute EQL events query with search time runtime field overriding mapping level runtime field
+eql:eql/20_runtime_mappings/Execute EQL sequence with search time runtime fields overriding mapping level runtime field
+eql:eql/20_runtime_mappings/Validate valid runtime mappings request
+eql:eql/30_async_missing_events/Execute async EQL with missing events
+eql:eql/40_tsdb/test* where counter
+eql:eql/40_tsdb/test* where true
+eql:eql/40_tsdb/test1 where counter
+eql:eql/40_tsdb/test2 where counter
+eql:eql/50_samples/Execute some EQL.
+eql:eql/60_no_exact/Case insensitive match on text field
+eql:eql/70_functions_on_keys/Test one join key
+eql:eql/70_functions_on_keys/Test two join keys 

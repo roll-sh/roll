@@ -1,0 +1,1926 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "PUT",
+      "path": "/sgx",
+      "body": {
+        "settings": {
+          "number_of_replicas": 0,
+          "refresh_interval": -1
+        },
+        "mappings": {
+          "properties": {
+            "c": {
+              "type": "completion"
+            },
+            "t": {
+              "type": "text",
+              "fields": {
+                "raw": {
+                  "type": "keyword",
+                  "ignore_above": 4
+                }
+              }
+            },
+            "n": {
+              "type": "long"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "sgx"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk",
+      "lines": [
+        {
+          "index": {
+            "_index": "sgx",
+            "_id": "1",
+            "routing": "x"
+          }
+        },
+        {
+          "c": "stream cherry",
+          "t": "longer text",
+          "n": 5,
+          "z": null
+        },
+        {
+          "index": {
+            "_index": "sgx",
+            "_id": "2"
+          }
+        },
+        {
+          "c": [
+            "Runs",
+            "fast dog"
+          ],
+          "t": "x"
+        },
+        {
+          "index": {
+            "_index": "sgx",
+            "_id": "3"
+          }
+        },
+        {
+          "c": {
+            "input": [
+              "runs"
+            ],
+            "weight": 3
+          }
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 200,
+          "items": [
+            {
+              "index": {
+                "_index": "sgx",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "sgx",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "sgx",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_refresh",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "suggest": {
+          "s": {
+            "prefix": "st",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "st",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "stream cherry",
+                    "_index": "sgx",
+                    "_id": "1",
+                    "_score": 1.0,
+                    "_ignored": [
+                      "t.raw"
+                    ],
+                    "_routing": "x",
+                    "_source": {
+                      "c": "stream cherry",
+                      "t": "longer text",
+                      "n": 5,
+                      "z": null
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "_source": false,
+        "suggest": {
+          "s": {
+            "prefix": "st",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "st",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "stream cherry",
+                    "_index": "sgx",
+                    "_id": "1",
+                    "_score": 1.0,
+                    "_ignored": [
+                      "t.raw"
+                    ],
+                    "_routing": "x"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "_source": [
+          "t"
+        ],
+        "suggest": {
+          "s": {
+            "prefix": "st",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "st",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "stream cherry",
+                    "_index": "sgx",
+                    "_id": "1",
+                    "_score": 1.0,
+                    "_ignored": [
+                      "t.raw"
+                    ],
+                    "_routing": "x",
+                    "_source": {
+                      "t": "longer text"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "_source": {
+          "excludes": [
+            "z"
+          ]
+        },
+        "suggest": {
+          "s": {
+            "prefix": "st",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "st",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "stream cherry",
+                    "_index": "sgx",
+                    "_id": "1",
+                    "_score": 1.0,
+                    "_ignored": [
+                      "t.raw"
+                    ],
+                    "_routing": "x",
+                    "_source": {
+                      "c": "stream cherry",
+                      "t": "longer text",
+                      "n": 5
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "stored_fields": [
+          "_none_"
+        ],
+        "suggest": {
+          "s": {
+            "prefix": "st",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "st",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "stream cherry",
+                    "_index": "sgx",
+                    "_score": 1.0
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "stored_fields": [
+          "t"
+        ],
+        "suggest": {
+          "s": {
+            "prefix": "st",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "st",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "stream cherry",
+                    "_index": "sgx",
+                    "_id": "1",
+                    "_score": 1.0,
+                    "_ignored": [
+                      "t.raw"
+                    ],
+                    "_routing": "x"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "docvalue_fields": [
+          "n"
+        ],
+        "suggest": {
+          "s": {
+            "prefix": "st",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "st",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "stream cherry",
+                    "_index": "sgx",
+                    "_id": "1",
+                    "_score": 1.0,
+                    "_ignored": [
+                      "t.raw"
+                    ],
+                    "_routing": "x",
+                    "_source": {
+                      "c": "stream cherry",
+                      "t": "longer text",
+                      "n": 5,
+                      "z": null
+                    },
+                    "fields": {
+                      "n": [
+                        5
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "fields": [
+          "n"
+        ],
+        "suggest": {
+          "s": {
+            "prefix": "st",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "st",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "stream cherry",
+                    "_index": "sgx",
+                    "_id": "1",
+                    "_score": 1.0,
+                    "_ignored": [
+                      "t.raw"
+                    ],
+                    "_routing": "x",
+                    "_source": {
+                      "c": "stream cherry",
+                      "t": "longer text",
+                      "n": 5,
+                      "z": null
+                    },
+                    "fields": {
+                      "n": [
+                        5
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "version": true,
+        "seq_no_primary_term": true,
+        "suggest": {
+          "s": {
+            "prefix": "st",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "st",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "stream cherry",
+                    "_index": "sgx",
+                    "_id": "1",
+                    "_version": 1,
+                    "_seq_no": 0,
+                    "_primary_term": 1,
+                    "_score": 1.0,
+                    "_ignored": [
+                      "t.raw"
+                    ],
+                    "_routing": "x",
+                    "_source": {
+                      "c": "stream cherry",
+                      "t": "longer text",
+                      "n": 5,
+                      "z": null
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "size": 0,
+        "suggest": {
+          "s": {
+            "prefix": "st",
+            "completion": {
+              "field": "c"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "st",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "stream cherry",
+                    "_index": "sgx",
+                    "_id": "1",
+                    "_score": 1.0,
+                    "_ignored": [
+                      "t.raw"
+                    ],
+                    "_routing": "x",
+                    "_source": {
+                      "c": "stream cherry",
+                      "t": "longer text",
+                      "n": 5,
+                      "z": null
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "query": {
+          "term": {
+            "c": "stream cherry"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "query": {
+          "term": {
+            "c": "stream\u001fcherry"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0925692,
+            "hits": [
+              {
+                "_index": "sgx",
+                "_id": "1",
+                "_score": 1.0925692,
+                "_ignored": [
+                  "t.raw"
+                ],
+                "_routing": "x",
+                "_source": {
+                  "c": "stream cherry",
+                  "t": "longer text",
+                  "n": 5,
+                  "z": null
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "query": {
+          "match": {
+            "c": "stream cherry"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0925692,
+            "hits": [
+              {
+                "_index": "sgx",
+                "_id": "1",
+                "_score": 1.0925692,
+                "_ignored": [
+                  "t.raw"
+                ],
+                "_routing": "x",
+                "_source": {
+                  "c": "stream cherry",
+                  "t": "longer text",
+                  "n": 5,
+                  "z": null
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "query": {
+          "match": {
+            "c": "stream"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "runs"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.52354836,
+            "hits": [
+              {
+                "_index": "sgx",
+                "_id": "3",
+                "_score": 0.52354836,
+                "_source": {
+                  "c": {
+                    "input": [
+                      "runs"
+                    ],
+                    "weight": 3
+                  }
+                }
+              },
+              {
+                "_index": "sgx",
+                "_id": "2",
+                "_score": 0.39019167,
+                "_source": {
+                  "c": [
+                    "Runs",
+                    "fast dog"
+                  ],
+                  "t": "x"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "query": {
+          "multi_match": {
+            "query": "runs",
+            "fields": [
+              "c*"
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.52354836,
+            "hits": [
+              {
+                "_index": "sgx",
+                "_id": "3",
+                "_score": 0.52354836,
+                "_source": {
+                  "c": {
+                    "input": [
+                      "runs"
+                    ],
+                    "weight": 3
+                  }
+                }
+              },
+              {
+                "_index": "sgx",
+                "_id": "2",
+                "_score": 0.39019167,
+                "_source": {
+                  "c": [
+                    "Runs",
+                    "fast dog"
+                  ],
+                  "t": "x"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "query": {
+          "simple_query_string": {
+            "query": "runs",
+            "fields": [
+              "c"
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.52354836,
+            "hits": [
+              {
+                "_index": "sgx",
+                "_id": "3",
+                "_score": 0.52354836,
+                "_source": {
+                  "c": {
+                    "input": [
+                      "runs"
+                    ],
+                    "weight": 3
+                  }
+                }
+              },
+              {
+                "_index": "sgx",
+                "_id": "2",
+                "_score": 0.39019167,
+                "_source": {
+                  "c": [
+                    "Runs",
+                    "fast dog"
+                  ],
+                  "t": "x"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "query": {
+          "match": {
+            "c": {
+              "query": "runs",
+              "analyzer": "standard"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.52354836,
+            "hits": [
+              {
+                "_index": "sgx",
+                "_id": "3",
+                "_score": 0.52354836,
+                "_source": {
+                  "c": {
+                    "input": [
+                      "runs"
+                    ],
+                    "weight": 3
+                  }
+                }
+              },
+              {
+                "_index": "sgx",
+                "_id": "2",
+                "_score": 0.39019167,
+                "_source": {
+                  "c": [
+                    "Runs",
+                    "fast dog"
+                  ],
+                  "t": "x"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "query": {
+          "match": {
+            "c": {
+              "query": "Runs",
+              "fuzziness": 1
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "failed to create query: Can only use fuzzy queries on keyword and text fields - not on [c] which is of type [completion]",
+                "index_uuid": "NjeaMfzHRoK3vLi3wXmwdg",
+                "index": "sgx"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "sgx",
+                "node": "LQYzGNGJSaKKVGO8RlNtFg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "failed to create query: Can only use fuzzy queries on keyword and text fields - not on [c] which is of type [completion]",
+                  "index_uuid": "NjeaMfzHRoK3vLi3wXmwdg",
+                  "index": "sgx",
+                  "caused_by": {
+                    "type": "illegal_argument_exception",
+                    "reason": "Can only use fuzzy queries on keyword and text fields - not on [c] which is of type [completion]"
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "query": {
+          "match_phrase_prefix": {
+            "c": "ru"
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "failed to create query: Can only use phrase prefix queries on text fields - not on [c] which is of type [completion]",
+                "index_uuid": "NjeaMfzHRoK3vLi3wXmwdg",
+                "index": "sgx"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "sgx",
+                "node": "LQYzGNGJSaKKVGO8RlNtFg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "failed to create query: Can only use phrase prefix queries on text fields - not on [c] which is of type [completion]",
+                  "index_uuid": "NjeaMfzHRoK3vLi3wXmwdg",
+                  "index": "sgx",
+                  "caused_by": {
+                    "type": "illegal_argument_exception",
+                    "reason": "Can only use phrase prefix queries on text fields - not on [c] which is of type [completion]"
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "query": {
+          "match_bool_prefix": {
+            "c": "ru"
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Can only use prefix queries on keyword, text and wildcard fields - not on [c] which is of type [completion]",
+                "index_uuid": "NjeaMfzHRoK3vLi3wXmwdg",
+                "index": "sgx"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "sgx",
+                "node": "LQYzGNGJSaKKVGO8RlNtFg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Can only use prefix queries on keyword, text and wildcard fields - not on [c] which is of type [completion]",
+                  "index_uuid": "NjeaMfzHRoK3vLi3wXmwdg",
+                  "index": "sgx"
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "query": {
+          "combined_fields": {
+            "query": "runs",
+            "fields": [
+              "c"
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "failed to create query: Field [c] of type [completion] does not support [combined_fields] queries",
+                "index_uuid": "NjeaMfzHRoK3vLi3wXmwdg",
+                "index": "sgx"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "sgx",
+                "node": "LQYzGNGJSaKKVGO8RlNtFg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "failed to create query: Field [c] of type [completion] does not support [combined_fields] queries",
+                  "index_uuid": "NjeaMfzHRoK3vLi3wXmwdg",
+                  "index": "sgx",
+                  "caused_by": {
+                    "type": "illegal_argument_exception",
+                    "reason": "Field [c] of type [completion] does not support [combined_fields] queries"
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "query": {
+          "match": {
+            "c": "fast dog"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.81427324,
+            "hits": [
+              {
+                "_index": "sgx",
+                "_id": "2",
+                "_score": 0.81427324,
+                "_source": {
+                  "c": [
+                    "Runs",
+                    "fast dog"
+                  ],
+                  "t": "x"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "query": {
+          "match_phrase": {
+            "c": "fast dog"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.81427324,
+            "hits": [
+              {
+                "_index": "sgx",
+                "_id": "2",
+                "_score": 0.81427324,
+                "_source": {
+                  "c": [
+                    "Runs",
+                    "fast dog"
+                  ],
+                  "t": "x"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "query": {
+          "terms": {
+            "c": [
+              "stream\u001fcherry"
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "sgx",
+                "_id": "1",
+                "_score": 1.0,
+                "_ignored": [
+                  "t.raw"
+                ],
+                "_routing": "x",
+                "_source": {
+                  "c": "stream cherry",
+                  "t": "longer text",
+                  "n": 5,
+                  "z": null
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "query": {
+          "exists": {
+            "field": "c"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "sgx",
+                "_id": "1",
+                "_score": 1.0,
+                "_ignored": [
+                  "t.raw"
+                ],
+                "_routing": "x",
+                "_source": {
+                  "c": "stream cherry",
+                  "t": "longer text",
+                  "n": 5,
+                  "z": null
+                }
+              },
+              {
+                "_index": "sgx",
+                "_id": "2",
+                "_score": 1.0,
+                "_source": {
+                  "c": [
+                    "Runs",
+                    "fast dog"
+                  ],
+                  "t": "x"
+                }
+              },
+              {
+                "_index": "sgx",
+                "_id": "3",
+                "_score": 1.0,
+                "_source": {
+                  "c": {
+                    "input": [
+                      "runs"
+                    ],
+                    "weight": 3
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "size": 0,
+        "suggest": {
+          "p": {
+            "text": "lnger txt",
+            "phrase": {
+              "field": "t",
+              "smoothing": {
+                "nope": {}
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "illegal_argument_exception",
+                "reason": "suggester[phrase] doesn't support object field [nope]"
+              }
+            ],
+            "type": "illegal_argument_exception",
+            "reason": "suggester[phrase] doesn't support object field [nope]"
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "size": 0,
+        "suggest": {
+          "p": {
+            "text": "lnger txt",
+            "phrase": {
+              "field": "t",
+              "smoothing": {
+                "linear": {}
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "illegal_argument_exception",
+                "reason": "linear smoothing lambdas must sum to 1"
+              }
+            ],
+            "type": "illegal_argument_exception",
+            "reason": "linear smoothing lambdas must sum to 1"
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "size": 0,
+        "suggest": {
+          "p": {
+            "text": "lnger txt",
+            "phrase": {
+              "field": "t",
+              "smoothing": {
+                "laplace": {},
+                "linear": {
+                  "trigram_lambda": 0.3,
+                  "bigram_lambda": 0.3,
+                  "unigram_lambda": 0.4
+                }
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "p": [
+              {
+                "text": "lnger txt",
+                "offset": 0,
+                "length": 9,
+                "options": [
+                  {
+                    "text": "longer txt",
+                    "score": 0.25297645
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sgx/_search",
+      "body": {
+        "size": 0,
+        "suggest": {
+          "p": {
+            "text": "lnger txt",
+            "phrase": {
+              "field": "t",
+              "smoothing": {
+                "laplace": {
+                  "alpha": 0.7
+                }
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "p": [
+              {
+                "text": "lnger txt",
+                "offset": 0,
+                "length": 9,
+                "options": [
+                  {
+                    "text": "longer txt",
+                    "score": 0.23251982
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/sgx",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,570 @@
+{
+  "description" : "Failure store rollover (::failures selector), selectors, health of data streams",
+  "steps" : [
+    {
+      "req" : "PUT /_index_template/esm-fst",
+      "body" : {
+        "index_patterns" : [
+          "esm-fs*"
+        ],
+        "data_stream" : { },
+        "template" : {
+          "settings" : {
+            "number_of_shards" : 2
+          },
+          "mappings" : {
+            "properties" : {
+              "count" : {
+                "type" : "long"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-fs1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-al-000001",
+      "body" : {
+        "aliases" : {
+          "esm-al" : {
+            "is_write_index" : true
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-al-000001"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-fs1::failures/_rollover",
+      "body" : {
+        "conditions" : {
+          "max_docs" : 1
+        }
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_state_exception",
+              "reason" : "Rolling over/initializing an empty failure store is only supported without conditions."
+            }
+          ],
+          "type" : "illegal_state_exception",
+          "reason" : "Rolling over/initializing an empty failure store is only supported without conditions."
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-fs1::failures/_rollover?dry_run=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : false,
+        "shards_acknowledged" : false,
+        "old_index" : "_none_",
+        "new_index" : ".fs-esm-fs1-2026.10.21-000002",
+        "rolled_over" : false,
+        "dry_run" : true,
+        "lazy" : false,
+        "conditions" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-fs1::failures/_rollover",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "old_index" : "_none_",
+        "new_index" : ".fs-esm-fs1-2026.10.21-000002",
+        "rolled_over" : true,
+        "dry_run" : false,
+        "lazy" : false,
+        "conditions" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /.fs-esm-fs1-*?expand_wildcards=all&flat_settings=true",
+      "status" : 200,
+      "response" : {
+        ".fs-esm-fs1-2026.10.21-000002" : {
+          "aliases" : { },
+          "mappings" : {
+            "dynamic" : "false",
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date"
+              },
+              "document" : {
+                "properties" : {
+                  "id" : {
+                    "type" : "keyword"
+                  },
+                  "index" : {
+                    "type" : "keyword"
+                  },
+                  "routing" : {
+                    "type" : "keyword"
+                  }
+                }
+              },
+              "error" : {
+                "properties" : {
+                  "message" : {
+                    "type" : "match_only_text"
+                  },
+                  "pipeline" : {
+                    "type" : "keyword"
+                  },
+                  "pipeline_trace" : {
+                    "type" : "keyword"
+                  },
+                  "processor_tag" : {
+                    "type" : "keyword"
+                  },
+                  "processor_type" : {
+                    "type" : "keyword"
+                  },
+                  "stack_trace" : {
+                    "type" : "text"
+                  },
+                  "type" : {
+                    "type" : "keyword"
+                  }
+                }
+              }
+            }
+          },
+          "settings" : {
+            "index.creation_date" : "1792574735566",
+            "index.failure_store.version" : "1",
+            "index.hidden" : "true",
+            "index.number_of_replicas" : "1",
+            "index.number_of_shards" : "2",
+            "index.provided_name" : ".fs-esm-fs1-2026.10.21-000002",
+            "index.routing.allocation.include._tier_preference" : "data_hot",
+            "index.uuid" : "B2p3rKxrRN6ujxKVwcnQ5Q",
+            "index.version.created" : "9111000"
+          },
+          "data_stream" : "esm-fs1"
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-fs1",
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "name" : "esm-fs1",
+            "timestamp_field" : {
+              "name" : "@timestamp"
+            },
+            "indices" : [
+              {
+                "index_name" : ".ds-esm-fs1-2026.10.21-000001",
+                "index_uuid" : "orWV8j0vRX2PbYRsiJdOGg",
+                "managed_by" : "Unmanaged",
+                "prefer_ilm" : true,
+                "index_mode" : "standard"
+              }
+            ],
+            "generation" : 2,
+            "status" : "YELLOW",
+            "template" : "esm-fst",
+            "next_generation_managed_by" : "Unmanaged",
+            "prefer_ilm" : true,
+            "hidden" : false,
+            "system" : false,
+            "allow_custom_routing" : false,
+            "replicated" : false,
+            "rollover_on_write" : false,
+            "index_mode" : "standard",
+            "settings" : { },
+            "mappings" : { },
+            "failure_store" : {
+              "enabled" : false,
+              "rollover_on_write" : false,
+              "indices" : [
+                {
+                  "index_name" : ".fs-esm-fs1-2026.10.21-000002",
+                  "index_uuid" : "B2p3rKxrRN6ujxKVwcnQ5Q",
+                  "managed_by" : "Data stream lifecycle"
+                }
+              ],
+              "lifecycle" : {
+                "enabled" : true,
+                "effective_retention" : "30d",
+                "retention_determined_by" : "default_failures_retention"
+              }
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-fs1::failures/_rollover?dry_run=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : false,
+        "shards_acknowledged" : false,
+        "old_index" : ".fs-esm-fs1-2026.10.21-000002",
+        "new_index" : ".fs-esm-fs1-2026.10.21-000003",
+        "rolled_over" : false,
+        "dry_run" : true,
+        "lazy" : false,
+        "conditions" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-fs1::failures/_rollover",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "old_index" : ".fs-esm-fs1-2026.10.21-000002",
+        "new_index" : ".fs-esm-fs1-2026.10.21-000003",
+        "rolled_over" : true,
+        "dry_run" : false,
+        "lazy" : false,
+        "conditions" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-fs1::data/_rollover?dry_run=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : false,
+        "shards_acknowledged" : false,
+        "old_index" : ".ds-esm-fs1-2026.10.21-000001",
+        "new_index" : ".ds-esm-fs1-2026.10.21-000004",
+        "rolled_over" : false,
+        "dry_run" : true,
+        "lazy" : false,
+        "conditions" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-fs1/_rollover",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "old_index" : ".ds-esm-fs1-2026.10.21-000001",
+        "new_index" : ".ds-esm-fs1-2026.10.21-000004",
+        "rolled_over" : true,
+        "dry_run" : false,
+        "lazy" : false,
+        "conditions" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-fs1",
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "name" : "esm-fs1",
+            "timestamp_field" : {
+              "name" : "@timestamp"
+            },
+            "indices" : [
+              {
+                "index_name" : ".ds-esm-fs1-2026.10.21-000001",
+                "index_uuid" : "orWV8j0vRX2PbYRsiJdOGg",
+                "managed_by" : "Unmanaged",
+                "prefer_ilm" : true,
+                "index_mode" : "standard"
+              },
+              {
+                "index_name" : ".ds-esm-fs1-2026.10.21-000004",
+                "index_uuid" : "YEJPhrhLSZi5R5GWITPjMQ",
+                "managed_by" : "Unmanaged",
+                "prefer_ilm" : true,
+                "index_mode" : "standard"
+              }
+            ],
+            "generation" : 4,
+            "status" : "YELLOW",
+            "template" : "esm-fst",
+            "next_generation_managed_by" : "Unmanaged",
+            "prefer_ilm" : true,
+            "hidden" : false,
+            "system" : false,
+            "allow_custom_routing" : false,
+            "replicated" : false,
+            "rollover_on_write" : false,
+            "index_mode" : "standard",
+            "settings" : { },
+            "mappings" : { },
+            "failure_store" : {
+              "enabled" : false,
+              "rollover_on_write" : false,
+              "indices" : [
+                {
+                  "index_name" : ".fs-esm-fs1-2026.10.21-000002",
+                  "index_uuid" : "B2p3rKxrRN6ujxKVwcnQ5Q",
+                  "managed_by" : "Data stream lifecycle"
+                },
+                {
+                  "index_name" : ".fs-esm-fs1-2026.10.21-000003",
+                  "index_uuid" : "pzb9fR7OQqqS6hYEaTqIMA",
+                  "managed_by" : "Data stream lifecycle"
+                }
+              ],
+              "lifecycle" : {
+                "enabled" : true,
+                "effective_retention" : "30d",
+                "retention_determined_by" : "default_failures_retention"
+              }
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-fs1::failures/_rollover?lazy=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : false,
+        "old_index" : ".fs-esm-fs1-2026.10.21-000003",
+        "new_index" : ".fs-esm-fs1-2026.10.21-000005",
+        "rolled_over" : false,
+        "dry_run" : false,
+        "lazy" : true,
+        "conditions" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-fs1?filter_path=**.failure_store.rollover_on_write,**.generation",
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "generation" : 4,
+            "failure_store" : {
+              "rollover_on_write" : true
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-al::failures/_rollover?dry_run=true",
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_state_exception",
+              "reason" : "Rolling over failure stores is only possible on data streams."
+            }
+          ],
+          "type" : "illegal_state_exception",
+          "reason" : "Rolling over failure stores is only possible on data streams."
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-al::data/_rollover?dry_run=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : false,
+        "shards_acknowledged" : false,
+        "old_index" : "esm-al-000001",
+        "new_index" : "esm-al-000002",
+        "rolled_over" : false,
+        "dry_run" : true,
+        "lazy" : false,
+        "conditions" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-nope::failures/_rollover?dry_run=true",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "rollover target [esm-nope] does not exist"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "rollover target [esm-nope] does not exist"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-fs1::bogus/_rollover?dry_run=true",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: Invalid index name [esm-fs1::bogus], invalid usage of :: separator, [bogus] is not a recognized selector;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: Invalid index name [esm-fs1::bogus], invalid usage of :: separator, [bogus] is not a recognized selector;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-fs1::*/_rollover?dry_run=true",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: Invalid index name [esm-fs1::*], invalid usage of :: separator, [*] is not a recognized selector;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: Invalid index name [esm-fs1::*], invalid usage of :: separator, [*] is not a recognized selector;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health/esm-fs1",
+      "status" : 200,
+      "response" : {
+        "cluster_name" : "docker-cluster",
+        "status" : "yellow",
+        "timed_out" : false,
+        "number_of_nodes" : 1,
+        "number_of_data_nodes" : 1,
+        "active_primary_shards" : 4,
+        "active_shards" : 4,
+        "relocating_shards" : 0,
+        "initializing_shards" : 0,
+        "unassigned_shards" : 4,
+        "unassigned_primary_shards" : 0,
+        "delayed_unassigned_shards" : 0,
+        "number_of_pending_tasks" : 0,
+        "number_of_in_flight_fetch" : 0,
+        "task_max_waiting_in_queue_millis" : 0,
+        "active_shards_percent_as_number" : 50.0
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-al-000001",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/esm-fs1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-fst",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

@@ -1,0 +1,331 @@
+{
+  "description" : "A date_histogram over date_nanos with hard_bounds: the bounds (milliseconds) clip the field's nanosecond values, also where the buckets are counted from the points tree.",
+  "steps" : [
+    {
+      "req" : "PUT /esm-nanos",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "date_nanos"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-nanos"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-nanos/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"t\":\"2019-03-01T00:00:00.123456789Z\"}\n{\"index\":{\"_id\":\"2\"}}\n{\"t\":\"2019-11-30T12:00:00Z\"}\n{\"index\":{\"_id\":\"3\"}}\n{\"t\":\"2021-06-15T08:30:00.000000001Z\"}\n{\"index\":{\"_id\":\"4\"}}\n{\"t\":\"2021-12-31T23:59:59.999999999Z\"}\n",
+      "headers" : {
+        "content-type" : "application/x-ndjson"
+      },
+      "mask" : [
+        "took",
+        "items"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "esm-nanos",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-nanos",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-nanos",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-nanos",
+              "_id" : "4",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 3,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-nanos/_search",
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "y" : {
+            "date_histogram" : {
+              "field" : "t",
+              "calendar_interval" : "year",
+              "hard_bounds" : {
+                "min" : "2020-01-01"
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 102,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 4,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "aggregations" : {
+          "y" : {
+            "buckets" : [
+              {
+                "key_as_string" : "2021-01-01T00:00:00.000Z",
+                "key" : 1609459200000,
+                "doc_count" : 2
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-nanos/_search",
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "m" : {
+            "date_histogram" : {
+              "field" : "t",
+              "calendar_interval" : "month",
+              "hard_bounds" : {
+                "min" : "2019-06-01",
+                "max" : "2021-07-01"
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 10,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 4,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "aggregations" : {
+          "m" : {
+            "buckets" : [
+              {
+                "key_as_string" : "2019-11-01T00:00:00.000Z",
+                "key" : 1572566400000,
+                "doc_count" : 1
+              },
+              {
+                "key_as_string" : "2019-12-01T00:00:00.000Z",
+                "key" : 1575158400000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2020-01-01T00:00:00.000Z",
+                "key" : 1577836800000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2020-02-01T00:00:00.000Z",
+                "key" : 1580515200000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2020-03-01T00:00:00.000Z",
+                "key" : 1583020800000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2020-04-01T00:00:00.000Z",
+                "key" : 1585699200000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2020-05-01T00:00:00.000Z",
+                "key" : 1588291200000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2020-06-01T00:00:00.000Z",
+                "key" : 1590969600000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2020-07-01T00:00:00.000Z",
+                "key" : 1593561600000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2020-08-01T00:00:00.000Z",
+                "key" : 1596240000000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2020-09-01T00:00:00.000Z",
+                "key" : 1598918400000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2020-10-01T00:00:00.000Z",
+                "key" : 1601510400000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2020-11-01T00:00:00.000Z",
+                "key" : 1604188800000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2020-12-01T00:00:00.000Z",
+                "key" : 1606780800000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2021-01-01T00:00:00.000Z",
+                "key" : 1609459200000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2021-02-01T00:00:00.000Z",
+                "key" : 1612137600000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2021-03-01T00:00:00.000Z",
+                "key" : 1614556800000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2021-04-01T00:00:00.000Z",
+                "key" : 1617235200000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2021-05-01T00:00:00.000Z",
+                "key" : 1619827200000,
+                "doc_count" : 0
+              },
+              {
+                "key_as_string" : "2021-06-01T00:00:00.000Z",
+                "key" : 1622505600000,
+                "doc_count" : 1
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-nanos",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

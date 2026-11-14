@@ -111,6 +111,7 @@ async fn edge_routes_by_host_and_sni_and_drains_on_sigterm() {
         ("--nosql-cql-shard-aware", free_port()),
         ("--nosql-rest", free_port()),
         ("--nosql-alternator", free_port()),
+        ("--search-http", free_port()),
     ];
     for (flag, port) in ports {
         cmd.args([flag, &local(port)]);

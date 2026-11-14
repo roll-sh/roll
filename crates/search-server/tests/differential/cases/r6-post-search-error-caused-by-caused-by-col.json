@@ -1,0 +1,253 @@
+{
+ "found": {
+  "case": 89,
+  "case_seed": 112000425,
+  "seed": 112
+ },
+ "signature": "POST _search .error.caused_by.caused_by.col",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "comp0": {
+       "type": "completion"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dbl0": {
+       "type": "double"
+      },
+      "flt0": {
+       "type": "float"
+      },
+      "half0": {
+       "type": "half_float"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "sayt0": {
+       "type": "search_as_you_type"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "ulong0": {
+       "type": "unsigned_long"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 3,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m5-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m5-a"
+  },
+  {
+   "body": {
+    "aggs": {
+     "adjacency_matrix_5": {
+      "adjacency_matrix": {
+       "filters": {
+        "c": {
+         "dis_max": {}
+        }
+       }
+      }
+     }
+    },
+    "query": {
+     "bool": {
+      "should": [
+       {
+        "bool": {
+         "filter": [
+          {
+           "exists": {
+            "field": "sayt0"
+           }
+          }
+         ],
+         "minimum_should_match": "50%",
+         "must": [
+          {
+           "exists": {
+            "field": "date0"
+           }
+          },
+          {
+           "constant_score": {
+            "boost": 3.0,
+            "filter": {
+             "ids": {
+              "values": [
+               "1",
+               "1",
+               "1"
+              ]
+             }
+            }
+           }
+          },
+          {
+           "exists": {
+            "field": "date0"
+           }
+          }
+         ],
+         "should": [
+          {
+           "ids": {
+            "values": [
+             "1",
+             "1",
+             "1"
+            ]
+           }
+          },
+          {
+           "pinned": {
+            "ids": [
+             "1",
+             "1"
+            ],
+            "organic": {
+             "bool": {
+              "minimum_should_match": 1,
+              "must_not": [
+               {
+                "range": {
+                 "dbl0": {
+                  "gte": 120.64,
+                  "lt": 125.29
+                 }
+                }
+               },
+               {
+                "exists": {
+                 "field": "sayt0"
+                }
+               }
+              ],
+              "should": [
+               {
+                "multi_match": {
+                 "fields": [
+                  "text0",
+                  "text0^2"
+                 ],
+                 "operator": "and",
+                 "query": "elastic Dogs shard",
+                 "type": "cross_fields"
+                }
+               },
+               {
+                "range": {
+                 "ulong0": {
+                  "gte": 19,
+                  "lt": 82
+                 }
+                }
+               },
+               {
+                "exists": {
+                 "field": "kw1"
+                }
+               }
+              ]
+             }
+            }
+           }
+          },
+          {
+           "boosting": {
+            "negative": {
+             "range": {
+              "half0": {
+               "gte": 118.84
+              }
+             }
+            },
+            "negative_boost": 0.2,
+            "positive": {
+             "range": {
+              "half0": {
+               "gte": -48.23,
+               "lte": 144.39
+              }
+             }
+            }
+           }
+          }
+         ]
+        }
+       }
+      ]
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "error": {
+      "caused_by": {
+       "caused_by": {
+        "col": 79,
+        "line": 1,
+        "reason": "[dis_max] requires 'queries' field with at least one clause",
+        "type": "parsing_exception"
+       },
+       "reason": "[1:79] [filters] failed to parse field [c]",
+       "type": "x_content_parse_exception"
+      },
+      "reason": "[1:79] [adjacency_matrix] failed to parse field [filters]",
+      "root_cause": [
+       {
+        "col": 79,
+        "line": 1,
+        "reason": "[dis_max] requires 'queries' field with at least one clause",
+        "type": "parsing_exception"
+       }
+      ],
+      "type": "x_content_parse_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "method": "POST",
+   "path": "/diff-m5-a/_search"
+  }
+ ]
+}

@@ -1,0 +1,376 @@
+{
+ "source": "Elasticsearch 9.5.5 (POST <index>/_search)",
+ "cases": [
+  {
+   "body": "{\"foo\":1}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Unknown key for a VALUE_NUMBER in [foo].",
+    "line": 1,
+    "col": 8
+   }
+  },
+  {
+   "body": "{\"from\":\"x\"}",
+   "error": {
+    "type": "number_format_exception",
+    "reason": "For input string: \"x\""
+   }
+  },
+  {
+   "body": "{\"from\":-1}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "[from] parameter cannot be negative but was [-1]"
+   }
+  },
+  {
+   "body": "{\"size\":-1}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "[size] parameter cannot be negative, found [-1]"
+   }
+  },
+  {
+   "body": "{\"size\":\"10\"}",
+   "parses": true
+  },
+  {
+   "body": "{\"query\":{\"match_all\":{}},\"from\":1,\"size\":2,\"timeout\":\"10s\",\"terminate_after\":5,\"min_score\":0.5,\"version\":true,\"seq_no_primary_term\":true,\"explain\":true,\"track_scores\":true,\"track_total_hits\":100,\"profile\":true,\"stats\":[\"a\",\"b\"]}",
+   "parses": true
+  },
+  {
+   "body": "{\"track_total_hits\":\"x\"}",
+   "error": {
+    "type": "number_format_exception",
+    "reason": "For input string: \"x\""
+   }
+  },
+  {
+   "body": "{\"track_total_hits\":-2}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "[track_total_hits] parameter must be positive or equals to -1, got -2"
+   }
+  },
+  {
+   "body": "{\"timeout\":\"abc\"}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "failed to parse setting [timeout] with value [abc] as a time value: unit is missing or unrecognized"
+   }
+  },
+  {
+   "body": "{\"_source\":false}",
+   "parses": true
+  },
+  {
+   "body": "{\"_source\":\"a*\"}",
+   "parses": true
+  },
+  {
+   "body": "{\"_source\":[\"a\",\"b\"]}",
+   "parses": true
+  },
+  {
+   "body": "{\"_source\":{\"includes\":[\"a\"],\"excludes\":\"b\"}}",
+   "parses": true
+  },
+  {
+   "body": "{\"_source\":{\"include\":[\"a\"]}}",
+   "parses": true
+  },
+  {
+   "body": "{\"_source\":{\"foo\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Unknown key for a VALUE_NUMBER in [foo].",
+    "line": 1,
+    "col": 19
+   }
+  },
+  {
+   "body": "{\"_source\":1}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Expected one of [VALUE_BOOLEAN, VALUE_STRING, START_ARRAY, START_OBJECT] but found [VALUE_NUMBER]",
+    "line": 1,
+    "col": 12
+   }
+  },
+  {
+   "body": "{\"stored_fields\":\"_none_\"}",
+   "parses": true
+  },
+  {
+   "body": "{\"stored_fields\":[\"a\",\"_none_\"]}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "cannot combine _none_ with other fields"
+   }
+  },
+  {
+   "body": "{\"stored_fields\":{\"a\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Unknown key for a START_OBJECT in [stored_fields].",
+    "line": 1,
+    "col": 18
+   }
+  },
+  {
+   "body": "{\"docvalue_fields\":[\"a\",{\"field\":\"b\",\"format\":\"epoch_millis\"}]}",
+   "parses": true
+  },
+  {
+   "body": "{\"docvalue_fields\":[{\"foo\":1}]}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:22] [fetch_field_and_format] unknown field [foo]"
+   }
+  },
+  {
+   "body": "{\"fields\":[1]}",
+   "parses": true
+  },
+  {
+   "body": "{\"script_fields\":{\"s\":{\"script\":\"1\",\"ignore_failure\":true}}}",
+   "parses": true
+  },
+  {
+   "body": "{\"script_fields\":{\"s\":{\"foo\":1}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Unknown key for a VALUE_NUMBER in [foo].",
+    "line": 1,
+    "col": 30
+   }
+  },
+  {
+   "body": "{\"sort\":\"a\"}",
+   "parses": true
+  },
+  {
+   "body": "{\"sort\":[\"a\",{\"b\":\"desc\"},{\"c\":{\"order\":\"asc\",\"mode\":\"min\",\"missing\":\"_last\",\"unmapped_type\":\"long\",\"numeric_type\":\"date\",\"format\":\"epoch_millis\",\"nested\":{\"path\":\"nest\",\"filter\":{\"match_all\":{}}}}},\"_score\",\"_doc\"]}",
+   "parses": true
+  },
+  {
+   "body": "{\"sort\":{\"a\":{\"order\":\"foo\"}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:23] [field_sort] failed to parse field [order]",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "No enum constant org.elasticsearch.search.sort.SortOrder.FOO"
+    }
+   }
+  },
+  {
+   "body": "{\"sort\":{\"a\":{\"foo\":1}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:15] [field_sort] unknown field [foo]"
+   }
+  },
+  {
+   "body": "{\"sort\":[{\"_geo_distance\":{\"geo\":[1,2],\"order\":\"asc\",\"unit\":\"km\",\"mode\":\"min\",\"distance_type\":\"arc\",\"ignore_unmapped\":true}}]}",
+   "parses": true
+  },
+  {
+   "body": "{\"sort\":[{\"_script\":{\"type\":\"number\",\"script\":\"1\",\"order\":\"desc\"}}]}",
+   "parses": true
+  },
+  {
+   "body": "{\"sort\":[{\"_script\":{\"type\":\"foo\",\"script\":\"1\"}}]}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:29] [_script] failed to parse field [type]",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Unknown ScriptSortType [foo]"
+    }
+   }
+  },
+  {
+   "body": "{\"sort\":1}",
+   "parses": true
+  },
+  {
+   "body": "{\"search_after\":[1,\"a\"]}",
+   "parses": true
+  },
+  {
+   "body": "{\"search_after\":1}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Unknown key for a VALUE_NUMBER in [search_after].",
+    "line": 1,
+    "col": 17
+   }
+  },
+  {
+   "body": "{\"collapse\":{\"field\":\"kw\",\"inner_hits\":{\"name\":\"x\",\"size\":2},\"max_concurrent_group_searches\":3}}",
+   "parses": true
+  },
+  {
+   "body": "{\"collapse\":{\"foo\":1}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:14] [collapse] unknown field [foo]"
+   }
+  },
+  {
+   "body": "{\"slice\":{\"id\":0,\"max\":2}}",
+   "parses": true
+  },
+  {
+   "body": "{\"slice\":{\"id\":3,\"max\":2}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:24] [slice] failed to parse field [max]",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "max must be greater than id"
+    }
+   }
+  },
+  {
+   "body": "{\"pit\":{\"id\":\"abc\",\"keep_alive\":\"1m\"}}",
+   "parses": true
+  },
+  {
+   "body": "{\"indices_boost\":[{\"esm-q\":2}]}",
+   "parses": true
+  },
+  {
+   "body": "{\"indices_boost\":{\"esm-q\":2}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Unknown key for a START_OBJECT in [indices_boost].",
+    "line": 1,
+    "col": 18
+   }
+  },
+  {
+   "body": "{\"rescore\":{\"window_size\":10,\"query\":{\"rescore_query\":{\"match_all\":{}},\"query_weight\":0.5,\"rescore_query_weight\":2,\"score_mode\":\"max\"}}}",
+   "parses": true
+  },
+  {
+   "body": "{\"rescore\":[{\"query\":{\"rescore_query\":{\"match_all\":{}}}}]}",
+   "parses": true
+  },
+  {
+   "body": "{\"rescore\":{\"foo\":{}}}",
+   "error": {
+    "type": "named_object_not_found_exception",
+    "reason": "[1:19] unknown field [foo]"
+   }
+  },
+  {
+   "body": "{\"runtime_mappings\":{\"r\":{\"type\":\"long\",\"script\":\"emit(1)\"}}}",
+   "parses": true
+  },
+  {
+   "body": "{\"runtime_mappings\":{\"r\":{\"type\":\"foo\"}}}",
+   "parses": true
+  },
+  {
+   "body": "{\"highlight\":{\"fields\":{\"t\":{}}}}",
+   "parses": true
+  },
+  {
+   "body": "{\"highlight\":{\"foo\":1}}",
+   "deferred": true,
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:15] [highlight] unknown field [foo]"
+   }
+  },
+  {
+   "body": "{\"suggest\":{\"s\":{\"text\":\"x\",\"term\":{\"field\":\"t\"}}}}",
+   "parses": true
+  },
+  {
+   "body": "{\"suggest\":{\"s\":{\"foo\":{}}}}",
+   "deferred": true,
+   "error": {
+    "type": "named_object_not_found_exception",
+    "reason": "[1:24] unknown field [foo]"
+   }
+  },
+  {
+   "body": "{\"aggs\":{\"a\":{\"terms\":{\"field\":\"kw\"}}}}",
+   "parses": true
+  },
+  {
+   "body": "{\"aggs\":{\"a\":{\"foo\":{}}}}",
+   "deferred": true,
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Unknown aggregation type [foo]",
+    "line": 1,
+    "col": 21,
+    "caused_by": {
+     "type": "named_object_not_found_exception",
+     "reason": "[1:21] unknown field [foo]"
+    }
+   }
+  },
+  {
+   "body": "{\"knn\":{\"field\":\"vec\",\"query_vector\":[1,2,3],\"k\":2,\"num_candidates\":10}}",
+   "parses": true
+  },
+  {
+   "body": "{\"knn\":[{\"field\":\"vec\",\"query_vector\":[1,2,3],\"k\":2,\"num_candidates\":10}]}",
+   "parses": true
+  },
+  {
+   "body": "{\"post_filter\":{\"term\":{\"kw\":\"x\"}}}",
+   "parses": true
+  },
+  {
+   "body": "{\"query\":{\"match_all\":{}},\"query\":{\"match_all\":{}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:34] Duplicate field 'query'\n at [Source: (byte[])\"{\"query\":{\"match_all\":{}},\"query\":{\"match_all\":{}}}\"; line: 1, column: 34]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Duplicate field 'query'\n at [Source: (byte[])\"{\"query\":{\"match_all\":{}},\"query\":{\"match_all\":{}}}\"; line: 1, column: 34]"
+    }
+   }
+  },
+  {
+   "body": "{\"ext\":{}}",
+   "parses": true
+  },
+  {
+   "body": "{\"min_score\":\"abc\"}",
+   "error": {
+    "type": "number_format_exception",
+    "reason": "For input string: \"abc\""
+   }
+  },
+  {
+   "body": "{\"explain\":\"yes\"}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Failed to parse value [yes] as only [true] or [false] are allowed."
+   }
+  },
+  {
+   "body": "{\"terminate_after\":-1}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "terminateAfter must be > 0"
+   }
+  },
+  {
+   "body": "{\"retriever\":{\"standard\":{\"query\":{\"match_all\":{}}}}}",
+   "parses": true
+  },
+  {
+   "body": "{\"from\":1.5}",
+   "parses": true
+  }
+ ]
+}

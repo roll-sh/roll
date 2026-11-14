@@ -1,0 +1,13 @@
+{
+ "_comment": "Exact kNN _score values from Elasticsearch 9.5.5 (index_options type flat), captured with the requests in tests/fixtures/README.md",
+ "cases": [
+  {"element": "float", "similarity": "cosine", "dims": 3, "query": [0.5, -1.5, 2], "docs": [[1, 2, 3], [-4, 5.5, 0.25]], "scores": [0.68344986, 0.21902427]},
+  {"element": "float", "similarity": "l2_norm", "dims": 3, "query": [0.5, -1.5, 2], "docs": [[1, 2, 3], [-4, 5.5, 0.25]], "scores": [0.06896552, 0.013640239]},
+  {"element": "float", "similarity": "max_inner_product", "dims": 3, "query": [0.5, -1.5, 2], "docs": [[1, 2, 3], [-4, 5.5, 0.25]], "scores": [4.5, 0.093023255]},
+  {"element": "float", "similarity": "dot_product", "dims": 3, "query": [0.0, 0.0, 1.0], "docs": [[0.6, 0.8, 0.0], [0.0, 0.6, -0.8]], "scores": [0.5, 0.099999994]},
+  {"element": "byte", "similarity": "l2_norm", "dims": 3, "query": [3, -7, 2], "docs": [[1, 2, 3], [-4, 5, 0]], "scores": [0.011494253, 0.005050505]},
+  {"element": "byte", "similarity": "dot_product", "dims": 3, "query": [3, -7, 2], "docs": [[1, 2, 3], [-4, 5, 0]], "scores": [0.49994913, 0.49952188]},
+  {"element": "byte", "similarity": "cosine", "dims": 3, "query": [3, -7, 2], "docs": [[1, 2, 3], [-4, 5, 0]], "scores": [0.41514447, 0.03389895]},
+  {"element": "bit", "similarity": "l2_norm", "dims": 16, "query": [-16, 3], "docs": [[-1, 0], [15, 1]], "scores": [0.625, 0.4375]}
+ ]
+}

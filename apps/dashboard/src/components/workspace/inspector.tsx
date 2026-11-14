@@ -41,7 +41,7 @@ export function Head({ tile, title, sub, actions, onClose }: { tile: ReactNode; 
   );
 }
 
-function Tabs<T extends string>({ tabs, value, onChange }: { tabs: readonly T[]; value: T; onChange: (t: T) => void }) {
+export function Tabs<T extends string>({ tabs, value, onChange }: { tabs: readonly T[]; value: T; onChange: (t: T) => void }) {
   return (
     <div className="flex gap-1 border-b border-line px-2">
       {tabs.map((t) => (
@@ -176,7 +176,7 @@ export function ResourceSheet({
   );
 }
 
-function Stat({ label, value, note }: { label: string; value: string; note: string }) {
+export function Stat({ label, value, note }: { label: string; value: string; note: string }) {
   return (
     <div className="rounded-lg border border-line-2 bg-raised px-2.5 py-2 inset-shadow-highlight">
       <div className="text-[11px] text-subtle">{label}</div>

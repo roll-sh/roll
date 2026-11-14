@@ -1,0 +1,142 @@
+{
+ "found": {
+  "case": 16,
+  "case_seed": 110000346,
+  "seed": 110
+ },
+ "signature": "POST _msearch status 400:x_content_parse_exception vs 200:200",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "comp0": {
+       "type": "completion"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dbl0": {
+       "type": "double"
+      },
+      "half0": {
+       "type": "half_float"
+      },
+      "int0": {
+       "type": "integer"
+      },
+      "irange0": {
+       "type": "integer_range"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "long0": {
+       "type": "long"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "term_vector": "with_positions_offsets",
+       "type": "text"
+      }
+     }
+    },
+    "settings": {
+     "merge.policy.segments_per_tier": 20,
+     "number_of_replicas": 0,
+     "number_of_shards": 2,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m6-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m6-a"
+  },
+  {
+   "es": {
+    "body": {
+     "error": {
+      "caused_by": {
+       "reason": "query malformed, empty clause found at [1:88]",
+       "type": "illegal_argument_exception"
+      },
+      "reason": "[1:88] [bool] failed to parse field [must]",
+      "root_cause": [
+       {
+        "reason": "[1:88] [bool] failed to parse field [must]",
+        "type": "x_content_parse_exception"
+       }
+      ],
+      "type": "x_content_parse_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "lines": [
+    {
+     "index": "diff-m6-a"
+    },
+    {},
+    {
+     "index": "diff-m6-a"
+    },
+    {},
+    {
+     "index": "diff-m6-a"
+    },
+    {
+     "aggs": {
+      "terms_19": {
+       "aggs": {
+        "filters_21": {
+         "filters": {
+          "filters": {
+           "a": {
+            "bool": {
+             "must": [
+              {}
+             ]
+            }
+           }
+          }
+         }
+        }
+       },
+       "terms": {
+        "field": "text0.raw",
+        "min_doc_count": 2,
+        "show_term_doc_count_error": true,
+        "size": 5
+       }
+      }
+     }
+    }
+   ],
+   "method": "POST",
+   "path": "/_msearch"
+  }
+ ]
+}

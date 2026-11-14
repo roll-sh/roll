@@ -294,3 +294,76 @@ async fn librdkafka_reads_across_gaps() {
     assert!(got.iter().all(|r| written.contains(r)), "only original records, at their original offsets");
     assert_eq!(latest(&got), latest(&written));
 }
+
+/// Everything readable in a stream's partition 0 of `topic` over the HTTP API.
+async fn http_all(http: &str, stream: &str, topic: &str) -> Vec<Rec> {
+    let (mut out, mut offset) = (vec![], 0i64);
+    loop {
+        let v: serde_json::Value =
+            reqwest::get(format!("{http}/v1/streams/{stream}/topics/{topic}/partitions/0/records?offset={offset}&limit=1000")).await.unwrap().json().await.unwrap();
+        let text = |v: &serde_json::Value| v.as_str().map(str::to_string);
+        out.extend(v["records"].as_array().unwrap_or_else(|| panic!("{v}")).iter().map(|r| (r["offset"].as_i64().unwrap(), text(&r["key"]), text(&r["value"]))));
+        offset = v["next_offset"].as_i64().unwrap();
+        if offset >= v["high_watermark"].as_i64().unwrap() {
+            return out;
+        }
+    }
+}
+
+/// A branch and its parent share chunks: compacting the branch leaves the parent reading every
+/// record, compacting the parent leaves the branch reading what it had, and once neither reads
+/// the original chunks they're deleted. Reads go to object storage (no remote cache).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn compaction_on_either_side_of_a_branch() {
+    let tb = TestBroker::start_with("compact-branch", |c| {
+        c.compaction_grace_ms = 0;
+        c.remote_cache_bytes = 0;
+    })
+    .await;
+    let mut c = Conn::connect(&tb.addr).await;
+    // No local copies either, so the parent's reads go to object storage too.
+    let mut configs = COMPACT.to_vec();
+    configs.extend([("local.retention.ms", "0"), ("local.retention.bytes", "0")]);
+    let mut held = configs.clone();
+    held.push(("min.compaction.lag.ms", "3600000"));
+    create(&mut c, "table", &held).await;
+    let written = write_rounds(&mut c, "table", 30).await;
+    let parent = tb.broker.find_stream("test").unwrap();
+    let (branch, _, _) = tb.broker.branch_stream(&parent, "copy").await.unwrap();
+    let ptopic = parent.topic("table").unwrap();
+    let btopic = branch.topic("table").unwrap();
+    let original: Vec<String> = tb.broker.store.chunks(&ptopic.id, 0).unwrap().into_iter().map(|c| c.key).collect();
+    let compact = |t: &stream_broker::broker::Topic| tb.broker.set_topic_configs(t, configs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(), false).unwrap();
+    // A closed partition (the branch's, between passes) has no log to ask: the catalog says.
+    let compacted = |t: &stream_broker::broker::Topic| tb.broker.store.chunks(&t.id, 0).unwrap().iter().any(|c| stream_broker::config::is_compacted_key(&c.key));
+
+    // The branch compacts (its partition opens from object storage alone).
+    compact(&btopic);
+    eventually("the branch compacting", || compacted(&btopic)).await;
+    let in_branch = http_all(&tb.http, &branch.id, "table").await;
+    assert!(in_branch.len() < written.len());
+    assert_eq!(latest(&in_branch), latest(&written));
+    assert_eq!(read_all(&mut c, "table", 0).await, written, "the parent still has every record");
+
+    // The parent compacts; the branch reads what it had.
+    compact(&ptopic);
+    eventually("the parent compacting", || compacted(&ptopic)).await;
+    assert_eq!(latest(&read_all(&mut c, "table", 0).await), latest(&written));
+    assert_eq!(http_all(&tb.http, &branch.id, "table").await, in_branch);
+
+    // Neither reads the original chunks now: they're gone.
+    let objects = tb.broker.objects.clone();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let referenced = tb.broker.store.referenced(&original).unwrap();
+        let mut left = 0;
+        for k in original.iter().filter(|k| !referenced.contains(*k)) {
+            left += objects.exists(k).await.unwrap() as usize;
+        }
+        if left == 0 && referenced.len() < original.len() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{left} unreferenced chunks left, {} still referenced", referenced.len());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}

@@ -1,0 +1,229 @@
+{
+ "found": {
+  "case": 36,
+  "case_seed": 118000390,
+  "seed": 118
+ },
+ "signature": "POST _search .error.caused_by.caused_by.caused_by",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "bool0": {
+       "type": "boolean"
+      },
+      "byte0": {
+       "type": "byte"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "int0": {
+       "type": "integer"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "n": {
+       "properties": {
+        "kw0": {
+         "type": "keyword"
+        },
+        "long0": {
+         "type": "long"
+        },
+        "text0": {
+         "analyzer": "simple",
+         "fields": {
+          "raw": {
+           "ignore_above": 32,
+           "type": "keyword"
+          }
+         },
+         "type": "text"
+        }
+       },
+       "type": "nested"
+      },
+      "scaled0": {
+       "scaling_factor": 100,
+       "type": "scaled_float"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "term_vector": "with_positions_offsets",
+       "type": "text"
+      },
+      "text1": {
+       "analyzer": "stop",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "vec0": {
+       "dims": 3,
+       "index_options": {
+        "type": "flat"
+       },
+       "similarity": "l2_norm",
+       "type": "dense_vector"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 1,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m9-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m9-a"
+  },
+  {
+   "body": {
+    "aggs": {
+     "adjacency_matrix_2": {
+      "adjacency_matrix": {
+       "filters": {
+        "b": {
+         "bool": {
+          "should": [
+           {
+            "combined_fields": {
+             "query": "ran"
+            }
+           }
+          ]
+         }
+        },
+        "c": {
+         "bool": {
+          "filter": [
+           {
+            "terms": {
+             "int0": [
+              -1,
+              -45
+             ]
+            }
+           },
+           {
+            "multi_match": {
+             "fields": [
+              "text0^2",
+              "text1^3"
+             ],
+             "fuzziness": null,
+             "query": "apple query shard",
+             "tie_breaker": 0.5,
+             "type": "most_fields"
+            }
+           }
+          ],
+          "must_not": [
+           {
+            "range": {
+             "int0": {
+              "gt": 101,
+              "lt": 108
+             }
+            }
+           },
+           {
+            "term": {
+             "bool0": true
+            }
+           }
+          ],
+          "should": [
+           {
+            "ids": {
+             "values": [
+              "21",
+              "22",
+              "29"
+             ]
+            }
+           },
+           {
+            "match_phrase_prefix": {
+             "text1": {
+              "query": "of da"
+             }
+            }
+           },
+           {
+            "range": {
+             "date0": {
+              "gte": "2024-04-12",
+              "lt": "2024-09-27T17:45:00Z"
+             }
+            }
+           }
+          ]
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "error": {
+      "caused_by": {
+       "caused_by": {
+        "caused_by": {
+         "col": 235,
+         "line": 1,
+         "reason": "[multi_match] unknown token [VALUE_NULL] after [fuzziness]",
+         "type": "parsing_exception"
+        },
+        "reason": "[1:235] [bool] failed to parse field [filter]",
+        "type": "x_content_parse_exception"
+       },
+       "reason": "[1:235] [filters] failed to parse field [c]",
+       "type": "x_content_parse_exception"
+      },
+      "reason": "[1:235] [adjacency_matrix] failed to parse field [filters]",
+      "root_cause": [
+       {
+        "col": 235,
+        "line": 1,
+        "reason": "[multi_match] unknown token [VALUE_NULL] after [fuzziness]",
+        "type": "parsing_exception"
+       }
+      ],
+      "type": "x_content_parse_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "method": "POST",
+   "path": "/diff-m9-a/_search?search_type=dfs_query_then_fetch"
+  }
+ ]
+}

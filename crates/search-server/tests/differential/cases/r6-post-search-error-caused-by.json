@@ -1,0 +1,76 @@
+{
+ "found": {
+  "case": 117,
+  "case_seed": 101000420,
+  "seed": 101
+ },
+ "signature": "POST _search .error.caused_by",
+ "steps": [
+  {
+   "body": {
+    "settings": {
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m1-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m1-a"
+  },
+  {
+   "body": {
+    "aggs": {
+     "filters_11": {
+      "filters": {
+       "filters": {
+        "a": {
+         "bool": {
+          "filter": [
+           {}
+          ]
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "error": {
+      "caused_by": {
+       "reason": "query malformed, empty clause found at [1:70]",
+       "type": "illegal_argument_exception"
+      },
+      "reason": "[1:70] [bool] failed to parse field [filter]",
+      "root_cause": [
+       {
+        "reason": "[1:70] [bool] failed to parse field [filter]",
+        "type": "x_content_parse_exception"
+       }
+      ],
+      "type": "x_content_parse_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "method": "POST",
+   "path": "/diff-m1-a/_search?search_type=dfs_query_then_fetch"
+  }
+ ]
+}

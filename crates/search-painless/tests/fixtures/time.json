@@ -1,0 +1,3726 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "return ZonedDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneId.of('Z'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T00:00Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZonedDateTime.of(2020, 1, 1, 10, 15, 30, 123000000, ZoneId.of('Europe/Paris'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T10:15:30.123+01:00[Europe/Paris]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZonedDateTime.of(2020, 6, 1, 10, 15, 30, 0, ZoneId.of('America/New_York'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-06-01T10:15:30-04:00[America/New_York]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZonedDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneId.of('UTC'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T00:00Z[UTC]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZonedDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneId.of('GMT+2'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T00:00+02:00[GMT+02:00]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZonedDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneId.of('+05:30'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T00:00+05:30"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZoneId.of('Foo/Bar')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.zone.ZoneRulesProvider.getProvider(ZoneRulesProvider.java:272)",
+       "java.base/java.time.zone.ZoneRulesProvider.getRules(ZoneRulesProvider.java:227)",
+       "java.base/java.time.ZoneRegion.ofId(ZoneRegion.java:121)",
+       "java.base/java.time.ZoneId.of(ZoneId.java:411)",
+       "java.base/java.time.ZoneId.of(ZoneId.java:359)",
+       "return ZoneId.of('Foo/Bar')",
+       "             ^---- HERE"
+      ],
+      "script": "return ZoneId.of('Foo/Bar')",
+      "lang": "painless",
+      "position": {
+       "offset": 13,
+       "start": 0,
+       "end": 27
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.zone.ZoneRulesProvider.getProvider(ZoneRulesProvider.java:272)",
+     "java.base/java.time.zone.ZoneRulesProvider.getRules(ZoneRulesProvider.java:227)",
+     "java.base/java.time.ZoneRegion.ofId(ZoneRegion.java:121)",
+     "java.base/java.time.ZoneId.of(ZoneId.java:411)",
+     "java.base/java.time.ZoneId.of(ZoneId.java:359)",
+     "return ZoneId.of('Foo/Bar')",
+     "             ^---- HERE"
+    ],
+    "script": "return ZoneId.of('Foo/Bar')",
+    "lang": "painless",
+    "position": {
+     "offset": 13,
+     "start": 0,
+     "end": 27
+    },
+    "caused_by": {
+     "type": "zone_rules_exception",
+     "reason": "Unknown time-zone ID: Foo/Bar"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZoneId.of('!!')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.ZoneRegion.checkName(ZoneRegion.java:152)",
+       "java.base/java.time.ZoneRegion.ofId(ZoneRegion.java:117)",
+       "java.base/java.time.ZoneId.of(ZoneId.java:411)",
+       "java.base/java.time.ZoneId.of(ZoneId.java:359)",
+       "return ZoneId.of('!!')",
+       "             ^---- HERE"
+      ],
+      "script": "return ZoneId.of('!!')",
+      "lang": "painless",
+      "position": {
+       "offset": 13,
+       "start": 0,
+       "end": 22
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.ZoneRegion.checkName(ZoneRegion.java:152)",
+     "java.base/java.time.ZoneRegion.ofId(ZoneRegion.java:117)",
+     "java.base/java.time.ZoneId.of(ZoneId.java:411)",
+     "java.base/java.time.ZoneId.of(ZoneId.java:359)",
+     "return ZoneId.of('!!')",
+     "             ^---- HERE"
+    ],
+    "script": "return ZoneId.of('!!')",
+    "lang": "painless",
+    "position": {
+     "offset": 13,
+     "start": 0,
+     "end": 22
+    },
+    "caused_by": {
+     "type": "date_time_exception",
+     "reason": "Invalid ID for region-based ZoneId, invalid format: !!"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZoneOffset.of('+25:00')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.ZoneOffset.validate(ZoneOffset.java:383)",
+       "java.base/java.time.ZoneOffset.ofHoursMinutesSeconds(ZoneOffset.java:336)",
+       "java.base/java.time.ZoneOffset.of(ZoneOffset.java:269)",
+       "return ZoneOffset.of('+25:00')",
+       "                 ^---- HERE"
+      ],
+      "script": "return ZoneOffset.of('+25:00')",
+      "lang": "painless",
+      "position": {
+       "offset": 17,
+       "start": 0,
+       "end": 30
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.ZoneOffset.validate(ZoneOffset.java:383)",
+     "java.base/java.time.ZoneOffset.ofHoursMinutesSeconds(ZoneOffset.java:336)",
+     "java.base/java.time.ZoneOffset.of(ZoneOffset.java:269)",
+     "return ZoneOffset.of('+25:00')",
+     "                 ^---- HERE"
+    ],
+    "script": "return ZoneOffset.of('+25:00')",
+    "lang": "painless",
+    "position": {
+     "offset": 17,
+     "start": 0,
+     "end": 30
+    },
+    "caused_by": {
+     "type": "date_time_exception",
+     "reason": "Zone offset hours not in valid range: value 25 is not in the range -18 to 18"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZonedDateTime.of(2021, 3, 28, 2, 30, 0, 0, ZoneId.of('Europe/Paris'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2021-03-28T03:30+02:00[Europe/Paris]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZonedDateTime.of(2021, 10, 31, 2, 30, 0, 0, ZoneId.of('Europe/Paris'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2021-10-31T02:30+02:00[Europe/Paris]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZonedDateTime.of(2021, 10, 31, 2, 30, 0, 0, ZoneId.of('Europe/Paris')).withLaterOffsetAtOverlap()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2021-10-31T02:30+01:00[Europe/Paris]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ZonedDateTime z = ZonedDateTime.of(2021, 3, 27, 2, 30, 0, 0, ZoneId.of('Europe/Paris')); return [z.plusDays(1), z.plusHours(24), z.plus(Duration.ofDays(1))]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[2021-03-28T03:30+02:00[Europe/Paris], 2021-03-28T03:30+02:00[Europe/Paris], 2021-03-28T03:30+02:00[Europe/Paris]]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Instant.ofEpochMilli(1577836800123L)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T00:00:00.123Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Instant.ofEpochSecond(0, 1)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1970-01-01T00:00:00.000000001Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Instant.ofEpochSecond(-1, 999999999)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1969-12-31T23:59:59.999999999Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Instant.parse('2020-01-01T10:15:30.5Z')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T10:15:30.500Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Instant.parse('2020-01-01T10:15:30+01:00')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T09:15:30Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Instant.parse('2020-01-01')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.format.DateTimeFormatter.parseResolved0(DateTimeFormatter.java:2131)",
+       "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2033)",
+       "java.base/java.time.Instant.parse(Instant.java:398)",
+       "return Instant.parse('2020-01-01')",
+       "                     ^---- HERE"
+      ],
+      "script": "return Instant.parse('2020-01-01')",
+      "lang": "painless",
+      "position": {
+       "offset": 21,
+       "start": 0,
+       "end": 34
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.format.DateTimeFormatter.parseResolved0(DateTimeFormatter.java:2131)",
+     "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2033)",
+     "java.base/java.time.Instant.parse(Instant.java:398)",
+     "return Instant.parse('2020-01-01')",
+     "                     ^---- HERE"
+    ],
+    "script": "return Instant.parse('2020-01-01')",
+    "lang": "painless",
+    "position": {
+     "offset": 21,
+     "start": 0,
+     "end": 34
+    },
+    "caused_by": {
+     "type": "date_time_parse_exception",
+     "reason": "Text '2020-01-01' could not be parsed at index 10"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Instant.ofEpochMilli(1577836800123L).toEpochMilli()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1577836800123"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Instant.EPOCH.plus(1, ChronoUnit.DAYS)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1970-01-02T00:00:00Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Instant.EPOCH.plus(1, ChronoUnit.MONTHS)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.Instant.plus(Instant.java:887)",
+       "return Instant.EPOCH.plus(1, ChronoUnit.MONTHS)",
+       "                                       ^---- HERE"
+      ],
+      "script": "return Instant.EPOCH.plus(1, ChronoUnit.MONTHS)",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 47
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.Instant.plus(Instant.java:887)",
+     "return Instant.EPOCH.plus(1, ChronoUnit.MONTHS)",
+     "                                       ^---- HERE"
+    ],
+    "script": "return Instant.EPOCH.plus(1, ChronoUnit.MONTHS)",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 47
+    },
+    "caused_by": {
+     "type": "unsupported_temporal_type_exception",
+     "reason": "Unsupported unit: Months"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Instant.EPOCH.atZone(ZoneId.of('Asia/Tokyo'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1970-01-01T09:00+09:00[Asia/Tokyo]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Instant.EPOCH.truncatedTo(ChronoUnit.HOURS)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1970-01-01T00:00:00Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 2, 30)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.LocalDate.create(LocalDate.java:479)",
+       "java.base/java.time.LocalDate.of(LocalDate.java:295)",
+       "return LocalDate.of(2020, 2, 30)",
+       "                ^---- HERE"
+      ],
+      "script": "return LocalDate.of(2020, 2, 30)",
+      "lang": "painless",
+      "position": {
+       "offset": 16,
+       "start": 0,
+       "end": 32
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.LocalDate.create(LocalDate.java:479)",
+     "java.base/java.time.LocalDate.of(LocalDate.java:295)",
+     "return LocalDate.of(2020, 2, 30)",
+     "                ^---- HERE"
+    ],
+    "script": "return LocalDate.of(2020, 2, 30)",
+    "lang": "painless",
+    "position": {
+     "offset": 16,
+     "start": 0,
+     "end": 32
+    },
+    "caused_by": {
+     "type": "date_time_exception",
+     "reason": "Invalid date 'FEBRUARY 30'"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2021, 2, 29)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.LocalDate.create(LocalDate.java:477)",
+       "java.base/java.time.LocalDate.of(LocalDate.java:295)",
+       "return LocalDate.of(2021, 2, 29)",
+       "                ^---- HERE"
+      ],
+      "script": "return LocalDate.of(2021, 2, 29)",
+      "lang": "painless",
+      "position": {
+       "offset": 16,
+       "start": 0,
+       "end": 32
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.LocalDate.create(LocalDate.java:477)",
+     "java.base/java.time.LocalDate.of(LocalDate.java:295)",
+     "return LocalDate.of(2021, 2, 29)",
+     "                ^---- HERE"
+    ],
+    "script": "return LocalDate.of(2021, 2, 29)",
+    "lang": "painless",
+    "position": {
+     "offset": 16,
+     "start": 0,
+     "end": 32
+    },
+    "caused_by": {
+     "type": "date_time_exception",
+     "reason": "Invalid date 'February 29' as '2021' is not a leap year"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 13, 1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.temporal.ValueRange.checkValidValue(ValueRange.java:319)",
+       "java.base/java.time.temporal.ChronoField.checkValidValue(ChronoField.java:721)",
+       "java.base/java.time.LocalDate.of(LocalDate.java:293)",
+       "return LocalDate.of(2020, 13, 1)",
+       "                ^---- HERE"
+      ],
+      "script": "return LocalDate.of(2020, 13, 1)",
+      "lang": "painless",
+      "position": {
+       "offset": 16,
+       "start": 0,
+       "end": 32
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.temporal.ValueRange.checkValidValue(ValueRange.java:319)",
+     "java.base/java.time.temporal.ChronoField.checkValidValue(ChronoField.java:721)",
+     "java.base/java.time.LocalDate.of(LocalDate.java:293)",
+     "return LocalDate.of(2020, 13, 1)",
+     "                ^---- HERE"
+    ],
+    "script": "return LocalDate.of(2020, 13, 1)",
+    "lang": "painless",
+    "position": {
+     "offset": 16,
+     "start": 0,
+     "end": 32
+    },
+    "caused_by": {
+     "type": "date_time_exception",
+     "reason": "Invalid value for MonthOfYear (valid values 1 - 12): 13"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 1, 31).plusMonths(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-02-29"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 2, 29).plusYears(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2021-02-28"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 1, 1).getDayOfWeek()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "WEDNESDAY"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [LocalDate.of(2020, 1, 1).getDayOfYear(), LocalDate.of(2020, 12, 31).getDayOfYear(), LocalDate.of(2020,1,1).lengthOfMonth(), LocalDate.of(2020,2,1).lengthOfMonth(), LocalDate.of(2020,1,1).isLeapYear()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, 366, 31, 29, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.parse('2020-02-29')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-02-29"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.parse('2021-02-29')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.format.DateTimeFormatter.createError(DateTimeFormatter.java:2102)",
+       "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2037)",
+       "java.base/java.time.LocalDate.parse(LocalDate.java:455)",
+       "java.base/java.time.LocalDate.parse(LocalDate.java:440)",
+       "return LocalDate.parse('2021-02-29')",
+       "                       ^---- HERE"
+      ],
+      "script": "return LocalDate.parse('2021-02-29')",
+      "lang": "painless",
+      "position": {
+       "offset": 23,
+       "start": 0,
+       "end": 36
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.format.DateTimeFormatter.createError(DateTimeFormatter.java:2102)",
+     "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2037)",
+     "java.base/java.time.LocalDate.parse(LocalDate.java:455)",
+     "java.base/java.time.LocalDate.parse(LocalDate.java:440)",
+     "return LocalDate.parse('2021-02-29')",
+     "                       ^---- HERE"
+    ],
+    "script": "return LocalDate.parse('2021-02-29')",
+    "lang": "painless",
+    "position": {
+     "offset": 23,
+     "start": 0,
+     "end": 36
+    },
+    "caused_by": {
+     "type": "date_time_parse_exception",
+     "reason": "Text '2021-02-29' could not be parsed: Invalid date 'February 29' as '2021' is not a leap year",
+     "caused_by": {
+      "type": "date_time_exception",
+      "reason": "Invalid date 'February 29' as '2021' is not a leap year"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.parse('20200101')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.format.DateTimeFormatter.parseResolved0(DateTimeFormatter.java:2131)",
+       "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2033)",
+       "java.base/java.time.LocalDate.parse(LocalDate.java:455)",
+       "java.base/java.time.LocalDate.parse(LocalDate.java:440)",
+       "return LocalDate.parse('20200101')",
+       "                       ^---- HERE"
+      ],
+      "script": "return LocalDate.parse('20200101')",
+      "lang": "painless",
+      "position": {
+       "offset": 23,
+       "start": 0,
+       "end": 34
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.format.DateTimeFormatter.parseResolved0(DateTimeFormatter.java:2131)",
+     "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2033)",
+     "java.base/java.time.LocalDate.parse(LocalDate.java:455)",
+     "java.base/java.time.LocalDate.parse(LocalDate.java:440)",
+     "return LocalDate.parse('20200101')",
+     "                       ^---- HERE"
+    ],
+    "script": "return LocalDate.parse('20200101')",
+    "lang": "painless",
+    "position": {
+     "offset": 23,
+     "start": 0,
+     "end": 34
+    },
+    "caused_by": {
+     "type": "date_time_parse_exception",
+     "reason": "Text '20200101' could not be parsed at index 0"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.parse('2020-01-01x')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.format.DateTimeFormatter.parseResolved0(DateTimeFormatter.java:2134)",
+       "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2033)",
+       "java.base/java.time.LocalDate.parse(LocalDate.java:455)",
+       "java.base/java.time.LocalDate.parse(LocalDate.java:440)",
+       "return LocalDate.parse('2020-01-01x')",
+       "                       ^---- HERE"
+      ],
+      "script": "return LocalDate.parse('2020-01-01x')",
+      "lang": "painless",
+      "position": {
+       "offset": 23,
+       "start": 0,
+       "end": 37
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.format.DateTimeFormatter.parseResolved0(DateTimeFormatter.java:2134)",
+     "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2033)",
+     "java.base/java.time.LocalDate.parse(LocalDate.java:455)",
+     "java.base/java.time.LocalDate.parse(LocalDate.java:440)",
+     "return LocalDate.parse('2020-01-01x')",
+     "                       ^---- HERE"
+    ],
+    "script": "return LocalDate.parse('2020-01-01x')",
+    "lang": "painless",
+    "position": {
+     "offset": 23,
+     "start": 0,
+     "end": 37
+    },
+    "caused_by": {
+     "type": "date_time_parse_exception",
+     "reason": "Text '2020-01-01x' could not be parsed, unparsed text found at index 10"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(10000, 1, 1)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "+10000-01-01"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(-5, 1, 1)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-0005-01-01"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 1, 1).until(LocalDate.of(2021, 3, 15))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "P1Y2M14D"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 1, 31).until(LocalDate.of(2020, 3, 1))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "P1M1D"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ChronoUnit.DAYS.between(LocalDate.of(2020, 1, 1), LocalDate.of(2021, 1, 1))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "366"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ChronoUnit.MONTHS.between(LocalDate.of(2020, 1, 31), LocalDate.of(2020, 2, 29))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ChronoUnit.HOURS.between(LocalDate.of(2020, 1, 1), LocalDate.of(2020, 1, 2))",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.LocalDate.until(LocalDate.java:1656)",
+       "java.base/java.time.temporal.ChronoUnit.between(ChronoUnit.java:271)",
+       "return ChronoUnit.HOURS.between(LocalDate.of(2020, 1, 1), LocalDate.of(2020, 1, 2))",
+       "                                                                   ^---- HERE"
+      ],
+      "script": "return ChronoUnit.HOURS.between(LocalDate.of(2020, 1, 1), LocalDate.of(2020, 1, 2))",
+      "lang": "painless",
+      "position": {
+       "offset": 67,
+       "start": 0,
+       "end": 83
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.LocalDate.until(LocalDate.java:1656)",
+     "java.base/java.time.temporal.ChronoUnit.between(ChronoUnit.java:271)",
+     "return ChronoUnit.HOURS.between(LocalDate.of(2020, 1, 1), LocalDate.of(2020, 1, 2))",
+     "                                                                   ^---- HERE"
+    ],
+    "script": "return ChronoUnit.HOURS.between(LocalDate.of(2020, 1, 1), LocalDate.of(2020, 1, 2))",
+    "lang": "painless",
+    "position": {
+     "offset": 67,
+     "start": 0,
+     "end": 83
+    },
+    "caused_by": {
+     "type": "unsupported_temporal_type_exception",
+     "reason": "Unsupported unit: Hours"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ChronoUnit.HOURS.between(ZonedDateTime.parse('2020-01-01T00:00:00Z'), ZonedDateTime.parse('2020-01-02T05:30:00+01:00'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "28"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 1, 15).with(TemporalAdjusters.lastDayOfMonth())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-31"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 1, 15).with(TemporalAdjusters.next(DayOfWeek.MONDAY))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-20"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 1, 15).with(TemporalAdjusters.firstInMonth(DayOfWeek.FRIDAY))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-03"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 1, 15).with(TemporalAdjusters.lastInMonth(DayOfWeek.FRIDAY))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-31"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 1, 15).with(ChronoField.DAY_OF_WEEK, 7)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-19"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 1, 15).with(ChronoField.MONTH_OF_YEAR, 13)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.temporal.ValueRange.checkValidValue(ValueRange.java:319)",
+       "java.base/java.time.temporal.ChronoField.checkValidValue(ChronoField.java:721)",
+       "java.base/java.time.LocalDate.with(LocalDate.java:1052)",
+       "return LocalDate.of(2020, 1, 15).with(ChronoField.MONTH_OF_YEAR, 13)",
+       "                                                 ^---- HERE"
+      ],
+      "script": "return LocalDate.of(2020, 1, 15).with(ChronoField.MONTH_OF_YEAR, 13)",
+      "lang": "painless",
+      "position": {
+       "offset": 49,
+       "start": 0,
+       "end": 68
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.temporal.ValueRange.checkValidValue(ValueRange.java:319)",
+     "java.base/java.time.temporal.ChronoField.checkValidValue(ChronoField.java:721)",
+     "java.base/java.time.LocalDate.with(LocalDate.java:1052)",
+     "return LocalDate.of(2020, 1, 15).with(ChronoField.MONTH_OF_YEAR, 13)",
+     "                                                 ^---- HERE"
+    ],
+    "script": "return LocalDate.of(2020, 1, 15).with(ChronoField.MONTH_OF_YEAR, 13)",
+    "lang": "painless",
+    "position": {
+     "offset": 49,
+     "start": 0,
+     "end": 68
+    },
+    "caused_by": {
+     "type": "date_time_exception",
+     "reason": "Invalid value for MonthOfYear (valid values 1 - 12): 13"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 1, 15).get(ChronoField.HOUR_OF_DAY)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.LocalDate.get0(LocalDate.java:718)",
+       "java.base/java.time.LocalDate.get(LocalDate.java:661)",
+       "return LocalDate.of(2020, 1, 15).get(ChronoField.HOUR_OF_DAY)",
+       "                                                ^---- HERE"
+      ],
+      "script": "return LocalDate.of(2020, 1, 15).get(ChronoField.HOUR_OF_DAY)",
+      "lang": "painless",
+      "position": {
+       "offset": 48,
+       "start": 0,
+       "end": 61
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.LocalDate.get0(LocalDate.java:718)",
+     "java.base/java.time.LocalDate.get(LocalDate.java:661)",
+     "return LocalDate.of(2020, 1, 15).get(ChronoField.HOUR_OF_DAY)",
+     "                                                ^---- HERE"
+    ],
+    "script": "return LocalDate.of(2020, 1, 15).get(ChronoField.HOUR_OF_DAY)",
+    "lang": "painless",
+    "position": {
+     "offset": 48,
+     "start": 0,
+     "end": 61
+    },
+    "caused_by": {
+     "type": "unsupported_temporal_type_exception",
+     "reason": "Unsupported field: HourOfDay"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 1, 15).getLong(ChronoField.EPOCH_DAY)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "18276"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 1, 15).get(ChronoField.EPOCH_DAY)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.LocalDate.get0(LocalDate.java:710)",
+       "java.base/java.time.LocalDate.get(LocalDate.java:661)",
+       "return LocalDate.of(2020, 1, 15).get(ChronoField.EPOCH_DAY)",
+       "                                                ^---- HERE"
+      ],
+      "script": "return LocalDate.of(2020, 1, 15).get(ChronoField.EPOCH_DAY)",
+      "lang": "painless",
+      "position": {
+       "offset": 48,
+       "start": 0,
+       "end": 59
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.LocalDate.get0(LocalDate.java:710)",
+     "java.base/java.time.LocalDate.get(LocalDate.java:661)",
+     "return LocalDate.of(2020, 1, 15).get(ChronoField.EPOCH_DAY)",
+     "                                                ^---- HERE"
+    ],
+    "script": "return LocalDate.of(2020, 1, 15).get(ChronoField.EPOCH_DAY)",
+    "lang": "painless",
+    "position": {
+     "offset": 48,
+     "start": 0,
+     "end": 59
+    },
+    "caused_by": {
+     "type": "unsupported_temporal_type_exception",
+     "reason": "Invalid field 'EpochDay' for get() method, use getLong() instead"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalTime.of(10, 15)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "10:15"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalTime.of(10, 15, 30, 1000)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "10:15:30.000001"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalTime.of(25, 0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.temporal.ValueRange.checkValidValue(ValueRange.java:319)",
+       "java.base/java.time.temporal.ChronoField.checkValidValue(ChronoField.java:721)",
+       "java.base/java.time.LocalTime.of(LocalTime.java:308)",
+       "return LocalTime.of(25, 0)",
+       "                ^---- HERE"
+      ],
+      "script": "return LocalTime.of(25, 0)",
+      "lang": "painless",
+      "position": {
+       "offset": 16,
+       "start": 0,
+       "end": 26
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.temporal.ValueRange.checkValidValue(ValueRange.java:319)",
+     "java.base/java.time.temporal.ChronoField.checkValidValue(ChronoField.java:721)",
+     "java.base/java.time.LocalTime.of(LocalTime.java:308)",
+     "return LocalTime.of(25, 0)",
+     "                ^---- HERE"
+    ],
+    "script": "return LocalTime.of(25, 0)",
+    "lang": "painless",
+    "position": {
+     "offset": 16,
+     "start": 0,
+     "end": 26
+    },
+    "caused_by": {
+     "type": "date_time_exception",
+     "reason": "Invalid value for HourOfDay (valid values 0 - 23): 25"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalTime.of(23, 59).plusMinutes(2)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "00:01"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalTime.parse('10:15:30.123456789')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "10:15:30.123456789"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalTime.NOON.minusHours(13)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "23:00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDateTime.of(2020, 1, 1, 10, 15, 30)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T10:15:30"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDateTime.of(2020, 1, 1, 10, 15)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T10:15"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDateTime.parse('2020-01-01T10:15:30.000')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T10:15:30"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDateTime.parse('2020-01-01 10:15:30')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.format.DateTimeFormatter.parseResolved0(DateTimeFormatter.java:2131)",
+       "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2033)",
+       "java.base/java.time.LocalDateTime.parse(LocalDateTime.java:496)",
+       "java.base/java.time.LocalDateTime.parse(LocalDateTime.java:481)",
+       "return LocalDateTime.parse('2020-01-01 10:15:30')",
+       "                           ^---- HERE"
+      ],
+      "script": "return LocalDateTime.parse('2020-01-01 10:15:30')",
+      "lang": "painless",
+      "position": {
+       "offset": 27,
+       "start": 0,
+       "end": 49
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.format.DateTimeFormatter.parseResolved0(DateTimeFormatter.java:2131)",
+     "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2033)",
+     "java.base/java.time.LocalDateTime.parse(LocalDateTime.java:496)",
+     "java.base/java.time.LocalDateTime.parse(LocalDateTime.java:481)",
+     "return LocalDateTime.parse('2020-01-01 10:15:30')",
+     "                           ^---- HERE"
+    ],
+    "script": "return LocalDateTime.parse('2020-01-01 10:15:30')",
+    "lang": "painless",
+    "position": {
+     "offset": 27,
+     "start": 0,
+     "end": 49
+    },
+    "caused_by": {
+     "type": "date_time_parse_exception",
+     "reason": "Text '2020-01-01 10:15:30' could not be parsed at index 10"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDateTime.of(2020, 1, 1, 23, 0).plusHours(2)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-02T01:00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDateTime.of(2020, 1, 1, 0, 0).truncatedTo(ChronoUnit.DAYS)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T00:00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDateTime.of(2020, 1, 1, 10, 15, 30, 999).truncatedTo(ChronoUnit.SECONDS)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T10:15:30"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZonedDateTime.parse('2020-01-01T10:15:30+01:00[Europe/Paris]')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T10:15:30+01:00[Europe/Paris]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZonedDateTime.parse('2020-01-01T10:15:30Z')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T10:15:30Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZonedDateTime.parse('2020-01-01T10:15:30')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.format.DateTimeFormatter.parseResolved0(DateTimeFormatter.java:2131)",
+       "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2033)",
+       "java.base/java.time.ZonedDateTime.parse(ZonedDateTime.java:602)",
+       "java.base/java.time.ZonedDateTime.parse(ZonedDateTime.java:587)",
+       "return ZonedDateTime.parse('2020-01-01T10:15:30')",
+       "                           ^---- HERE"
+      ],
+      "script": "return ZonedDateTime.parse('2020-01-01T10:15:30')",
+      "lang": "painless",
+      "position": {
+       "offset": 27,
+       "start": 0,
+       "end": 49
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.format.DateTimeFormatter.parseResolved0(DateTimeFormatter.java:2131)",
+     "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2033)",
+     "java.base/java.time.ZonedDateTime.parse(ZonedDateTime.java:602)",
+     "java.base/java.time.ZonedDateTime.parse(ZonedDateTime.java:587)",
+     "return ZonedDateTime.parse('2020-01-01T10:15:30')",
+     "                           ^---- HERE"
+    ],
+    "script": "return ZonedDateTime.parse('2020-01-01T10:15:30')",
+    "lang": "painless",
+    "position": {
+     "offset": 27,
+     "start": 0,
+     "end": 49
+    },
+    "caused_by": {
+     "type": "date_time_parse_exception",
+     "reason": "Text '2020-01-01T10:15:30' could not be parsed at index 19"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30Z'); return [z.getYear(), z.getMonthValue(), z.getMonth(), z.getDayOfMonth(), z.getHour(), z.getMinute(), z.getSecond(), z.getNano(), z.getDayOfWeek(), z.getDayOfYear(), z.getZone(), z.getOffset()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[2020, 1, JANUARY, 1, 10, 15, 30, 0, WEDNESDAY, 1, Z, Z]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30.123Z'); return [z.getHourOfDay(), z.getMillisOfDay(), z.getMillisOfSecond(), z.getMinuteOfDay(), z.getMonthOfYear(), z.getSecondOfDay(), z.getWeekOfWeekyear(), z.getWeekyear(), z.getYearOfCentury(), z.getYearOfEra(), z.getCenturyOfEra(), z.getEra(), z.getDayOfWeekEnum()]",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return [z.getHourOfDay(), z.getMillisOfDay(), z.getMillisOfSecond(), z.getMinuteOfDay(), z.getMonthOfYear(), z.getSecondOfDay(), z.getWeekOfWeekyear(), z.getWeekyear(), z.getYearOfCentury(), z.getYearOfEra(), z.getCenturyOfEra(), z.getEra(), z.getDayOfWeekEnum()]",
+       "         ^---- HERE"
+      ],
+      "script": "ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30.123Z'); return [z.getHourOfDay(), z.getMillisOfDay(), z.getMillisOfSecond(), z.getMinuteOfDay(), z.getMonthOfYear(), z.getSecondOfDay(), z.getWeekOfWeekyear(), z.getWeekyear(), z.getYearOfCentury() ...",
+      "lang": "painless",
+      "position": {
+       "offset": 76,
+       "start": 67,
+       "end": 330
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return [z.getHourOfDay(), z.getMillisOfDay(), z.getMillisOfSecond(), z.getMinuteOfDay(), z.getMonthOfYear(), z.getSecondOfDay(), z.getWeekOfWeekyear(), z.getWeekyear(), z.getYearOfCentury(), z.getYearOfEra(), z.getCenturyOfEra(), z.getEra(), z.getDayOfWeekEnum()]",
+     "         ^---- HERE"
+    ],
+    "script": "ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30.123Z'); return [z.getHourOfDay(), z.getMillisOfDay(), z.getMillisOfSecond(), z.getMinuteOfDay(), z.getMonthOfYear(), z.getSecondOfDay(), z.getWeekOfWeekyear(), z.getWeekyear(), z.getYearOfCentury() ...",
+    "lang": "painless",
+    "position": {
+     "offset": 76,
+     "start": 67,
+     "end": 330
+    },
+    "caused_by": {
+     "type": "unsupported_operation_exception",
+     "reason": "[getHourOfDay] is no longer available; use [getHour()] instead"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ZonedDateTime z = ZonedDateTime.parse('2021-01-01T00:00:00Z'); return [z.getWeekOfWeekyear(), z.getWeekyear()]",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return [z.getWeekOfWeekyear(), z.getWeekyear()]",
+       "         ^---- HERE"
+      ],
+      "script": "ZonedDateTime z = ZonedDateTime.parse('2021-01-01T00:00:00Z'); return [z.getWeekOfWeekyear(), z.getWeekyear()]",
+      "lang": "painless",
+      "position": {
+       "offset": 72,
+       "start": 63,
+       "end": 110
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return [z.getWeekOfWeekyear(), z.getWeekyear()]",
+     "         ^---- HERE"
+    ],
+    "script": "ZonedDateTime z = ZonedDateTime.parse('2021-01-01T00:00:00Z'); return [z.getWeekOfWeekyear(), z.getWeekyear()]",
+    "lang": "painless",
+    "position": {
+     "offset": 72,
+     "start": 63,
+     "end": 110
+    },
+    "caused_by": {
+     "type": "unsupported_operation_exception",
+     "reason": "[getWeekOfWeekyear] is no longer available; use [get(IsoFields.WEEK_OF_WEEK_BASED_YEAR)] instead"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ZonedDateTime z = ZonedDateTime.parse('2020-12-31T00:00:00Z'); return [z.getWeekOfWeekyear(), z.getWeekyear()]",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return [z.getWeekOfWeekyear(), z.getWeekyear()]",
+       "         ^---- HERE"
+      ],
+      "script": "ZonedDateTime z = ZonedDateTime.parse('2020-12-31T00:00:00Z'); return [z.getWeekOfWeekyear(), z.getWeekyear()]",
+      "lang": "painless",
+      "position": {
+       "offset": 72,
+       "start": 63,
+       "end": 110
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return [z.getWeekOfWeekyear(), z.getWeekyear()]",
+     "         ^---- HERE"
+    ],
+    "script": "ZonedDateTime z = ZonedDateTime.parse('2020-12-31T00:00:00Z'); return [z.getWeekOfWeekyear(), z.getWeekyear()]",
+    "lang": "painless",
+    "position": {
+     "offset": 72,
+     "start": 63,
+     "end": 110
+    },
+    "caused_by": {
+     "type": "unsupported_operation_exception",
+     "reason": "[getWeekOfWeekyear] is no longer available; use [get(IsoFields.WEEK_OF_WEEK_BASED_YEAR)] instead"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30Z'); return [z.toInstant(), z.toEpochSecond(), z.toInstant().toEpochMilli(), z.toLocalDate(), z.toLocalTime(), z.toLocalDateTime(), z.toOffsetDateTime()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[2020-01-01T10:15:30Z, 1577873730, 1577873730000, 2020-01-01, 10:15:30, 2020-01-01T10:15:30, 2020-01-01T10:15:30Z]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30Z'); return z.withZoneSameInstant(ZoneId.of('America/Los_Angeles'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T02:15:30-08:00[America/Los_Angeles]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30Z'); return z.withZoneSameLocal(ZoneId.of('America/Los_Angeles'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T10:15:30-08:00[America/Los_Angeles]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ZonedDateTime z = ZonedDateTime.parse('2020-01-31T10:15:30Z'); return [z.plusMonths(1), z.minusDays(31), z.plusWeeks(2), z.withDayOfMonth(15), z.withHour(0), z.with(ChronoField.YEAR, 1999)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[2020-02-29T10:15:30Z, 2019-12-31T10:15:30Z, 2020-02-14T10:15:30Z, 2020-01-15T10:15:30Z, 2020-01-31T00:15:30Z, 1999-01-31T10:15:30Z]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ZonedDateTime a = ZonedDateTime.parse('2020-01-01T10:15:30Z'); ZonedDateTime b = ZonedDateTime.parse('2020-01-01T11:15:30+01:00'); return [a.isEqual(b), a.equals(b), a.compareTo(b) < 0, a.isBefore(b), a.isAfter(b)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, false, true, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30Z'); return [z.toEpochMilli(), z.getMillis()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1577873730000, 1577873730000]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Duration.ofSeconds(3661)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "PT1H1M1S"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Duration.ofMillis(-1500)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "PT-1.5S"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Duration.ofDays(2).plusHours(3).plusMinutes(4)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "PT51H4M"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Duration.between(Instant.EPOCH, Instant.ofEpochSecond(90061))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "PT25H1M1S"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Duration.between(LocalDate.of(2020,1,1), LocalDate.of(2020,1,2))",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.LocalDate.until(LocalDate.java:1656)",
+       "java.base/java.time.Duration.between(Duration.java:520)",
+       "return Duration.between(LocalDate.of(2020,1,1), LocalDate.of(2020,1,2))",
+       "                                                         ^---- HERE"
+      ],
+      "script": "return Duration.between(LocalDate.of(2020,1,1), LocalDate.of(2020,1,2))",
+      "lang": "painless",
+      "position": {
+       "offset": 57,
+       "start": 0,
+       "end": 71
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.LocalDate.until(LocalDate.java:1656)",
+     "java.base/java.time.Duration.between(Duration.java:520)",
+     "return Duration.between(LocalDate.of(2020,1,1), LocalDate.of(2020,1,2))",
+     "                                                         ^---- HERE"
+    ],
+    "script": "return Duration.between(LocalDate.of(2020,1,1), LocalDate.of(2020,1,2))",
+    "lang": "painless",
+    "position": {
+     "offset": 57,
+     "start": 0,
+     "end": 71
+    },
+    "caused_by": {
+     "type": "unsupported_temporal_type_exception",
+     "reason": "Unsupported unit: Seconds"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Duration.parse('PT1H30M')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "PT1H30M"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Duration.parse('P2DT3H4M')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "PT51H4M"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Duration.parse('xyz')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.Duration.parse(Duration.java:450)",
+       "return Duration.parse('xyz')",
+       "                      ^---- HERE"
+      ],
+      "script": "return Duration.parse('xyz')",
+      "lang": "painless",
+      "position": {
+       "offset": 22,
+       "start": 0,
+       "end": 28
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.Duration.parse(Duration.java:450)",
+     "return Duration.parse('xyz')",
+     "                      ^---- HERE"
+    ],
+    "script": "return Duration.parse('xyz')",
+    "lang": "painless",
+    "position": {
+     "offset": 22,
+     "start": 0,
+     "end": 28
+    },
+    "caused_by": {
+     "type": "date_time_parse_exception",
+     "reason": "Text cannot be parsed to a Duration"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Duration.ofMinutes(90).toHours(), Duration.ofMinutes(90).toMinutes(), Duration.ofMinutes(90).toMillis(), Duration.ofMinutes(90).getSeconds(), Duration.ofMillis(1500).getNano()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, 90, 5400000, 5400, 500000000]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Duration.ofSeconds(10).compareTo(Duration.ofSeconds(5))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Duration.ofSeconds(-90).abs()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "PT1M30S"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Duration.ZERO",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "PT0S"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Period.of(1, 2, 3)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "P1Y2M3D"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Period.ofWeeks(2)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "P14D"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Period.parse('P1Y2M3D')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "P1Y2M3D"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Period.between(LocalDate.of(2020, 1, 31), LocalDate.of(2020, 3, 1))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "P1M1D"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Period.of(1, 14, 3).normalized()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "P2Y2M3D"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 1, 31).plus(Period.ofMonths(1))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-02-29"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDateTime.of(2020, 1, 1, 0, 0).plus(Duration.ofHours(25))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-02T01:00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Instant.EPOCH.plus(Period.ofDays(1))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1970-01-02T00:00:00Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Instant.EPOCH.plus(Period.ofMonths(1))",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.Instant.plus(Instant.java:887)",
+       "java.base/java.time.Instant.plus(Instant.java:209)",
+       "java.base/java.time.Period.addTo(Period.java:905)",
+       "java.base/java.time.Instant.plus(Instant.java:788)",
+       "return Instant.EPOCH.plus(Period.ofMonths(1))",
+       "                                ^---- HERE"
+      ],
+      "script": "return Instant.EPOCH.plus(Period.ofMonths(1))",
+      "lang": "painless",
+      "position": {
+       "offset": 32,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.Instant.plus(Instant.java:887)",
+     "java.base/java.time.Instant.plus(Instant.java:209)",
+     "java.base/java.time.Period.addTo(Period.java:905)",
+     "java.base/java.time.Instant.plus(Instant.java:788)",
+     "return Instant.EPOCH.plus(Period.ofMonths(1))",
+     "                                ^---- HERE"
+    ],
+    "script": "return Instant.EPOCH.plus(Period.ofMonths(1))",
+    "lang": "painless",
+    "position": {
+     "offset": 32,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "unsupported_temporal_type_exception",
+     "reason": "Unsupported unit: Months"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DayOfWeek.MONDAY.plus(8)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "TUESDAY"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [DayOfWeek.SUNDAY.getValue(), Month.MARCH.getValue(), Month.FEBRUARY.length(true), Month.of(12), DayOfWeek.of(3)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[7, 3, 29, DECEMBER, WEDNESDAY]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Month.of(13)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.Month.of(Month.java:187)",
+       "return Month.of(13)",
+       "            ^---- HERE"
+      ],
+      "script": "return Month.of(13)",
+      "lang": "painless",
+      "position": {
+       "offset": 12,
+       "start": 0,
+       "end": 19
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.Month.of(Month.java:187)",
+     "return Month.of(13)",
+     "            ^---- HERE"
+    ],
+    "script": "return Month.of(13)",
+    "lang": "painless",
+    "position": {
+     "offset": 12,
+     "start": 0,
+     "end": 19
+    },
+    "caused_by": {
+     "type": "date_time_exception",
+     "reason": "Invalid value for MonthOfYear: 13"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [Month.JANUARY.getDisplayName(TextStyle.FULL, Locale.ROOT), Month.JANUARY.getDisplayName(TextStyle.SHORT, Locale.ROOT), DayOfWeek.MONDAY.getDisplayName(TextStyle.SHORT, Locale.ROOT)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[Jan, Jan, Mon]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return [ChronoUnit.DAYS, ChronoField.DAY_OF_MONTH, ChronoUnit.HALF_DAYS, ChronoField.AMPM_OF_DAY]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[Days, DayOfMonth, HalfDays, AmPmOfDay]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Year.of(2020).isLeap()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "true"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return YearMonth.of(2020, 2).atEndOfMonth()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-02-29"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return YearMonth.of(2020, 2)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-02"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MonthDay.of(2, 29)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "--02-29"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return OffsetDateTime.of(2020, 1, 1, 10, 0, 0, 0, ZoneOffset.ofHours(2))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T10:00+02:00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return OffsetDateTime.parse('2020-01-01T10:15:30+01:00').toInstant()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T09:15:30Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZoneOffset.ofHoursMinutes(5, 30)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "+05:30"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZoneOffset.UTC",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd HH:mm:ss'); return f.format(ZonedDateTime.parse('2020-01-02T03:04:05Z'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-02 03:04:05"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DateTimeFormatter f = DateTimeFormatter.ofPattern('dd/MM/yy EEE EEEE MMM MMMM a h:mm'); return f.format(LocalDateTime.of(2020, 1, 2, 15, 4))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "02/01/20 Thu Thursday Jan January PM 3:04"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd\\'T\\'HH:mm:ss.SSSXXX'); return f.format(ZonedDateTime.parse('2020-01-02T03:04:05.006+05:30'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-02T03:04:05.006+05:30"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd\\'T\\'HH:mm:ssZ'); return f.format(ZonedDateTime.parse('2020-01-02T03:04:05Z'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-02T03:04:05+0000"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd\\'T\\'HH:mm:ssxxx VV z'); return f.format(ZonedDateTime.parse('2020-01-02T03:04:05+01:00[Europe/Paris]'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-02T03:04:05+01:00 Europe/Paris CET"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd'); return LocalDate.parse('2020-02-30', f)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-02-29"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd'); return LocalDate.parse('2020-13-01', f)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.format.DateTimeFormatter.createError(DateTimeFormatter.java:2102)",
+       "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2037)",
+       "java.base/java.time.LocalDate.parse(LocalDate.java:455)",
+       "return LocalDate.parse('2020-13-01', f)",
+       "                       ^---- HERE"
+      ],
+      "script": "DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd'); return LocalDate.parse('2020-13-01', f)",
+      "lang": "painless",
+      "position": {
+       "offset": 88,
+       "start": 65,
+       "end": 104
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.format.DateTimeFormatter.createError(DateTimeFormatter.java:2102)",
+     "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2037)",
+     "java.base/java.time.LocalDate.parse(LocalDate.java:455)",
+     "return LocalDate.parse('2020-13-01', f)",
+     "                       ^---- HERE"
+    ],
+    "script": "DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd'); return LocalDate.parse('2020-13-01', f)",
+    "lang": "painless",
+    "position": {
+     "offset": 88,
+     "start": 65,
+     "end": 104
+    },
+    "caused_by": {
+     "type": "date_time_parse_exception",
+     "reason": "Text '2020-13-01' could not be parsed: Invalid value for MonthOfYear (valid values 1 - 12): 13",
+     "caused_by": {
+      "type": "date_time_exception",
+      "reason": "Invalid value for MonthOfYear (valid values 1 - 12): 13"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd').withResolverStyle(ResolverStyle.STRICT); return LocalDate.parse('2020-01-01', f)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.format.DateTimeFormatter.createError(DateTimeFormatter.java:2102)",
+       "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2037)",
+       "java.base/java.time.LocalDate.parse(LocalDate.java:455)",
+       "return LocalDate.parse('2020-01-01', f)",
+       "                       ^---- HERE"
+      ],
+      "script": "DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd').withResolverStyle(ResolverStyle.STRICT); return LocalDate.parse('2020-01-01', f)",
+      "lang": "painless",
+      "position": {
+       "offset": 128,
+       "start": 105,
+       "end": 144
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.format.DateTimeFormatter.createError(DateTimeFormatter.java:2102)",
+     "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2037)",
+     "java.base/java.time.LocalDate.parse(LocalDate.java:455)",
+     "return LocalDate.parse('2020-01-01', f)",
+     "                       ^---- HERE"
+    ],
+    "script": "DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd').withResolverStyle(ResolverStyle.STRICT); return LocalDate.parse('2020-01-01', f)",
+    "lang": "painless",
+    "position": {
+     "offset": 128,
+     "start": 105,
+     "end": 144
+    },
+    "caused_by": {
+     "type": "date_time_parse_exception",
+     "reason": "Text '2020-01-01' could not be parsed: Unable to obtain LocalDate from TemporalAccessor: {YearOfEra=2020, DayOfMonth=1, MonthOfYear=1},ISO of type java.time.format.Parsed",
+     "caused_by": {
+      "type": "date_time_exception",
+      "reason": "Unable to obtain LocalDate from TemporalAccessor: {YearOfEra=2020, DayOfMonth=1, MonthOfYear=1},ISO of type java.time.format.Parsed"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DateTimeFormatter f = DateTimeFormatter.ofPattern('uuuu-MM-dd').withResolverStyle(ResolverStyle.STRICT); return LocalDate.parse('2020-02-30', f)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.format.DateTimeFormatter.createError(DateTimeFormatter.java:2102)",
+       "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2037)",
+       "java.base/java.time.LocalDate.parse(LocalDate.java:455)",
+       "return LocalDate.parse('2020-02-30', f)",
+       "                       ^---- HERE"
+      ],
+      "script": "DateTimeFormatter f = DateTimeFormatter.ofPattern('uuuu-MM-dd').withResolverStyle(ResolverStyle.STRICT); return LocalDate.parse('2020-02-30', f)",
+      "lang": "painless",
+      "position": {
+       "offset": 128,
+       "start": 105,
+       "end": 144
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.format.DateTimeFormatter.createError(DateTimeFormatter.java:2102)",
+     "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2037)",
+     "java.base/java.time.LocalDate.parse(LocalDate.java:455)",
+     "return LocalDate.parse('2020-02-30', f)",
+     "                       ^---- HERE"
+    ],
+    "script": "DateTimeFormatter f = DateTimeFormatter.ofPattern('uuuu-MM-dd').withResolverStyle(ResolverStyle.STRICT); return LocalDate.parse('2020-02-30', f)",
+    "lang": "painless",
+    "position": {
+     "offset": 128,
+     "start": 105,
+     "end": 144
+    },
+    "caused_by": {
+     "type": "date_time_parse_exception",
+     "reason": "Text '2020-02-30' could not be parsed: Invalid date 'FEBRUARY 30'",
+     "caused_by": {
+      "type": "date_time_exception",
+      "reason": "Invalid date 'FEBRUARY 30'"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DateTimeFormatter f = DateTimeFormatter.ofPattern('dd.MM.yyyy HH:mm'); return LocalDateTime.parse('15.03.2020 14:30', f)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-03-15T14:30"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DateTimeFormatter f = DateTimeFormatter.ofPattern('dd.MM.yyyy HH:mm'); return LocalDateTime.parse('15.03.2020', f)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.format.DateTimeFormatter.parseResolved0(DateTimeFormatter.java:2131)",
+       "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2033)",
+       "java.base/java.time.LocalDateTime.parse(LocalDateTime.java:496)",
+       "return LocalDateTime.parse('15.03.2020', f)",
+       "                           ^---- HERE"
+      ],
+      "script": "DateTimeFormatter f = DateTimeFormatter.ofPattern('dd.MM.yyyy HH:mm'); return LocalDateTime.parse('15.03.2020', f)",
+      "lang": "painless",
+      "position": {
+       "offset": 98,
+       "start": 71,
+       "end": 114
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.format.DateTimeFormatter.parseResolved0(DateTimeFormatter.java:2131)",
+     "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2033)",
+     "java.base/java.time.LocalDateTime.parse(LocalDateTime.java:496)",
+     "return LocalDateTime.parse('15.03.2020', f)",
+     "                           ^---- HERE"
+    ],
+    "script": "DateTimeFormatter f = DateTimeFormatter.ofPattern('dd.MM.yyyy HH:mm'); return LocalDateTime.parse('15.03.2020', f)",
+    "lang": "painless",
+    "position": {
+     "offset": 98,
+     "start": 71,
+     "end": 114
+    },
+    "caused_by": {
+     "type": "date_time_parse_exception",
+     "reason": "Text '15.03.2020' could not be parsed at index 10"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DateTimeFormatter f = DateTimeFormatter.ofPattern('dd.MM.yyyy'); return LocalDateTime.parse('15.03.2020', f)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.format.DateTimeFormatter.createError(DateTimeFormatter.java:2102)",
+       "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2037)",
+       "java.base/java.time.LocalDateTime.parse(LocalDateTime.java:496)",
+       "return LocalDateTime.parse('15.03.2020', f)",
+       "                           ^---- HERE"
+      ],
+      "script": "DateTimeFormatter f = DateTimeFormatter.ofPattern('dd.MM.yyyy'); return LocalDateTime.parse('15.03.2020', f)",
+      "lang": "painless",
+      "position": {
+       "offset": 92,
+       "start": 65,
+       "end": 108
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.format.DateTimeFormatter.createError(DateTimeFormatter.java:2102)",
+     "java.base/java.time.format.DateTimeFormatter.parse(DateTimeFormatter.java:2037)",
+     "java.base/java.time.LocalDateTime.parse(LocalDateTime.java:496)",
+     "return LocalDateTime.parse('15.03.2020', f)",
+     "                           ^---- HERE"
+    ],
+    "script": "DateTimeFormatter f = DateTimeFormatter.ofPattern('dd.MM.yyyy'); return LocalDateTime.parse('15.03.2020', f)",
+    "lang": "painless",
+    "position": {
+     "offset": 92,
+     "start": 65,
+     "end": 108
+    },
+    "caused_by": {
+     "type": "date_time_parse_exception",
+     "reason": "Text '15.03.2020' could not be parsed: Unable to obtain LocalDateTime from TemporalAccessor: {},ISO resolved to 2020-03-15 of type java.time.format.Parsed",
+     "caused_by": {
+      "type": "date_time_exception",
+      "reason": "Unable to obtain LocalDateTime from TemporalAccessor: {},ISO resolved to 2020-03-15 of type java.time.format.Parsed",
+      "caused_by": {
+       "type": "date_time_exception",
+       "reason": "Unable to obtain LocalTime from TemporalAccessor: {},ISO resolved to 2020-03-15 of type java.time.format.Parsed"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DateTimeFormatter f = DateTimeFormatter.ofPattern('MMM d, yyyy'); return LocalDate.parse('Mar 5, 2020', f)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-03-05"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd HH:mm:ss VV'); return ZonedDateTime.parse('2020-01-02 03:04:05 Europe/Paris', f)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-02T03:04:05+01:00[Europe/Paris]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.ISO_LOCAL_DATE.format(LocalDate.of(2020, 1, 2))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-02"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.ISO_INSTANT.format(ZonedDateTime.parse('2020-01-02T03:04:05.100+01:00'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-02T02:04:05.100Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(ZonedDateTime.parse('2020-01-02T03:04:05+01:00[Europe/Paris]'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-02T03:04:05+01:00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.ISO_ZONED_DATE_TIME.format(ZonedDateTime.parse('2020-01-02T03:04:05+01:00[Europe/Paris]'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-02T03:04:05+01:00[Europe/Paris]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.BASIC_ISO_DATE.format(LocalDate.of(2020, 1, 2))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "20200102"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.parse('2020-01-02T03:04:05Z'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "Thu, 2 Jan 2020 03:04:05 GMT"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.ISO_WEEK_DATE.format(LocalDate.of(2021, 1, 1))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-W53-5"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.ISO_LOCAL_DATE.format(LocalTime.NOON)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.LocalTime.get0(LocalTime.java:712)",
+       "java.base/java.time.LocalTime.getLong(LocalTime.java:690)",
+       "java.base/java.time.format.DateTimePrintContext$1.getLong(DateTimePrintContext.java:282)",
+       "java.base/java.time.format.DateTimePrintContext.getValue(DateTimePrintContext.java:373)",
+       "java.base/java.time.format.DateTimeFormatterBuilder$NumberPrinterParser.format(DateTimeFormatterBuilder.java:2920)",
+       "java.base/java.time.format.DateTimeFormatterBuilder$CompositePrinterParser.format(DateTimeFormatterBuilder.java:2549)",
+       "java.base/java.time.format.DateTimeFormatter.formatTo(DateTimeFormatter.java:1928)",
+       "java.base/java.time.format.DateTimeFormatter.format(DateTimeFormatter.java:1902)",
+       "return DateTimeFormatter.ISO_LOCAL_DATE.format(LocalTime.NOON)",
+       "                                                        ^---- HERE"
+      ],
+      "script": "return DateTimeFormatter.ISO_LOCAL_DATE.format(LocalTime.NOON)",
+      "lang": "painless",
+      "position": {
+       "offset": 56,
+       "start": 0,
+       "end": 62
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.LocalTime.get0(LocalTime.java:712)",
+     "java.base/java.time.LocalTime.getLong(LocalTime.java:690)",
+     "java.base/java.time.format.DateTimePrintContext$1.getLong(DateTimePrintContext.java:282)",
+     "java.base/java.time.format.DateTimePrintContext.getValue(DateTimePrintContext.java:373)",
+     "java.base/java.time.format.DateTimeFormatterBuilder$NumberPrinterParser.format(DateTimeFormatterBuilder.java:2920)",
+     "java.base/java.time.format.DateTimeFormatterBuilder$CompositePrinterParser.format(DateTimeFormatterBuilder.java:2549)",
+     "java.base/java.time.format.DateTimeFormatter.formatTo(DateTimeFormatter.java:1928)",
+     "java.base/java.time.format.DateTimeFormatter.format(DateTimeFormatter.java:1902)",
+     "return DateTimeFormatter.ISO_LOCAL_DATE.format(LocalTime.NOON)",
+     "                                                        ^---- HERE"
+    ],
+    "script": "return DateTimeFormatter.ISO_LOCAL_DATE.format(LocalTime.NOON)",
+    "lang": "painless",
+    "position": {
+     "offset": 56,
+     "start": 0,
+     "end": 62
+    },
+    "caused_by": {
+     "type": "unsupported_temporal_type_exception",
+     "reason": "Unsupported field: Year"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.ofPattern('yyyy-MM-dd').format(LocalTime.NOON)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.LocalTime.get0(LocalTime.java:712)",
+       "java.base/java.time.LocalTime.getLong(LocalTime.java:690)",
+       "java.base/java.time.format.DateTimePrintContext.getValue(DateTimePrintContext.java:373)",
+       "java.base/java.time.format.DateTimeFormatterBuilder$NumberPrinterParser.format(DateTimeFormatterBuilder.java:2920)",
+       "java.base/java.time.format.DateTimeFormatterBuilder$CompositePrinterParser.format(DateTimeFormatterBuilder.java:2549)",
+       "java.base/java.time.format.DateTimeFormatter.formatTo(DateTimeFormatter.java:1928)",
+       "java.base/java.time.format.DateTimeFormatter.format(DateTimeFormatter.java:1902)",
+       "return DateTimeFormatter.ofPattern('yyyy-MM-dd').format(LocalTime.NOON)",
+       "                                                                 ^---- HERE"
+      ],
+      "script": "return DateTimeFormatter.ofPattern('yyyy-MM-dd').format(LocalTime.NOON)",
+      "lang": "painless",
+      "position": {
+       "offset": 65,
+       "start": 0,
+       "end": 71
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.LocalTime.get0(LocalTime.java:712)",
+     "java.base/java.time.LocalTime.getLong(LocalTime.java:690)",
+     "java.base/java.time.format.DateTimePrintContext.getValue(DateTimePrintContext.java:373)",
+     "java.base/java.time.format.DateTimeFormatterBuilder$NumberPrinterParser.format(DateTimeFormatterBuilder.java:2920)",
+     "java.base/java.time.format.DateTimeFormatterBuilder$CompositePrinterParser.format(DateTimeFormatterBuilder.java:2549)",
+     "java.base/java.time.format.DateTimeFormatter.formatTo(DateTimeFormatter.java:1928)",
+     "java.base/java.time.format.DateTimeFormatter.format(DateTimeFormatter.java:1902)",
+     "return DateTimeFormatter.ofPattern('yyyy-MM-dd').format(LocalTime.NOON)",
+     "                                                                 ^---- HERE"
+    ],
+    "script": "return DateTimeFormatter.ofPattern('yyyy-MM-dd').format(LocalTime.NOON)",
+    "lang": "painless",
+    "position": {
+     "offset": 65,
+     "start": 0,
+     "end": 71
+    },
+    "caused_by": {
+     "type": "unsupported_temporal_type_exception",
+     "reason": "Unsupported field: YearOfEra"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.ofPattern('qqqq')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "Text(QuarterOfYear,FULL_STANDALONE)"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.ofPattern('yyyy-MM-dd')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "Value(YearOfEra,4,19,EXCEEDS_PAD)'-'Value(MonthOfYear,2)'-'Value(DayOfMonth,2)"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.ISO_LOCAL_DATE",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "Value(Year,4,10,EXCEEDS_PAD)'-'Value(MonthOfYear,2)'-'Value(DayOfMonth,2)"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.ofPattern('{')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.format.DateTimeFormatterBuilder.parsePattern(DateTimeFormatterBuilder.java:2056)",
+       "java.base/java.time.format.DateTimeFormatterBuilder.appendPattern(DateTimeFormatterBuilder.java:1910)",
+       "java.base/java.time.format.DateTimeFormatter.ofPattern(DateTimeFormatter.java:569)",
+       "return DateTimeFormatter.ofPattern('{')",
+       "                        ^---- HERE"
+      ],
+      "script": "return DateTimeFormatter.ofPattern('{')",
+      "lang": "painless",
+      "position": {
+       "offset": 24,
+       "start": 0,
+       "end": 39
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.format.DateTimeFormatterBuilder.parsePattern(DateTimeFormatterBuilder.java:2056)",
+     "java.base/java.time.format.DateTimeFormatterBuilder.appendPattern(DateTimeFormatterBuilder.java:1910)",
+     "java.base/java.time.format.DateTimeFormatter.ofPattern(DateTimeFormatter.java:569)",
+     "return DateTimeFormatter.ofPattern('{')",
+     "                        ^---- HERE"
+    ],
+    "script": "return DateTimeFormatter.ofPattern('{')",
+    "lang": "painless",
+    "position": {
+     "offset": 24,
+     "start": 0,
+     "end": 39
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Pattern includes reserved character: '{'"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.ofPattern('ddd')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.format.DateTimeFormatterBuilder.parseField(DateTimeFormatterBuilder.java:2158)",
+       "java.base/java.time.format.DateTimeFormatterBuilder.parsePattern(DateTimeFormatterBuilder.java:1942)",
+       "java.base/java.time.format.DateTimeFormatterBuilder.appendPattern(DateTimeFormatterBuilder.java:1910)",
+       "java.base/java.time.format.DateTimeFormatter.ofPattern(DateTimeFormatter.java:569)",
+       "return DateTimeFormatter.ofPattern('ddd')",
+       "                        ^---- HERE"
+      ],
+      "script": "return DateTimeFormatter.ofPattern('ddd')",
+      "lang": "painless",
+      "position": {
+       "offset": 24,
+       "start": 0,
+       "end": 41
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.format.DateTimeFormatterBuilder.parseField(DateTimeFormatterBuilder.java:2158)",
+     "java.base/java.time.format.DateTimeFormatterBuilder.parsePattern(DateTimeFormatterBuilder.java:1942)",
+     "java.base/java.time.format.DateTimeFormatterBuilder.appendPattern(DateTimeFormatterBuilder.java:1910)",
+     "java.base/java.time.format.DateTimeFormatter.ofPattern(DateTimeFormatter.java:569)",
+     "return DateTimeFormatter.ofPattern('ddd')",
+     "                        ^---- HERE"
+    ],
+    "script": "return DateTimeFormatter.ofPattern('ddd')",
+    "lang": "painless",
+    "position": {
+     "offset": 24,
+     "start": 0,
+     "end": 41
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Too many pattern letters: d"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.ofPattern('w W Y e c F Q').format(LocalDate.of(2020, 1, 5))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2 2 2020 1 1 1 1"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.ofPattern('G GGGG u D DDD').format(LocalDate.of(2020, 2, 5))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "AD Anno Domini 2020 36 036"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return DateTimeFormatter.ISO_LOCAL_DATE.parse('2020-01-02')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "{},ISO resolved to 2020-01-02"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.from(DateTimeFormatter.ISO_LOCAL_DATE.parse('2020-01-02'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-02"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.from(ZonedDateTime.parse('2020-01-02T03:04:05Z'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-02"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.from(LocalTime.NOON)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.LocalDate.from(LocalDate.java:423)",
+       "return LocalDate.from(LocalTime.NOON)",
+       "                               ^---- HERE"
+      ],
+      "script": "return LocalDate.from(LocalTime.NOON)",
+      "lang": "painless",
+      "position": {
+       "offset": 31,
+       "start": 0,
+       "end": 37
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.LocalDate.from(LocalDate.java:423)",
+     "return LocalDate.from(LocalTime.NOON)",
+     "                               ^---- HERE"
+    ],
+    "script": "return LocalDate.from(LocalTime.NOON)",
+    "lang": "painless",
+    "position": {
+     "offset": 31,
+     "start": 0,
+     "end": 37
+    },
+    "caused_by": {
+     "type": "date_time_exception",
+     "reason": "Unable to obtain LocalDate from TemporalAccessor: 12:00 of type java.time.LocalTime"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZonedDateTime.from(LocalDate.of(2020, 1, 1))",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.ZonedDateTime.from(ZonedDateTime.java:570)",
+       "return ZonedDateTime.from(LocalDate.of(2020, 1, 1))",
+       "                                   ^---- HERE"
+      ],
+      "script": "return ZonedDateTime.from(LocalDate.of(2020, 1, 1))",
+      "lang": "painless",
+      "position": {
+       "offset": 35,
+       "start": 0,
+       "end": 51
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.ZonedDateTime.from(ZonedDateTime.java:570)",
+     "return ZonedDateTime.from(LocalDate.of(2020, 1, 1))",
+     "                                   ^---- HERE"
+    ],
+    "script": "return ZonedDateTime.from(LocalDate.of(2020, 1, 1))",
+    "lang": "painless",
+    "position": {
+     "offset": 35,
+     "start": 0,
+     "end": 51
+    },
+    "caused_by": {
+     "type": "date_time_exception",
+     "reason": "Unable to obtain ZonedDateTime from TemporalAccessor: 2020-01-01 of type java.time.LocalDate",
+     "caused_by": {
+      "type": "date_time_exception",
+      "reason": "Unable to obtain ZoneId from TemporalAccessor: 2020-01-01 of type java.time.LocalDate"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new Date(0L)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "Thu Jan 01 00:00:00 GMT 1970"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return new Date(1577836800000L).getTime()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1577836800000"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Date.from(Instant.EPOCH)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "Thu Jan 01 00:00:00 GMT 1970"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Clock.fixed(Instant.EPOCH, ZoneId.of('UTC')).instant()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1970-01-01T00:00:00Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZonedDateTime.parse('2020-01-01T10:15:30Z').format(DateTimeFormatter.ofPattern('EEEE, MMMM d, yyyy h:mm a'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "Wednesday, January 1, 2020 10:15 AM"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30Z'); return z.until(ZonedDateTime.parse('2020-03-01T10:15:29Z'), ChronoUnit.MONTHS)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30Z'); return z.until(ZonedDateTime.parse('2020-01-02T10:15:29Z'), ChronoUnit.DAYS)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 1, 1).atStartOfDay(ZoneId.of('America/Sao_Paulo'))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-01T00:00-03:00[America/Sao_Paulo]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZoneId.of('America/Sao_Paulo').getId()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "America/Sao_Paulo"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZoneId.of('UTC').normalized()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ZoneId.of('Europe/Paris') instanceof ZoneOffset",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "false"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Instant.MAX",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "+1000000000-12-31T23:59:59.999999999Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Instant.MIN",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-1000000000-01-01T00:00:00Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.MAX",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "+999999999-12-31"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.MIN.minusDays(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.temporal.ValueRange.checkValidValue(ValueRange.java:319)",
+       "java.base/java.time.temporal.ChronoField.checkValidValue(ChronoField.java:721)",
+       "java.base/java.time.LocalDate.ofEpochDay(LocalDate.java:365)",
+       "java.base/java.time.LocalDate.plusDays(LocalDate.java:1395)",
+       "java.base/java.time.LocalDate.minusDays(LocalDate.java:1536)",
+       "return LocalDate.MIN.minusDays(1)",
+       "                    ^---- HERE"
+      ],
+      "script": "return LocalDate.MIN.minusDays(1)",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 33
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.temporal.ValueRange.checkValidValue(ValueRange.java:319)",
+     "java.base/java.time.temporal.ChronoField.checkValidValue(ChronoField.java:721)",
+     "java.base/java.time.LocalDate.ofEpochDay(LocalDate.java:365)",
+     "java.base/java.time.LocalDate.plusDays(LocalDate.java:1395)",
+     "java.base/java.time.LocalDate.minusDays(LocalDate.java:1536)",
+     "return LocalDate.MIN.minusDays(1)",
+     "                    ^---- HERE"
+    ],
+    "script": "return LocalDate.MIN.minusDays(1)",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 33
+    },
+    "caused_by": {
+     "type": "date_time_exception",
+     "reason": "Invalid value for EpochDay (valid values -365243219162 - 365241780471): -365243219163"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Instant.ofEpochSecond(Long.MAX_VALUE)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.time.Instant.create(Instant.java:414)",
+       "java.base/java.time.Instant.ofEpochSecond(Instant.java:308)",
+       "return Instant.ofEpochSecond(Long.MAX_VALUE)",
+       "                                 ^---- HERE"
+      ],
+      "script": "return Instant.ofEpochSecond(Long.MAX_VALUE)",
+      "lang": "painless",
+      "position": {
+       "offset": 33,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.time.Instant.create(Instant.java:414)",
+     "java.base/java.time.Instant.ofEpochSecond(Instant.java:308)",
+     "return Instant.ofEpochSecond(Long.MAX_VALUE)",
+     "                                 ^---- HERE"
+    ],
+    "script": "return Instant.ofEpochSecond(Long.MAX_VALUE)",
+    "lang": "painless",
+    "position": {
+     "offset": 33,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "date_time_exception",
+     "reason": "Instant exceeds minimum or maximum instant"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return Duration.ofSeconds(Long.MAX_VALUE).plusSeconds(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.lang.Math.addExact(Math.java:935)",
+       "java.base/java.time.Duration.plus(Duration.java:878)",
+       "java.base/java.time.Duration.plusSeconds(Duration.java:835)",
+       "return Duration.ofSeconds(Long.MAX_VALUE).plusSeconds(1)",
+       "                                         ^---- HERE"
+      ],
+      "script": "return Duration.ofSeconds(Long.MAX_VALUE).plusSeconds(1)",
+      "lang": "painless",
+      "position": {
+       "offset": 41,
+       "start": 0,
+       "end": 56
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.lang.Math.addExact(Math.java:935)",
+     "java.base/java.time.Duration.plus(Duration.java:878)",
+     "java.base/java.time.Duration.plusSeconds(Duration.java:835)",
+     "return Duration.ofSeconds(Long.MAX_VALUE).plusSeconds(1)",
+     "                                         ^---- HERE"
+    ],
+    "script": "return Duration.ofSeconds(Long.MAX_VALUE).plusSeconds(1)",
+    "lang": "painless",
+    "position": {
+     "offset": 41,
+     "start": 0,
+     "end": 56
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "long overflow"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ChronoUnit.valueOf('DAYS')",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "Days"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ChronoField.valueOf('NOPE')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.lang.Enum.valueOf(Enum.java:293)",
+       "java.base/java.time.temporal.ChronoField.valueOf(ChronoField.java:102)",
+       "return ChronoField.valueOf('NOPE')",
+       "                  ^---- HERE"
+      ],
+      "script": "return ChronoField.valueOf('NOPE')",
+      "lang": "painless",
+      "position": {
+       "offset": 18,
+       "start": 0,
+       "end": 34
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.lang.Enum.valueOf(Enum.java:293)",
+     "java.base/java.time.temporal.ChronoField.valueOf(ChronoField.java:102)",
+     "return ChronoField.valueOf('NOPE')",
+     "                  ^---- HERE"
+    ],
+    "script": "return ChronoField.valueOf('NOPE')",
+    "lang": "painless",
+    "position": {
+     "offset": 18,
+     "start": 0,
+     "end": 34
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "No enum constant java.time.temporal.ChronoField.NOPE"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ValueRange.of(1, 10)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1 - 10"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return ChronoField.DAY_OF_MONTH.range()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1 - 28/31"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return LocalDate.of(2020, 2, 1).range(ChronoField.DAY_OF_MONTH)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1 - 29"
+  }
+ }
+]

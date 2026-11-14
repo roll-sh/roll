@@ -1,0 +1,211 @@
+{
+  "diff": {
+    "es": 1,
+    "path": ".num_freed",
+    "roll": 2
+  },
+  "found": {
+    "case": 66,
+    "case_seed": 3000075,
+    "seed": 3
+  },
+  "roll": {
+    "body": {
+      "num_freed": 2,
+      "succeeded": true
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+  },
+  "signature": "DELETE _search/scroll .num_freed",
+  "steps": [
+    {
+      "body": {
+        "settings": {
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m0-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m0-a"
+    },
+    {
+      "body": {
+        "settings": {
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m0-b",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m0-b"
+    },
+    {
+      "es": {
+        "body": {
+          "errors": false,
+          "items": [
+            {
+              "index": {
+                "_id": "23",
+                "_index": "diff-m0-b",
+                "_primary_term": 1,
+                "_seq_no": 0,
+                "_shards": {
+                  "failed": 0,
+                  "successful": 1,
+                  "total": 2
+                },
+                "_version": 1,
+                "result": "created",
+                "status": 201
+              }
+            }
+          ],
+          "took": 200
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "lines": [
+        {
+          "index": {
+            "_id": "23",
+            "_index": "diff-m0-b"
+          }
+        },
+        {
+          "int0": -35,
+          "ip0": "10.0.3.121"
+        }
+      ],
+      "method": "POST",
+      "path": "/_bulk"
+    },
+    {
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "successful": 2,
+            "total": 4
+          }
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m0-a,diff-m0-b/_refresh"
+    },
+    {
+      "body": {
+        "query": {
+          "function_score": {
+            "functions": [
+              {
+                "field_value_factor": {
+                  "field": "int0",
+                  "missing": 1,
+                  "modifier": "log1p"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "capture": [
+        [
+          "scroll",
+          "/_scroll_id"
+        ]
+      ],
+      "es": {
+        "body": {
+          "_scroll_id": "FGluY2x1ZGVfY29udGV4dF91dWlkDnF1ZXJ5VGhlbkZldGNoARZRTlNiNVBJb1RKLUlNMDM3WVdNTUdnAAAAAAAAQi0WMk1rc0w1Y3hSUXFNd3NIQzhYeC1TZw==",
+          "_shards": {
+            "failed": 1,
+            "failures": [
+              {
+                "index": "diff-m0-b",
+                "node": "2MksL5cxRQqMwsHC8Xx-Sg",
+                "reason": {
+                  "reason": "function score query returned an invalid score: NaN for doc: 0; score must be a non-negative real number",
+                  "type": "illegal_argument_exception"
+                },
+                "shard": 0
+              }
+            ],
+            "skipped": 0,
+            "successful": 1,
+            "total": 2
+          },
+          "hits": {
+            "hits": [],
+            "max_score": null,
+            "total": {
+              "relation": "eq",
+              "value": 0
+            }
+          },
+          "timed_out": false,
+          "took": 0
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m0-*/_search?scroll=1m"
+    },
+    {
+      "body": {
+        "scroll_id": "${scroll}"
+      },
+      "es": {
+        "body": {
+          "num_freed": 1,
+          "succeeded": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "DELETE",
+      "path": "/_search/scroll"
+    }
+  ]
+}

@@ -530,6 +530,12 @@ impl Code {
         Ok(Arc::new(Facts { paths: diffs.iter().map(|d| d.path.as_str().to_string()).collect(), comment_only: None }))
     }
 
+    /// The paths `head` changes since it left the default branch, as reviews read them (roll
+    /// previews' path filters).
+    pub fn change_paths(&self, r: &RepoRow, head: &ChangesetId) -> Result<Vec<String>> {
+        Ok(self.review_facts_sync(r, head)?.paths.clone())
+    }
+
     // ── status ──
 
     fn status_with(&self, r: &RepoRow, c: &Change, cfg: &ReviewConfig, facts: &Facts) -> Result<Status> {

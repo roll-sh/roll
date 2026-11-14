@@ -1,0 +1,6438 @@
+{
+  "description" : "Round 2: by-query request validation, source-less and failing scans, doc-values-only multi-term and distance_feature queries, regexp flags, encoded kNN query vectors and parameter checks, dynamic dense_vector and copy_to mappings, nested kNN filters, boosts and inner hits",
+  "steps" : [
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "junk" : {
+          "more" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:2] [reindex] unknown field [junk]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:2] [reindex] unknown field [junk]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "junk" : { }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "Unknown key for a START_OBJECT in [junk].",
+              "line" : 1,
+              "col" : 9
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:21] [reindex] failed to parse field [source]",
+          "caused_by" : {
+            "type" : "parsing_exception",
+            "reason" : "Unknown key for a START_OBJECT in [junk].",
+            "line" : 1,
+            "col" : 9
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "dest" : {
+          "junk" : { }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:10] [dest] unknown field [junk]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:17] [reindex] failed to parse field [dest]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:10] [dest] unknown field [junk]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "dest" : { }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: use _all if you really want to copy from all existing indexes;2: index must be specified;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: use _all if you really want to copy from all existing indexes;2: index must be specified;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "size" : "cat"
+        },
+        "dest" : {
+          "index" : "es-docs-d"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:24] [reindex] failed to parse field [source]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:24] [reindex] failed to parse field [source]",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"cat\""
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-nope"
+        },
+        "dest" : {
+          "index" : "es-docs-d"
+        },
+        "max_docs" : -4
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:76] [reindex] failed to parse field [max_docs]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:76] [reindex] failed to parse field [max_docs]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[max_docs] parameter cannot be negative, found [-4]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "conflicts" : "cat"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:14] [reindex] failed to parse field [conflicts]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:14] [reindex] failed to parse field [conflicts]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "conflicts may only be \"proceed\" or \"abort\" but was [cat]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-nope",
+          "from" : 1,
+          "stored_fields" : [
+            "_id"
+          ]
+        },
+        "dest" : {
+          "index" : "es-docs-d",
+          "routing" : "x"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: using [from] is not allowed in a scroll context;2: from is not supported in this context;3: stored_fields is not supported in this context;4: routing must be unset, [keep], [discard] or [=<some new value>];"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: using [from] is not allowed in a scroll context;2: from is not supported in this context;3: stored_fields is not supported in this context;4: routing must be unset, [keep], [discard] or [=<some new value>];"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-nope",
+          "_source" : false
+        },
+        "dest" : {
+          "index" : "es-docs-d",
+          "version_type" : "external",
+          "op_type" : "create"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: _source:false is not supported in this context;2: create operations only support internal versioning. use index instead;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: _source:false is not supported in this context;2: create operations only support internal versioning. use index instead;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-nope",
+          "remote" : {
+            "host" : "badremote"
+          }
+        },
+        "dest" : {
+          "index" : "es-docs-d"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:64] [reindex] failed to parse field [source]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:64] [reindex] failed to parse field [source]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[host] must be of the form [scheme]://[host]:[port](/[pathPrefix])? but was [badremote]",
+            "caused_by" : {
+              "type" : "u_r_i_syntax_exception",
+              "reason" : "The port was not defined in the [host]: badremote"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-nope",
+          "remote" : {
+            "host" : "http://okremote:9200",
+            "socket_timeout" : "junk"
+          }
+        },
+        "dest" : {
+          "index" : "es-docs-d"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:99] [reindex] failed to parse field [source]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:99] [reindex] failed to parse field [source]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "failed to parse setting [socket_timeout] with value [junk] as a time value: unit is missing or unrecognized"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-nope",
+          "remote" : {
+            "host" : "http://okremote:9200",
+            "junk" : "x"
+          }
+        },
+        "dest" : {
+          "index" : "es-docs-d"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:86] [reindex] failed to parse field [source]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:86] [reindex] failed to parse field [source]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Unsupported fields in [remote]: [junk]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-nope",
+          "remote" : {
+            "host" : "http://okremote:9200"
+          }
+        },
+        "dest" : {
+          "index" : "es-docs-d"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[okremote:9200] not whitelisted in reindex.remote.whitelist"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[okremote:9200] not whitelisted in reindex.remote.whitelist"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-nope"
+        },
+        "dest" : {
+          "index" : "es-docs-d"
+        },
+        "size" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:65] [reindex] unknown field [size]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:65] [reindex] unknown field [size]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-nope"
+        },
+        "dest" : {
+          "index" : "es-docs-d",
+          "version" : 10
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:64] [dest] unknown field [version] did you mean [version_type]?"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:74] [reindex] failed to parse field [dest]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:64] [dest] unknown field [version] did you mean [version_type]?"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex?slices=0",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-nope"
+        },
+        "dest" : {
+          "index" : "es-docs-d"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[slices] must be a positive integer or the string \"auto\", but was [0]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[slices] must be a positive integer or the string \"auto\", but was [0]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex?requests_per_second=0",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-nope"
+        },
+        "dest" : {
+          "index" : "es-docs-d"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[requests_per_second] must be a float greater than 0. Use -1 to disable throttling."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[requests_per_second] must be a float greater than 0. Use -1 to disable throttling."
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex?pipeline=x",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-nope"
+        },
+        "dest" : {
+          "index" : "es-docs-d"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "_reindex doesn't support [pipeline] as a query parameter. Specify it in the [dest] object instead."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "_reindex doesn't support [pipeline] as a query parameter. Specify it in the [dest] object instead."
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-nope/_delete_by_query",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: query is missing;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: query is missing;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-nope/_delete_by_query?scroll_size=asdf",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse int parameter [scroll_size] with value [asdf]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse int parameter [scroll_size] with value [asdf]",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"asdf\""
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-nope/_delete_by_query?max_docs=5",
+      "body" : {
+        "max_docs" : 4,
+        "query" : {
+          "match_all" : { }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[max_docs] set to two different values [4] and [5]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[max_docs] set to two different values [4] and [5]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-nope/_delete_by_query?max_docs=1&slices=2",
+      "body" : {
+        "query" : {
+          "match_all" : { }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[max_docs] should be >= [slices]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[max_docs] should be >= [slices]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-nope/_delete_by_query",
+      "body" : {
+        "stored_fields" : [
+          "_id"
+        ],
+        "query" : {
+          "match_all" : { }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: stored_fields is not supported in this context;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: stored_fields is not supported in this context;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-remote:test/_delete_by_query",
+      "body" : {
+        "query" : {
+          "match_all" : { }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: Cross-cluster calls are not supported in this context but remote indices were requested: [es-docs-remote:test];"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: Cross-cluster calls are not supported in this context but remote indices were requested: [es-docs-remote:test];"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-nope/_update_by_query?requests_per_second=unlimited",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[requests_per_second] must be a float greater than 0. Use -1 to disable throttling."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[requests_per_second] must be a float greater than 0. Use -1 to disable throttling.",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"unlimited\""
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-nope/_update_by_query?slices=junk",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[slices] must be a positive integer or the string \"auto\", but was [junk]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[slices] must be a positive integer or the string \"auto\", but was [junk]",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"junk\""
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-nope/_update_by_query",
+      "body" : {
+        "conflicts" : "cat"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "conflicts may only be \"proceed\" or \"abort\" but was [cat]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "conflicts may only be \"proceed\" or \"abort\" but was [cat]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-ns",
+      "body" : {
+        "mappings" : {
+          "_source" : {
+            "enabled" : false
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-ns"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-ns/_doc/1?refresh=true",
+      "body" : {
+        "age" : 23
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-ns",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-ns"
+        },
+        "dest" : {
+          "index" : "es-docs-d"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[es-docs-ns][1] didn't store _source"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[es-docs-ns][1] didn't store _source"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-ns/_update_by_query",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[es-docs-ns][1] didn't store _source"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[es-docs-ns][1] didn't store _source"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-sf",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 2
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-sf"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-sf/_doc/1?refresh=true",
+      "body" : {
+        "text" : "test"
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-sf",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-sf",
+          "query" : {
+            "script" : {
+              "script" : {
+                "lang" : "painless",
+                "source" : "throw new IllegalArgumentException(\"Cats!\")"
+              }
+            }
+          }
+        },
+        "dest" : {
+          "index" : "es-docs-d"
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "script_exception",
+              "reason" : "runtime error",
+              "script_stack" : [
+                "throw new IllegalArgumentException(\"Cats!\")",
+                "      ^---- HERE"
+              ],
+              "script" : "throw new IllegalArgumentException(\"Cats!\")",
+              "lang" : "painless",
+              "position" : {
+                "offset" : 6,
+                "start" : 0,
+                "end" : 43
+              }
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "Partial shards failure",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 1,
+              "index" : "es-docs-sf",
+              "node" : "XU-PsPtaRtezxPl7Imo35A",
+              "reason" : {
+                "type" : "script_exception",
+                "reason" : "runtime error",
+                "script_stack" : [
+                  "throw new IllegalArgumentException(\"Cats!\")",
+                  "      ^---- HERE"
+                ],
+                "script" : "throw new IllegalArgumentException(\"Cats!\")",
+                "lang" : "painless",
+                "position" : {
+                  "offset" : 6,
+                  "start" : 0,
+                  "end" : 43
+                },
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Cats!"
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-sf/_update_by_query",
+      "body" : {
+        "query" : {
+          "script" : {
+            "script" : {
+              "lang" : "painless",
+              "source" : "throw new IllegalArgumentException(\"Cats!\")"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "script_exception",
+              "reason" : "runtime error",
+              "script_stack" : [
+                "throw new IllegalArgumentException(\"Cats!\")",
+                "      ^---- HERE"
+              ],
+              "script" : "throw new IllegalArgumentException(\"Cats!\")",
+              "lang" : "painless",
+              "position" : {
+                "offset" : 6,
+                "start" : 0,
+                "end" : 43
+              }
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "Partial shards failure",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 1,
+              "index" : "es-docs-sf",
+              "node" : "XU-PsPtaRtezxPl7Imo35A",
+              "reason" : {
+                "type" : "script_exception",
+                "reason" : "runtime error",
+                "script_stack" : [
+                  "throw new IllegalArgumentException(\"Cats!\")",
+                  "      ^---- HERE"
+                ],
+                "script" : "throw new IllegalArgumentException(\"Cats!\")",
+                "lang" : "painless",
+                "position" : {
+                  "offset" : 6,
+                  "start" : 0,
+                  "end" : 43
+                },
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Cats!"
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-sf/_search",
+      "body" : {
+        "query" : {
+          "script" : {
+            "script" : {
+              "lang" : "painless",
+              "source" : "throw new IllegalArgumentException(\"Cats!\")"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 1,
+          "failures" : [
+            {
+              "shard" : 1,
+              "index" : "es-docs-sf",
+              "node" : "XU-PsPtaRtezxPl7Imo35A",
+              "reason" : {
+                "type" : "script_exception",
+                "reason" : "runtime error",
+                "script_stack" : [
+                  "throw new IllegalArgumentException(\"Cats!\")",
+                  "      ^---- HERE"
+                ],
+                "script" : "throw new IllegalArgumentException(\"Cats!\")",
+                "lang" : "painless",
+                "position" : {
+                  "offset" : 6,
+                  "start" : 0,
+                  "end" : 43
+                },
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Cats!"
+                }
+              }
+            }
+          ]
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-ns,es-docs-sf",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-dvo",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword",
+              "index" : false
+            },
+            "t" : {
+              "type" : "text",
+              "index" : false,
+              "doc_values" : true
+            },
+            "m" : {
+              "type" : "match_only_text",
+              "index" : false,
+              "doc_values" : true
+            },
+            "d" : {
+              "type" : "date",
+              "index" : false
+            },
+            "g" : {
+              "type" : "geo_point",
+              "index" : false
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-dvo"
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"k\":\"London Heathrow Airport\",\"t\":\"London Heathrow Airport\",\"m\":\"London Heathrow Airport\",\"d\":\"2020-01-01\",\"g\":[0,0]}\n{\"index\":{\"_id\":\"2\"}}\n{\"k\":\"London Gatwick Airport\",\"t\":\"London Gatwick Airport\",\"m\":\"London Gatwick Airport\",\"d\":\"2020-01-05\",\"g\":[1,1]}\n{\"index\":{\"_id\":\"3\"}}\n{\"k\":\"Singapore Changi Airport\",\"t\":\"Singapore Changi Airport\",\"m\":\"Singapore Changi Airport\",\"d\":\"2020-02-01\",\"g\":[50,50]}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-dvo",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-dvo",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "prefix" : {
+            "k" : "London"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "prefix" : {
+            "k" : {
+              "value" : "london",
+              "case_insensitive" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "wildcard" : {
+            "k" : "*Changi*"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                2
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "wildcard" : {
+            "k" : {
+              "value" : "*changi*",
+              "case_insensitive" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                2
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "regexp" : {
+            "k" : "London.*"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "regexp" : {
+            "k" : {
+              "value" : "london.*",
+              "case_insensitive" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "prefix" : {
+            "t" : "London"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "prefix" : {
+            "t" : {
+              "value" : "london",
+              "case_insensitive" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "wildcard" : {
+            "t" : "*Changi*"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                2
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "wildcard" : {
+            "t" : {
+              "value" : "*changi*",
+              "case_insensitive" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                2
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "regexp" : {
+            "t" : "London.*"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "regexp" : {
+            "t" : {
+              "value" : "london.*",
+              "case_insensitive" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "prefix" : {
+            "m" : "London"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 8,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "prefix" : {
+            "m" : {
+              "value" : "london",
+              "case_insensitive" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "wildcard" : {
+            "m" : "*Changi*"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                2
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "wildcard" : {
+            "m" : {
+              "value" : "*changi*",
+              "case_insensitive" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                2
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "regexp" : {
+            "m" : "London.*"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "_doc"
+        ],
+        "query" : {
+          "regexp" : {
+            "m" : {
+              "value" : "london.*",
+              "case_insensitive" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "fuzzy" : {
+            "k" : {
+              "value" : "London Gatwick Airpot"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 11,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "term" : {
+            "k" : {
+              "value" : "london gatwick airport",
+              "case_insensitive" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "term" : {
+            "t" : "London Gatwick Airport"
+          }
+        },
+        "docvalue_fields" : [
+          "t"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : 1.0,
+              "fields" : {
+                "t" : [
+                  "London Gatwick Airport"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "range" : {
+            "t" : {
+              "gte" : "L"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: Cannot search on field [t] since it is not indexed.",
+              "index_uuid" : "yVylbinTQ5ipOoFpCZeCpg",
+              "index" : "es-docs-dvo"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-dvo",
+              "node" : "XU-PsPtaRtezxPl7Imo35A",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: Cannot search on field [t] since it is not indexed.",
+                "index_uuid" : "yVylbinTQ5ipOoFpCZeCpg",
+                "index" : "es-docs-dvo",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Cannot search on field [t] since it is not indexed."
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "bool" : {
+            "should" : {
+              "distance_feature" : {
+                "field" : "d",
+                "pivot" : "7d",
+                "origin" : "2020-01-04"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : 1.0
+            },
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "1",
+              "_score" : 0.6363636
+            },
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "3",
+              "_score" : 0.20588236
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-dvo/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "bool" : {
+            "should" : {
+              "distance_feature" : {
+                "field" : "g",
+                "pivot" : "1000km",
+                "origin" : [
+                  0.0,
+                  0.0
+                ]
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "1",
+              "_score" : 1.0
+            },
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "2",
+              "_score" : 0.8641178
+            },
+            {
+              "_index" : "es-docs-dvo",
+              "_id" : "3",
+              "_score" : 0.12057058
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-dvo",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-re",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-re"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-re/_doc/1?refresh=true",
+      "body" : {
+        "k" : "abc~d"
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-re",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-re/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "regexp" : {
+            "k" : "ab.*"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-re",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-re/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "regexp" : {
+            "k" : {
+              "value" : "ab~(x)d",
+              "flags" : "ALL"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-re",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-re/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "regexp" : {
+            "k" : {
+              "value" : "ab~(x)d",
+              "flags" : "NONE"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-re/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "regexp" : {
+            "k" : {
+              "value" : "ab.~d",
+              "flags" : "INTERSECTION"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-re",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-re/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "query_string" : {
+            "query" : "k:/ab.*/"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-re",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-re",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "b" : {
+              "type" : "dense_vector",
+              "dims" : 3,
+              "element_type" : "byte",
+              "similarity" : "l2_norm"
+            },
+            "f" : {
+              "type" : "dense_vector",
+              "dims" : 3,
+              "similarity" : "l2_norm"
+            },
+            "h" : {
+              "type" : "dense_vector",
+              "dims" : 3,
+              "element_type" : "bfloat16",
+              "similarity" : "l2_norm"
+            },
+            "t" : {
+              "type" : "dense_vector",
+              "dims" : 16,
+              "element_type" : "bit"
+            },
+            "nodims" : {
+              "type" : "dense_vector",
+              "similarity" : "l2_norm"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-v"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-v/_doc/1?refresh=true",
+      "body" : {
+        "b" : [
+          64,
+          10,
+          -30
+        ],
+        "f" : [
+          0.1,
+          0.2,
+          0.3
+        ],
+        "h" : [
+          1,
+          2,
+          3
+        ],
+        "t" : [
+          3,
+          5
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-v",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-v/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "knn" : {
+            "field" : "b",
+            "query_vector" : "40af20a"
+          }
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: failed to parse field [query_vector]: [query_vector] must contain a valid Base64-encoded byte vector, but the decoded bytes length [5] is not compatible with the expected vector length",
+              "index_uuid" : "b5jyFpGqSeyttpZQbvSBrA",
+              "index" : "es-docs-v"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-v",
+              "node" : "XU-PsPtaRtezxPl7Imo35A",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: failed to parse field [query_vector]: [query_vector] must contain a valid Base64-encoded byte vector, but the decoded bytes length [5] is not compatible with the expected vector length",
+                "index_uuid" : "b5jyFpGqSeyttpZQbvSBrA",
+                "index" : "es-docs-v",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "failed to parse field [query_vector]: [query_vector] must contain a valid Base64-encoded byte vector, but the decoded bytes length [5] is not compatible with the expected vector length"
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-v/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "knn" : {
+            "field" : "b",
+            "query_vector" : "!!"
+          }
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: failed to parse field [query_vector]: [query_vector] must be a valid base64 or hex string",
+              "index_uuid" : "b5jyFpGqSeyttpZQbvSBrA",
+              "index" : "es-docs-v"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-v",
+              "node" : "XU-PsPtaRtezxPl7Imo35A",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: failed to parse field [query_vector]: [query_vector] must be a valid base64 or hex string",
+                "index_uuid" : "b5jyFpGqSeyttpZQbvSBrA",
+                "index" : "es-docs-v",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "failed to parse field [query_vector]: [query_vector] must be a valid base64 or hex string"
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-v/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "knn" : {
+            "field" : "b",
+            "query_vector" : "0102"
+          }
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 3.871917E-5,
+          "hits" : [
+            {
+              "_index" : "es-docs-v",
+              "_id" : "1",
+              "_score" : 3.871917E-5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-v/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "knn" : {
+            "field" : "b",
+            "query_vector" : "400ae2"
+          }
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-v",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-v/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "knn" : {
+            "field" : "f",
+            "query_vector" : "AQID"
+          }
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: failed to parse field [query_vector]: [query_vector] must contain a valid Base64-encoded float vector, but the decoded bytes length [3] is not compatible with the expected vector length",
+              "index_uuid" : "b5jyFpGqSeyttpZQbvSBrA",
+              "index" : "es-docs-v"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-v",
+              "node" : "XU-PsPtaRtezxPl7Imo35A",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: failed to parse field [query_vector]: [query_vector] must contain a valid Base64-encoded float vector, but the decoded bytes length [3] is not compatible with the expected vector length",
+                "index_uuid" : "b5jyFpGqSeyttpZQbvSBrA",
+                "index" : "es-docs-v",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "failed to parse field [query_vector]: [query_vector] must contain a valid Base64-encoded float vector, but the decoded bytes length [3] is not compatible with the expected vector length"
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-v/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "knn" : {
+            "field" : "f",
+            "query_vector" : "PczMzT5MzM0+mZma"
+          }
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-v",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-v/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "knn" : {
+            "field" : "f",
+            "query_vector" : "400ae2"
+          }
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.9614228E-4,
+          "hits" : [
+            {
+              "_index" : "es-docs-v",
+              "_id" : "1",
+              "_score" : 1.9614228E-4
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-v/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "knn" : {
+            "field" : "f",
+            "query_vector" : "0a0b"
+          }
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: The query vector has a different number of dimensions [2] than the document vectors [3].",
+              "index_uuid" : "b5jyFpGqSeyttpZQbvSBrA",
+              "index" : "es-docs-v"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-v",
+              "node" : "XU-PsPtaRtezxPl7Imo35A",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: The query vector has a different number of dimensions [2] than the document vectors [3].",
+                "index_uuid" : "b5jyFpGqSeyttpZQbvSBrA",
+                "index" : "es-docs-v",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "The query vector has a different number of dimensions [2] than the document vectors [3]."
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-v/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "knn" : {
+            "field" : "h",
+            "query_vector" : "Pc0+TT6a"
+          }
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 0.081070766,
+          "hits" : [
+            {
+              "_index" : "es-docs-v",
+              "_id" : "1",
+              "_score" : 0.081070766
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-v/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "knn" : {
+            "field" : "t",
+            "query_vector" : "0a"
+          }
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: The query vector has a different number of dimensions [1] than the document vectors [16].",
+              "index_uuid" : "b5jyFpGqSeyttpZQbvSBrA",
+              "index" : "es-docs-v"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-v",
+              "node" : "XU-PsPtaRtezxPl7Imo35A",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: The query vector has a different number of dimensions [1] than the document vectors [16].",
+                "index_uuid" : "b5jyFpGqSeyttpZQbvSBrA",
+                "index" : "es-docs-v",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "The query vector has a different number of dimensions [1] than the document vectors [16]."
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-v/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "knn" : {
+            "field" : "t",
+            "query_vector" : "AwU="
+          }
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-v",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-v/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "knn" : {
+            "field" : "nodims",
+            "query_vector" : [
+              1,
+              2,
+              3
+            ]
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-v/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "knn" : {
+            "field" : "missing",
+            "query_vector" : [
+              1,
+              2,
+              3
+            ]
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-v/_search",
+      "body" : {
+        "knn" : {
+          "field" : "f",
+          "query_vector" : [
+            1,
+            2,
+            3
+          ],
+          "num_candidates" : 2
+        },
+        "size" : 10
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[num_candidates] cannot be less than [k]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[num_candidates] cannot be less than [k]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-v/_search?search_type=query_then_fetch",
+      "body" : {
+        "knn" : {
+          "field" : "f",
+          "query_vector" : [
+            1,
+            2,
+            3
+          ],
+          "k" : 1,
+          "num_candidates" : 2
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "cannot set [search_type] when using [knn] search, since the search type is determined automatically"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "cannot set [search_type] when using [knn] search, since the search type is determined automatically"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-v/_doc/2",
+      "body" : {
+        "f" : [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:13] failed to parse: The [dense_vector] field [f] in doc [document with id '2'] has more dimensions than defined in the mapping [3]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:13] failed to parse: The [dense_vector] field [f] in doc [document with id '2'] has more dimensions than defined in the mapping [3]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "The [dense_vector] field [f] in doc [document with id '2'] has more dimensions than defined in the mapping [3]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-v/_doc/3",
+      "body" : {
+        "f" : [
+          1,
+          2
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "document_parsing_exception",
+              "reason" : "[1:10] failed to parse: The [dense_vector] field [f] in doc [document with id '3'] has a different number of dimensions [2] than defined in the mapping [3]"
+            }
+          ],
+          "type" : "document_parsing_exception",
+          "reason" : "[1:10] failed to parse: The [dense_vector] field [f] in doc [document with id '3'] has a different number of dimensions [2] than defined in the mapping [3]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "The [dense_vector] field [f] in doc [document with id '3'] has a different number of dimensions [2] than defined in the mapping [3]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-v",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-dyn/_doc/1?refresh=true",
+      "body" : {
+        "v" : [
+          0.5,
+          0.51,
+          0.52,
+          0.53,
+          0.54,
+          0.55,
+          0.56,
+          0.57,
+          0.58,
+          0.59,
+          0.6,
+          0.61,
+          0.62,
+          0.63,
+          0.64,
+          0.65,
+          0.66,
+          0.67,
+          0.68,
+          0.69,
+          0.7,
+          0.71,
+          0.72,
+          0.73,
+          0.74,
+          0.75,
+          0.76,
+          0.77,
+          0.78,
+          0.79,
+          0.8,
+          0.81,
+          0.82,
+          0.83,
+          0.84,
+          0.85,
+          0.86,
+          0.87,
+          0.88,
+          0.89,
+          0.9,
+          0.91,
+          0.92,
+          0.93,
+          0.94,
+          0.95,
+          0.96,
+          0.97,
+          0.98,
+          0.99,
+          1.0,
+          1.01,
+          1.02,
+          1.03,
+          1.04,
+          1.05,
+          1.06,
+          1.07,
+          1.08,
+          1.09,
+          1.1,
+          1.11,
+          1.12,
+          1.13,
+          1.14,
+          1.15,
+          1.16,
+          1.17,
+          1.18,
+          1.19,
+          1.2,
+          1.21,
+          1.22,
+          1.23,
+          1.24,
+          1.25,
+          1.26,
+          1.27,
+          1.28,
+          1.29,
+          1.3,
+          1.31,
+          1.32,
+          1.33,
+          1.34,
+          1.35,
+          1.36,
+          1.37,
+          1.38,
+          1.39,
+          1.4,
+          1.41,
+          1.42,
+          1.43,
+          1.44,
+          1.45,
+          1.46,
+          1.47,
+          1.48,
+          1.49,
+          1.5,
+          1.51,
+          1.52,
+          1.53,
+          1.54,
+          1.55,
+          1.56,
+          1.57,
+          1.58,
+          1.59,
+          1.6,
+          1.61,
+          1.62,
+          1.63,
+          1.64,
+          1.65,
+          1.66,
+          1.67,
+          1.68,
+          1.69,
+          1.7,
+          1.71,
+          1.72,
+          1.73,
+          1.74,
+          1.75,
+          1.76,
+          1.77
+        ],
+        "o" : {
+          "w" : [
+            0.5,
+            0.51,
+            0.52,
+            0.53,
+            0.54,
+            0.55,
+            0.56,
+            0.57,
+            0.58,
+            0.59,
+            0.6,
+            0.61,
+            0.62,
+            0.63,
+            0.64,
+            0.65,
+            0.66,
+            0.67,
+            0.68,
+            0.69,
+            0.7,
+            0.71,
+            0.72,
+            0.73,
+            0.74,
+            0.75,
+            0.76,
+            0.77,
+            0.78,
+            0.79,
+            0.8,
+            0.81,
+            0.82,
+            0.83,
+            0.84,
+            0.85,
+            0.86,
+            0.87,
+            0.88,
+            0.89,
+            0.9,
+            0.91,
+            0.92,
+            0.93,
+            0.94,
+            0.95,
+            0.96,
+            0.97,
+            0.98,
+            0.99,
+            1.0,
+            1.01,
+            1.02,
+            1.03,
+            1.04,
+            1.05,
+            1.06,
+            1.07,
+            1.08,
+            1.09,
+            1.1,
+            1.11,
+            1.12,
+            1.13,
+            1.14,
+            1.15,
+            1.16,
+            1.17,
+            1.18,
+            1.19,
+            1.2,
+            1.21,
+            1.22,
+            1.23,
+            1.24,
+            1.25,
+            1.26,
+            1.27,
+            1.28,
+            1.29,
+            1.3,
+            1.31,
+            1.32,
+            1.33,
+            1.34,
+            1.35,
+            1.36,
+            1.37,
+            1.38,
+            1.39,
+            1.4,
+            1.41,
+            1.42,
+            1.43,
+            1.44,
+            1.45,
+            1.46,
+            1.47,
+            1.48,
+            1.49,
+            1.5,
+            1.51,
+            1.52,
+            1.53,
+            1.54,
+            1.55,
+            1.56,
+            1.57,
+            1.58,
+            1.59,
+            1.6,
+            1.61,
+            1.62,
+            1.63,
+            1.64,
+            1.65,
+            1.66,
+            1.67,
+            1.68,
+            1.69,
+            1.7,
+            1.71,
+            1.72,
+            1.73,
+            1.74,
+            1.75,
+            1.76,
+            1.77
+          ]
+        },
+        "ints" : [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61,
+          62,
+          63,
+          64,
+          65,
+          66,
+          67,
+          68,
+          69,
+          70,
+          71,
+          72,
+          73,
+          74,
+          75,
+          76,
+          77,
+          78,
+          79,
+          80,
+          81,
+          82,
+          83,
+          84,
+          85,
+          86,
+          87,
+          88,
+          89,
+          90,
+          91,
+          92,
+          93,
+          94,
+          95,
+          96,
+          97,
+          98,
+          99,
+          100,
+          101,
+          102,
+          103,
+          104,
+          105,
+          106,
+          107,
+          108,
+          109,
+          110,
+          111,
+          112,
+          113,
+          114,
+          115,
+          116,
+          117,
+          118,
+          119,
+          120,
+          121,
+          122,
+          123,
+          124,
+          125,
+          126,
+          127,
+          128,
+          129
+        ],
+        "mixed" : [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          2
+        ],
+        "short" : [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-dyn",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "GET /es-docs-dyn/_mapping",
+      "status" : 200,
+      "response" : {
+        "es-docs-dyn" : {
+          "mappings" : {
+            "properties" : {
+              "ints" : {
+                "type" : "long"
+              },
+              "mixed" : {
+                "type" : "dense_vector",
+                "dims" : 128,
+                "index" : true,
+                "similarity" : "cosine",
+                "index_options" : {
+                  "type" : "int8_hnsw",
+                  "m" : 16,
+                  "ef_construction" : 100
+                }
+              },
+              "o" : {
+                "properties" : {
+                  "w" : {
+                    "type" : "dense_vector",
+                    "dims" : 128,
+                    "index" : true,
+                    "similarity" : "cosine",
+                    "index_options" : {
+                      "type" : "int8_hnsw",
+                      "m" : 16,
+                      "ef_construction" : 100
+                    }
+                  }
+                }
+              },
+              "short" : {
+                "type" : "float"
+              },
+              "v" : {
+                "type" : "dense_vector",
+                "dims" : 128,
+                "index" : true,
+                "similarity" : "cosine",
+                "index_options" : {
+                  "type" : "int8_hnsw",
+                  "m" : 16,
+                  "ef_construction" : 100
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "PUT /es-docs-cp",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "float",
+              "copy_to" : "dest"
+            },
+            "b" : {
+              "type" : "keyword",
+              "copy_to" : "kdest"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-cp"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-cp/_doc/1?refresh=true",
+      "body" : {
+        "a" : [
+          0.5,
+          0.51,
+          0.52,
+          0.53,
+          0.54,
+          0.55,
+          0.56,
+          0.57,
+          0.58,
+          0.59,
+          0.6,
+          0.61,
+          0.62,
+          0.63,
+          0.64,
+          0.65,
+          0.66,
+          0.67,
+          0.68,
+          0.69,
+          0.7,
+          0.71,
+          0.72,
+          0.73,
+          0.74,
+          0.75,
+          0.76,
+          0.77,
+          0.78,
+          0.79,
+          0.8,
+          0.81,
+          0.82,
+          0.83,
+          0.84,
+          0.85,
+          0.86,
+          0.87,
+          0.88,
+          0.89,
+          0.9,
+          0.91,
+          0.92,
+          0.93,
+          0.94,
+          0.95,
+          0.96,
+          0.97,
+          0.98,
+          0.99,
+          1.0,
+          1.01,
+          1.02,
+          1.03,
+          1.04,
+          1.05,
+          1.06,
+          1.07,
+          1.08,
+          1.09,
+          1.1,
+          1.11,
+          1.12,
+          1.13,
+          1.14,
+          1.15,
+          1.16,
+          1.17,
+          1.18,
+          1.19,
+          1.2,
+          1.21,
+          1.22,
+          1.23,
+          1.24,
+          1.25,
+          1.26,
+          1.27,
+          1.28,
+          1.29,
+          1.3,
+          1.31,
+          1.32,
+          1.33,
+          1.34,
+          1.35,
+          1.36,
+          1.37,
+          1.38,
+          1.39,
+          1.4,
+          1.41,
+          1.42,
+          1.43,
+          1.44,
+          1.45,
+          1.46,
+          1.47,
+          1.48,
+          1.49,
+          1.5,
+          1.51,
+          1.52,
+          1.53,
+          1.54,
+          1.55,
+          1.56,
+          1.57,
+          1.58,
+          1.59,
+          1.6,
+          1.61,
+          1.62,
+          1.63,
+          1.64,
+          1.65,
+          1.66,
+          1.67,
+          1.68,
+          1.69,
+          1.7,
+          1.71,
+          1.72,
+          1.73,
+          1.74,
+          1.75,
+          1.76,
+          1.77
+        ],
+        "b" : "x"
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-cp",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "GET /es-docs-cp/_mapping",
+      "status" : 200,
+      "response" : {
+        "es-docs-cp" : {
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "float",
+                "copy_to" : [
+                  "dest"
+                ]
+              },
+              "b" : {
+                "type" : "keyword",
+                "copy_to" : [
+                  "kdest"
+                ]
+              },
+              "dest" : {
+                "type" : "float"
+              },
+              "kdest" : {
+                "type" : "text",
+                "fields" : {
+                  "keyword" : {
+                    "type" : "keyword",
+                    "ignore_above" : 256
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-cp/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "term" : {
+            "kdest" : "x"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 0.2876821,
+          "hits" : [
+            {
+              "_index" : "es-docs-cp",
+              "_id" : "1",
+              "_score" : 0.2876821
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-dyn,es-docs-cp",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-nk",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "name" : {
+              "type" : "keyword"
+            },
+            "nested" : {
+              "type" : "nested",
+              "properties" : {
+                "language" : {
+                  "type" : "keyword"
+                },
+                "paragraph_id" : {
+                  "type" : "keyword"
+                },
+                "vector" : {
+                  "type" : "dense_vector",
+                  "dims" : 5,
+                  "index" : true,
+                  "similarity" : "l2_norm",
+                  "index_options" : {
+                    "type" : "hnsw"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-nk"
+      }
+    },
+    {
+      "req" : "POST /es-docs-nk/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"name\":\"cow.jpg\",\"nested\":[{\"paragraph_id\":0,\"vector\":[230.0,300.33,-34.8988,15.555,-200.0],\"language\":\"EN\"},{\"paragraph_id\":1,\"vector\":[240.0,300,-3,1,-20],\"language\":\"FR\"}]}\n{\"index\":{\"_id\":\"2\"}}\n{\"name\":\"moose.jpg\",\"nested\":[{\"paragraph_id\":0,\"vector\":[-0.5,100.0,-13,14.8,-156.0],\"language\":\"EN\"},{\"paragraph_id\":2,\"vector\":[0,100.0,0,14.8,-156.0],\"language\":\"EN\"},{\"paragraph_id\":3,\"vector\":[0,1.0,0,1.8,-15.0],\"language\":\"FR\"}]}\n{\"index\":{\"_id\":\"3\"}}\n{\"name\":\"rabbit.jpg\",\"nested\":[{\"paragraph_id\":0,\"vector\":[0.5,111.3,-13.0,14.8,-156.0],\"language\":\"FR\"}]}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 200,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-nk",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-nk",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-nk",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-nk/_search",
+      "body" : {
+        "_source" : false,
+        "knn" : {
+          "field" : "nested.vector",
+          "query_vector" : [
+            -0.5,
+            90.0,
+            -10,
+            14.8,
+            -156.0
+          ],
+          "k" : 3,
+          "num_candidates" : 5,
+          "filter" : {
+            "term" : {
+              "name" : "rabbit.jpg"
+            }
+          },
+          "inner_hits" : {
+            "size" : 3,
+            "fields" : [
+              "nested.paragraph_id"
+            ],
+            "_source" : false
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 7,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 0.0021519717,
+          "hits" : [
+            {
+              "_index" : "es-docs-nk",
+              "_id" : "3",
+              "_score" : 0.0021519717,
+              "inner_hits" : {
+                "nested" : {
+                  "hits" : {
+                    "total" : {
+                      "value" : 1,
+                      "relation" : "eq"
+                    },
+                    "max_score" : 0.0021519717,
+                    "hits" : [
+                      {
+                        "_index" : "es-docs-nk",
+                        "_id" : "3",
+                        "_nested" : {
+                          "field" : "nested",
+                          "offset" : 0
+                        },
+                        "_score" : 0.0021519717,
+                        "fields" : {
+                          "nested" : [
+                            {
+                              "paragraph_id" : [
+                                "0"
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-nk/_search",
+      "body" : {
+        "_source" : false,
+        "knn" : {
+          "field" : "nested.vector",
+          "query_vector" : [
+            -0.5,
+            90.0,
+            -10,
+            14.8,
+            -156.0
+          ],
+          "k" : 3,
+          "num_candidates" : 5,
+          "boost" : 2,
+          "filter" : {
+            "match" : {
+              "nested.language" : "EN"
+            }
+          },
+          "inner_hits" : {
+            "size" : 3,
+            "fields" : [
+              "nested.paragraph_id"
+            ],
+            "_source" : false
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 9,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.018181818,
+          "hits" : [
+            {
+              "_index" : "es-docs-nk",
+              "_id" : "2",
+              "_score" : 0.018181818,
+              "inner_hits" : {
+                "nested" : {
+                  "hits" : {
+                    "total" : {
+                      "value" : 2,
+                      "relation" : "eq"
+                    },
+                    "max_score" : 0.018181818,
+                    "hits" : [
+                      {
+                        "_index" : "es-docs-nk",
+                        "_id" : "2",
+                        "_nested" : {
+                          "field" : "nested",
+                          "offset" : 0
+                        },
+                        "_score" : 0.018181818,
+                        "fields" : {
+                          "nested" : [
+                            {
+                              "paragraph_id" : [
+                                "0"
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "_index" : "es-docs-nk",
+                        "_id" : "2",
+                        "_nested" : {
+                          "field" : "nested",
+                          "offset" : 1
+                        },
+                        "_score" : 0.009937888,
+                        "fields" : {
+                          "nested" : [
+                            {
+                              "paragraph_id" : [
+                                "2"
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "_index" : "es-docs-nk",
+              "_id" : "1",
+              "_score" : 2.0014715E-5,
+              "inner_hits" : {
+                "nested" : {
+                  "hits" : {
+                    "total" : {
+                      "value" : 1,
+                      "relation" : "eq"
+                    },
+                    "max_score" : 2.0014715E-5,
+                    "hits" : [
+                      {
+                        "_index" : "es-docs-nk",
+                        "_id" : "1",
+                        "_nested" : {
+                          "field" : "nested",
+                          "offset" : 0
+                        },
+                        "_score" : 2.0014715E-5,
+                        "fields" : {
+                          "nested" : [
+                            {
+                              "paragraph_id" : [
+                                "0"
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-nk/_search",
+      "body" : {
+        "_source" : false,
+        "knn" : {
+          "field" : "nested.vector",
+          "query_vector" : [
+            -0.5,
+            90.0,
+            -10,
+            14.8,
+            -156.0
+          ],
+          "k" : 3,
+          "num_candidates" : 10,
+          "boost" : 2,
+          "filter" : [
+            {
+              "match" : {
+                "nested.language" : "FR"
+              }
+            },
+            {
+              "term" : {
+                "name" : "rabbit.jpg"
+              }
+            }
+          ],
+          "inner_hits" : {
+            "size" : 3,
+            "fields" : [
+              "nested.paragraph_id"
+            ],
+            "_source" : false
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 7,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 0.0043039434,
+          "hits" : [
+            {
+              "_index" : "es-docs-nk",
+              "_id" : "3",
+              "_score" : 0.0043039434,
+              "inner_hits" : {
+                "nested" : {
+                  "hits" : {
+                    "total" : {
+                      "value" : 1,
+                      "relation" : "eq"
+                    },
+                    "max_score" : 0.0043039434,
+                    "hits" : [
+                      {
+                        "_index" : "es-docs-nk",
+                        "_id" : "3",
+                        "_nested" : {
+                          "field" : "nested",
+                          "offset" : 0
+                        },
+                        "_score" : 0.0043039434,
+                        "fields" : {
+                          "nested" : [
+                            {
+                              "paragraph_id" : [
+                                "0"
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-nk/_search",
+      "body" : {
+        "_source" : false,
+        "query" : {
+          "nested" : {
+            "path" : "nested",
+            "query" : {
+              "knn" : {
+                "field" : "nested.vector",
+                "query_vector" : [
+                  -0.5,
+                  90.0,
+                  -10,
+                  14.8,
+                  -156.0
+                ],
+                "num_candidates" : 3
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 0.009090909,
+          "hits" : [
+            {
+              "_index" : "es-docs-nk",
+              "_id" : "2",
+              "_score" : 0.009090909
+            },
+            {
+              "_index" : "es-docs-nk",
+              "_id" : "3",
+              "_score" : 0.0021519717
+            },
+            {
+              "_index" : "es-docs-nk",
+              "_id" : "1",
+              "_score" : 1.0007358E-5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "add" : {
+              "index" : "es-docs-nk",
+              "alias" : "es-docs-nk-alias",
+              "filter" : {
+                "term" : {
+                  "name" : "cow.jpg"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /es-docs-nk-alias/_search",
+      "body" : {
+        "_source" : false,
+        "knn" : {
+          "field" : "nested.vector",
+          "query_vector" : [
+            -0.5,
+            90.0,
+            -10,
+            14.8,
+            -156.0
+          ],
+          "k" : 1,
+          "num_candidates" : 1
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 6,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0007358E-5,
+          "hits" : [
+            {
+              "_index" : "es-docs-nk",
+              "_id" : "1",
+              "_score" : 1.0007358E-5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-nk",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-s/_doc/1?refresh=true",
+      "body" : {
+        "a" : 1
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-s",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "add" : {
+              "index" : "es-docs-s",
+              "alias" : "es-docs-sa"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-s"
+        },
+        "dest" : {
+          "index" : "es-docs-s"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: reindex cannot write into an index its reading from [es-docs-s];"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: reindex cannot write into an index its reading from [es-docs-s];"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-s*"
+        },
+        "dest" : {
+          "index" : "es-docs-sa"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: reindex cannot write into an index its reading from [es-docs-s];"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: reindex cannot write into an index its reading from [es-docs-s];"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_reindex?refresh=true",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-s",
+          "sort" : "a"
+        },
+        "dest" : {
+          "index" : "es-docs-s2"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 372,
+        "timed_out" : false,
+        "total" : 1,
+        "updated" : 0,
+        "created" : 1,
+        "deleted" : 0,
+        "batches" : 1,
+        "version_conflicts" : 0,
+        "noops" : 0,
+        "retries" : {
+          "bulk" : 0,
+          "search" : 0
+        },
+        "throttled_millis" : 0,
+        "requests_per_second" : -1.0,
+        "throttled_until_millis" : 0,
+        "failures" : [ ]
+      }
+    },
+    {
+      "req" : "POST /_reindex?refresh=true",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-s"
+        },
+        "dest" : {
+          "index" : "es-docs-s2",
+          "version_type" : "external"
+        },
+        "script" : {
+          "source" : "ctx._version = null; ctx._id = ctx._id + 'x'"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 31,
+        "timed_out" : false,
+        "total" : 1,
+        "updated" : 0,
+        "created" : 1,
+        "deleted" : 0,
+        "batches" : 1,
+        "version_conflicts" : 0,
+        "noops" : 0,
+        "retries" : {
+          "bulk" : 0,
+          "search" : 0
+        },
+        "throttled_millis" : 0,
+        "requests_per_second" : -1.0,
+        "throttled_until_millis" : 0,
+        "failures" : [ ]
+      }
+    },
+    {
+      "req" : "POST /_reindex?refresh=true",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-s"
+        },
+        "dest" : {
+          "index" : "es-docs-s2"
+        },
+        "script" : {
+          "source" : "ctx.op = 'delete'"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 26,
+        "timed_out" : false,
+        "total" : 1,
+        "updated" : 0,
+        "created" : 0,
+        "deleted" : 1,
+        "batches" : 1,
+        "version_conflicts" : 0,
+        "noops" : 0,
+        "retries" : {
+          "bulk" : 0,
+          "search" : 0
+        },
+        "throttled_millis" : 0,
+        "requests_per_second" : -1.0,
+        "throttled_until_millis" : 0,
+        "failures" : [ ]
+      }
+    },
+    {
+      "req" : "GET /es-docs-s2/_search?filter_path=hits.hits._id",
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "1x"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-s,es-docs-s2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-tsa",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "time_series",
+            "routing_path" : [
+              "metricset",
+              "k8s.pod.uid"
+            ],
+            "time_series" : {
+              "start_time" : "2021-04-28T00:00:00Z",
+              "end_time" : "2021-04-29T00:00:00Z"
+            },
+            "number_of_shards" : 2
+          }
+        },
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "metricset" : {
+              "type" : "keyword",
+              "time_series_dimension" : true
+            },
+            "k8s" : {
+              "properties" : {
+                "pod" : {
+                  "properties" : {
+                    "uid" : {
+                      "type" : "keyword",
+                      "time_series_dimension" : true
+                    },
+                    "name" : {
+                      "type" : "keyword"
+                    },
+                    "ip" : {
+                      "type" : "ip"
+                    },
+                    "network" : {
+                      "properties" : {
+                        "tx" : {
+                          "type" : "long"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-tsa"
+      }
+    },
+    {
+      "req" : "POST /es-docs-tsa/_bulk?refresh=true",
+      "raw" : "{\"index\":{}}\n{\"@timestamp\": \"2021-04-28T18:50:04.467Z\", \"metricset\": \"pod\", \"k8s\": {\"pod\": {\"name\": \"cat\", \"uid\":\"947e4ced-1786-4e53-9e0c-5c447e959507\", \"ip\": \"10.10.55.1\", \"network\": {\"tx\": 2001818691}}}}\n{\"index\":{}}\n{\"@timestamp\": \"2021-04-28T18:50:03.142Z\", \"metricset\": \"pod\", \"k8s\": {\"pod\": {\"name\": \"dog\", \"uid\":\"df3145b3-0563-4d3b-a0f7-897eb2876ea9\", \"ip\": \"10.10.55.3\", \"network\": {\"tx\": 1434521831}}}}\n{\"create\":{}}\n{\"@timestamp\": \"2021-04-28T18:50:03.142Z\", \"metricset\": \"pod\", \"k8s\": {\"pod\": {\"name\": \"dog\", \"uid\":\"df3145b3-0563-4d3b-a0f7-897eb2876ea9\", \"network\": {\"tx\": 1}}}}\n{\"index\":{}}\n{\"@timestamp\": \"2021-04-29T18:50:03.142Z\", \"metricset\": \"pod\"}\n{\"index\":{}}\n{\"@timestamp\": \"2021-04-28T18:50:03.142Z\", \"k8s\": {\"pod\": {\"name\": \"x\"}}}\n{\"index\":{}}\n{\"metricset\": \"pod\"}\n",
+      "mask" : [
+        "shard"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : true,
+        "took" : 200,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-tsa",
+              "_id" : "KCjEJ9R_BgO8TRX2QOd6dpR12oDh--qoyNZRQPy43y34Qdy2dpsyG0p___6G5i7mzLNNlnE",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-tsa",
+              "_id" : "KCjEJ9R_BgO8TRX2QOd6dpQ5ihHD--qoyLTiOy0pmP6_RAIE-e0-dKR___6G5i7r-cUefnI",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "create" : {
+              "_index" : "es-docs-tsa",
+              "_id" : "KCjEJ9R_BgO8TRX2QOd6dpQ5ihHD--qoyLTiOy0pmP6_RAIE-e0-dKR___6G5i7r-cUefnI",
+              "status" : 409,
+              "error" : {
+                "type" : "version_conflict_engine_exception",
+                "reason" : "[KCjEJ9R_BgO8TRX2QOd6dpQ5ihHD--qoyLTiOy0pmP6_RAIE-e0-dKR___6G5i7r-cUefnI][KCjEJ9R_BgO8TRX2QOd6dpQ5ihHD--qoyLTiOy0pmP6_RAIE-e0-dKQ@2021-04-28T18:50:03.142Z]: version conflict, document already exists (current version [1])",
+                "index_uuid" : "TqVgxs0JQhy4brYJbf_HCQ",
+                "shard" : "0",
+                "index" : "es-docs-tsa"
+              }
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-tsa",
+              "_id" : null,
+              "status" : 400,
+              "error" : {
+                "type" : "document_parsing_exception",
+                "reason" : "[1:62] failed to parse: time series index @timestamp value [2021-04-29T18:50:03.142Z] must be smaller than 2021-04-29T00:00:00Z",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "time series index @timestamp value [2021-04-29T18:50:03.142Z] must be smaller than 2021-04-29T00:00:00Z"
+                }
+              }
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-tsa",
+              "_id" : null,
+              "status" : 400,
+              "error" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Error extracting routing: source didn't contain any routing fields"
+              }
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-tsa",
+              "_id" : null,
+              "status" : 400,
+              "error" : {
+                "type" : "document_parsing_exception",
+                "reason" : "[1:20] failed to parse: data stream timestamp field [@timestamp] is missing",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "data stream timestamp field [@timestamp] is missing"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-tsa/_doc?refresh=true",
+      "body" : {
+        "@timestamp" : "2021-04-28T18:50:04.467Z",
+        "metricset" : "pod",
+        "k8s" : {
+          "pod" : {
+            "name" : "cat",
+            "uid" : "947e4ced-1786-4e53-9e0c-5c447e959507"
+          }
+        }
+      },
+      "mask" : [
+        "shard"
+      ],
+      "status" : 409,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "version_conflict_engine_exception",
+              "reason" : "[KCjEJ9R_BgO8TRX2QOd6dpR12oDh--qoyNZRQPy43y34Qdy2dpsyG0p___6G5i7mzLNNlnE][KCjEJ9R_BgO8TRX2QOd6dpR12oDh--qoyNZRQPy43y34Qdy2dpsyG0o@2021-04-28T18:50:04.467Z]: version conflict, document already exists (current version [1])",
+              "index_uuid" : "TqVgxs0JQhy4brYJbf_HCQ",
+              "shard" : "1",
+              "index" : "es-docs-tsa"
+            }
+          ],
+          "type" : "version_conflict_engine_exception",
+          "reason" : "[KCjEJ9R_BgO8TRX2QOd6dpR12oDh--qoyNZRQPy43y34Qdy2dpsyG0p___6G5i7mzLNNlnE][KCjEJ9R_BgO8TRX2QOd6dpR12oDh--qoyNZRQPy43y34Qdy2dpsyG0o@2021-04-28T18:50:04.467Z]: version conflict, document already exists (current version [1])",
+          "index_uuid" : "TqVgxs0JQhy4brYJbf_HCQ",
+          "shard" : "1",
+          "index" : "es-docs-tsa"
+        },
+        "status" : 409
+      }
+    },
+    {
+      "req" : "POST /es-docs-tsa/_doc?op_type=index&refresh=true",
+      "body" : {
+        "@timestamp" : "2021-04-28T18:50:04.467Z",
+        "metricset" : "pod",
+        "k8s" : {
+          "pod" : {
+            "name" : "cat",
+            "uid" : "947e4ced-1786-4e53-9e0c-5c447e959507"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-tsa",
+        "_id" : "KCjEJ9R_BgO8TRX2QOd6dpR12oDh--qoyNZRQPy43y34Qdy2dpsyG0p___6G5i7mzLNNlnE",
+        "_version" : 2,
+        "result" : "updated",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-tsa/_doc?routing=x",
+      "body" : {
+        "@timestamp" : "2021-04-28T18:50:04.467Z",
+        "metricset" : "pod"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "specifying routing is not supported because the destination index [es-docs-tsa] is in time_series mode"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "specifying routing is not supported because the destination index [es-docs-tsa] is in time_series mode"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-tsa/_search",
+      "body" : {
+        "sort" : [
+          "@timestamp",
+          "_ts_routing_hash"
+        ],
+        "docvalue_fields" : [
+          "_ts_routing_hash",
+          "_tsid"
+        ],
+        "_source" : false
+      },
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-tsa",
+              "_id" : "KCjEJ9R_BgO8TRX2QOd6dpQ5ihHD--qoyLTiOy0pmP6_RAIE-e0-dKR___6G5i7r-cUefnI",
+              "_score" : null,
+              "fields" : {
+                "_tsid" : [
+                  "KCjEJ9R_BgO8TRX2QOd6dpQ5ihHD--qoyLTiOy0pmP6_RAIE-e0-dKQ"
+                ],
+                "_ts_routing_hash" : [
+                  "cn4exQ"
+                ]
+              },
+              "sort" : [
+                1619635803142,
+                "cn4exQ"
+              ]
+            },
+            {
+              "_index" : "es-docs-tsa",
+              "_id" : "KCjEJ9R_BgO8TRX2QOd6dpR12oDh--qoyNZRQPy43y34Qdy2dpsyG0p___6G5i7mzLNNlnE",
+              "_score" : null,
+              "fields" : {
+                "_tsid" : [
+                  "KCjEJ9R_BgO8TRX2QOd6dpR12oDh--qoyNZRQPy43y34Qdy2dpsyG0o"
+                ],
+                "_ts_routing_hash" : [
+                  "cZZNsw"
+                ]
+              },
+              "sort" : [
+                1619635804467,
+                "cZZNsw"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "GET /es-docs-tsa/_doc/not%20an%20id",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "invalid id [not an id] for index [es-docs-tsa] in time_series mode"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "invalid id [not an id] for index [es-docs-tsa] in time_series mode"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "GET /es-docs-tsa/_doc/abc?routing=x",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "specifying routing is not supported because the destination index [es-docs-tsa] is in time_series mode"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "specifying routing is not supported because the destination index [es-docs-tsa] is in time_series mode"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-tsa/_doc/not%20an%20id",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "invalid id [not an id] for index [es-docs-tsa] in time_series mode"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "invalid id [not an id] for index [es-docs-tsa] in time_series mode"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "POST /es-docs-tsa/_update/abc",
+      "body" : {
+        "doc" : {
+          "a" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "update is not supported because the destination index [es-docs-tsa] is in time_series mode"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "update is not supported because the destination index [es-docs-tsa] is in time_series mode"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-tsa",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-tsb",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "time_series",
+            "routing_path" : [
+              "metricset",
+              "k8s.pod.uid"
+            ],
+            "time_series" : {
+              "start_time" : "2021-04-28T00:00:00Z",
+              "end_time" : "2021-04-29T00:00:00Z"
+            },
+            "number_of_shards" : 2,
+            "mapping" : {
+              "synthetic_id" : false
+            }
+          }
+        },
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "metricset" : {
+              "type" : "keyword",
+              "time_series_dimension" : true
+            },
+            "k8s" : {
+              "properties" : {
+                "pod" : {
+                  "properties" : {
+                    "uid" : {
+                      "type" : "keyword",
+                      "time_series_dimension" : true
+                    },
+                    "name" : {
+                      "type" : "keyword"
+                    },
+                    "ip" : {
+                      "type" : "ip"
+                    },
+                    "network" : {
+                      "properties" : {
+                        "tx" : {
+                          "type" : "long"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-tsb"
+      }
+    },
+    {
+      "req" : "POST /es-docs-tsb/_bulk?refresh=true",
+      "raw" : "{\"index\":{}}\n{\"@timestamp\": \"2021-04-28T18:50:04.467Z\", \"metricset\": \"pod\", \"k8s\": {\"pod\": {\"name\": \"cat\", \"uid\":\"947e4ced-1786-4e53-9e0c-5c447e959507\", \"ip\": \"10.10.55.1\", \"network\": {\"tx\": 2001818691}}}}\n{\"index\":{}}\n{\"@timestamp\": \"2021-04-28T18:50:03.142Z\", \"metricset\": \"pod\", \"k8s\": {\"pod\": {\"name\": \"dog\", \"uid\":\"df3145b3-0563-4d3b-a0f7-897eb2876ea9\", \"ip\": \"10.10.55.3\", \"network\": {\"tx\": 1434521831}}}}\n{\"create\":{}}\n{\"@timestamp\": \"2021-04-28T18:50:03.142Z\", \"metricset\": \"pod\", \"k8s\": {\"pod\": {\"name\": \"dog\", \"uid\":\"df3145b3-0563-4d3b-a0f7-897eb2876ea9\", \"network\": {\"tx\": 1}}}}\n{\"index\":{}}\n{\"@timestamp\": \"2021-04-29T18:50:03.142Z\", \"metricset\": \"pod\"}\n{\"index\":{}}\n{\"@timestamp\": \"2021-04-28T18:50:03.142Z\", \"k8s\": {\"pod\": {\"name\": \"x\"}}}\n{\"index\":{}}\n{\"metricset\": \"pod\"}\n",
+      "mask" : [
+        "shard"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : true,
+        "took" : 200,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-tsb",
+              "_id" : "cZZNs7B9sSWsyrL5AAABeRnRGTM",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-tsb",
+              "_id" : "cn4excfoxSs_KdA5AAABeRnRFAY",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "create" : {
+              "_index" : "es-docs-tsb",
+              "_id" : "cn4excfoxSs_KdA5AAABeRnRFAY",
+              "status" : 409,
+              "error" : {
+                "type" : "version_conflict_engine_exception",
+                "reason" : "[cn4excfoxSs_KdA5AAABeRnRFAY][KCjEJ9R_BgO8TRX2QOd6dpQ5ihHD--qoyLTiOy0pmP6_RAIE-e0-dKQ@2021-04-28T18:50:03.142Z]: version conflict, document already exists (current version [1])",
+                "index_uuid" : "wbLmhWy0TWuekfrzxyJytA",
+                "shard" : "0",
+                "index" : "es-docs-tsb"
+              }
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-tsb",
+              "_id" : null,
+              "status" : 400,
+              "error" : {
+                "type" : "document_parsing_exception",
+                "reason" : "[1:62] failed to parse: time series index @timestamp value [2021-04-29T18:50:03.142Z] must be smaller than 2021-04-29T00:00:00Z",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "time series index @timestamp value [2021-04-29T18:50:03.142Z] must be smaller than 2021-04-29T00:00:00Z"
+                }
+              }
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-tsb",
+              "_id" : null,
+              "status" : 400,
+              "error" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Error extracting routing: source didn't contain any routing fields"
+              }
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-tsb",
+              "_id" : null,
+              "status" : 400,
+              "error" : {
+                "type" : "document_parsing_exception",
+                "reason" : "[1:20] failed to parse: data stream timestamp field [@timestamp] is missing",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "data stream timestamp field [@timestamp] is missing"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-tsb/_doc?refresh=true",
+      "body" : {
+        "@timestamp" : "2021-04-28T18:50:04.467Z",
+        "metricset" : "pod",
+        "k8s" : {
+          "pod" : {
+            "name" : "cat",
+            "uid" : "947e4ced-1786-4e53-9e0c-5c447e959507"
+          }
+        }
+      },
+      "mask" : [
+        "shard"
+      ],
+      "status" : 409,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "version_conflict_engine_exception",
+              "reason" : "[cZZNs7B9sSWsyrL5AAABeRnRGTM][KCjEJ9R_BgO8TRX2QOd6dpR12oDh--qoyNZRQPy43y34Qdy2dpsyG0o@2021-04-28T18:50:04.467Z]: version conflict, document already exists (current version [1])",
+              "index_uuid" : "wbLmhWy0TWuekfrzxyJytA",
+              "shard" : "1",
+              "index" : "es-docs-tsb"
+            }
+          ],
+          "type" : "version_conflict_engine_exception",
+          "reason" : "[cZZNs7B9sSWsyrL5AAABeRnRGTM][KCjEJ9R_BgO8TRX2QOd6dpR12oDh--qoyNZRQPy43y34Qdy2dpsyG0o@2021-04-28T18:50:04.467Z]: version conflict, document already exists (current version [1])",
+          "index_uuid" : "wbLmhWy0TWuekfrzxyJytA",
+          "shard" : "1",
+          "index" : "es-docs-tsb"
+        },
+        "status" : 409
+      }
+    },
+    {
+      "req" : "POST /es-docs-tsb/_doc?op_type=index&refresh=true",
+      "body" : {
+        "@timestamp" : "2021-04-28T18:50:04.467Z",
+        "metricset" : "pod",
+        "k8s" : {
+          "pod" : {
+            "name" : "cat",
+            "uid" : "947e4ced-1786-4e53-9e0c-5c447e959507"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-tsb",
+        "_id" : "cZZNs7B9sSWsyrL5AAABeRnRGTM",
+        "_version" : 2,
+        "result" : "updated",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-tsb/_doc?routing=x",
+      "body" : {
+        "@timestamp" : "2021-04-28T18:50:04.467Z",
+        "metricset" : "pod"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "specifying routing is not supported because the destination index [es-docs-tsb] is in time_series mode"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "specifying routing is not supported because the destination index [es-docs-tsb] is in time_series mode"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-tsb/_search",
+      "body" : {
+        "sort" : [
+          "@timestamp",
+          "_ts_routing_hash"
+        ],
+        "docvalue_fields" : [
+          "_ts_routing_hash",
+          "_tsid"
+        ],
+        "_source" : false
+      },
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "took" : 8,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-tsb",
+              "_id" : "cn4excfoxSs_KdA5AAABeRnRFAY",
+              "_score" : null,
+              "fields" : {
+                "_tsid" : [
+                  "KCjEJ9R_BgO8TRX2QOd6dpQ5ihHD--qoyLTiOy0pmP6_RAIE-e0-dKQ"
+                ],
+                "_ts_routing_hash" : [
+                  "cn4exQ"
+                ]
+              },
+              "sort" : [
+                1619635803142,
+                "cn4exQ"
+              ]
+            },
+            {
+              "_index" : "es-docs-tsb",
+              "_id" : "cZZNs7B9sSWsyrL5AAABeRnRGTM",
+              "_score" : null,
+              "fields" : {
+                "_tsid" : [
+                  "KCjEJ9R_BgO8TRX2QOd6dpR12oDh--qoyNZRQPy43y34Qdy2dpsyG0o"
+                ],
+                "_ts_routing_hash" : [
+                  "cZZNsw"
+                ]
+              },
+              "sort" : [
+                1619635804467,
+                "cZZNsw"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "GET /es-docs-tsb/_doc/not%20an%20id",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "invalid id [not an id] for index [es-docs-tsb] in time_series mode"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "invalid id [not an id] for index [es-docs-tsb] in time_series mode"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "GET /es-docs-tsb/_doc/abc?routing=x",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "specifying routing is not supported because the destination index [es-docs-tsb] is in time_series mode"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "specifying routing is not supported because the destination index [es-docs-tsb] is in time_series mode"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-tsb/_doc/not%20an%20id",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "invalid id [not an id] for index [es-docs-tsb] in time_series mode"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "invalid id [not an id] for index [es-docs-tsb] in time_series mode"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "POST /es-docs-tsb/_update/abc",
+      "body" : {
+        "doc" : {
+          "a" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "update is not supported because the destination index [es-docs-tsb] is in time_series mode"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "update is not supported because the destination index [es-docs-tsb] is in time_series mode"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-tsb",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-h",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "text" : {
+              "type" : "text"
+            },
+            "kw" : {
+              "type" : "keyword"
+            },
+            "d" : {
+              "type" : "date"
+            },
+            "idAlias" : {
+              "type" : "alias",
+              "path" : "_id"
+            },
+            "off" : {
+              "type" : "object",
+              "enabled" : false
+            },
+            "fl" : {
+              "type" : "flattened"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-h"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-h/_doc/1?refresh=true&routing=r1",
+      "body" : {
+        "text" : "the quick brown fox",
+        "kw" : "value",
+        "d" : "1990-12-29T22:30:00.000Z",
+        "off" : [
+          "some text",
+          {
+            "a" : "b"
+          },
+          [
+            1,
+            2,
+            3
+          ]
+        ],
+        "un" : {
+          "a" : "foo",
+          "b" : "bar"
+        },
+        "fl" : {
+          "bar" : "x"
+        },
+        "o" : {
+          "p" : [
+            {
+              "x" : 1
+            }
+          ],
+          "o.p" : [
+            {
+              "x" : 2
+            }
+          ]
+        }
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-h",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-h/_search",
+      "body" : {
+        "query" : {
+          "match" : {
+            "text" : "fox"
+          }
+        },
+        "highlight" : {
+          "type" : "unified",
+          "fields" : {
+            "*" : { }
+          },
+          "pre_tags" : [ ],
+          "post_tags" : [ ]
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "pre_tags or post_tags must not be empty",
+              "line" : 1,
+              "col" : 111
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "pre_tags or post_tags must not be empty",
+          "line" : 1,
+          "col" : 111
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-h/_search",
+      "body" : {
+        "query" : {
+          "match" : {
+            "text" : "fox"
+          }
+        },
+        "highlight" : {
+          "fields" : {
+            "text" : {
+              "number_of_fragments" : -1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:88] [highlight_field] failed to parse field [number_of_fragments]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:88] [highlight] failed to parse field [fields]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:88] [fields] failed to parse field [text]",
+            "caused_by" : {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:88] [highlight_field] failed to parse field [number_of_fragments]",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "[number_of_fragments] must be between [0] and [10000]"
+              }
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-h/_search",
+      "body" : {
+        "query" : {
+          "match" : {
+            "text" : "fox"
+          }
+        },
+        "highlight" : {
+          "number_of_fragments" : 100000,
+          "fields" : {
+            "text" : { }
+          }
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:70] [highlight] failed to parse field [number_of_fragments]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:70] [highlight] failed to parse field [number_of_fragments]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[number_of_fragments] must be between [0] and [10000]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-h/_search",
+      "body" : {
+        "query" : {
+          "match" : {
+            "text" : "fox"
+          }
+        },
+        "highlight" : {
+          "require_field_match" : false,
+          "fields" : {
+            "text" : {
+              "matched_fields" : [
+                "text"
+              ]
+            }
+          }
+        }
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Matched fields are not supported when [require_field_match] is set to [false]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-h",
+              "node" : "XU-PsPtaRtezxPl7Imo35A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Matched fields are not supported when [require_field_match] is set to [false]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Matched fields are not supported when [require_field_match] is set to [false]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Matched fields are not supported when [require_field_match] is set to [false]"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-h/_search",
+      "body" : {
+        "_source" : false,
+        "fields" : [
+          "_id",
+          "_index",
+          "_version",
+          "_routing",
+          "idAlias"
+        ]
+      },
+      "mask" : [
+        "node"
+      ],
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "took" : 6,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-h",
+              "_id" : "1",
+              "_score" : 1.0,
+              "_routing" : "r1",
+              "fields" : {
+                "_id" : [
+                  "1"
+                ],
+                "_index" : [
+                  "es-docs-h"
+                ],
+                "idAlias" : [
+                  "1"
+                ],
+                "_version" : [
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-h/_search",
+      "body" : {
+        "_source" : false,
+        "fields" : [
+          "_seq_no"
+        ]
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "error fetching [_seq_no]: Cannot fetch values for internal field [_seq_no]."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-h",
+              "node" : "XU-PsPtaRtezxPl7Imo35A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "error fetching [_seq_no]: Cannot fetch values for internal field [_seq_no].",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Cannot fetch values for internal field [_seq_no]."
+                }
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "error fetching [_seq_no]: Cannot fetch values for internal field [_seq_no].",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "error fetching [_seq_no]: Cannot fetch values for internal field [_seq_no].",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Cannot fetch values for internal field [_seq_no]."
+              }
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-h/_search",
+      "body" : {
+        "_source" : false,
+        "fields" : [
+          {
+            "field" : "kw",
+            "format" : "yyyy"
+          }
+        ]
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "error fetching [kw]: Field [kw] of type [keyword] doesn't support formats."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-h",
+              "node" : "XU-PsPtaRtezxPl7Imo35A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "error fetching [kw]: Field [kw] of type [keyword] doesn't support formats.",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Field [kw] of type [keyword] doesn't support formats."
+                }
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "error fetching [kw]: Field [kw] of type [keyword] doesn't support formats.",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "error fetching [kw]: Field [kw] of type [keyword] doesn't support formats.",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Field [kw] of type [keyword] doesn't support formats."
+              }
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-h/_search",
+      "body" : {
+        "_source" : false,
+        "fields" : [
+          {
+            "field" : "k*",
+            "format" : "yyyy"
+          }
+        ]
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "error fetching [kw] which matched [k*]: Field [kw] of type [keyword] doesn't support formats."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-h",
+              "node" : "XU-PsPtaRtezxPl7Imo35A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "error fetching [kw] which matched [k*]: Field [kw] of type [keyword] doesn't support formats.",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Field [kw] of type [keyword] doesn't support formats."
+                }
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "error fetching [kw] which matched [k*]: Field [kw] of type [keyword] doesn't support formats.",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "error fetching [kw] which matched [k*]: Field [kw] of type [keyword] doesn't support formats.",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Field [kw] of type [keyword] doesn't support formats."
+              }
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-h/_search",
+      "body" : {
+        "_source" : false,
+        "fields" : [
+          {
+            "field" : "fl.bar",
+            "format" : "yyyy"
+          }
+        ]
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "error fetching [fl.bar]: Field [fl.bar] of type [flattened] doesn't support formats."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-h",
+              "node" : "XU-PsPtaRtezxPl7Imo35A",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "error fetching [fl.bar]: Field [fl.bar] of type [flattened] doesn't support formats.",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Field [fl.bar] of type [flattened] doesn't support formats."
+                }
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "error fetching [fl.bar]: Field [fl.bar] of type [flattened] doesn't support formats.",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "error fetching [fl.bar]: Field [fl.bar] of type [flattened] doesn't support formats.",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Field [fl.bar] of type [flattened] doesn't support formats."
+              }
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-h/_search",
+      "body" : {
+        "_source" : false,
+        "fields" : [
+          {
+            "field" : "d",
+            "format" : "yyyy/MM/dd"
+          }
+        ]
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-h",
+              "_id" : "1",
+              "_score" : 1.0,
+              "_routing" : "r1",
+              "fields" : {
+                "d" : [
+                  "1990/12/29"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-h/_search",
+      "body" : {
+        "_source" : false,
+        "fields" : [
+          {
+            "field" : "*",
+            "include_unmapped" : true
+          }
+        ]
+      },
+      "mask" : [
+        "node"
+      ],
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-h",
+              "_id" : "1",
+              "_score" : 1.0,
+              "_routing" : "r1",
+              "fields" : {
+                "d" : [
+                  "1990-12-29T22:30:00.000Z"
+                ],
+                "fl" : [
+                  {
+                    "bar" : "x"
+                  }
+                ],
+                "un.a.keyword" : [
+                  "foo"
+                ],
+                "o.p.x" : [
+                  1
+                ],
+                "idAlias" : [
+                  "1"
+                ],
+                "kw" : [
+                  "value"
+                ],
+                "un.b.keyword" : [
+                  "bar"
+                ],
+                "off.a" : [
+                  "b"
+                ],
+                "off" : [
+                  1,
+                  2,
+                  3,
+                  "some text"
+                ],
+                "o.o.p.x" : [
+                  2
+                ],
+                "un.a" : [
+                  "foo"
+                ],
+                "text" : [
+                  "the quick brown fox"
+                ],
+                "un.b" : [
+                  "bar"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-h/_search",
+      "body" : {
+        "_source" : false,
+        "fields" : [
+          "_*"
+        ]
+      },
+      "mask" : [
+        "node"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-h",
+              "_id" : "1",
+              "_score" : 1.0,
+              "_routing" : "r1"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-h",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

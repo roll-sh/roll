@@ -1,0 +1,55 @@
+{
+  "ism.put_policy": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/im-plugin/ism/api/",
+      "description": "Creates or updates an ISM policy."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ism/policies/{policy_id}",
+          "methods": [
+            "PUT"
+          ],
+          "parts": {
+            "policy_id": {
+              "type": "string",
+              "description": "policy_id"
+            }
+          }
+        },
+        {
+          "path": "/_opendistro/_ism/policies/{policy_id}",
+          "methods": [
+            "PUT"
+          ],
+          "parts": {
+            "policy_id": {
+              "type": "string",
+              "description": "policy_id"
+            }
+          }
+        }
+      ]
+    },
+    "params": {
+      "if_seq_no": {
+        "type": "number",
+        "description": "Only update the policy if it has this sequence number"
+      },
+      "if_primary_term": {
+        "type": "number",
+        "description": "Only update the policy if it has this primary term"
+      },
+      "refresh": {
+        "type": "enum",
+        "description": "Refresh policy"
+      }
+    },
+    "body": {
+      "description": "The policy",
+      "required": false
+    }
+  }
+}

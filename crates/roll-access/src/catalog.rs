@@ -765,6 +765,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/streams/{s}", "streams", R, one(&["s"], "stream")),
     row("PATCH", "/v1/streams/{s}", "streams", W, one(&["s"], "stream")),
     row("DELETE", "/v1/streams/{s}", "streams", D, one(&["s"], "stream")),
+    // A copy-on-write branch of the stream (roll previews): its answer has the branch's own key.
+    row("POST", "/v1/streams/{s}/branches", "streams", W, one(&["s"], "stream")).reveals(STREAM_SECRETS),
     row("GET", "/v1/streams/{s}/keys", "streams", R, one(&["s"], "stream")),
     row("POST", "/v1/streams/{s}/keys", "streams", REVEAL, one(&["s"], "stream")),
     row("DELETE", "/v1/streams/{s}/keys/{username}", "streams", ADMIN, one(&["s"], "stream")),

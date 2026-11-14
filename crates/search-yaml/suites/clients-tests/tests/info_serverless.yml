@@ -1,0 +1,9 @@
+---
+requires:
+  serverless: true
+  stack: false
+---
+'info':
+  - do:
+      info: {}
+  - match: { name: 'serverless' }

@@ -1,0 +1,795 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "PUT",
+      "path": "fxta-a",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "k": {
+              "type": "keyword"
+            },
+            "t": {
+              "type": "text"
+            },
+            "n": {
+              "type": "long"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxta-a"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "fxta-a",
+            "_id": "0"
+          }
+        },
+        {
+          "k": "a",
+          "t": "fox",
+          "n": 0
+        },
+        {
+          "index": {
+            "_index": "fxta-a",
+            "_id": "1"
+          }
+        },
+        {
+          "k": "b",
+          "t": "fox fox dog",
+          "n": 1
+        },
+        {
+          "index": {
+            "_index": "fxta-a",
+            "_id": "2"
+          }
+        },
+        {
+          "k": "a",
+          "t": "fox fox fox dog dog",
+          "n": 2
+        },
+        {
+          "index": {
+            "_index": "fxta-a",
+            "_id": "3"
+          }
+        },
+        {
+          "k": "b",
+          "t": "fox dog dog dog",
+          "n": 3
+        },
+        {
+          "index": {
+            "_index": "fxta-a",
+            "_id": "4"
+          }
+        },
+        {
+          "k": "a",
+          "t": "fox fox",
+          "n": 4
+        },
+        {
+          "index": {
+            "_index": "fxta-a",
+            "_id": "5"
+          }
+        },
+        {
+          "k": "b",
+          "t": "fox fox fox dog",
+          "n": 5
+        },
+        {
+          "index": {
+            "_index": "fxta-a",
+            "_id": "6"
+          }
+        },
+        {
+          "k": "a",
+          "t": "fox dog dog",
+          "n": 6
+        },
+        {
+          "index": {
+            "_index": "fxta-a",
+            "_id": "7"
+          }
+        },
+        {
+          "k": "b",
+          "t": "fox fox dog dog dog",
+          "n": 7
+        },
+        {
+          "index": {
+            "_index": "fxta-a",
+            "_id": "8"
+          }
+        },
+        {
+          "k": "a",
+          "t": "fox fox fox",
+          "n": 8
+        },
+        {
+          "index": {
+            "_index": "fxta-a",
+            "_id": "9"
+          }
+        },
+        {
+          "k": "b",
+          "t": "fox dog",
+          "n": 9
+        },
+        {
+          "index": {
+            "_index": "fxta-a",
+            "_id": "10"
+          }
+        },
+        {
+          "k": "a",
+          "t": "fox fox dog dog",
+          "n": 10
+        },
+        {
+          "index": {
+            "_index": "fxta-a",
+            "_id": "11"
+          }
+        },
+        {
+          "k": "b",
+          "t": "fox fox fox dog dog dog",
+          "n": 11
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "fxta-a",
+                "_id": "0",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxta-a",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxta-a",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxta-a",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxta-a",
+                "_id": "4",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxta-a",
+                "_id": "5",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 5,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxta-a",
+                "_id": "6",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 6,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxta-a",
+                "_id": "7",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 7,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxta-a",
+                "_id": "8",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 8,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxta-a",
+                "_id": "9",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 9,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxta-a",
+                "_id": "10",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 10,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxta-a",
+                "_id": "11",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 11,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxta-a/_search",
+      "body": {
+        "terminate_after": 2,
+        "post_filter": {
+          "term": {
+            "k": "b"
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "terminated_early": true,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "fxta-a",
+                "_id": "1",
+                "_score": 1.0
+              },
+              {
+                "_index": "fxta-a",
+                "_id": "3",
+                "_score": 1.0
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxta-a/_search",
+      "body": {
+        "terminate_after": 2,
+        "post_filter": {
+          "term": {
+            "k": "z"
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxta-a/_search",
+      "body": {
+        "terminate_after": 3,
+        "post_filter": {
+          "term": {
+            "k": "b"
+          }
+        },
+        "aggs": {
+          "s": {
+            "sum": {
+              "field": "n"
+            }
+          },
+          "c": {
+            "value_count": {
+              "field": "k"
+            }
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "terminated_early": true,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "fxta-a",
+                "_id": "1",
+                "_score": 1.0
+              },
+              {
+                "_index": "fxta-a",
+                "_id": "3",
+                "_score": 1.0
+              },
+              {
+                "_index": "fxta-a",
+                "_id": "5",
+                "_score": 1.0
+              }
+            ]
+          },
+          "aggregations": {
+            "c": {
+              "value": 7
+            },
+            "s": {
+              "value": 21.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxta-a/_search",
+      "body": {
+        "terminate_after": 3,
+        "min_score": 0.5,
+        "query": {
+          "match": {
+            "t": "fox dog"
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.5153053,
+            "hits": [
+              {
+                "_index": "fxta-a",
+                "_id": "3",
+                "_score": 0.5153053
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxta-a/_search",
+      "body": {
+        "terminate_after": 2,
+        "min_score": 0.6,
+        "query": {
+          "match": {
+            "t": "dog"
+          }
+        },
+        "aggs": {
+          "s": {
+            "sum": {
+              "field": "n"
+            }
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "aggregations": {
+            "s": {
+              "value": 0.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxta-a/_search",
+      "body": {
+        "terminate_after": 2,
+        "min_score": 0.3,
+        "post_filter": {
+          "term": {
+            "k": "a"
+          }
+        },
+        "query": {
+          "match": {
+            "t": "fox"
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxta-a/_search",
+      "body": {
+        "terminate_after": 6,
+        "post_filter": {
+          "term": {
+            "k": "a"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 6,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxta-a/_search",
+      "body": {
+        "terminate_after": 6,
+        "post_filter": {
+          "term": {
+            "k": "a"
+          }
+        },
+        "size": 0
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 6,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/fxta-a",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

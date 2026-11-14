@@ -10,6 +10,7 @@
 //! image = "node:22"
 //! run = "pnpm i && pnpm dev --port $PORT"
 //! port = 3000
+//! health = "/healthz"    # ready only once this answers 2xx/3xx (optional)
 //! postgres = "prj_…"     # roll Postgres project to branch
 //! redis = "rdb_…"        # roll Redis database to branch
 //!
@@ -59,9 +60,14 @@ pub struct CheckSpec {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreviewSpec {
+    /// The service's name in a roll preview environment (docs/previews.md, "Services"); the
+    /// repo's name when not set.
+    pub name: Option<String>,
     pub image: String,
     pub run: String,
     pub port: u16,
+    /// A path the service answers 2xx/3xx on once it works: a preview is ready only then.
+    pub health: Option<String>,
     /// roll Postgres project (`prj_…`) whose `main` each preview branches.
     pub postgres: Option<String>,
     /// roll Redis database (`rdb_…`) each preview branches.
@@ -101,9 +107,11 @@ struct RawCheck {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPreview {
+    name: Option<String>,
     image: String,
     run: String,
     port: u16,
+    health: Option<String>,
     postgres: Option<String>,
     redis: Option<String>,
     auto: Option<bool>,
@@ -174,10 +182,22 @@ impl RollToml {
                 {
                     return Err(format!("{FILE} {at}: redis must be a roll Redis database id (rdb_…)"));
                 }
+                let label = |n: &str| {
+                    (1..=20).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') && !n.starts_with('-') && !n.ends_with('-')
+                };
+                if p.name.as_deref().is_some_and(|n| !label(n)) {
+                    return Err(format!("{FILE} {at}: name is 1-20 characters of a-z, 0-9 and -"));
+                }
                 Some(PreviewSpec {
+                    name: p.name,
                     image: image(at, p.image)?,
                     run: run(at, p.run)?,
                     port: p.port,
+                    health: match p.health {
+                        Some(h) if h.starts_with('/') && h.len() <= 200 && !h.contains(|c: char| c.is_control() || c.is_whitespace()) => Some(h),
+                        Some(_) => return Err(format!("{FILE} {at}: health is a path starting with / (at most 200 characters, no spaces)")),
+                        None => None,
+                    },
                     postgres: p.postgres,
                     redis: p.redis,
                     auto: p.auto.unwrap_or(true),
@@ -329,6 +349,7 @@ mod tests {
             ("[checks.t]\nimage = \"a\"\nrun = \"x\"\nmemory = 1", "memory"),
             ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 0", "port"),
             ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\npostgres = \"db\"", "postgres"),
+            ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\nhealth = \"healthz\"", "health"),
             ("[preview]\nimage = \"a\"\nrun = \"x\"\nport = 3000\nredis = \"rdb_\"", "redis"),
             ("[preview]\nimage = \"a\"\nrun = \"x\"", "port"),
             ("[queue]\nbatch_size = 0", "batch_size"),

@@ -1,0 +1,69 @@
+return MessageFormat.format('{0} x {1}', new Object[] {1, 'a'})
+----
+return MessageFormat.format('{0} x {1}', 1, 'a')
+----
+return MessageFormat.format("It's {0}", new Object[] {'x'})
+----
+return MessageFormat.format("It''s '{0}' {0} '{'1}' ''{1}''", new Object[] {'x', 'y'})
+----
+return MessageFormat.format('{0} {1} {2} {3} {4}', new Object[] {1234567.891, 42, -5L, 0.5f, new BigDecimal('12345.678')})
+----
+return MessageFormat.format('{0,number} {0,number,integer} {0,number,percent} {0,number,currency} {0,number,#.#} {0,number,0000.00}', new Object[] {1234.5678})
+----
+return MessageFormat.format('{0} {1}', new Object[] {null, new Date(0)})
+----
+return MessageFormat.format('{0,date} {0,time} {0,date,short} {0,date,long} {0,date,full} {0,time,short} {0,date,yyyy-MM-dd}', new Object[] {new Date(1600000000000L)})
+----
+return MessageFormat.format('{0,choice,0#no files|1#one file|1<{0,number,integer} files}', new Object[] {0}) + ' / ' + MessageFormat.format('{0,choice,0#no files|1#one file|1<{0,number,integer} files}', new Object[] {1}) + ' / ' + MessageFormat.format('{0,choice,0#no files|1#one file|1<{0,number,integer} files}', new Object[] {1234})
+----
+return MessageFormat.format('{0} {5} {1}', new Object[] {'a', 'b'})
+----
+return MessageFormat.format('{0}', null)
+----
+return MessageFormat.format('{0', new Object[] {1})
+----
+return MessageFormat.format('{x}', new Object[] {1})
+----
+return MessageFormat.format('{-1}', new Object[] {1})
+----
+return MessageFormat.format('{0,foo}', new Object[] {1})
+----
+return MessageFormat.format('{0,number}', new Object[] {'x'})
+----
+return MessageFormat.format('{0,date}', new Object[] {'x'})
+----
+return MessageFormat.format('{ 0 , number , integer }', new Object[] {12.7})
+----
+return MessageFormat.format('{0,  NUMBER,  INTEGER}', new Object[] {12.7})
+----
+return MessageFormat.format('a}b', new Object[] {1})
+----
+return MessageFormat.format("'{0}", new Object[] {1})
+----
+return MessageFormat.format('{0,number,#.#.#}', new Object[] {1})
+----
+return MessageFormat.format('{0,choice,abc}', new Object[] {1})
+----
+return MessageFormat.format('{0} {1} {2}', new Object[] {[1, 2], ['a': 1], 'x'.charAt(0)})
+----
+return MessageFormat.format('{0}{1}{2}{3}{4}{5}{6}{7}{8}{9}{10}', new Object[] {0,1,2,3,4,5,6,7,8,9,10})
+----
+return MessageFormat.format('{0,number,#,##0.00;(#,##0.00)}', new Object[] {-1234.5})
+----
+return MessageFormat.format('{0,choice,-1#neg|0#zero|0<pos}', new Object[] {-0.5}) + MessageFormat.format('{0,choice,-1#neg|0#zero|0<pos}', new Object[] {Double.NaN}) + MessageFormat.format('{0,choice,-1#neg|0#zero|0<pos}', new Object[] {0.0001})
+----
+ChoiceFormat c = new ChoiceFormat('0#none|1#one|2#many'); return [c.format(0), c.format(1.5), c.format(-1), c.format(5), c.toPattern(), c.getLimits(), c.getFormats()]
+----
+ChoiceFormat c = new ChoiceFormat(new double[] {0, 1, 2}, new String[] {'a', 'b', 'c'}); return [c.format(1), c.toPattern(), ChoiceFormat.nextDouble(1.0), ChoiceFormat.previousDouble(1.0), ChoiceFormat.nextDouble(1.0, false)]
+----
+ChoiceFormat c = new ChoiceFormat('1#a|0#b')
+----
+ChoiceFormat c = new ChoiceFormat('#a')
+----
+ChoiceFormat c = new ChoiceFormat('x#a')
+----
+ChoiceFormat c = new ChoiceFormat('0#a|1<b|∞#c'); return [c.toPattern(), c.format(Double.POSITIVE_INFINITY), c.format(2), c.getLimits()[1]]
+----
+ChoiceFormat c = new ChoiceFormat('0#a'); c.applyPattern('5#x|6#y'); c.setChoices(new double[] {1}, new String[] {'z'}); return [c.format(0), c.toPattern()]
+----
+return MessageFormat.Field.ARGUMENT

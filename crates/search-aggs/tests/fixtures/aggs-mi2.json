@@ -1,0 +1,315 @@
+{
+ "indices": [
+  {
+   "name": "aggs-mi-a",
+   "mapping": {
+    "properties": {
+     "n": {
+      "type": "double"
+     },
+     "k": {
+      "type": "keyword"
+     },
+     "other": {
+      "type": "long"
+     }
+    }
+   },
+   "docs": [
+    {
+     "n": 1.5,
+     "k": "x",
+     "other": 1
+    },
+    {
+     "n": 7,
+     "k": "z",
+     "other": 2
+    },
+    {
+     "other": 3
+    }
+   ]
+  },
+  {
+   "name": "aggs-mi-b",
+   "mapping": {
+    "properties": {
+     "d": {
+      "type": "date"
+     },
+     "ip": {
+      "type": "ip"
+     },
+     "n": {
+      "type": "long"
+     },
+     "k": {
+      "type": "keyword"
+     }
+    }
+   },
+   "docs": [
+    {
+     "d": 1619827200000,
+     "ip": "192.168.0.1",
+     "n": 5,
+     "k": "x"
+    },
+    {
+     "d": 1577836800000,
+     "ip": "10.0.0.1",
+     "n": 7,
+     "k": "y"
+    }
+   ]
+  }
+ ],
+ "cases": [
+  {
+   "name": "max_min_date_unmapped_first",
+   "body": "{\"aggs\":{\"mx\":{\"max\":{\"field\":\"d\"}},\"mn\":{\"min\":{\"field\":\"d\"}},\"a\":{\"avg\":{\"field\":\"d\"}},\"s\":{\"stats\":{\"field\":\"d\"}}}}",
+   "typed_keys": true,
+   "response": {
+    "avg#a": {
+     "value": 1598832000000.0
+    },
+    "min#mn": {
+     "value": 1577836800000.0,
+     "value_as_string": "2020-01-01T00:00:00.000Z"
+    },
+    "stats#s": {
+     "count": 2,
+     "min": 1577836800000.0,
+     "max": 1619827200000.0,
+     "avg": 1598832000000.0,
+     "sum": 3197664000000.0
+    },
+    "max#mx": {
+     "value": 1619827200000.0,
+     "value_as_string": "2021-05-01T00:00:00.000Z"
+    }
+   }
+  },
+  {
+   "name": "composite_ip_unmapped",
+   "body": "{\"aggs\":{\"c\":{\"composite\":{\"sources\":[{\"f\":{\"terms\":{\"field\":\"ip\"}}}]}}}}",
+   "typed_keys": false,
+   "response": {
+    "c": {
+     "after_key": {
+      "f": "192.168.0.1"
+     },
+     "buckets": [
+      {
+       "key": {
+        "f": "10.0.0.1"
+       },
+       "doc_count": 1
+      },
+      {
+       "key": {
+        "f": "192.168.0.1"
+       },
+       "doc_count": 1
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "composite_ip_and_long",
+   "body": "{\"aggs\":{\"c\":{\"composite\":{\"sources\":[{\"f\":{\"terms\":{\"field\":\"ip\"}}},{\"o\":{\"terms\":{\"field\":\"other\",\"missing_bucket\":true}}}]}}}}",
+   "typed_keys": false,
+   "response": {
+    "c": {
+     "after_key": {
+      "f": "192.168.0.1",
+      "o": null
+     },
+     "buckets": [
+      {
+       "key": {
+        "f": "10.0.0.1",
+        "o": null
+       },
+       "doc_count": 1
+      },
+      {
+       "key": {
+        "f": "192.168.0.1",
+        "o": null
+       },
+       "doc_count": 1
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "terms_long_double",
+   "body": "{\"aggs\":{\"t\":{\"terms\":{\"field\":\"n\"}}}}",
+   "typed_keys": true,
+   "response": {
+    "dterms#t": {
+     "doc_count_error_upper_bound": 0,
+     "sum_other_doc_count": 0,
+     "buckets": [
+      {
+       "key": 7.0,
+       "doc_count": 2
+      },
+      {
+       "key": 1.5,
+       "doc_count": 1
+      },
+      {
+       "key": 5.0,
+       "doc_count": 1
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "terms_ip_unmapped",
+   "body": "{\"aggs\":{\"t\":{\"terms\":{\"field\":\"ip\"}},\"o\":{\"terms\":{\"field\":\"other\"}}}}",
+   "typed_keys": true,
+   "response": {
+    "sterms#t": {
+     "doc_count_error_upper_bound": 0,
+     "sum_other_doc_count": 0,
+     "buckets": [
+      {
+       "key": "10.0.0.1",
+       "doc_count": 1
+      },
+      {
+       "key": "192.168.0.1",
+       "doc_count": 1
+      }
+     ]
+    },
+    "lterms#o": {
+     "doc_count_error_upper_bound": 0,
+     "sum_other_doc_count": 0,
+     "buckets": [
+      {
+       "key": 1,
+       "doc_count": 1
+      },
+      {
+       "key": 2,
+       "doc_count": 1
+      },
+      {
+       "key": 3,
+       "doc_count": 1
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "histogram_date_unmapped",
+   "body": "{\"aggs\":{\"h\":{\"date_histogram\":{\"field\":\"d\",\"calendar_interval\":\"year\"}},\"r\":{\"range\":{\"field\":\"other\",\"ranges\":[{\"to\":2},{\"from\":2}]}}}}",
+   "typed_keys": true,
+   "response": {
+    "date_histogram#h": {
+     "buckets": [
+      {
+       "key_as_string": "2020-01-01T00:00:00.000Z",
+       "key": 1577836800000,
+       "doc_count": 1
+      },
+      {
+       "key_as_string": "2021-01-01T00:00:00.000Z",
+       "key": 1609459200000,
+       "doc_count": 1
+      }
+     ]
+    },
+    "range#r": {
+     "buckets": [
+      {
+       "key": "*-2.0",
+       "to": 2.0,
+       "doc_count": 1
+      },
+      {
+       "key": "2.0-*",
+       "from": 2.0,
+       "doc_count": 2
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "cardinality_mixed",
+   "body": "{\"aggs\":{\"c\":{\"cardinality\":{\"field\":\"n\"}},\"k\":{\"cardinality\":{\"field\":\"k\"}},\"p\":{\"percentiles\":{\"field\":\"n\",\"percents\":[50]}}}}",
+   "typed_keys": false,
+   "response": {
+    "p": {
+     "values": {
+      "50.0": 6.0
+     }
+    },
+    "k": {
+     "value": 3
+    },
+    "c": {
+     "value": 4
+    }
+   }
+  },
+  {
+   "name": "rare_and_sig_unmapped",
+   "body": "{\"aggs\":{\"r\":{\"rare_terms\":{\"field\":\"ip\"}},\"t\":{\"terms\":{\"field\":\"k\"},\"aggs\":{\"m\":{\"max\":{\"field\":\"d\"}}}}}}",
+   "typed_keys": false,
+   "response": {
+    "t": {
+     "doc_count_error_upper_bound": 0,
+     "sum_other_doc_count": 0,
+     "buckets": [
+      {
+       "key": "x",
+       "doc_count": 2,
+       "m": {
+        "value": 1619827200000.0,
+        "value_as_string": "2021-05-01T00:00:00.000Z"
+       }
+      },
+      {
+       "key": "y",
+       "doc_count": 1,
+       "m": {
+        "value": 1577836800000.0,
+        "value_as_string": "2020-01-01T00:00:00.000Z"
+       }
+      },
+      {
+       "key": "z",
+       "doc_count": 1,
+       "m": {
+        "value": null
+       }
+      }
+     ]
+    },
+    "r": {
+     "buckets": [
+      {
+       "key": "10.0.0.1",
+       "doc_count": 1
+      },
+      {
+       "key": "192.168.0.1",
+       "doc_count": 1
+      }
+     ]
+    }
+   }
+  }
+ ]
+}

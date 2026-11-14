@@ -1,0 +1,2350 @@
+{
+  "description" : "Round 3 (b): standard, knn, rescorer and diversify (MMR) retrievers with their validation, completion suggester contexts (category and geo, paths, prefixes, boosts, multi-fields, typed keys), simulate ingest with pipeline substitutions and mapping validation",
+  "steps" : [
+    {
+      "req" : "PUT /es-docs-ret",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "name" : {
+              "type" : "text",
+              "fields" : {
+                "raw" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "color" : {
+              "type" : "keyword"
+            },
+            "count" : {
+              "type" : "integer"
+            },
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 3,
+              "similarity" : "l2_norm",
+              "index_options" : {
+                "type" : "hnsw"
+              }
+            },
+            "f" : {
+              "type" : "rank_features"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-ret"
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_bulk?refresh=true",
+      "raw" : "{\"index\": {\"_id\": \"1\"}}\n{\"name\": \"cow\", \"color\": \"brown\", \"count\": 1, \"v\": [1, 1, 1], \"f\": {\"a\": 1, \"b\": 9}}\n{\"index\": {\"_id\": \"2\"}}\n{\"name\": \"cow cow\", \"color\": \"spotted\", \"count\": 2, \"v\": [1, 2, 1], \"f\": {\"a\": 2, \"b\": 8}}\n{\"index\": {\"_id\": \"3\"}}\n{\"name\": \"cow cow cow\", \"color\": \"spotted\", \"count\": 3, \"v\": [2, 2, 2], \"f\": {\"a\": 3, \"b\": 7}}\n{\"index\": {\"_id\": \"4\"}}\n{\"name\": \"pig\", \"color\": \"pink\", \"count\": 4, \"v\": [5, 1, 0], \"f\": {\"a\": 4, \"b\": 6}}\n{\"index\": {\"_id\": \"5\"}}\n{\"name\": \"pig pig\", \"color\": \"pink\", \"count\": 5, \"v\": [5, 2, 0], \"f\": {\"a\": 5, \"b\": 5}}\n{\"index\": {\"_id\": \"6\"}}\n{\"name\": \"chicken\", \"color\": \"white\", \"count\": 6, \"v\": [0, 9, 1], \"f\": {\"a\": 6, \"b\": 4}}\n{\"index\": {\"_id\": \"7\"}}\n{\"name\": \"rabbit\", \"color\": \"brown\", \"count\": 7, \"v\": [9, 9, 9], \"f\": {\"a\": 7, \"b\": 3}}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 200,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-ret",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-ret",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-ret",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-ret",
+              "_id" : "4",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 3,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-ret",
+              "_id" : "5",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 4,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-ret",
+              "_id" : "6",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 5,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-ret",
+              "_id" : "7",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 6,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_search",
+      "body" : {
+        "fields" : [
+          "name"
+        ],
+        "_source" : false,
+        "retriever" : {
+          "standard" : {
+            "query" : {
+              "match" : {
+                "name" : "cow"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 38,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 1.087262,
+          "hits" : [
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "3",
+              "_score" : 1.087262,
+              "fields" : {
+                "name" : [
+                  "cow cow cow"
+                ]
+              }
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "2",
+              "_score" : 1.0557057,
+              "fields" : {
+                "name" : [
+                  "cow cow"
+                ]
+              }
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "1",
+              "_score" : 0.9711467,
+              "fields" : {
+                "name" : [
+                  "cow"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_search",
+      "body" : {
+        "_source" : false,
+        "retriever" : {
+          "standard" : {
+            "query" : {
+              "match" : {
+                "name" : "cow"
+              }
+            },
+            "filter" : {
+              "term" : {
+                "color" : "spotted"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 36,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 1.087262,
+          "hits" : [
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "3",
+              "_score" : 1.087262
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "2",
+              "_score" : 1.0557057
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_search",
+      "body" : {
+        "_source" : false,
+        "retriever" : {
+          "standard" : {
+            "filter" : [
+              {
+                "term" : {
+                  "color" : "pink"
+                }
+              }
+            ],
+            "sort" : [
+              {
+                "count" : "desc"
+              }
+            ]
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 23,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "5",
+              "_score" : null,
+              "sort" : [
+                5
+              ]
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "4",
+              "_score" : null,
+              "sort" : [
+                4
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_search",
+      "body" : {
+        "_source" : false,
+        "retriever" : {
+          "standard" : {
+            "query" : {
+              "match_all" : { }
+            },
+            "sort" : [
+              {
+                "count" : "asc"
+              }
+            ],
+            "search_after" : [
+              3
+            ],
+            "terminate_after" : 10
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 8,
+        "timed_out" : false,
+        "terminated_early" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 7,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "4",
+              "_score" : null,
+              "sort" : [
+                4
+              ]
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "5",
+              "_score" : null,
+              "sort" : [
+                5
+              ]
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "6",
+              "_score" : null,
+              "sort" : [
+                6
+              ]
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "7",
+              "_score" : null,
+              "sort" : [
+                7
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_search",
+      "body" : {
+        "_source" : false,
+        "retriever" : {
+          "standard" : {
+            "query" : {
+              "match" : {
+                "name" : "cow pig"
+              }
+            },
+            "min_score" : 0.9
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 26,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 5,
+            "relation" : "eq"
+          },
+          "max_score" : 1.4853958,
+          "hits" : [
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "5",
+              "_score" : 1.4853958
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "4",
+              "_score" : 1.3664199
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "3",
+              "_score" : 1.087262
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "2",
+              "_score" : 1.0557057
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "1",
+              "_score" : 0.9711467
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_search",
+      "body" : {
+        "_source" : false,
+        "size" : 3,
+        "retriever" : {
+          "standard" : {
+            "query" : {
+              "match_all" : { }
+            },
+            "collapse" : {
+              "field" : "color"
+            },
+            "sort" : [
+              {
+                "count" : "asc"
+              }
+            ]
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 15,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 7,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "1",
+              "_score" : null,
+              "fields" : {
+                "color" : [
+                  "brown"
+                ]
+              },
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "2",
+              "_score" : null,
+              "fields" : {
+                "color" : [
+                  "spotted"
+                ]
+              },
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "4",
+              "_score" : null,
+              "fields" : {
+                "color" : [
+                  "pink"
+                ]
+              },
+              "sort" : [
+                4
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_search",
+      "body" : {
+        "retriever" : {
+          "standard" : {
+            "query" : {
+              "match_all" : { }
+            }
+          }
+        },
+        "query" : {
+          "match_all" : { }
+        },
+        "sort" : [
+          "count"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: cannot specify [retriever] and [query, sort];"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: cannot specify [retriever] and [query, sort];"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_search",
+      "body" : {
+        "_source" : false,
+        "retriever" : {
+          "knn" : {
+            "field" : "v",
+            "query_vector" : [
+              1,
+              1,
+              1
+            ],
+            "k" : 3,
+            "num_candidates" : 10
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 104,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "1",
+              "_score" : 1.0
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "2",
+              "_score" : 0.5
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "3",
+              "_score" : 0.25
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_search",
+      "body" : {
+        "_source" : false,
+        "retriever" : {
+          "knn" : {
+            "field" : "v",
+            "query_vector" : [
+              1,
+              1,
+              1
+            ],
+            "k" : 3,
+            "num_candidates" : 10,
+            "filter" : {
+              "term" : {
+                "color" : "pink"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 15,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.055555556,
+          "hits" : [
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "4",
+              "_score" : 0.055555556
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "5",
+              "_score" : 0.05263158
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_search",
+      "body" : {
+        "_source" : false,
+        "size" : 2,
+        "retriever" : {
+          "rescorer" : {
+            "rescore" : {
+              "window_size" : 5,
+              "query" : {
+                "rescore_query" : {
+                  "rank_feature" : {
+                    "field" : "f.b",
+                    "linear" : { }
+                  }
+                },
+                "query_weight" : 0
+              }
+            },
+            "retriever" : {
+              "standard" : {
+                "query" : {
+                  "rank_feature" : {
+                    "field" : "f.a",
+                    "linear" : { }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 41,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 7,
+            "relation" : "eq"
+          },
+          "max_score" : 7.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "3",
+              "_score" : 7.0
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "4",
+              "_score" : 6.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_search",
+      "body" : {
+        "_source" : false,
+        "size" : 2,
+        "retriever" : {
+          "rescorer" : {
+            "filter" : {
+              "term" : {
+                "color" : "pink"
+              }
+            },
+            "rescore" : {
+              "window_size" : 5,
+              "query" : {
+                "rescore_query" : {
+                  "rank_feature" : {
+                    "field" : "f.b",
+                    "linear" : { }
+                  }
+                },
+                "query_weight" : 0
+              }
+            },
+            "retriever" : {
+              "standard" : {
+                "query" : {
+                  "rank_feature" : {
+                    "field" : "f.a",
+                    "linear" : { }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 10,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 6.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "4",
+              "_score" : 6.0
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "5",
+              "_score" : 5.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_search",
+      "body" : {
+        "size" : 10,
+        "retriever" : {
+          "rescorer" : {
+            "rescore" : {
+              "window_size" : 5,
+              "query" : {
+                "rescore_query" : {
+                  "match_all" : { }
+                }
+              }
+            },
+            "retriever" : {
+              "standard" : {
+                "query" : {
+                  "match_all" : { }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: [rescorer] requires [window_size: 5] be greater than or equal to [size: 10];"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: [rescorer] requires [window_size: 5] be greater than or equal to [size: 10];"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_search",
+      "body" : {
+        "retriever" : {
+          "rescorer" : {
+            "rescore" : {
+              "window_size" : 10,
+              "query" : {
+                "rescore_query" : {
+                  "match_all" : { }
+                }
+              }
+            },
+            "retriever" : {
+              "standard" : {
+                "query" : {
+                  "match_all" : { }
+                },
+                "search_after" : [
+                  1
+                ]
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[search_after] cannot be used in children of compound retrievers"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[search_after] cannot be used in children of compound retrievers"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_search",
+      "body" : {
+        "_source" : false,
+        "retriever" : {
+          "diversify" : {
+            "type" : "mmr",
+            "field" : "v",
+            "lambda" : 0.3,
+            "size" : 3,
+            "retriever" : {
+              "knn" : {
+                "field" : "v",
+                "query_vector" : [
+                  1,
+                  1,
+                  1
+                ],
+                "k" : 7,
+                "num_candidates" : 10
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 29,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 7,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "1",
+              "_score" : 1.0
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "2",
+              "_score" : 0.5
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "4",
+              "_score" : 0.055555556
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_search",
+      "body" : {
+        "_source" : false,
+        "retriever" : {
+          "diversify" : {
+            "type" : "mmr",
+            "field" : "v",
+            "lambda" : 0.5,
+            "size" : 2,
+            "query_vector" : [
+              1,
+              0,
+              0
+            ],
+            "retriever" : {
+              "standard" : {
+                "query" : {
+                  "match_all" : { }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 10,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 7,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "1",
+              "_score" : 1.0
+            },
+            {
+              "_index" : "es-docs-ret",
+              "_id" : "7",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-ret/_search",
+      "body" : {
+        "retriever" : {
+          "diversify" : {
+            "type" : "mmr",
+            "field" : "v",
+            "lambda" : 1.5,
+            "size" : -1,
+            "retriever" : {
+              "standard" : {
+                "query" : {
+                  "match_all" : { }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: [diversify] MMR result diversification [size] of -1 must be greater than zero;2: [diversify] MMR result diversification must have a [lambda] between 0.0 and 1.0. The value provided was 1.5;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: [diversify] MMR result diversification [size] of -1 must be greater than zero;2: [diversify] MMR result diversification must have a [lambda] between 0.0 and 1.0. The value provided was 1.5;"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-ret",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-sg",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "loc" : {
+              "type" : "geo_point"
+            },
+            "color" : {
+              "type" : "keyword"
+            },
+            "s" : {
+              "type" : "completion",
+              "contexts" : [
+                {
+                  "name" : "color",
+                  "type" : "category",
+                  "path" : "color"
+                },
+                {
+                  "name" : "location",
+                  "type" : "geo",
+                  "precision" : 4,
+                  "path" : "loc"
+                }
+              ]
+            },
+            "plain" : {
+              "type" : "completion",
+              "fields" : {
+                "sub" : {
+                  "type" : "completion"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-sg"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-sg/_doc/1?refresh=true",
+      "body" : {
+        "s" : [
+          {
+            "input" : "foox",
+            "weight" : 2,
+            "contexts" : {
+              "color" : [
+                "red",
+                "yellow"
+              ]
+            }
+          },
+          {
+            "input" : [
+              "fooy",
+              "bar"
+            ],
+            "weight" : 3
+          }
+        ],
+        "color" : "blue",
+        "loc" : {
+          "lat" : 52.2,
+          "lon" : 4.5
+        },
+        "plain" : {
+          "input" : "baz",
+          "weight" : 4
+        }
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-sg",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "PUT /es-docs-sg/_doc/2?refresh=true",
+      "body" : {
+        "s" : {
+          "input" : "food",
+          "contexts" : {
+            "location" : [
+              {
+                "lat" : 0,
+                "lon" : 0
+              }
+            ],
+            "color" : "red"
+          }
+        },
+        "plain" : [
+          "bat",
+          "bad"
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-sg",
+        "_id" : "2",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-sg/_search",
+      "body" : {
+        "suggest" : {
+          "r" : {
+            "prefix" : "foo",
+            "completion" : {
+              "field" : "s",
+              "contexts" : {
+                "color" : "red"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 5,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "suggest" : {
+          "r" : [
+            {
+              "text" : "foo",
+              "offset" : 0,
+              "length" : 3,
+              "options" : [
+                {
+                  "text" : "foox",
+                  "_index" : "es-docs-sg",
+                  "_id" : "1",
+                  "_score" : 2.0,
+                  "_source" : {
+                    "s" : [
+                      {
+                        "input" : "foox",
+                        "weight" : 2,
+                        "contexts" : {
+                          "color" : [
+                            "red",
+                            "yellow"
+                          ]
+                        }
+                      },
+                      {
+                        "input" : [
+                          "fooy",
+                          "bar"
+                        ],
+                        "weight" : 3
+                      }
+                    ],
+                    "color" : "blue",
+                    "loc" : {
+                      "lat" : 52.2,
+                      "lon" : 4.5
+                    },
+                    "plain" : {
+                      "input" : "baz",
+                      "weight" : 4
+                    }
+                  },
+                  "contexts" : {
+                    "color" : [
+                      "red"
+                    ]
+                  }
+                },
+                {
+                  "text" : "food",
+                  "_index" : "es-docs-sg",
+                  "_id" : "2",
+                  "_score" : 1.0,
+                  "_source" : {
+                    "s" : {
+                      "input" : "food",
+                      "contexts" : {
+                        "location" : [
+                          {
+                            "lat" : 0,
+                            "lon" : 0
+                          }
+                        ],
+                        "color" : "red"
+                      }
+                    },
+                    "plain" : [
+                      "bat",
+                      "bad"
+                    ]
+                  },
+                  "contexts" : {
+                    "color" : [
+                      "red"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-sg/_search",
+      "body" : {
+        "suggest" : {
+          "r" : {
+            "prefix" : "foo",
+            "completion" : {
+              "field" : "s",
+              "contexts" : {
+                "color" : [
+                  {
+                    "context" : "yel",
+                    "prefix" : true,
+                    "boost" : 2
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "suggest" : {
+          "r" : [
+            {
+              "text" : "foo",
+              "offset" : 0,
+              "length" : 3,
+              "options" : [
+                {
+                  "text" : "foox",
+                  "_index" : "es-docs-sg",
+                  "_id" : "1",
+                  "_score" : 4.0,
+                  "_source" : {
+                    "s" : [
+                      {
+                        "input" : "foox",
+                        "weight" : 2,
+                        "contexts" : {
+                          "color" : [
+                            "red",
+                            "yellow"
+                          ]
+                        }
+                      },
+                      {
+                        "input" : [
+                          "fooy",
+                          "bar"
+                        ],
+                        "weight" : 3
+                      }
+                    ],
+                    "color" : "blue",
+                    "loc" : {
+                      "lat" : 52.2,
+                      "lon" : 4.5
+                    },
+                    "plain" : {
+                      "input" : "baz",
+                      "weight" : 4
+                    }
+                  },
+                  "contexts" : {
+                    "color" : [
+                      "yellow"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-sg/_search",
+      "body" : {
+        "suggest" : {
+          "r" : {
+            "prefix" : "foo",
+            "completion" : {
+              "field" : "s",
+              "contexts" : {
+                "location" : {
+                  "lat" : 52.2,
+                  "lon" : 4.5
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 5,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "suggest" : {
+          "r" : [
+            {
+              "text" : "foo",
+              "offset" : 0,
+              "length" : 3,
+              "options" : [
+                {
+                  "text" : "fooy",
+                  "_index" : "es-docs-sg",
+                  "_id" : "1",
+                  "_score" : 3.0,
+                  "_source" : {
+                    "s" : [
+                      {
+                        "input" : "foox",
+                        "weight" : 2,
+                        "contexts" : {
+                          "color" : [
+                            "red",
+                            "yellow"
+                          ]
+                        }
+                      },
+                      {
+                        "input" : [
+                          "fooy",
+                          "bar"
+                        ],
+                        "weight" : 3
+                      }
+                    ],
+                    "color" : "blue",
+                    "loc" : {
+                      "lat" : 52.2,
+                      "lon" : 4.5
+                    },
+                    "plain" : {
+                      "input" : "baz",
+                      "weight" : 4
+                    }
+                  },
+                  "contexts" : {
+                    "location" : [
+                      "u170"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-sg/_search",
+      "body" : {
+        "suggest" : {
+          "r" : {
+            "prefix" : "foo",
+            "completion" : {
+              "field" : "s",
+              "contexts" : {
+                "location" : [
+                  {
+                    "context" : {
+                      "lat" : 52.2,
+                      "lon" : 4.5
+                    },
+                    "precision" : 2
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "suggest" : {
+          "r" : [
+            {
+              "text" : "foo",
+              "offset" : 0,
+              "length" : 3,
+              "options" : [
+                {
+                  "text" : "fooy",
+                  "_index" : "es-docs-sg",
+                  "_id" : "1",
+                  "_score" : 3.0,
+                  "_source" : {
+                    "s" : [
+                      {
+                        "input" : "foox",
+                        "weight" : 2,
+                        "contexts" : {
+                          "color" : [
+                            "red",
+                            "yellow"
+                          ]
+                        }
+                      },
+                      {
+                        "input" : [
+                          "fooy",
+                          "bar"
+                        ],
+                        "weight" : 3
+                      }
+                    ],
+                    "color" : "blue",
+                    "loc" : {
+                      "lat" : 52.2,
+                      "lon" : 4.5
+                    },
+                    "plain" : {
+                      "input" : "baz",
+                      "weight" : 4
+                    }
+                  },
+                  "contexts" : {
+                    "location" : [
+                      "u170"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-sg/_search",
+      "body" : {
+        "suggest" : {
+          "r" : {
+            "prefix" : "foo",
+            "completion" : {
+              "field" : "s",
+              "contexts" : {
+                "color" : "blue",
+                "location" : {
+                  "lat" : 0,
+                  "lon" : 0
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "suggest" : {
+          "r" : [
+            {
+              "text" : "foo",
+              "offset" : 0,
+              "length" : 3,
+              "options" : [
+                {
+                  "text" : "fooy",
+                  "_index" : "es-docs-sg",
+                  "_id" : "1",
+                  "_score" : 3.0,
+                  "_source" : {
+                    "s" : [
+                      {
+                        "input" : "foox",
+                        "weight" : 2,
+                        "contexts" : {
+                          "color" : [
+                            "red",
+                            "yellow"
+                          ]
+                        }
+                      },
+                      {
+                        "input" : [
+                          "fooy",
+                          "bar"
+                        ],
+                        "weight" : 3
+                      }
+                    ],
+                    "color" : "blue",
+                    "loc" : {
+                      "lat" : 52.2,
+                      "lon" : 4.5
+                    },
+                    "plain" : {
+                      "input" : "baz",
+                      "weight" : 4
+                    }
+                  },
+                  "contexts" : {
+                    "color" : [
+                      "blue"
+                    ]
+                  }
+                },
+                {
+                  "text" : "food",
+                  "_index" : "es-docs-sg",
+                  "_id" : "2",
+                  "_score" : 1.0,
+                  "_source" : {
+                    "s" : {
+                      "input" : "food",
+                      "contexts" : {
+                        "location" : [
+                          {
+                            "lat" : 0,
+                            "lon" : 0
+                          }
+                        ],
+                        "color" : "red"
+                      }
+                    },
+                    "plain" : [
+                      "bat",
+                      "bad"
+                    ]
+                  },
+                  "contexts" : {
+                    "location" : [
+                      "s000"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-sg/_search",
+      "body" : {
+        "suggest" : {
+          "r" : {
+            "prefix" : "foo",
+            "completion" : {
+              "field" : "s",
+              "contexts" : {
+                "color" : [
+                  "red",
+                  "blue"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "suggest" : {
+          "r" : [
+            {
+              "text" : "foo",
+              "offset" : 0,
+              "length" : 3,
+              "options" : [
+                {
+                  "text" : "fooy",
+                  "_index" : "es-docs-sg",
+                  "_id" : "1",
+                  "_score" : 3.0,
+                  "_source" : {
+                    "s" : [
+                      {
+                        "input" : "foox",
+                        "weight" : 2,
+                        "contexts" : {
+                          "color" : [
+                            "red",
+                            "yellow"
+                          ]
+                        }
+                      },
+                      {
+                        "input" : [
+                          "fooy",
+                          "bar"
+                        ],
+                        "weight" : 3
+                      }
+                    ],
+                    "color" : "blue",
+                    "loc" : {
+                      "lat" : 52.2,
+                      "lon" : 4.5
+                    },
+                    "plain" : {
+                      "input" : "baz",
+                      "weight" : 4
+                    }
+                  },
+                  "contexts" : {
+                    "color" : [
+                      "red",
+                      "blue"
+                    ]
+                  }
+                },
+                {
+                  "text" : "food",
+                  "_index" : "es-docs-sg",
+                  "_id" : "2",
+                  "_score" : 1.0,
+                  "_source" : {
+                    "s" : {
+                      "input" : "food",
+                      "contexts" : {
+                        "location" : [
+                          {
+                            "lat" : 0,
+                            "lon" : 0
+                          }
+                        ],
+                        "color" : "red"
+                      }
+                    },
+                    "plain" : [
+                      "bat",
+                      "bad"
+                    ]
+                  },
+                  "contexts" : {
+                    "color" : [
+                      "red"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-sg/_search",
+      "body" : {
+        "suggest" : {
+          "r" : {
+            "prefix" : "foo",
+            "completion" : {
+              "field" : "s"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Missing mandatory contexts in context query"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-sg",
+              "node" : "pC8H5mawRYGuetg8R-ZoyA",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Missing mandatory contexts in context query"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Missing mandatory contexts in context query",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Missing mandatory contexts in context query"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-sg/_search?typed_keys=true",
+      "body" : {
+        "suggest" : {
+          "r" : {
+            "prefix" : "ba",
+            "completion" : {
+              "field" : "plain.sub"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "suggest" : {
+          "completion#r" : [
+            {
+              "text" : "ba",
+              "offset" : 0,
+              "length" : 2,
+              "options" : [
+                {
+                  "text" : "baz",
+                  "_index" : "es-docs-sg",
+                  "_id" : "1",
+                  "_score" : 4.0,
+                  "_source" : {
+                    "s" : [
+                      {
+                        "input" : "foox",
+                        "weight" : 2,
+                        "contexts" : {
+                          "color" : [
+                            "red",
+                            "yellow"
+                          ]
+                        }
+                      },
+                      {
+                        "input" : [
+                          "fooy",
+                          "bar"
+                        ],
+                        "weight" : 3
+                      }
+                    ],
+                    "color" : "blue",
+                    "loc" : {
+                      "lat" : 52.2,
+                      "lon" : 4.5
+                    },
+                    "plain" : {
+                      "input" : "baz",
+                      "weight" : 4
+                    }
+                  }
+                },
+                {
+                  "text" : "bad",
+                  "_index" : "es-docs-sg",
+                  "_id" : "2",
+                  "_score" : 1.0,
+                  "_source" : {
+                    "s" : {
+                      "input" : "food",
+                      "contexts" : {
+                        "location" : [
+                          {
+                            "lat" : 0,
+                            "lon" : 0
+                          }
+                        ],
+                        "color" : "red"
+                      }
+                    },
+                    "plain" : [
+                      "bat",
+                      "bad"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "PUT /es-docs-sg/_doc/3",
+      "body" : {
+        "s" : "nothing"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Contexts are mandatory in context enabled completion field [s]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Contexts are mandatory in context enabled completion field [s]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-sg",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/es-docs-p1",
+      "body" : {
+        "processors" : [
+          {
+            "set" : {
+              "field" : "x",
+              "value" : 1
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-si",
+      "body" : {
+        "settings" : {
+          "default_pipeline" : "es-docs-p1"
+        },
+        "mappings" : {
+          "dynamic" : "strict",
+          "properties" : {
+            "foo" : {
+              "type" : "text"
+            },
+            "x" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-si"
+      }
+    },
+    {
+      "req" : "POST /_ingest/_simulate",
+      "body" : {
+        "docs" : [
+          {
+            "_index" : "es-docs-si",
+            "_id" : "1",
+            "_source" : {
+              "foo" : "bar"
+            }
+          },
+          {
+            "_index" : "es-docs-si",
+            "_id" : "2",
+            "_source" : {
+              "foob" : "bar"
+            }
+          },
+          {
+            "_index" : "es-docs-none",
+            "_id" : "z",
+            "_source" : {
+              "a" : 1
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_id" : "1",
+              "_index" : "es-docs-si",
+              "_version" : -3,
+              "_source" : {
+                "foo" : "bar",
+                "x" : 1
+              },
+              "executed_pipelines" : [
+                "es-docs-p1"
+              ],
+              "effective_mapping" : {
+                "_doc" : {
+                  "dynamic" : "strict",
+                  "properties" : {
+                    "foo" : {
+                      "type" : "text"
+                    },
+                    "x" : {
+                      "type" : "long"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "doc" : {
+              "_id" : "2",
+              "_index" : "es-docs-si",
+              "_version" : -3,
+              "_source" : {
+                "x" : 1,
+                "foob" : "bar"
+              },
+              "executed_pipelines" : [
+                "es-docs-p1"
+              ],
+              "error" : {
+                "type" : "strict_dynamic_mapping_exception",
+                "reason" : "[1:15] mapping set to strict, dynamic introduction of [foob] within [_doc] is not allowed"
+              },
+              "effective_mapping" : {
+                "_doc" : {
+                  "dynamic" : "strict",
+                  "properties" : {
+                    "foo" : {
+                      "type" : "text"
+                    },
+                    "x" : {
+                      "type" : "long"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "doc" : {
+              "_id" : "z",
+              "_index" : "es-docs-none",
+              "_version" : -3,
+              "_source" : {
+                "a" : 1
+              },
+              "executed_pipelines" : [ ],
+              "effective_mapping" : { }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/_simulate",
+      "body" : {
+        "docs" : [
+          {
+            "_index" : "es-docs-si",
+            "_id" : "1",
+            "_source" : {
+              "foo" : "bar"
+            }
+          }
+        ],
+        "pipeline_substitutions" : {
+          "es-docs-p1" : {
+            "processors" : [
+              {
+                "set" : {
+                  "field" : "y",
+                  "value" : 2
+                }
+              }
+            ]
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_id" : "1",
+              "_index" : "es-docs-si",
+              "_version" : -3,
+              "_source" : {
+                "foo" : "bar",
+                "y" : 2
+              },
+              "executed_pipelines" : [
+                "es-docs-p1"
+              ],
+              "error" : {
+                "type" : "strict_dynamic_mapping_exception",
+                "reason" : "[1:18] mapping set to strict, dynamic introduction of [y] within [_doc] is not allowed"
+              },
+              "effective_mapping" : {
+                "_doc" : {
+                  "dynamic" : "strict",
+                  "properties" : {
+                    "foo" : {
+                      "type" : "text"
+                    },
+                    "x" : {
+                      "type" : "long"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/es-docs-si/_simulate?pipeline=es-docs-p2",
+      "body" : {
+        "docs" : [
+          {
+            "_id" : "q",
+            "_source" : {
+              "foo" : "bar"
+            }
+          }
+        ],
+        "pipeline_substitutions" : {
+          "es-docs-p2" : {
+            "processors" : [
+              {
+                "fail" : {
+                  "message" : "boom"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_id" : "q",
+              "_index" : "es-docs-si",
+              "error" : {
+                "type" : "fail_processor_exception",
+                "reason" : "boom"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/_simulate",
+      "body" : {
+        "docs" : [
+          {
+            "_index" : "es-docs-si",
+            "_source" : {
+              "foo" : "bar"
+            }
+          }
+        ],
+        "pipeline_substitutions" : {
+          "es-docs-p1" : {
+            "processors" : [
+              {
+                "bad" : { }
+              }
+            ]
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "No processor type exists with name [bad]",
+              "processor_type" : "bad"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "No processor type exists with name [bad]",
+          "processor_type" : "bad"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_ingest/_simulate",
+      "body" : {
+        "docs" : [
+          {
+            "_index" : "es-docs-si",
+            "_source" : {
+              "foo" : "bar"
+            }
+          }
+        ],
+        "pipeline_substitutions" : {
+          "es-docs-p1" : {
+            "processors" : [ ],
+            "created_date" : "x"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "Provided a pipeline property which is managed by the system: created_date."
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "Provided a pipeline property which is managed by the system: created_date."
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-si",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/es-docs-p1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

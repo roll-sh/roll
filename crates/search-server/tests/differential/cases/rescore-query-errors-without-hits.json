@@ -1,0 +1,185 @@
+{
+  "diff": {
+    "es": {
+      "body": {
+        "error": {
+          "failed_shards": [
+            {
+              "index": "diff-m18-a",
+              "node": "2MksL5cxRQqMwsHC8Xx-Sg",
+              "reason": {
+                "caused_by": {
+                  "reason": "In [combined_fields] query, at least one field must be provided",
+                  "type": "illegal_argument_exception"
+                },
+                "index": "diff-m18-a",
+                "index_uuid": "3xuNbuiAQQir_8dOw_5sUQ",
+                "reason": "failed to create query: In [combined_fields] query, at least one field must be provided",
+                "type": "query_shard_exception"
+              },
+              "shard": 0
+            }
+          ],
+          "grouped": true,
+          "phase": "query",
+          "reason": "all shards failed",
+          "root_cause": [
+            {
+              "index": "diff-m18-a",
+              "index_uuid": "3xuNbuiAQQir_8dOw_5sUQ",
+              "reason": "failed to create query: In [combined_fields] query, at least one field must be provided",
+              "type": "query_shard_exception"
+            }
+          ],
+          "type": "search_phase_execution_exception"
+        },
+        "status": 400
+      },
+      "error": "search_phase_execution_exception",
+      "status": 400
+    },
+    "path": "status 400",
+    "roll": {
+      "body": {
+        "_shards": {
+          "failed": 0,
+          "skipped": 0,
+          "successful": 1,
+          "total": 1
+        },
+        "hits": {
+          "hits": [],
+          "max_score": null,
+          "total": {
+            "relation": "eq",
+            "value": 0
+          }
+        },
+        "timed_out": false,
+        "took": 0
+      },
+      "error": null,
+      "status": 200
+    }
+  },
+  "found": {
+    "case": 77,
+    "case_seed": 3000086,
+    "seed": 3
+  },
+  "roll": {
+    "body": {
+      "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 1,
+        "total": 1
+      },
+      "hits": {
+        "hits": [],
+        "max_score": null,
+        "total": {
+          "relation": "eq",
+          "value": 0
+        }
+      },
+      "timed_out": false,
+      "took": 0
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+  },
+  "signature": "POST _search status 400:search_phase_execution_exception vs 200:200",
+  "steps": [
+    {
+      "body": {
+        "settings": {
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m18-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m18-a"
+    },
+    {
+      "body": {
+        "rescore": {
+          "query": {
+            "rescore_query": {
+              "boosting": {
+                "negative": {
+                  "multi_match": {
+                    "query": "over quick engine"
+                  }
+                },
+                "negative_boost": 0.2,
+                "positive": {
+                  "combined_fields": {
+                    "query": "slow fast the"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "body": {
+          "error": {
+            "failed_shards": [
+              {
+                "index": "diff-m18-a",
+                "node": "2MksL5cxRQqMwsHC8Xx-Sg",
+                "reason": {
+                  "caused_by": {
+                    "reason": "In [combined_fields] query, at least one field must be provided",
+                    "type": "illegal_argument_exception"
+                  },
+                  "index": "diff-m18-a",
+                  "index_uuid": "3xuNbuiAQQir_8dOw_5sUQ",
+                  "reason": "failed to create query: In [combined_fields] query, at least one field must be provided",
+                  "type": "query_shard_exception"
+                },
+                "shard": 0
+              }
+            ],
+            "grouped": true,
+            "phase": "query",
+            "reason": "all shards failed",
+            "root_cause": [
+              {
+                "index": "diff-m18-a",
+                "index_uuid": "3xuNbuiAQQir_8dOw_5sUQ",
+                "reason": "failed to create query: In [combined_fields] query, at least one field must be provided",
+                "type": "query_shard_exception"
+              }
+            ],
+            "type": "search_phase_execution_exception"
+          },
+          "status": 400
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 400
+      },
+      "method": "POST",
+      "path": "/diff-m18-a/_search"
+    }
+  ]
+}

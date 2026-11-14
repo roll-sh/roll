@@ -302,12 +302,15 @@ impl Txns {
             for &i in parts {
                 let Some(p) = topic.partition(i) else { continue };
                 let log = b.log(&topic, &p).map_err(|e| anyhow::anyhow!(e.message()))?;
+                // The marker and its row together, as far as a branch's cut can tell.
+                let _marking = b.markers.read().await;
                 let (offset, aborted) = log
                     .append_marker(t.producer_id, t.epoch, commit, 0, now_ms())
                     .map_err(|e| anyhow::anyhow!("marker on {topic_name}-{i}: {e}"))?;
                 if let Some(a) = aborted {
                     b.store.insert_aborted(&stream.id, &topic.id, i, &a)?;
                 }
+                drop(_marking);
                 b.request_flush(&p, &log, 0);
                 waits.push((log.subscribe(), offset + 1));
             }

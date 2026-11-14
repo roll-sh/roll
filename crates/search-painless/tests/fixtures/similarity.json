@@ -1,0 +1,2005 @@
+[
+ {
+  "request": {
+   "script": "return doc.freq;"
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "3",
+    "score": 5.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 5.0,
+      "doc.length": 5,
+      "score": 5.0
+     }
+    ]
+   },
+   {
+    "id": "1",
+    "score": 3.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 2.0,
+      "doc.length": 8,
+      "score": 2.0
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 1.0
+     }
+    ]
+   },
+   {
+    "id": "4",
+    "score": 3.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 3.0,
+      "doc.length": 12,
+      "score": 3.0
+     }
+    ]
+   },
+   {
+    "id": "0",
+    "score": 2.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 1.0
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 1.0
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "request": {
+   "script": "return query.boost * doc.freq;"
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "3",
+    "score": 5.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 5.0,
+      "doc.length": 5,
+      "score": 5.0
+     }
+    ]
+   },
+   {
+    "id": "1",
+    "score": 3.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 2.0,
+      "doc.length": 8,
+      "score": 2.0
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 1.0
+     }
+    ]
+   },
+   {
+    "id": "4",
+    "score": 3.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 3.0,
+      "doc.length": 12,
+      "score": 3.0
+     }
+    ]
+   },
+   {
+    "id": "0",
+    "score": 2.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 1.0
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 1.0
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "request": {
+   "script": "return weight;",
+   "weight_script": "return query.boost * 2;"
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "0",
+    "score": 4.0,
+    "terms": [
+     {
+      "weight": 2.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 2.0
+     },
+     {
+      "weight": 2.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 2.0
+     }
+    ]
+   },
+   {
+    "id": "1",
+    "score": 4.0,
+    "terms": [
+     {
+      "weight": 2.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 2.0,
+      "doc.length": 8,
+      "score": 2.0
+     },
+     {
+      "weight": 2.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 2.0
+     }
+    ]
+   },
+   {
+    "id": "3",
+    "score": 2.0,
+    "terms": [
+     {
+      "weight": 2.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 5.0,
+      "doc.length": 5,
+      "score": 2.0
+     }
+    ]
+   },
+   {
+    "id": "4",
+    "score": 2.0,
+    "terms": [
+     {
+      "weight": 2.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 3.0,
+      "doc.length": 12,
+      "score": 2.0
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "request": {
+   "script": "double tf = Math.sqrt(doc.freq); double norm = 1/Math.sqrt(doc.length); return weight * tf * norm;",
+   "weight_script": "double idf = Math.log((field.docCount+1.0)/(term.docFreq+1.0)) + 1.0; return query.boost * idf;"
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "0",
+    "score": 1.4054651,
+    "terms": [
+     {
+      "weight": 1.4054651,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 0.70273256
+     },
+     {
+      "weight": 1.4054651,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 0.70273256
+     }
+    ]
+   },
+   {
+    "id": "3",
+    "score": 1.4054651,
+    "terms": [
+     {
+      "weight": 1.4054651,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 5.0,
+      "doc.length": 5,
+      "score": 1.4054651
+     }
+    ]
+   },
+   {
+    "id": "1",
+    "score": 1.1996396,
+    "terms": [
+     {
+      "weight": 1.4054651,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 2.0,
+      "doc.length": 8,
+      "score": 0.70273256
+     },
+     {
+      "weight": 1.4054651,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 0.49690697
+     }
+    ]
+   },
+   {
+    "id": "4",
+    "score": 0.70273256,
+    "terms": [
+     {
+      "weight": 1.4054651,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 3.0,
+      "doc.length": 12,
+      "score": 0.70273256
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "request": {
+   "script": "double idf = Math.log(1 + (field.docCount - term.docFreq + 0.5) / (term.docFreq + 0.5)); double avg = field.sumTotalTermFreq / (double) field.docCount; double k1 = 1.2, b = 0.75; return query.boost * idf * doc.freq * (k1 + 1) / (doc.freq + k1 * (1 - b + b * doc.length / avg));"
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "0",
+    "score": 1.2610484,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 0.6305242
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 0.6305242
+     }
+    ]
+   },
+   {
+    "id": "1",
+    "score": 1.1669502,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 2.0,
+      "doc.length": 8,
+      "score": 0.6851736
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 0.48177668
+     }
+    ]
+   },
+   {
+    "id": "3",
+    "score": 0.9839283,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 5.0,
+      "doc.length": 5,
+      "score": 0.9839283
+     }
+    ]
+   },
+   {
+    "id": "4",
+    "score": 0.7055578,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 3.0,
+      "doc.length": 12,
+      "score": 0.7055578
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "request": {
+   "script": "return field.sumDocFreq + field.sumTotalTermFreq / 100.0 + term.totalTermFreq / 10.0;"
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "0",
+    "score": 49.92,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 24.91
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 25.01
+     }
+    ]
+   },
+   {
+    "id": "1",
+    "score": 49.92,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 2.0,
+      "doc.length": 8,
+      "score": 24.91
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 25.01
+     }
+    ]
+   },
+   {
+    "id": "3",
+    "score": 25.01,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 5.0,
+      "doc.length": 5,
+      "score": 25.01
+     }
+    ]
+   },
+   {
+    "id": "4",
+    "score": 24.91,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 3.0,
+      "doc.length": 12,
+      "score": 24.91
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "request": {
+   "script": "return doc.getLength() + doc.getFreq() * 0.5 + query.getBoost() + field.getDocCount() + term.getDocFreq() + term.getTotalTermFreq();"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Similarity scores should not increase when norm increases:\n1333.5 = score from ScriptedSimilarity(weightScript=[null], script=[Script{type=inline, lang='painless', idOrCode='return doc.getLength() + doc.getFreq() * 0.5 + query.getBoost() + field.getDocCount() + term.getDocFreq() + term.getTotalTermFreq();', options={}, params={}}]) computed from:\n  1.0 = weight\n  2.0 = query.boost\n  1100 = field.docCount\n  2000 = field.sumDocFreq\n  3000 = field.sumTotalTermFreq\n  100 = term.docFreq\n  130 = term.totalTermFreq\n  1 = doc.freq\n  1 = doc.length\n\n1334.5 = score from ScriptedSimilarity(weightScript=[null], script=[Script{type=inline, lang='painless', idOrCode='return doc.getLength() + doc.getFreq() * 0.5 + query.getBoost() + field.getDocCount() + term.getDocFreq() + term.getTotalTermFreq();', options={}, params={}}]) computed from:\n  1.0 = weight\n  2.0 = query.boost\n  1100 = field.docCount\n  2000 = field.sumDocFreq\n  3000 = field.sumTotalTermFreq\n  100 = term.docFreq\n  130 = term.totalTermFreq\n  1 = doc.freq\n  2 = doc.length\n"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Similarity scores should not increase when norm increases:\n1333.5 = score from ScriptedSimilarity(weightScript=[null], script=[Script{type=inline, lang='painless', idOrCode='return doc.getLength() + doc.getFreq() * 0.5 + query.getBoost() + field.getDocCount() + term.getDocFreq() + term.getTotalTermFreq();', options={}, params={}}]) computed from:\n  1.0 = weight\n  2.0 = query.boost\n  1100 = field.docCount\n  2000 = field.sumDocFreq\n  3000 = field.sumTotalTermFreq\n  100 = term.docFreq\n  130 = term.totalTermFreq\n  1 = doc.freq\n  1 = doc.length\n\n1334.5 = score from ScriptedSimilarity(weightScript=[null], script=[Script{type=inline, lang='painless', idOrCode='return doc.getLength() + doc.getFreq() * 0.5 + query.getBoost() + field.getDocCount() + term.getDocFreq() + term.getTotalTermFreq();', options={}, params={}}]) computed from:\n  1.0 = weight\n  2.0 = query.boost\n  1100 = field.docCount\n  2000 = field.sumDocFreq\n  3000 = field.sumTotalTermFreq\n  100 = term.docFreq\n  130 = term.totalTermFreq\n  1 = doc.freq\n  2 = doc.length\n"
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": "return field.getSumDocFreq() * 1.0 / field.getSumTotalTermFreq();"
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "0",
+    "score": 1.548387,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 0.7741935
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 0.7741935
+     }
+    ]
+   },
+   {
+    "id": "1",
+    "score": 1.548387,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 2.0,
+      "doc.length": 8,
+      "score": 0.7741935
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 0.7741935
+     }
+    ]
+   },
+   {
+    "id": "3",
+    "score": 0.7741935,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 5.0,
+      "doc.length": 5,
+      "score": 0.7741935
+     }
+    ]
+   },
+   {
+    "id": "4",
+    "score": 0.7741935,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 3.0,
+      "doc.length": 12,
+      "score": 0.7741935
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "request": {
+   "script": "return weight * doc.freq;",
+   "weight_script": "return term.docFreq;"
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "3",
+    "score": 15.0,
+    "terms": [
+     {
+      "weight": 3.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 5.0,
+      "doc.length": 5,
+      "score": 15.0
+     }
+    ]
+   },
+   {
+    "id": "1",
+    "score": 9.0,
+    "terms": [
+     {
+      "weight": 3.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 2.0,
+      "doc.length": 8,
+      "score": 6.0
+     },
+     {
+      "weight": 3.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 3.0
+     }
+    ]
+   },
+   {
+    "id": "4",
+    "score": 9.0,
+    "terms": [
+     {
+      "weight": 3.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 3.0,
+      "doc.length": 12,
+      "score": 9.0
+     }
+    ]
+   },
+   {
+    "id": "0",
+    "score": 6.0,
+    "terms": [
+     {
+      "weight": 3.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 3.0
+     },
+     {
+      "weight": 3.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 3.0
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "request": {
+   "script": "return doc.freq;",
+   "query": {
+    "match": {
+     "f": {
+      "query": "quick fox",
+      "boost": 2.5
+     }
+    }
+   }
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "3",
+    "score": 5.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 2.5,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 5.0,
+      "doc.length": 5,
+      "score": 5.0
+     }
+    ]
+   },
+   {
+    "id": "1",
+    "score": 3.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 2.5,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 2.0,
+      "doc.length": 8,
+      "score": 2.0
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 2.5,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 1.0
+     }
+    ]
+   },
+   {
+    "id": "4",
+    "score": 3.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 2.5,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 3.0,
+      "doc.length": 12,
+      "score": 3.0
+     }
+    ]
+   },
+   {
+    "id": "0",
+    "score": 2.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 2.5,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 1.0
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 2.5,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 1.0
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "request": {
+   "script": "return query.boost;",
+   "query": {
+    "bool": {
+     "should": [
+      {
+       "match": {
+        "f": {
+         "query": "quick",
+         "boost": 3
+        }
+       }
+      },
+      {
+       "match": {
+        "f": "fox"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "0",
+    "score": 4.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 3.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 3.0
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 1.0
+     }
+    ]
+   },
+   {
+    "id": "1",
+    "score": 4.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 3.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 2.0,
+      "doc.length": 8,
+      "score": 3.0
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 1.0
+     }
+    ]
+   },
+   {
+    "id": "4",
+    "score": 3.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 3.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 3.0,
+      "doc.length": 12,
+      "score": 3.0
+     }
+    ]
+   },
+   {
+    "id": "3",
+    "score": 1.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 5.0,
+      "doc.length": 5,
+      "score": 1.0
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "request": {
+   "script": "return doc.length > 4 ? 1 : 0.5;"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Similarity scores should not increase when norm increases:\n0.5 = score from ScriptedSimilarity(weightScript=[null], script=[Script{type=inline, lang='painless', idOrCode='return doc.length > 4 ? 1 : 0.5;', options={}, params={}}]) computed from:\n  1.0 = weight\n  2.0 = query.boost\n  1100 = field.docCount\n  2000 = field.sumDocFreq\n  3000 = field.sumTotalTermFreq\n  100 = term.docFreq\n  130 = term.totalTermFreq\n  1 = doc.freq\n  4 = doc.length\n\n1.0 = score from ScriptedSimilarity(weightScript=[null], script=[Script{type=inline, lang='painless', idOrCode='return doc.length > 4 ? 1 : 0.5;', options={}, params={}}]) computed from:\n  1.0 = weight\n  2.0 = query.boost\n  1100 = field.docCount\n  2000 = field.sumDocFreq\n  3000 = field.sumTotalTermFreq\n  100 = term.docFreq\n  130 = term.totalTermFreq\n  1 = doc.freq\n  5 = doc.length\n"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Similarity scores should not increase when norm increases:\n0.5 = score from ScriptedSimilarity(weightScript=[null], script=[Script{type=inline, lang='painless', idOrCode='return doc.length > 4 ? 1 : 0.5;', options={}, params={}}]) computed from:\n  1.0 = weight\n  2.0 = query.boost\n  1100 = field.docCount\n  2000 = field.sumDocFreq\n  3000 = field.sumTotalTermFreq\n  100 = term.docFreq\n  130 = term.totalTermFreq\n  1 = doc.freq\n  4 = doc.length\n\n1.0 = score from ScriptedSimilarity(weightScript=[null], script=[Script{type=inline, lang='painless', idOrCode='return doc.length > 4 ? 1 : 0.5;', options={}, params={}}]) computed from:\n  1.0 = weight\n  2.0 = query.boost\n  1100 = field.docCount\n  2000 = field.sumDocFreq\n  3000 = field.sumTotalTermFreq\n  100 = term.docFreq\n  130 = term.totalTermFreq\n  1 = doc.freq\n  5 = doc.length\n"
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": "return 1;"
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "0",
+    "score": 2.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 1.0
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 1.0
+     }
+    ]
+   },
+   {
+    "id": "1",
+    "score": 2.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 2.0,
+      "doc.length": 8,
+      "score": 1.0
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 1.0
+     }
+    ]
+   },
+   {
+    "id": "3",
+    "score": 1.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 5.0,
+      "doc.length": 5,
+      "score": 1.0
+     }
+    ]
+   },
+   {
+    "id": "4",
+    "score": 1.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 3.0,
+      "doc.length": 12,
+      "score": 1.0
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "request": {
+   "script": "int x = (int) doc.freq; return 10 / (x - 1);"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return 10 / (x - 1);",
+       "             ^---- HERE"
+      ],
+      "script": "int x = (int) doc.freq; return 10 / (x - 1);",
+      "lang": "painless",
+      "position": {
+       "offset": 37,
+       "start": 24,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return 10 / (x - 1);",
+     "             ^---- HERE"
+    ],
+    "script": "int x = (int) doc.freq; return 10 / (x - 1);",
+    "lang": "painless",
+    "position": {
+     "offset": 37,
+     "start": 24,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "/ by zero"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": "return params.x;"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return params.x;",
+       "             ^---- HERE"
+      ],
+      "script": "return params.x;",
+      "lang": "painless",
+      "position": {
+       "offset": 13,
+       "start": 0,
+       "end": 16
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return params.x;",
+     "             ^---- HERE"
+    ],
+    "script": "return params.x;",
+    "lang": "painless",
+    "position": {
+     "offset": 13,
+     "start": 0,
+     "end": 16
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "cannot resolve symbol [params.x]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": "throw new IllegalStateException('no scores');"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "throw new IllegalStateException('no scores');",
+       "      ^---- HERE"
+      ],
+      "script": "throw new IllegalStateException('no scores');",
+      "lang": "painless",
+      "position": {
+       "offset": 6,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "throw new IllegalStateException('no scores');",
+     "      ^---- HERE"
+    ],
+    "script": "throw new IllegalStateException('no scores');",
+    "lang": "painless",
+    "position": {
+     "offset": 6,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_state_exception",
+     "reason": "no scores"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": "return doc.freq;",
+   "weight_script": "return doc.freq;"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return doc.freq;",
+       "          ^---- HERE"
+      ],
+      "script": "return doc.freq;",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 16
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return doc.freq;",
+     "          ^---- HERE"
+    ],
+    "script": "return doc.freq;",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 16
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "cannot resolve symbol [doc.freq]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": "return weight;",
+   "weight_script": "return 1 / 0;"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return 1 / 0;",
+       "       ^---- HERE"
+      ],
+      "script": "return 1 / 0;",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 13
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return 1 / 0;",
+     "       ^---- HERE"
+    ],
+    "script": "return 1 / 0;",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 13
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "/ by zero"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": "return -1;"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Similarities should not return negative scores:\n-1.0 = score from ScriptedSimilarity(weightScript=[null], script=[Script{type=inline, lang='painless', idOrCode='return -1;', options={}, params={}}]) computed from:\n  1.0 = weight\n  2.0 = query.boost\n  1100 = field.docCount\n  2000 = field.sumDocFreq\n  3000 = field.sumTotalTermFreq\n  100 = term.docFreq\n  130 = term.totalTermFreq\n  1 = doc.freq\n  20 = doc.length\n"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Similarities should not return negative scores:\n-1.0 = score from ScriptedSimilarity(weightScript=[null], script=[Script{type=inline, lang='painless', idOrCode='return -1;', options={}, params={}}]) computed from:\n  1.0 = weight\n  2.0 = query.boost\n  1100 = field.docCount\n  2000 = field.sumDocFreq\n  3000 = field.sumTotalTermFreq\n  100 = term.docFreq\n  130 = term.totalTermFreq\n  1 = doc.freq\n  20 = doc.length\n"
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": "return Double.NaN;"
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "0",
+    "score": null,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": "NaN"
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": "NaN"
+     }
+    ]
+   },
+   {
+    "id": "1",
+    "score": null,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 2.0,
+      "doc.length": 8,
+      "score": "NaN"
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": "NaN"
+     }
+    ]
+   },
+   {
+    "id": "3",
+    "score": null,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 5.0,
+      "doc.length": 5,
+      "score": "NaN"
+     }
+    ]
+   },
+   {
+    "id": "4",
+    "score": null,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 3.0,
+      "doc.length": 12,
+      "score": "NaN"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "request": {
+   "script": "def d = doc; return d.freq + d.length;"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Similarity scores should not increase when norm increases:\n2.0 = score from ScriptedSimilarity(weightScript=[null], script=[Script{type=inline, lang='painless', idOrCode='def d = doc; return d.freq + d.length;', options={}, params={}}]) computed from:\n  1.0 = weight\n  2.0 = query.boost\n  1100 = field.docCount\n  2000 = field.sumDocFreq\n  3000 = field.sumTotalTermFreq\n  100 = term.docFreq\n  130 = term.totalTermFreq\n  1 = doc.freq\n  1 = doc.length\n\n3.0 = score from ScriptedSimilarity(weightScript=[null], script=[Script{type=inline, lang='painless', idOrCode='def d = doc; return d.freq + d.length;', options={}, params={}}]) computed from:\n  1.0 = weight\n  2.0 = query.boost\n  1100 = field.docCount\n  2000 = field.sumDocFreq\n  3000 = field.sumTotalTermFreq\n  100 = term.docFreq\n  130 = term.totalTermFreq\n  1 = doc.freq\n  2 = doc.length\n"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Similarity scores should not increase when norm increases:\n2.0 = score from ScriptedSimilarity(weightScript=[null], script=[Script{type=inline, lang='painless', idOrCode='def d = doc; return d.freq + d.length;', options={}, params={}}]) computed from:\n  1.0 = weight\n  2.0 = query.boost\n  1100 = field.docCount\n  2000 = field.sumDocFreq\n  3000 = field.sumTotalTermFreq\n  100 = term.docFreq\n  130 = term.totalTermFreq\n  1 = doc.freq\n  1 = doc.length\n\n3.0 = score from ScriptedSimilarity(weightScript=[null], script=[Script{type=inline, lang='painless', idOrCode='def d = doc; return d.freq + d.length;', options={}, params={}}]) computed from:\n  1.0 = weight\n  2.0 = query.boost\n  1100 = field.docCount\n  2000 = field.sumDocFreq\n  3000 = field.sumTotalTermFreq\n  100 = term.docFreq\n  130 = term.totalTermFreq\n  1 = doc.freq\n  2 = doc.length\n"
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": "return doc.freq + 0.1f;"
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "3",
+    "score": 5.1,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 5.0,
+      "doc.length": 5,
+      "score": 5.1
+     }
+    ]
+   },
+   {
+    "id": "1",
+    "score": 3.1999998,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 2.0,
+      "doc.length": 8,
+      "score": 2.1
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 1.1
+     }
+    ]
+   },
+   {
+    "id": "4",
+    "score": 3.1,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 3.0,
+      "doc.length": 12,
+      "score": 3.1
+     }
+    ]
+   },
+   {
+    "id": "0",
+    "score": 2.2,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 1.1
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 1.1
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "request": {
+   "script": "float f = (float) doc.freq; return f / 3;"
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "3",
+    "score": 1.6666666,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 5.0,
+      "doc.length": 5,
+      "score": 1.6666666
+     }
+    ]
+   },
+   {
+    "id": "1",
+    "score": 1.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 2.0,
+      "doc.length": 8,
+      "score": 0.6666667
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 0.33333334
+     }
+    ]
+   },
+   {
+    "id": "4",
+    "score": 1.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 3.0,
+      "doc.length": 12,
+      "score": 1.0
+     }
+    ]
+   },
+   {
+    "id": "0",
+    "score": 0.6666667,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 0.33333334
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 0.33333334
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "request": {
+   "script": "return Math.pow(doc.freq, 0.7) * Math.log1p(field.docCount);"
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "3",
+    "score": 5.527881,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 5.0,
+      "doc.length": 5,
+      "score": 5.527881
+     }
+    ]
+   },
+   {
+    "id": "1",
+    "score": 4.7024813,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 2.0,
+      "doc.length": 8,
+      "score": 2.9107218
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 1.7917595
+     }
+    ]
+   },
+   {
+    "id": "4",
+    "score": 3.8660243,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 3.0,
+      "doc.length": 12,
+      "score": 3.8660243
+     }
+    ]
+   },
+   {
+    "id": "0",
+    "score": 3.583519,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 1.7917595
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 1.7917595
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "request": {
+   "script": "return field.docCount - term.docFreq;",
+   "query": {
+    "match_phrase": {
+     "f": "quick fox"
+    }
+   }
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "1",
+    "score": 4.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 6,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 2.0
+     },
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 2.0
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "request": {
+   "script": "return doc.freq;",
+   "query": {
+    "match": {
+     "f": "fox"
+    }
+   }
+  },
+  "status": 200,
+  "hits": [
+   {
+    "id": "3",
+    "score": 5.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 5.0,
+      "doc.length": 5,
+      "score": 5.0
+     }
+    ]
+   },
+   {
+    "id": "0",
+    "score": 1.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 4,
+      "score": 1.0
+     }
+    ]
+   },
+   {
+    "id": "1",
+    "score": 1.0,
+    "terms": [
+     {
+      "weight": 1.0,
+      "query.boost": 1.0,
+      "field.docCount": 5,
+      "field.sumDocFreq": 24,
+      "field.sumTotalTermFreq": 31,
+      "term.docFreq": 3,
+      "term.totalTermFreq": 7,
+      "doc.freq": 1.0,
+      "doc.length": 8,
+      "score": 1.0
+     }
+    ]
+   }
+  ]
+ }
+]

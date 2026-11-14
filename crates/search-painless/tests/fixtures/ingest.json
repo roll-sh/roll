@@ -1,0 +1,4875 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "ctx.a += 1",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 2,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.317669041Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.b = ctx.a + 1; ctx.c = 'new'",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "b": 2,
+       "s": "x",
+       "c": "new",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.319756122Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.tags.add('t3')",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2",
+        "t3"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.321219422Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.o.k *= 10",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 20
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.322399154Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.remove('a')",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.323640945Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.s = ctx.toString()",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "{a=1, s=x, d=1.5, n=null, tags=[t1, t2], o={k=2, l=[1, 2]}, _index=painless-ingest, _id=1, _version=-3}",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.32469636Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.k = new ArrayList(ctx.keySet())",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "k": [
+        "a",
+        "s",
+        "d",
+        "n",
+        "tags",
+        "o",
+        "_index",
+        "_id",
+        "_version"
+       ],
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.325830364Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.size = ctx.size()",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "size": 9,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.327023081Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.c = ctx.containsKey('a') + ',' + ctx.containsKey('_index') + ',' + ctx.containsKey('_source') + ',' + ctx.containsKey('zz')",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "c": "true,true,false,false",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.328045414Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._index = 'other'",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "other",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.329105394Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._index = 5",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "script_exception",
+        "reason": "runtime error",
+        "script_stack": [
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:402)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+         "ctx._index = 5",
+         "   ^---- HERE"
+        ],
+        "script": "ctx._index = 5",
+        "lang": "painless",
+        "position": {
+         "offset": 3,
+         "start": 0,
+         "end": 14
+        }
+       }
+      ],
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:402)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx._index = 5",
+       "   ^---- HERE"
+      ],
+      "script": "ctx._index = 5",
+      "lang": "painless",
+      "position": {
+       "offset": 3,
+       "start": 0,
+       "end": 14
+      },
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "_index [5] is wrong type, expected assignable to [java.lang.String], not [java.lang.Integer]"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._index = null",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.331224893Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._id = 'newid'",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "newid",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.332058613Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._routing = 'r'",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_routing": "r",
+      "_id": "1",
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.333078678Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._version = 5",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "5",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.334069657Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._version = 5.5",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "script_exception",
+        "reason": "runtime error",
+        "script_stack": [
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.lambda$static$0(Metadata.java:352)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:407)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+         "ctx._version = 5.5",
+         "   ^---- HERE"
+        ],
+        "script": "ctx._version = 5.5",
+        "lang": "painless",
+        "position": {
+         "offset": 3,
+         "start": 0,
+         "end": 18
+        }
+       }
+      ],
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.lambda$static$0(Metadata.java:352)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:407)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx._version = 5.5",
+       "   ^---- HERE"
+      ],
+      "script": "ctx._version = 5.5",
+      "lang": "painless",
+      "position": {
+       "offset": 3,
+       "start": 0,
+       "end": 18
+      },
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "_version may only be set to an int or a long but was [5.5] with type [java.lang.Double]"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._version = '5'",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "script_exception",
+        "reason": "runtime error",
+        "script_stack": [
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:402)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+         "ctx._version = '5'",
+         "               ^---- HERE"
+        ],
+        "script": "ctx._version = '5'",
+        "lang": "painless",
+        "position": {
+         "offset": 15,
+         "start": 0,
+         "end": 18
+        }
+       }
+      ],
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:402)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx._version = '5'",
+       "               ^---- HERE"
+      ],
+      "script": "ctx._version = '5'",
+      "lang": "painless",
+      "position": {
+       "offset": 15,
+       "start": 0,
+       "end": 18
+      },
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "_version [5] is wrong type, expected assignable to [java.lang.Number], not [java.lang.String]"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._version = null",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "script_exception",
+        "reason": "runtime error",
+        "script_stack": [
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:370)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+         "ctx._version = null",
+         "   ^---- HERE"
+        ],
+        "script": "ctx._version = null",
+        "lang": "painless",
+        "position": {
+         "offset": 3,
+         "start": 0,
+         "end": 19
+        }
+       }
+      ],
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:370)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx._version = null",
+       "   ^---- HERE"
+      ],
+      "script": "ctx._version = null",
+      "lang": "painless",
+      "position": {
+       "offset": 3,
+       "start": 0,
+       "end": 19
+      },
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "_version cannot be null"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._version_type = 'external'",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_version_type": "external",
+      "_id": "1",
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.338261343Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._version_type = 'bogus'",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "script_exception",
+        "reason": "runtime error",
+        "script_stack": [
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.ingest.IngestDocMetadata.versionTypeValidator(IngestDocMetadata.java:106)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:407)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+         "ctx._version_type = 'bogus'",
+         "                    ^---- HERE"
+        ],
+        "script": "ctx._version_type = 'bogus'",
+        "lang": "painless",
+        "position": {
+         "offset": 20,
+         "start": 0,
+         "end": 27
+        }
+       }
+      ],
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.ingest.IngestDocMetadata.versionTypeValidator(IngestDocMetadata.java:106)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:407)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx._version_type = 'bogus'",
+       "                    ^---- HERE"
+      ],
+      "script": "ctx._version_type = 'bogus'",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 27
+      },
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "_version_type must be a null or one of [internal, external, external_gte] but was [bogus] with type [java.lang.String]"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._if_seq_no = 3",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_id": "1",
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_if_seq_no": "3",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.340617837Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._if_primary_term = 1.5",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "script_exception",
+        "reason": "runtime error",
+        "script_stack": [
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.lambda$static$0(Metadata.java:352)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:407)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+         "ctx._if_primary_term = 1.5",
+         "   ^---- HERE"
+        ],
+        "script": "ctx._if_primary_term = 1.5",
+        "lang": "painless",
+        "position": {
+         "offset": 3,
+         "start": 0,
+         "end": 26
+        }
+       }
+      ],
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.lambda$static$0(Metadata.java:352)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:407)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx._if_primary_term = 1.5",
+       "   ^---- HERE"
+      ],
+      "script": "ctx._if_primary_term = 1.5",
+      "lang": "painless",
+      "position": {
+       "offset": 3,
+       "start": 0,
+       "end": 26
+      },
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "_if_primary_term may only be set to an int or a long but was [1.5] with type [java.lang.Double]"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._dynamic_templates = ['f': 't']",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_dynamic_templates": "{f=t}",
+      "_id": "1",
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.342632466Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._dynamic_templates = 'x'",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "script_exception",
+        "reason": "runtime error",
+        "script_stack": [
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:402)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+         "ctx._dynamic_templates = 'x'",
+         "                         ^---- HERE"
+        ],
+        "script": "ctx._dynamic_templates = 'x'",
+        "lang": "painless",
+        "position": {
+         "offset": 25,
+         "start": 0,
+         "end": 28
+        }
+       }
+      ],
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:402)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx._dynamic_templates = 'x'",
+       "                         ^---- HERE"
+      ],
+      "script": "ctx._dynamic_templates = 'x'",
+      "lang": "painless",
+      "position": {
+       "offset": 25,
+       "start": 0,
+       "end": 28
+      },
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "_dynamic_templates [x] is wrong type, expected assignable to [java.util.Map], not [java.lang.String]"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._type = 'x'",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "script_exception",
+        "reason": "runtime error",
+        "script_stack": [
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+         "ctx._type = 'x'",
+         "            ^---- HERE"
+        ],
+        "script": "ctx._type = 'x'",
+        "lang": "painless",
+        "position": {
+         "offset": 12,
+         "start": 0,
+         "end": 15
+        }
+       }
+      ],
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx._type = 'x'",
+       "            ^---- HERE"
+      ],
+      "script": "ctx._type = 'x'",
+      "lang": "painless",
+      "position": {
+       "offset": 12,
+       "start": 0,
+       "end": 15
+      },
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "_type cannot be updated"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.remove('_index')",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.346092017Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.remove('_version')",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "script_exception",
+        "reason": "runtime error",
+        "script_stack": [
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:379)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.remove(Metadata.java:255)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.remove(CtxMap.java:137)",
+         "ctx.remove('_version')",
+         "           ^---- HERE"
+        ],
+        "script": "ctx.remove('_version')",
+        "lang": "painless",
+        "position": {
+         "offset": 11,
+         "start": 0,
+         "end": 22
+        }
+       }
+      ],
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:379)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.remove(Metadata.java:255)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.remove(CtxMap.java:137)",
+       "ctx.remove('_version')",
+       "           ^---- HERE"
+      ],
+      "script": "ctx.remove('_version')",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 22
+      },
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "_version cannot be removed"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.remove('_id')",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.348476603Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.clear()",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "script_exception",
+        "reason": "runtime error",
+        "script_stack": [
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:379)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.remove(Metadata.java:255)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.clear(CtxMap.java:155)",
+         "ctx.clear()",
+         "   ^---- HERE"
+        ],
+        "script": "ctx.clear()",
+        "lang": "painless",
+        "position": {
+         "offset": 3,
+         "start": 0,
+         "end": 11
+        }
+       }
+      ],
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:379)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.remove(Metadata.java:255)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.clear(CtxMap.java:155)",
+       "ctx.clear()",
+       "   ^---- HERE"
+      ],
+      "script": "ctx.clear()",
+      "lang": "painless",
+      "position": {
+       "offset": 3,
+       "start": 0,
+       "end": 11
+      },
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "_version cannot be removed"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.m = metadata().getIndex() + '/' + metadata().getId() + '/' + metadata().getRouting() + '/' + metadata().getVersion() + '/' + metadata().getVersionType()",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "m": "painless-ingest/1/null/-3/null",
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.350251361Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "metadata().setIndex('m-index')",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "m-index",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.35093596Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "metadata().setVersion(7)",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "7",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.351721579Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "metadata().setVersionType('external_gte')",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_version_type": "external_gte",
+      "_id": "1",
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.352621779Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "metadata().setRouting(null)",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_id": "1",
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.353622029Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.now = metadata().getNow() instanceof ZonedDateTime",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "now": true,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.354505781Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.ext = metadata().isVersionInternal()",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "processor_type": "script",
+      "script_stack": [
+       "ctx.ext = metadata().isVersionInternal()",
+       "                    ^---- HERE"
+      ],
+      "script": "ctx.ext = metadata().isVersionInternal()",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 40
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "processor_type": "script",
+    "script_stack": [
+     "ctx.ext = metadata().isVersionInternal()",
+     "                    ^---- HERE"
+    ],
+    "script": "ctx.ext = metadata().isVersionInternal()",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 40
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [org.elasticsearch.script.Metadata, isVersionInternal/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source = ['x': 1]",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "_source": {
+        "x": 1
+       },
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.35682896Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.a = 2",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "script_exception",
+        "reason": "runtime error",
+        "script_stack": [
+         "ctx._source.a = 2",
+         "           ^---- HERE"
+        ],
+        "script": "ctx._source.a = 2",
+        "lang": "painless",
+        "position": {
+         "offset": 11,
+         "start": 0,
+         "end": 17
+        }
+       }
+      ],
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "ctx._source.a = 2",
+       "           ^---- HERE"
+      ],
+      "script": "ctx._source.a = 2",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 17
+      },
+      "caused_by": {
+       "type": "null_pointer_exception",
+       "reason": "cannot access method/field [a] from a null def reference"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.x = ctx._source",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "x": null,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.358902021Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.x = ctx._ingest",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "x": null,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.359845084Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.x = ctx['_ingest']",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "x": null,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.360736452Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.f = field('o.k').get(0)",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "f": 2,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.361669376Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "field('o.new').set(5)",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "new": 5,
+        "k": 2,
+        "l": [
+         1,
+         2
+        ]
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.362546228Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "field('p.q.r').set(1)",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "p": {
+        "q": {
+         "r": 1
+        }
+       },
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.363641638Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "field('tags').append('t9')",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2",
+        "t9"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.364791939Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "field('tags').remove(0)",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "processor_type": "script",
+      "script_stack": [
+       "field('tags').remove(0)",
+       "             ^---- HERE"
+      ],
+      "script": "field('tags').remove(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 13,
+       "start": 0,
+       "end": 23
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "processor_type": "script",
+    "script_stack": [
+     "field('tags').remove(0)",
+     "             ^---- HERE"
+    ],
+    "script": "field('tags').remove(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 13,
+     "start": 0,
+     "end": 23
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [org.elasticsearch.script.field.WriteField, remove/1] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.dd = $('o.k', 0) + $('zz', 7)",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "dd": 9,
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.369240999Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "field('a').set(null)",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": null,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.37065601Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.ex = field('a').exists() + ' ' + field('n').exists() + ' ' + field('zz').exists() + ' ' + field('o.k').exists()",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "ex": "true true false true",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.372531435Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.sz = field('tags').size() + field('a').size() + field('zz').size()",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "sz": 3,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.373616501Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.vals = []; for (def v : field('tags')) { ctx.vals.add(v) }",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "vals": [
+        "t1",
+        "t2"
+       ],
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.374792227Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "field('o').deleteValue(2)",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "processor_type": "script",
+      "script_stack": [
+       "field('o').deleteValue(2)",
+       "          ^---- HERE"
+      ],
+      "script": "field('o').deleteValue(2)",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 25
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "processor_type": "script",
+    "script_stack": [
+     "field('o').deleteValue(2)",
+     "          ^---- HERE"
+    ],
+    "script": "field('o').deleteValue(2)",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 25
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [org.elasticsearch.script.field.WriteField, deleteValue/1] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.it = []; for (def e : ctx.entrySet()) { ctx.it.add(e.getKey()) }",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "it": [
+        "a",
+        "s",
+        "d",
+        "it",
+        "n",
+        "tags",
+        "o",
+        "_index",
+        "_id",
+        "_version"
+       ],
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.377949516Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "for (def e : ctx.entrySet()) { if (e.getKey() == '_index') { e.setValue('via-entry') } }",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "via-entry",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.379301151Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "for (def e : ctx.entrySet()) { if (e.getKey() == '_index') { e.setValue(5) } }",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "script_exception",
+        "reason": "runtime error",
+        "script_stack": [
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:402)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+         "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap$Entry.setValue(CtxMap.java:347)",
+         "e.setValue(5) } }",
+         " ^---- HERE"
+        ],
+        "script": "for (def e : ctx.entrySet()) { if (e.getKey() == '_index') { e.setValue(5) } }",
+        "lang": "painless",
+        "position": {
+         "offset": 62,
+         "start": 61,
+         "end": 78
+        }
+       }
+      ],
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:402)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap$Entry.setValue(CtxMap.java:347)",
+       "e.setValue(5) } }",
+       " ^---- HERE"
+      ],
+      "script": "for (def e : ctx.entrySet()) { if (e.getKey() == '_index') { e.setValue(5) } }",
+      "lang": "painless",
+      "position": {
+       "offset": 62,
+       "start": 61,
+       "end": 78
+      },
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "_index [5] is wrong type, expected assignable to [java.lang.String], not [java.lang.Integer]"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.p = params.x",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "p": null,
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.381643503Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.p = params.x",
+    "lang": "painless",
+    "params": {
+     "x": [
+      1,
+      2
+     ]
+    }
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "p": [
+        1,
+        2
+       ],
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.382626754Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "params.x.add(3); ctx.p = params.x",
+    "lang": "painless",
+    "params": {
+     "x": [
+      1,
+      2
+     ]
+    }
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "p": [
+        1,
+        2,
+        3
+       ],
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.383743084Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "params.y = 2",
+    "lang": "painless",
+    "params": {
+     "x": 1
+    }
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "script_exception",
+        "reason": "runtime error",
+        "script_stack": [
+         "java.base/java.util.Collections$UnmodifiableMap.put(Collections.java:1666)",
+         "params.y = 2",
+         "      ^---- HERE"
+        ],
+        "script": "params.y = 2",
+        "lang": "painless",
+        "position": {
+         "offset": 6,
+         "start": 0,
+         "end": 12
+        }
+       }
+      ],
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Collections$UnmodifiableMap.put(Collections.java:1666)",
+       "params.y = 2",
+       "      ^---- HERE"
+      ],
+      "script": "params.y = 2",
+      "lang": "painless",
+      "position": {
+       "offset": 6,
+       "start": 0,
+       "end": 12
+      },
+      "caused_by": {
+       "type": "unsupported_operation_exception",
+       "reason": null
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.c = (char) 'c'",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "illegal_argument_exception",
+        "reason": "unexpected value type [class java.lang.Character]"
+       }
+      ],
+      "type": "illegal_argument_exception",
+      "reason": "unexpected value type [class java.lang.Character]"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.p = /a/",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "illegal_argument_exception",
+        "reason": "unexpected value type [class java.util.regex.Pattern]"
+       }
+      ],
+      "type": "illegal_argument_exception",
+      "reason": "unexpected value type [class java.util.regex.Pattern]"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.big = 9007199254740993L; ctx.f = 1.1f; ctx.nan = Double.NaN",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "big": 9007199254740993,
+       "s": "x",
+       "d": 1.5,
+       "f": 1.1,
+       "nan": "NaN",
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.387730938Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.date = ZonedDateTime.parse('2020-01-01T00:00:00Z')",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "date": "2020-01-01T00:00:00.000Z",
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.38881616Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "throw new IllegalStateException('bad')",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "script_exception",
+        "reason": "runtime error",
+        "script_stack": [
+         "throw new IllegalStateException('bad')",
+         "      ^---- HERE"
+        ],
+        "script": "throw new IllegalStateException('bad')",
+        "lang": "painless",
+        "position": {
+         "offset": 6,
+         "start": 0,
+         "end": 38
+        }
+       }
+      ],
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "throw new IllegalStateException('bad')",
+       "      ^---- HERE"
+      ],
+      "script": "throw new IllegalStateException('bad')",
+      "lang": "painless",
+      "position": {
+       "offset": 6,
+       "start": 0,
+       "end": 38
+      },
+      "caused_by": {
+       "type": "illegal_state_exception",
+       "reason": "bad"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.x = ctx.s.foo()",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "script_exception",
+        "reason": "runtime error",
+        "script_stack": [
+         "ctx.x = ctx.s.foo()",
+         "             ^---- HERE"
+        ],
+        "script": "ctx.x = ctx.s.foo()",
+        "lang": "painless",
+        "position": {
+         "offset": 13,
+         "start": 0,
+         "end": 19
+        }
+       }
+      ],
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "ctx.x = ctx.s.foo()",
+       "             ^---- HERE"
+      ],
+      "script": "ctx.x = ctx.s.foo()",
+      "lang": "painless",
+      "position": {
+       "offset": 13,
+       "start": 0,
+       "end": 19
+      },
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "dynamic method [java.lang.String, foo/0] not found"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return 1",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "processor_type": "script",
+      "script_stack": [
+       "return 1",
+       "       ^---- HERE"
+      ],
+      "script": "return 1",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 8
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "processor_type": "script",
+    "script_stack": [
+     "return 1",
+     "       ^---- HERE"
+    ],
+    "script": "return 1",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 8
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [void]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.n.x = 1",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "error": {
+      "root_cause": [
+       {
+        "type": "script_exception",
+        "reason": "runtime error",
+        "script_stack": [
+         "ctx.n.x = 1",
+         "     ^---- HERE"
+        ],
+        "script": "ctx.n.x = 1",
+        "lang": "painless",
+        "position": {
+         "offset": 5,
+         "start": 0,
+         "end": 11
+        }
+       }
+      ],
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "ctx.n.x = 1",
+       "     ^---- HERE"
+      ],
+      "script": "ctx.n.x = 1",
+      "lang": "painless",
+      "position": {
+       "offset": 5,
+       "start": 0,
+       "end": 11
+      },
+      "caused_by": {
+       "type": "null_pointer_exception",
+       "reason": "cannot access method/field [x] from a null def reference"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._ingest = 1",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "_ingest": 1,
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.395234655Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.list = [1, [2, 3], ['k': null]]",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "a": 1,
+       "s": "x",
+       "d": 1.5,
+       "list": [
+        1,
+        [
+         2,
+         3
+        ],
+        {
+         "k": null
+        }
+       ],
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.396351859Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.x = ctx['a.b'] + ctx.a.c + field('a.b').get(0) + field('a.c').get(0)",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a.b": 1,
+     "a": {
+      "c": 2
+     }
+    },
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {\"a.b\": 1, \"a\": {\"c\": 2}}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{\"a.b\": 1, \"a\": {\"c\": 2}}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "x": 5,
+       "a": {
+        "c": 2
+       },
+       "a.b": 1
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.397383164Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.created = true",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {},
+    "_index": "painless-ingest",
+    "_id": "1"
+   },
+   "doc_raw": "{\"_source\": {}, \"_index\": \"painless-ingest\", \"_id\": \"1\"}",
+   "source_raw": "{}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_index": "painless-ingest",
+      "_version": "-3",
+      "_id": "1",
+      "_source": {
+       "created": true
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.398508333Z"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.m = metadata().getRouting() + '/' + metadata().getVersion() + '/' + metadata().getVersionType(); ctx.s = ctx.toString()",
+    "lang": "painless"
+   },
+   "doc": {
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1",
+      "t2"
+     ],
+     "o": {
+      "k": 2,
+      "l": [
+       1,
+       2
+      ]
+     },
+     "n": null,
+     "d": 1.5
+    },
+    "_index": "painless-ingest",
+    "_id": "1",
+    "_routing": "rr",
+    "_version": 3,
+    "_version_type": "external"
+   },
+   "doc_raw": "{\"_source\": {\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}, \"_index\": \"painless-ingest\", \"_id\": \"1\", \"_routing\": \"rr\", \"_version\": 3, \"_version_type\": \"external\"}",
+   "source_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\", \"t2\"], \"o\": {\"k\": 2, \"l\": [1, 2]}, \"n\": null, \"d\": 1.5}"
+  },
+  "status": 200,
+  "response": {
+   "docs": [
+    {
+     "doc": {
+      "_routing": "rr",
+      "_version_type": "external",
+      "_id": "1",
+      "_index": "painless-ingest",
+      "_version": "3",
+      "_source": {
+       "a": 1,
+       "s": "{a=1, s=x, d=1.5, m=rr/3/external, n=null, tags=[t1, t2], o={k=2, l=[1, 2]}, _routing=rr, _version_type=external, _index=painless-ingest, _id=1, _version=3}",
+       "d": 1.5,
+       "m": "rr/3/external",
+       "n": null,
+       "tags": [
+        "t1",
+        "t2"
+       ],
+       "o": {
+        "l": [
+         1,
+         2
+        ],
+        "k": 2
+       }
+      },
+      "_ingest": {
+       "timestamp": "2026-10-21T05:04:13.399316421Z"
+      }
+     }
+    }
+   ]
+  }
+ }
+]

@@ -1,0 +1,314 @@
+{
+  "description": "async search: submit (finished within wait_for_completion), get, status, delete, errors",
+  "steps": [
+    {
+      "req": "PUT /compat-xpack-s",
+      "body": {
+        "mappings": {
+          "properties": {
+            "user": {
+              "type": "keyword"
+            },
+            "tags": {
+              "type": "keyword"
+            },
+            "n": {
+              "type": "integer"
+            },
+            "msg": {
+              "type": "text"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "compat-xpack-s"
+      }
+    },
+    {
+      "req": "POST /compat-xpack-s/_bulk?refresh=true&filter_path=errors",
+      "raw": "{\"index\": {\"_id\": \"1\"}}\n{\"user\": \"alice\", \"tags\": [\"a\", \"b\"], \"n\": 1, \"msg\": \"quick brown fox\"}\n{\"index\": {\"_id\": \"2\"}}\n{\"user\": \"bob\", \"tags\": [\"b\", \"c\"], \"n\": 2, \"msg\": \"lazy dog\"}\n{\"index\": {\"_id\": \"3\"}}\n{\"user\": \"alice\", \"tags\": [\"a\", \"c\"], \"n\": 3, \"msg\": \"quick dog\"}\n{\"index\": {\"_id\": \"4\"}}\n{\"user\": \"carol\", \"tags\": [\"a\"], \"n\": 4, \"msg\": \"brown cow\"}\n",
+      "status": 200,
+      "response": {
+        "errors": false
+      }
+    },
+    {
+      "req": "POST /compat-xpack-s/_async_search?wait_for_completion_timeout=10s&keep_on_completion=true&filter_path=is_partial,is_running,response.hits.total,response.aggregations",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "u": {
+            "terms": {
+              "field": "user"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "is_partial": false,
+        "is_running": false,
+        "response": {
+          "hits": {
+            "total": {
+              "value": 4,
+              "relation": "eq"
+            }
+          },
+          "aggregations": {
+            "u": {
+              "doc_count_error_upper_bound": 0,
+              "sum_other_doc_count": 0,
+              "buckets": [
+                {
+                  "key": "alice",
+                  "doc_count": 2
+                },
+                {
+                  "key": "bob",
+                  "doc_count": 1
+                },
+                {
+                  "key": "carol",
+                  "doc_count": 1
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "req": "POST /compat-xpack-s/_async_search?wait_for_completion_timeout=10s&filter_path=-id,-start_time_in_millis,-expiration_time_in_millis,-completion_time_in_millis,-response.took",
+      "body": {
+        "query": {
+          "match": {
+            "msg": "quick"
+          }
+        },
+        "sort": [
+          "n"
+        ],
+        "_source": [
+          "user"
+        ]
+      },
+      "status": 200,
+      "response": {
+        "is_partial": false,
+        "is_running": false,
+        "response": {
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "compat-xpack-s",
+                "_id": "1",
+                "_score": null,
+                "_source": {
+                  "user": "alice"
+                },
+                "sort": [
+                  1
+                ]
+              },
+              {
+                "_index": "compat-xpack-s",
+                "_id": "3",
+                "_score": null,
+                "_source": {
+                  "user": "alice"
+                },
+                "sort": [
+                  3
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req": "POST /compat-xpack-s/_async_search?keep_alive=1ms",
+      "body": {
+        "query": {
+          "match_all": {}
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "action_request_validation_exception",
+              "reason": "Validation Failed: 1: [keep_alive] must be greater or equals than 1 second, got:1ms;"
+            }
+          ],
+          "type": "action_request_validation_exception",
+          "reason": "Validation Failed: 1: [keep_alive] must be greater or equals than 1 second, got:1ms;"
+        },
+        "status": 400
+      }
+    },
+    {
+      "req": "POST /compat-xpack-s/_async_search?scroll=1m",
+      "body": {},
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "action_request_validation_exception",
+              "reason": "Validation Failed: 1: [request_cache] cannot be used in a scroll context;2: [scroll] queries are not supported;"
+            }
+          ],
+          "type": "action_request_validation_exception",
+          "reason": "Validation Failed: 1: [request_cache] cannot be used in a scroll context;2: [scroll] queries are not supported;"
+        },
+        "status": 400
+      }
+    },
+    {
+      "req": "POST /compat-xpack-s/_async_search?wait_for_completion_timeout=bogus",
+      "body": {},
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse [bogus]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "failed to parse [bogus]",
+          "caused_by": {
+            "type": "number_format_exception",
+            "reason": "For input string: \"bogu\""
+          }
+        },
+        "status": 400
+      }
+    },
+    {
+      "req": "GET /_async_search/FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc=",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "resource_not_found_exception",
+              "reason": "FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc="
+            }
+          ],
+          "type": "resource_not_found_exception",
+          "reason": "FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc="
+        },
+        "status": 404
+      }
+    },
+    {
+      "req": "GET /_async_search/status/FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc=",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "resource_not_found_exception",
+              "reason": "FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc="
+            }
+          ],
+          "type": "resource_not_found_exception",
+          "reason": "FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc="
+        },
+        "status": 404
+      }
+    },
+    {
+      "req": "DELETE /_async_search/FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc=",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "resource_not_found_exception",
+              "reason": "FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc="
+            }
+          ],
+          "type": "resource_not_found_exception",
+          "reason": "FmRldE8zREVEUzA2ZVpUeGs2ejJFUFEaMkZ5QTVrSTZSaVN3WlNFVmtlWHJsdzoxMDc="
+        },
+        "status": 404
+      }
+    },
+    {
+      "req": "GET /_async_search/notanid",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "invalid id: [notanid]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "invalid id: [notanid]",
+          "caused_by": {
+            "type": "e_o_f_exception",
+            "reason": "tried to read: 1475998 bytes but only 2 remaining"
+          }
+        },
+        "status": 400
+      }
+    },
+    {
+      "req": "POST /compat-xpack-nope/_async_search",
+      "body": {},
+      "status": 404,
+      "response": {
+        "is_partial": true,
+        "is_running": false,
+        "start_time_in_millis": 1792752321007,
+        "expiration_time_in_millis": 1793184321007,
+        "error": {
+          "type": "status_exception",
+          "reason": "error while executing search",
+          "caused_by": {
+            "type": "index_not_found_exception",
+            "reason": "no such index [compat-xpack-nope]",
+            "resource.type": "index_or_alias",
+            "resource.id": "compat-xpack-nope",
+            "index_uuid": "_na_",
+            "index": "compat-xpack-nope"
+          }
+        }
+      },
+      "mask": [
+        "expiration_time_in_millis"
+      ]
+    },
+    {
+      "req": "DELETE /compat-xpack-s",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    }
+  ]
+}

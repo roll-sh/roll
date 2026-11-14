@@ -67,6 +67,9 @@ code-sql.workspace = true
 pg-storage.workspace = true
 tempfile.workspace = true
 aws-sdk-s3.workspace = true
+# `tests/preview.rs`: roll previews on a real roll code.
+roll-previews.workspace = true
+code-preview.workspace = true
 # `tests/nosql_api.rs`: the real control API in process.
 nosql-control.workspace = true
 nosql-server.workspace = true
@@ -75,6 +78,10 @@ regex.workspace = true
 s3-control.workspace = true
 s3-server.workspace = true
 s3-store.workspace = true
+# `tests/search.rs` runs the `roll` binary against an in-process search control plane.
+search-control.workspace = true
+search-server.workspace = true
+search-store.workspace = true
 
 [[test]]
 name = "cqlsh_roll"

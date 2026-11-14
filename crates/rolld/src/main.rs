@@ -23,10 +23,12 @@ mod edge;
 mod isolation;
 mod logs;
 mod nosql;
+mod previews;
 mod products;
 mod queues;
 mod storage;
 mod redis;
+mod search;
 mod storage_events;
 mod streams;
 mod tasks;
@@ -35,7 +37,8 @@ mod workspace;
 use products::{Product, Products};
 
 /// roll daemon: serverless Postgres, serverless Redis, S3-compatible storage, Kafka-compatible streams, tasks,
-/// RabbitMQ-compatible queues and ScyllaDB/Cassandra-compatible nosql on your machine (or an EC2 host).
+/// RabbitMQ-compatible queues, ScyllaDB/Cassandra-compatible nosql and Elasticsearch-compatible search on your
+/// machine (or an EC2 host).
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -278,8 +281,10 @@ struct Args {
     edge: edge::EdgeArgs,
     #[command(flatten)]
     streams: streams::StreamArgs,
+    #[command(flatten)]
+    search: search::SearchArgs,
     /// Products this node runs, comma-separated: postgres, redis, streams, tasks, storage, nosql,
-    /// queues, code (default: all). `--no-<product>` and `--<product>-only` narrow it.
+    /// queues, code, search (default: all). `--no-<product>` and `--<product>-only` narrow it.
     #[arg(long, env = "ROLL_PRODUCTS", value_enum, value_delimiter = ',')]
     products: Option<Vec<Product>>,
     /// `text`, or `json`: one JSON object per line, with an access line per HTTP request and
@@ -302,9 +307,11 @@ impl Args {
             no_storage: self.no_storage,
             no_queues: self.queues.disabled,
             no_nosql: self.nosql.nosql_disabled,
+            no_search: self.search.search_disabled,
             code_only: self.code_only,
             queues_only: self.queues_only,
             nosql_only: self.nosql.nosql_only,
+            search_only: self.search.search_only,
         })
     }
 }
@@ -417,6 +424,12 @@ async fn run() -> anyhow::Result<()> {
         false => None,
     };
 
+    // roll search: same object storage; the Elasticsearch REST listener and `/v1/search`.
+    let search = match on.on(Product::Search) {
+        true => Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, &cluster, args.code.cluster.system_database.as_deref(), args.db_budget()?.search, edge::Public::of(&args).as_ref()).await?),
+        false => None,
+    };
+
     // Workspace projects: always on (docs/workspace.md); roll apps places its services there.
     let workspace = workspace::open(&args, &home)?;
     // roll apps: services built and run on this host's Docker, each on its lease's holder.
@@ -463,11 +476,32 @@ async fn run() -> anyhow::Result<()> {
     if let Some(n) = &nosql {
         router = router.merge(n.router());
     }
+    if let Some(s) = &search {
+        router = router.merge(s.router());
+    }
     if let Some(a) = &apps {
         router = router.merge(a.router());
     }
     // Workspace projects: always on; the operator's, and each signed-in user's own.
     router = router.merge(roll_workspace::router(workspace.clone()));
+    // roll previews: an environment per change of a project's repos (needs roll code).
+    let preview_hosts = match &code {
+        Some(c) => {
+            let on_products = previews::Products {
+                postgres: postgres.is_some(),
+                redis: redis.is_some(),
+                nosql: nosql.is_some(),
+                storage: storage_svc.is_some(),
+                streams: streams.is_some(),
+                queues: queues.is_some(),
+                tasks: tasks.is_some(),
+            };
+            let p = previews::start(&args, &home, c, workspace.clone(), cluster.clone(), on_products)?;
+            router = router.merge(roll_previews::api::router(p.engine.clone()));
+            Some(p.runtime)
+        }
+        None => None,
+    };
     // Accounts and sign-in: always on; the gate resolves their session cookies. (Before the
     // evaluator joins the gate: setting sessions makes the gate anew.)
     let accounts = accounts::open(&args, &home, code.as_ref().map(|c| c.code.clone()), !auth.enforcing()).await?;
@@ -484,6 +518,7 @@ async fn run() -> anyhow::Result<()> {
             nosql: nosql.as_ref().map(|n| n.control.clone()),
             streams: streams.as_ref().map(|s| s.broker.clone()),
             code: code.as_ref().map(|c| &c.code),
+            search: search.as_ref().map(|s| s.control.clone()),
             apps: apps.as_ref().map(|a| a.apps.clone()),
         },
         workspace,
@@ -536,6 +571,9 @@ async fn run() -> anyhow::Result<()> {
     if let Some(a) = &apps {
         router = apps_control::public::with_forwarded(router, a.apps.clone());
     }
+    if let Some(rt) = &preview_hosts {
+        router = router.layer(axum::middleware::from_fn_with_state(rt.clone(), roll_previews::runtime::route));
+    }
     // In a cluster, requests from other nodes are verified first.
     if cluster.backend_name() != "memory" {
         router = router.layer(axum::middleware::from_fn_with_state(cluster.clone(), roll_cluster::accept_forwarded));
@@ -550,6 +588,7 @@ async fn run() -> anyhow::Result<()> {
         storage: storage_svc.as_ref().map(|s| s.s3_router()),
         nosql: nosql.as_ref(),
         queues: queues.as_ref(),
+        search: search.as_ref().map(|s| s.rest_router()),
         apps: apps.as_ref().map(|a| a.public_router()),
         custom_domains: apps.as_ref().map(|a| a.custom_domains()),
         auth: &auth,
@@ -563,6 +602,9 @@ async fn run() -> anyhow::Result<()> {
     }
     if let Some(r) = &redis {
         router = r.internal(router);
+    }
+    if let Some(s) = &search {
+        router = s.internal(router);
     }
 
     // Everything that serves until it fails; any of them ending ends the process.
@@ -597,6 +639,9 @@ async fn run() -> anyhow::Result<()> {
     }
     if let Some(n) = &nosql {
         serving.push(Box::pin(n.serve()));
+    }
+    if let Some(s) = &search {
+        serving.push(Box::pin(s.serve()));
     }
     if let Some(a) = &apps {
         serving.push(Box::pin(a.serve()));
@@ -640,6 +685,9 @@ async fn run() -> anyhow::Result<()> {
     }
     if let Some(n) = &nosql {
         n.shutdown().await?;
+    }
+    if let Some(s) = &search {
+        s.shutdown().await;
     }
     if let Some(q) = &queues {
         q.shutdown().await;
@@ -691,6 +739,7 @@ async fn start_postgres(args: &Args, home: &std::path::Path, storage: &StorageCo
 struct CodeNode {
     code: std::sync::Arc<code_control::Code>,
     previews: std::sync::Arc<code_preview::Previews>,
+    isolation: std::sync::Arc<dyn code_preview::Isolation>,
     _checks: tokio::task::JoinHandle<()>,
 }
 
@@ -847,9 +896,9 @@ async fn start_code(
         Some(data),
         isolation.clone(),
     );
-    let runner = code_preview::CheckRunner::new(isolation, args.code_runner_concurrency);
+    let runner = code_preview::CheckRunner::new(isolation.clone(), args.code_runner_concurrency);
     let checks = code_preview::start(&code, std::sync::Arc::new(runner), previews.clone());
-    Ok(CodeNode { code, previews, _checks: checks })
+    Ok(CodeNode { code, previews, isolation, _checks: checks })
 }
 
 

@@ -18,6 +18,7 @@ import { checkRows } from "@/lib/ci";
 import { canWrite, isAdmin, landSummary, landVerb } from "@/lib/queue";
 import { addDraft, draftFor, emptyPending, removeDraft, reviewHeadline, reviewPayload, updateDraft, type LineSelection } from "@/lib/review";
 import { CodeShell } from "./shell";
+import { PreviewEnvironmentView } from "./preview-environment";
 import { ChangeAgent } from "./change-agent";
 import { ago, btn, Confirm, EmptyPanel, ErrorNote, Panel, panel, primary } from "../ui";
 import { DiffViewer, type DiffReview } from "./diff";
@@ -711,6 +712,15 @@ function ChecksPanel({ repo, change, policy, required }: { repo: string; change:
 function PreviewPanel({ change, busy, run }: { change: Change; busy: string | null; run: ReturnType<typeof useAction>["run"] }) {
   const p = change.preview;
   const open = change.state !== "landed" && change.state !== "closed";
+  if (p?.environment)
+    return (
+      <Panel title="Preview">
+        <div className="px-5 py-4">
+          <PreviewEnvironmentView env={p.environment} />
+          {p.error && <p className="mt-3 text-[12px] text-danger">{p.error}</p>}
+        </div>
+      </Panel>
+    );
   return (
     <Panel
       title="Preview"

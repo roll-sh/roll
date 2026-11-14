@@ -1,0 +1,191 @@
+{
+ "found": {
+  "case": 39,
+  "case_seed": 104000351,
+  "seed": 104
+ },
+ "signature": "POST _search/scroll .hits.max_score",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "mot0": {
+       "type": "match_only_text"
+      }
+     }
+    },
+    "settings": {
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m16-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m16-a"
+  },
+  {
+   "es": {
+    "body": {
+     "errors": false,
+     "items": [
+      {
+       "index": {
+        "_id": "4",
+        "_index": "diff-m16-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 2
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      }
+     ],
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": {
+      "_id": "4",
+      "_index": "diff-m16-a"
+     }
+    },
+    {
+     "mot0": "and index engine banana running quick"
+    }
+   ],
+   "method": "POST",
+   "path": "/_bulk"
+  },
+  {
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "successful": 1,
+      "total": 2
+     }
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m16-a/_refresh"
+  },
+  {
+   "body": {
+    "query": {
+     "multi_match": {
+      "query": "engine",
+      "type": "phrase_prefix"
+     }
+    }
+   },
+   "capture": [
+    [
+     "scroll",
+     "/_scroll_id"
+    ]
+   ],
+   "es": {
+    "body": {
+     "_scroll_id": "FGluY2x1ZGVfY29udGV4dF91dWlkDXF1ZXJ5QW5kRmV0Y2gBFkFHMFM5Z1huUThLV1dldzREWks5V1EAAAAAAADfBxZHVEZ0S1JrTVNpLWxtMHIwUjR6dGJB",
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "4",
+        "_index": "diff-m16-a",
+        "_score": 1.0,
+        "_source": {
+         "mot0": "and index engine banana running quick"
+        }
+       }
+      ],
+      "max_score": 1.0,
+      "total": {
+       "relation": "eq",
+       "value": 1
+      }
+     },
+     "timed_out": false,
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m16-a/_search?scroll=1m"
+  },
+  {
+   "body": {
+    "scroll_id": "${scroll}"
+   },
+   "capture": [
+    [
+     "scroll",
+     "/_scroll_id"
+    ]
+   ],
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "hits": {
+      "hits": [],
+      "max_score": 1.0,
+      "total": {
+       "relation": "eq",
+       "value": 1
+      }
+     },
+     "timed_out": false,
+     "took": 1
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/_search/scroll"
+  }
+ ]
+}

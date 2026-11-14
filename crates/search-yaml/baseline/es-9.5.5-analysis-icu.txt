@@ -1,0 +1,16 @@
+# Tests of Elasticsearch 9.5.5's `analysis-icu` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plugins).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+analysis-icu:analysis_icu/10_basic/Folding filter
+analysis-icu:analysis_icu/10_basic/Normalization charfilter
+analysis-icu:analysis_icu/10_basic/Normalization filter
+analysis-icu:analysis_icu/10_basic/Normalization with unicode_set_filter
+analysis-icu:analysis_icu/10_basic/Tokenizer
+analysis-icu:analysis_icu/10_basic/Transform with custom ruleset
+analysis-icu:analysis_icu/20_search/Index ICU content
+analysis-icu:analysis_icu/30_icu_collation_keyword_field/Test basic field retrieval for icu_collation_keyword (multi-value)
+analysis-icu:analysis_icu/30_icu_collation_keyword_field/Test exists query on icu_collation_keyword field
+analysis-icu:analysis_icu/30_icu_collation_keyword_field/icu_collation_keyword get mapping
+analysis-icu:analysis_icu/30_icu_collation_keyword_field/icu_collation_keyword ignore_above omits value from field retrieval
+analysis-icu:analysis_icu/30_icu_collation_keyword_field/sort on icu_collation_keyword
+analysis-icu:analysis_icu/30_icu_collation_keyword_field/sort with numeric option on icu_collation_keyword

@@ -1,0 +1,16 @@
+# Tests of Elasticsearch 9.5.5's `searchable-snapshots` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (security users=admin:admin-password:superuser login=admin:admin-password setting=xpack.searchable.snapshot.shared_cache.size=16MB setting=xpack.searchable.snapshot.shared_cache.region_size=256KB setting=xpack.searchable_snapshots.cache_fetch_async_thread_pool.keep_alive=0ms).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+searchable-snapshots:clear_cache/Clear searchable snapshots cache
+searchable-snapshots:field_level_security/Test doc level security with different users on full_copy index
+searchable-snapshots:field_level_security/Test doc level security with different users on shared_cache index
+searchable-snapshots:indices_stats/Tests Indices Stats API for snapshot backed indices
+searchable-snapshots:mount/Test Mount API silently ignored special field ignored_index_settings in request body
+searchable-snapshots:mount/Test Mount API with ignore_index_settings
+searchable-snapshots:mount/Test Mount API with unknown request body field
+searchable-snapshots:pit/Tests searches vs default-storage index
+searchable-snapshots:pit/Tests searches vs shared-cache index
+searchable-snapshots:repository/Delete repository when a snapshot is mounted as an index
+searchable-snapshots:shared_cache_stats/Node Cache Stats API with Frozen Indices
+searchable-snapshots:sort_segments_on_timestamp/Test that index segments are sorted on timestamp field if @timestamp field is defined in mapping
+searchable-snapshots:stats/Tests searchable snapshots stats
