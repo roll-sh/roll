@@ -1661,12 +1661,12 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **Terraform resources for the newer registries** (on #33): `roll_secrets_ca`,
-   `roll_secrets_ssh_ca`, `roll_secrets_transit_key` and `roll_secrets_outside_database`, so a
-   project's CAs, SSH CAs, encryption keys and outside databases are declared with the rest of
-   it.
-2. **Transit in the Go and Python clients** (on #32), as `@roll/secrets` has it: encrypt, decrypt,
-   sign, verify, HMAC and public keys.
+1. **RabbitMQ outside roll** (on #39), as Vault's and Infisical's RabbitMQ engines: two users take
+   turns, or a user per lease with a template user's vhost permissions, through the management
+   HTTPS API and the same guards; passwords as RabbitMQ's salted SHA-256 hash, so the broker never
+   sees one.
+2. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
+   and outside databases (#33), and transit in the Go and Python clients (#32).
 3. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47), a live check of
    OpenSearch links (#29 and #51 in one build), and splitting the CLI's `secrets.rs` (2,700 lines)
    by command once the stacked pull requests that touch it have landed.
