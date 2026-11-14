@@ -80,10 +80,10 @@ fn score(probe: &Probe, emb: &Value, similarity: &str) -> Option<f64> {
 pub fn highlight(src: &Map, field: &str, probe: Option<&Probe>, similarity: &str, fragments: usize, by_score: bool) -> Option<Vec<String>> {
     let entry = super::semantic::inference_entries(src).into_iter().find(|(f, _, _)| f == field).map(|(_, e, _)| e)?;
     let chunks = entry.pointer(&["inference", "chunks"])?.as_object()?;
-    // Offsets index the field's values joined by one separator.
-    let text: String = super::semantic::texts_at(src, field).unwrap_or_default().join("\n");
-    let mut scored: Vec<(usize, f64, super::chunking::Span)> = Vec::new();
-    for list in chunks.values() {
+    // Offsets index each source field's values joined by one separator.
+    let mut scored: Vec<(usize, f64, super::chunking::Span, String)> = Vec::new();
+    for (source, list) in chunks {
+        let text: String = super::semantic::texts_at(src, source).unwrap_or_default().join("\n");
         for c in list.as_array().into_iter().flatten() {
             let (Some(s), Some(e)) = (c.get("start_offset").and_then(Value::as_i64), c.get("end_offset").and_then(Value::as_i64)) else { continue };
             let sc = match probe {
@@ -93,7 +93,7 @@ pub fn highlight(src: &Map, field: &str, probe: Option<&Probe>, similarity: &str
                 },
                 None => 0.0,
             };
-            scored.push((scored.len(), sc, super::chunking::Span { start: s.max(0) as usize, end: e.max(0) as usize }));
+            scored.push((scored.len(), sc, super::chunking::Span { start: s.max(0) as usize, end: e.max(0) as usize }, text.clone()));
         }
     }
     if scored.is_empty() {
@@ -101,9 +101,9 @@ pub fn highlight(src: &Map, field: &str, probe: Option<&Probe>, similarity: &str
     }
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     let n = if fragments == 0 { 1 } else { fragments }.min(scored.len());
-    let mut best: Vec<(usize, f64, super::chunking::Span)> = scored.into_iter().take(n).collect();
+    let mut best: Vec<(usize, f64, super::chunking::Span, String)> = scored.into_iter().take(n).collect();
     if !by_score {
         best.sort_by_key(|c| c.0);
     }
-    Some(best.into_iter().map(|(_, _, span)| super::chunking::substring(&text, span)).collect())
+    Some(best.into_iter().map(|(_, _, span, text)| super::chunking::substring(&text, span)).collect())
 }

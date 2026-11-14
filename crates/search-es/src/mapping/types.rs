@@ -865,7 +865,8 @@ pub static TYPES: &[TypeDef] = &[
     TypeDef { multi_fields: false, ..def!("rank_features", RANK_FEATURES, Family::Other) },
     def!("scaled_float", SCALED_FLOAT, Family::Numeric).with_validate(validate_number),
     TypeDef { multi_fields: false, ..def!("search_as_you_type", SEARCH_AS_YOU_TYPE, Family::Text) },
-    TypeDef { multi_fields: false, in_multi_field: false, validate: Some(validate_semantic_text), ..def!("semantic_text", SEMANTIC_TEXT, Family::Other) },
+    // Multi-fields and `copy_to` sources are allowed in the new format; it can't be a multi-field.
+    TypeDef { in_multi_field: false, validate: Some(validate_semantic_text), ..def!("semantic_text", SEMANTIC_TEXT, Family::Other) },
     def!("shape", SHAPE, Family::Geo),
     def!("short", SHORT, Family::Numeric).with_validate(validate_number),
     TypeDef { multi_fields: false, in_multi_field: false, ..def!("sparse_vector", SPARSE_VECTOR, Family::Vector) },

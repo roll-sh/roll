@@ -355,6 +355,21 @@ pub fn index_inference(
     Ok(updates)
 }
 
+/// The fields whose values a `semantic_text` field embeds: itself, then every field that copies
+/// into it (`copy_to`), in path order.
+pub fn sources(mapping: &Mapping, field: &str) -> Vec<String> {
+    let mut out = vec![field.to_string()];
+    for (path, m) in mapping.field_paths() {
+        if let crate::mapping::MapperRef::Field(f) = m
+            && f.copy_to.iter().any(|t| t == field)
+            && path != field
+        {
+            out.push(path);
+        }
+    }
+    out
+}
+
 /// The values of a `semantic_text` field in a document, as the texts to embed: strings as
 /// they are, numbers and booleans as their text, arrays value by value (`null`s skipped).
 pub(crate) fn texts_at(doc: &Map, path: &str) -> Option<Vec<String>> {
@@ -384,6 +399,9 @@ pub(crate) fn texts_at(doc: &Map, path: &str) -> Option<Vec<String>> {
 struct Need {
     doc: usize,
     path: String,
+    /// The field the values come from: the `semantic_text` field itself, or a field that copies
+    /// into it (`copy_to`). Chunks are kept per source.
+    source: String,
     inference_id: String,
     values: Vec<String>,
     chunking: Option<super::chunking::Chunking>,
@@ -441,12 +459,11 @@ pub async fn infer_documents(cluster: &crate::cluster::Cluster, docs: &[(&Mappin
             if present.contains(&path) {
                 continue;
             }
-            let Some(values) = texts_at(doc, &path) else { continue };
-            if values.is_empty() {
-                continue;
-            }
             let chunking = f.raw("chunking_settings").and_then(super::chunking::Chunking::from_stored);
-            needs.push(Need { doc: d, path, inference_id: inference_id(f), values, chunking });
+            for source in sources(mapping, &path) {
+                let Some(values) = texts_at(doc, &source).filter(|v| !v.is_empty()) else { continue };
+                needs.push(Need { doc: d, path: path.clone(), source, inference_id: inference_id(f), values, chunking: chunking.clone() });
+            }
         }
     }
     if needs.is_empty() {
@@ -547,10 +564,11 @@ pub async fn infer_documents(cluster: &crate::cluster::Cluster, docs: &[(&Mappin
         if let Some(c) = &need.chunking {
             inference.insert("chunking_settings".into(), c.to_value());
         }
-        let mut by_source = Map::new();
-        by_source.insert(need.path.clone(), Value::Arr(std::mem::take(&mut chunks[n])));
-        inference.insert("chunks".into(), Value::Obj(by_source));
-        entries.insert(need.path.clone(), crate::obj! { "inference" => Value::Obj(inference) });
+        inference.insert("chunks".into(), Value::object());
+        let entry = entries.entry(need.path.clone()).or_insert_with(|| crate::obj! { "inference" => Value::Obj(inference) });
+        if let Some(Value::Obj(by_source)) = entry.as_object_mut().and_then(|e| e.get_mut("inference")).and_then(|i| i.as_object_mut()).and_then(|i| i.get_mut("chunks")) {
+            by_source.insert(need.source.clone(), Value::Arr(std::mem::take(&mut chunks[n])));
+        }
     }
     out
 }
@@ -592,7 +610,11 @@ pub fn drop_stale(mapping: &Mapping, old: &[u8], new: &[u8]) -> Option<bytes::By
         return None;
     }
     let (Ok(Some(Value::Obj(old))), Ok(Some(Value::Obj(mut new)))) = (crate::json::parse(old), crate::json::parse(new)) else { return None };
-    let stale: Vec<String> = semantic.into_iter().map(|(p, _)| p).filter(|p| texts_at(&old, p) != texts_at(&new, p)).collect();
+    let stale: Vec<String> = semantic
+        .into_iter()
+        .map(|(p, _)| p)
+        .filter(|p| sources(mapping, p).iter().any(|s| texts_at(&old, s) != texts_at(&new, s)))
+        .collect();
     let mut changed = false;
     for p in &stale {
         if new.shift_remove(&format!("_inference_fields.{p}")).is_some() {
