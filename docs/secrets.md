@@ -1600,6 +1600,8 @@ compares from those answers, which closes the last window (#49).
 Every stacked pull request's API tests (#49, #50, #51, #53, #55, #57) also pass on Postgres, and
 #49 adds **Copy reference** to a key's menu (`roll://ENV[/folder]/KEY`, as 1Password's). Every
 stacked pull request is mergeable, and #20 is level with `main`.
+Then roll secrets for VS Code (#58): hovers and warnings where code reads a variable, names
+completed, and `.env` values moved into roll as `roll://` references (checked in code-server).
 
 Then (2026-11-14, latest): `roll run` masks values in what the command prints when it isn't a
 terminal (#54), as 1Password's `op run` and GitHub Actions do; pulling into Kubernetes with External
@@ -1709,12 +1711,10 @@ user's call).
 
 1. **A tenth independent review** of ESO (#55), renewing identity logins (#56), pinned issuer keys
    (#57) and the ninth review's fixes, and its fixes.
-2. **A VS Code extension** (Doppler, Infisical and 1Password each ship one): which environments set
-   an environment variable the code reads (hover, never a value), a warning where the chosen
-   environment lacks one, names completed inside `process.env.`/`os.environ[…]`/`env::var(…)`, and in
-   a `.env` file "Replace with a roll:// reference" and "Move to roll" (the value goes into roll, the
-   line becomes a reference), using the CLI's per-directory setup and a token kept in VS Code's
-   secret storage. Checked in code-server.
+2. **Approving change requests from Slack**: roll code's chat ops already installs a Slack app
+   and maps its members; a request's notice gets Approve and Reject buttons that review it as the
+   member who pressed (their own roll permissions and the request's gates, never the app's), the
+   platform's request verified and recorded before it's acknowledged, as chat ops does.
 3. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
    #49 and #54 meet, `watch` keeps both (answered digests, streams and signals).
 4. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
@@ -1758,6 +1758,8 @@ Open pull requests after this one:
   after its grace; a user with two keys already is refused, never pruned.
 - **#55, pulling into Kubernetes with External Secrets Operator** (after #20): its webhook
   provider (one store for whole environments and single keys) and `values?dynamic=false`.
+- **#58, roll secrets for VS Code** (after #20): hovers, warnings and completion where code reads
+  a variable; `.env` values replaced by `roll://` references or moved into roll first.
 - **#57, workload identities pin their issuer's keys** (after #20): `jwks` on an identity, for a
   cluster's own issuer; `identities add --jwks`, the dashboard's Other OIDC form.
 - **#56, a workload identity's login renews itself** (after #20): long-running `roll run
