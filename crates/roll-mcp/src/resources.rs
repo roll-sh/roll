@@ -73,8 +73,9 @@ pub fn project(uri: &str, answer: &Value) -> Value {
         }
     }
     json!({ "contents": [
-        { "uri": uri, "mimeType": "text/markdown", "text": text },
-        { "uri": uri, "mimeType": "application/json", "text": answer.to_string() },
+        // Names people chose, as results' text: what they hide stays visible.
+        { "uri": uri, "mimeType": "text/markdown", "text": crate::visible(&text) },
+        { "uri": uri, "mimeType": "application/json", "text": crate::visible(&answer.to_string()) },
     ] })
 }
 
@@ -85,8 +86,8 @@ pub fn guide() -> Value {
 /// `roll://access/me` from `GET /v1/access`'s answer: words first, the grant as JSON after.
 pub fn me(answer: &Value, now: i64) -> Value {
     json!({ "contents": [
-        { "uri": ME, "mimeType": "text/markdown", "text": words(answer, now) },
-        { "uri": ME, "mimeType": "application/json", "text": answer.to_string() },
+        { "uri": ME, "mimeType": "text/markdown", "text": crate::visible(&words(answer, now)) },
+        { "uri": ME, "mimeType": "application/json", "text": crate::visible(&answer.to_string()) },
     ] })
 }
 

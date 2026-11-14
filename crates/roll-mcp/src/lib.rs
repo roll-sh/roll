@@ -758,7 +758,7 @@ fn invisible(c: char) -> bool {
 /// `text` with each invisible character written as a JSON escape (`\u200b`, a surrogate pair past
 /// U+FFFF): the model sees that it's there, a JSON text still parses to the same value, and
 /// `structuredContent` stays exact.
-fn visible(text: &str) -> String {
+pub(crate) fn visible(text: &str) -> String {
     if !text.chars().any(invisible) {
         return text.to_string();
     }
