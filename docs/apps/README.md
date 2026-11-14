@@ -1577,6 +1577,15 @@ over a `DirTree`, as a new web service's build would read it, a Procfile's `web:
 service exists (with a roll.toml, whose `[app]` can name the builder, it's only said). A repo
 service's plan (`--repo`, or a linked repo service) is roll's, from its tree in roll code.
 
+Deno (a `deno.json`, before Node: its config decides) runs its `start` task, or `main.ts`,
+`server.ts`… with network, environment and file access, on the Deno image, its dependencies in
+the image. .NET (one `.csproj` or `.fsproj` at the root; two are the person's to choose) is
+`dotnet restore` and `dotnet publish` on the SDK image of its `TargetFramework`, run on the
+ASP.NET image as its `app` user with `--urls http://0.0.0.0:$PORT`. Both are plan-tested
+(`deno_runs_its_start_task_or_its_entry_module`, `dotnet_publishes_its_project_and_runs_it_on_port`),
+not yet built in Docker. A tree none of them builds says what it did find (`mix.exs`: Elixir, a
+`.sln`, `pubspec.yaml`…), so the next step (a Dockerfile, the root directory) is plain.
+
 - Node yields to another language: a tree with a Gemfile, composer.json, requirements.txt,
   pyproject.toml, manage.py, go.mod, Cargo.toml, pom.xml or build.gradle isn't a Node app even
   with a package.json; a package.json with a `build` script there adds a Node `assets` stage.
@@ -1812,8 +1821,10 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (a second product review of the experience, a product review of what one engineer can close here now, bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **More builds**: Elixir/Phoenix, Deno and .NET providers, and `NothingDetected` naming what it
-   did find (`mix.exs`, `deno.json`, `*.csproj`).
+1. **Builds checked in Docker, and Elixir**: Deno's and .NET's plans built and run for real (a
+   tiny app each through `pnpm test:apps --docker`), then an Elixir/Phoenix provider (`mix
+   release` on the Elixir image, `PHX_SERVER=true`, `SECRET_KEY_BASE` asked for), built the same
+   way before it ships.
 2. **The project Logs view in a browser**: checked by typecheck and the suite only (rolld wasn't
    built when it landed); look at it against a live rolld with several services, phone width too.
 3. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they

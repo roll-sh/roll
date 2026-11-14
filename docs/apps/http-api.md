@@ -409,7 +409,7 @@ type ProjectImport = {
 type PlanRequest = { repo: string; revision?: string; root?: string } | { files: Record<string, string> };
 
 type Plan = {
-  provider: "dockerfile" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "static";
+  provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "static";
   framework: string | null;  // next, django, rails, spring…
   language_version: string | null;
   install: string | null;

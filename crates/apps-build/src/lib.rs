@@ -8,8 +8,10 @@
 
 mod caches;
 mod cargo;
+mod deno;
 mod df;
 mod docker;
+mod dotnet;
 mod golang;
 mod java;
 mod node;
@@ -113,6 +115,7 @@ pub struct Plan {
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Dockerfile,
+    Deno,
     Node,
     Python,
     Go,
@@ -120,17 +123,19 @@ pub enum Provider {
     Ruby,
     Php,
     Java,
+    Dotnet,
     Static,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(
-        "couldn't tell how to build this: found no Dockerfile, package.json, requirements.txt, \
-         pyproject.toml, go.mod, Cargo.toml, Gemfile, composer.json, index.php, pom.xml, \
-         build.gradle or index.html at the root; add a Dockerfile or set the root directory"
+        "couldn't tell how to build this: found no Dockerfile, package.json, deno.json, \
+         requirements.txt, pyproject.toml, go.mod, Cargo.toml, Gemfile, composer.json, index.php, \
+         pom.xml, build.gradle, a .csproj or index.html at the root{0}; add a Dockerfile or set the \
+         root directory"
     )]
-    NothingDetected,
+    NothingDetected(String),
     #[error("the Dockerfile path {0:?} must be a relative path inside the source, without `..`")]
     BadDockerfilePath(String),
     #[error("there's no {0} in the source (the builder is set to dockerfile)")]
@@ -184,7 +189,9 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         return docker::plan(tree, &o);
     }
     type Detect = fn(&dyn Tree, &Overrides) -> Result<Option<Draft>, Error>;
-    const PROVIDERS: [Detect; 8] = [
+    const PROVIDERS: [Detect; 10] = [
+        // Before Node: a Deno project's deno.json decides, a package.json beside it notwithstanding.
+        deno::detect,
         node::detect,
         python::detect,
         golang::detect,
@@ -192,6 +199,7 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         ruby::detect,
         php::detect,
         java::detect,
+        dotnet::detect,
         static_site::detect,
     ];
     for detect in PROVIDERS {
@@ -215,7 +223,28 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
             return Ok(p);
         }
     }
-    Err(Error::NothingDetected)
+    Err(Error::NothingDetected(found(tree)))
+}
+
+/// What the root holds that roll doesn't build yet, said with the error: `" (found mix.exs:
+/// Elixir)"`, or nothing.
+fn found(tree: &dyn Tree) -> String {
+    const KNOWN: [(&str, &str); 9] = [
+        ("mix.exs", "Elixir"),
+        ("pubspec.yaml", "Dart"),
+        ("Package.swift", "Swift"),
+        ("build.sbt", "Scala (sbt)"),
+        ("stack.yaml", "Haskell"),
+        ("CMakeLists.txt", "C or C++ (CMake)"),
+        ("Makefile", "make"),
+        ("deps.edn", "Clojure"),
+        ("dune-project", "OCaml"),
+    ];
+    let mut seen: Vec<String> = KNOWN.iter().filter(|(f, _)| tree.exists(f)).map(|(f, what)| format!("{f}: {what}")).collect();
+    if let Some(sln) = tree.list("").into_iter().find(|f| f.ends_with(".sln")) {
+        seen.push(format!("{sln}: a .NET solution (set the root directory to its project)"));
+    }
+    if seen.is_empty() { String::new() } else { format!(" (found {}, which roll doesn't build itself)", seen.join("; ")) }
 }
 
 impl Overrides {
