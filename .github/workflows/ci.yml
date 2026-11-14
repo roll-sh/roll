@@ -60,8 +60,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --locked ${{ matrix.packages }} --lib
 
-  # Every package's types (TypeScript 7, scripts/typecheck.mjs), the dashboard's node tests and the
-  # desktop app's tests.
+  # Every package's types (TypeScript 7, scripts/typecheck.mjs), the dashboard's node tests, the
+  # desktop app's tests and the VS Code extension's.
   web:
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -71,6 +71,7 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm --filter dashboard test:node
       - run: pnpm --filter @roll/desktop test
+      - run: pnpm --filter roll-secrets test
 
   # The dashboard's vitest suite, split across runners.
   dashboard:

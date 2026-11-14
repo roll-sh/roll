@@ -819,6 +819,38 @@ doppler secrets download --no-file --format json > prod.json  &&  roll secrets i
 vercel env pull .env.production --environment=production  &&  roll secrets import .env.production -e production
 ```
 
+### VS Code
+
+`apps/vscode` is roll secrets for VS Code (as Doppler's, Infisical's and 1Password's extensions):
+
+- **Where the code reads a variable** (`process.env.X`, `import.meta.env.X`, `os.environ["X"]`,
+  `os.getenv`, `os.Getenv`, `env::var`, `ENV["X"]`, `getenv`, `System.getenv`,
+  `Environment.GetEnvironmentVariable`), a hover says which environments set it in the folder, and
+  which this token can read don't. A warning marks a key roll sets somewhere but not in the
+  workspace's environment (`STRIPE_KEY isn't set in staging (set in development)`); names roll
+  doesn't know at all (`PATH`, `NODE_ENV`) are left alone. Names are completed where a name goes.
+- **In a `.env` file**, a line with a plain value offers "Replace with `roll://ENV/KEY`" when the
+  environment has the key, and "Move to roll": after a confirmation that names the project,
+  environment and folder (and says when it replaces roll's value), the value is set in roll as one
+  change and the entry becomes its reference, which `roll run --env-file` resolves. The file is
+  read as the CLI reads it (a double-quoted value over several lines, a comment after its quote,
+  the last entry of a key set twice; nothing is offered on a file the CLI would refuse), and the
+  whole entry is replaced, every line of a multi-line key; if the entry changed while roll
+  answered, it's left alone and the message says so. A protected environment's 409 says to open a
+  change request in the dashboard.
+- **What it reads**: the folder's grid (`GET …/grid`: names and which environments set them, never
+  a value; `read` is enough), cached a minute. It writes only for "Move to roll". A value never
+  goes into a message, a log or the extension's state.
+- **Setup**: what `roll secrets setup` remembers for the folder (`~/.config/roll/secrets.json`),
+  or the `roll.project`, `roll.environment` and `roll.path` settings. All of them, and
+  `roll.apiUrl`, come from your own settings only, never a repository's `.vscode/settings.json`
+  (which could send your token elsewhere, or point "Move to roll" at another project or
+  environment), and a confirmation names the project it writes to. The status bar's
+  `roll: shop · staging` chooses another environment for the workspace. The token is a project
+  token kept in VS Code's secret storage (`roll secrets: Sign in`), or `ROLL_TOKEN`.
+- Checked in code-server 4.96 (VS Code 1.96) against a live rolld: the hover, the warning, and a
+  `.env` value moved into staging and replaced by `roll://staging/STRIPE_KEY`.
+
 ### Backup and restore
 
 `roll secrets keygen` makes an X25519 key pair (the secret key in a 0600 file, the public key
