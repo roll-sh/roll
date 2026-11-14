@@ -73,6 +73,8 @@ rdkafka = { version = "0.39", features = ["cmake-build", "ssl-vendored", "zstd"]
 rcgen = "0.14"
 # roll secrets: certificate lifetimes (rcgen takes time's dates).
 time = "0.3"
+# roll secrets: SSH certificates (Ed25519 CAs and user keys).
+ed25519-dalek = "2"
 x509-parser = "0.18"
 pg-control = { path = "crates/pg-control" }
 pg-storage = { path = "crates/pg-storage" }

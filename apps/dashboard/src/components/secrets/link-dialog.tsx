@@ -1,4 +1,4 @@
-import { Cloud, Database, KeyRound, Link2, RotateCw, ShieldCheck, type LucideIcon } from "lucide-react";
+import { Cloud, Database, KeyRound, Link2, RotateCw, ShieldCheck, Terminal, type LucideIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { SECRET_KEY, type Batch, type Environment, type LinkField, type LinkMode, type LinkTarget, type Op } from "@/lib/secrets-api";
 import type { ResourceKind } from "@/lib/workspace-api";
@@ -15,6 +15,7 @@ const OWN_KINDS: Record<string, { icon: LucideIcon; label: string }> = {
   aws_iam_user: { icon: KeyRound, label: "IAM user" },
   outside_database: { icon: Database, label: "Database outside roll" },
   pki: { icon: ShieldCheck, label: "Certificate authority" },
+  ssh: { icon: Terminal, label: "SSH CA" },
 };
 
 /** A link target's kind: a canvas resource's icon, roll secrets' own, or a plain link for one this dashboard doesn't know yet. */
@@ -63,6 +64,7 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const [picks, setPicks] = useState<Record<string, Pick>>({});
   const [ttl, setTtl] = useState("60");
   const [certNames, setCertNames] = useState("");
+  const [principals, setPrincipals] = useState("");
   const [rotateDays, setRotateDays] = useState("30");
   const [busy, setBusy] = useState(false);
 
@@ -85,6 +87,10 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const needsNames = chosen.some((c) => c.t.kind === "pki");
   const names = certNames.split(",").map((n) => n.trim()).filter(Boolean);
   const namesOk = !needsNames || names.length > 0;
+  // An SSH certificate names the server logins it's for (the CA's policy decides which).
+  const needsPrincipals = chosen.some((c) => c.t.kind === "ssh");
+  const logins = principals.split(",").map((n) => n.trim()).filter(Boolean);
+  const principalsOk = !needsPrincipals || logins.length > 0;
   // A managed certificate rotates on a schedule, before it ends (it lives twice that).
   const needsRotation = chosen.some((c) => c.t.kind === "pki" && c.p.mode === "managed");
   const rotate = Number(rotateDays);
@@ -99,8 +105,12 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
         ref: c.t.ref,
         field: c.f.field,
         mode: c.p.mode,
-        ...((c.p.mode === "dynamic" || c.t.kind === "pki") && {
-          options: { ...(c.p.mode === "dynamic" && { ttl_minutes: ttlMinutes }), ...(c.t.kind === "pki" && { names, ...(c.p.mode === "managed" && { rotate_days: rotate }) }) },
+        ...((c.p.mode === "dynamic" || c.t.kind === "pki" || c.t.kind === "ssh") && {
+          options: {
+            ...(c.p.mode === "dynamic" && { ttl_minutes: ttlMinutes }),
+            ...(c.t.kind === "pki" && { names, ...(c.p.mode === "managed" && { rotate_days: rotate }) }),
+            ...(c.t.kind === "ssh" && { principals: logins }),
+          },
         }),
       },
     }));
@@ -173,6 +183,12 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
             <input value={certNames} onChange={(e) => setCertNames(e.target.value)} placeholder="api.svc.internal" spellCheck={false} className={`${sized} h-7 w-56 font-mono`} aria-label="Certificate names" />
           </label>
         )}
+        {needsPrincipals && (
+          <label className="flex items-center gap-1.5 text-[12px] text-muted">
+            Logins
+            <input value={principals} onChange={(e) => setPrincipals(e.target.value)} placeholder="deploy" spellCheck={false} className={`${sized} h-7 w-40 font-mono`} aria-label="SSH principals" />
+          </label>
+        )}
         {needsRotation && (
           <label className="flex items-center gap-1.5 text-[12px] text-muted">
             Rotate every
@@ -188,13 +204,13 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
           </label>
         )}
         <span className="text-[11.5px] text-danger">
-          {badKey ? `${badKey.p.key || "A key"} isn't a valid key` : dupKey ? `${dupKey.p.key} is picked twice` : !ttlOk ? "A lease is 1 minute to 7 days" : !namesOk ? "A certificate names what it's for" : !rotateOk ? "Rotate every 1 to 198 days" : ""}
+          {badKey ? `${badKey.p.key || "A key"} isn't a valid key` : dupKey ? `${dupKey.p.key} is picked twice` : !ttlOk ? "A lease is 1 minute to 7 days" : !namesOk ? "A certificate names what it's for" : !rotateOk ? "Rotate every 1 to 198 days" : !principalsOk ? "An SSH certificate names its logins" : ""}
         </span>
         <span className="ml-auto" />
         <button className={ghost} onClick={onClose}>
           Cancel
         </button>
-        <button className={primary} disabled={!chosen.length || !!badKey || !!dupKey || !ttlOk || !namesOk || !rotateOk || busy} onClick={submit}>
+        <button className={primary} disabled={!chosen.length || !!badKey || !!dupKey || !ttlOk || !namesOk || !rotateOk || !principalsOk || busy} onClick={submit}>
           {busy ? "Linking…" : `Link ${chosen.length || ""}`.trim()}
         </button>
       </div>

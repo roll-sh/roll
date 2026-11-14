@@ -618,6 +618,60 @@ TLS certificates for services (mTLS between them), with no CA to run.
   random, positive and never start with a zero byte, so the serial a client shows is the one to
   revoke.
 
+### SSH certificates
+
+A project's own SSH CA, as Vault's SSH engine signs them: short-lived user certificates instead of
+long-lived public keys on every server. Servers trust one CA key (`TrustedUserCAKeys`).
+
+- `POST …/ssh-cas {name, principals, max_hours?, host_domains?, max_host_days?}` (admin; `roll secrets ssh-cas add NAME --principal
+  deploy`, the Integrations tab) makes an Ed25519 key, sealed with the project's data key and bound to
+  the CA. Its public key (`ssh-ed25519 …`, `roll secrets ssh-cas key NAME`) is what servers trust.
+  `principals` are the logins it signs for; `max_hours` (24 by default, a week at most) is the longest
+  a certificate lives.
+- The link kind `ssh` has `certificate` (the `…-cert.pub` line) and `private_key` (an unencrypted
+  OpenSSH key), one credential, with the logins in `options.principals` (the Link dialog asks); a
+  login the CA doesn't allow is refused when it's linked. Each lease gets a new Ed25519 key and a
+  user certificate (`permit-pty`, `permit-port-forwarding`; the key id names the lease) for its TTL
+  plus five minutes, at most `max_hours`. Links are `dynamic` only: a certificate lives hours, and a
+  managed rotation counts in days.
+- The certificate and key formats are OpenSSH's (`PROTOCOL.certkeys`, `PROTOCOL.key`), written by roll
+  and checked against OpenSSH 10: `ssh-keygen -L` reads them, and `sshd` with `TrustedUserCAKeys`
+  takes the certificate for its principal and nobody else's. A certificate can't be taken back, so
+  lifetimes stay short; an SSH CA a key links to can't be deleted.
+- **`roll ssh -e production -- deploy@host`** (as `vault ssh` and `tsh ssh`): resolves the
+  environment's `SSH_CERT` and `SSH_KEY` (`--cert`, `--identity` for other keys; a dynamic link gets
+  a pair for this session), writes them to a private temporary directory (0700, the key 0600), runs
+  `ssh -i … -o CertificateFile=… -o IdentitiesOnly=yes` with the rest of the arguments, deletes both
+  when it exits, and exits with ssh's code. A person never handles the key. Hosts the project's
+  SSH CAs sign are trusted by their CA (their `@cert-authority` lines are added after the user's own
+  `known_hosts`, which keeps any host the user accepts), so there's no "trust this host?" on first
+  use. `--key` and `sign-user` read only a public key line: given a private key's path they read
+  `<path>.pub`, and anything else is refused before it leaves the machine.
+- **A key you already have** (in an agent, on a hardware token): `POST …/ssh-cas/{id}/sign-user
+  {public_key, principals, ttl_minutes?}` (`reveal`, as resolving an SSH link is, since a certificate
+  is a login, and `write`, since otherwise a principal comes only from a link a writer made;
+  audited, and refused if the audit row can't be written; `roll secrets ssh-cas sign-user NAME ~/.ssh/id_ed25519.pub --principal
+  deploy`) certifies its public key for logins the CA allows, 60 minutes by default and the CA's
+  `max_hours` at most; only the public key comes to roll. `roll ssh --key ~/.ssh/id_ed25519.pub
+  --ca ops --principal deploy -- deploy@host` does it per session (the private file next to it,
+  or else the agent's matching key). Checked with OpenSSH 10: an RSA key held only in `ssh-agent`
+  logged in to a real `sshd` as `deploy` with roll's certificate, and not as `root`.
+- **Host certificates**, as Vault's SSH engine signs host keys: an SSH CA with `host_domains`
+  (`--host-domain svc.internal`, a domain of the project's own: a top-level or common public
+suffix such as `com`, `co.uk` or `github.io` is refused (from a built-in list of the common ones, not the whole Public Suffix List: signing hosts is an admin's, and a CA's `@cert-authority` line only reaches clients that add it); `max_host_days`, 90 by default, 397 at most) signs a server's own
+  public key for its names. `POST …/ssh-cas/{id}/sign-host {public_key, hosts, days?}` (admin, since
+  a host certificate lets a server stand in for those names; audited; `roll secrets ssh-cas
+  sign-host NAME /etc/ssh/ssh_host_ed25519_key.pub --host db1.svc.internal`) takes the key line
+  (Ed25519, ECDSA P-256/384/521, or RSA of 2048–16384 bits, parsed with bounds), checks each name is
+  under a host domain (a `*.` one level under one too), and answers the `…-cert-v01@openssh.com`
+  line for sshd's `HostCertificate` and the `known_hosts` line clients add: `@cert-authority
+  *.svc.internal,svc.internal ssh-ed25519 …` (`roll secrets ssh-cas known-hosts NAME`, the CA's row
+  in the Integrations tab). The server's key never leaves it. A CA may sign users, hosts or both.
+  Checked against OpenSSH 10: `ssh-keygen -L` reads all three key types' certificates as host
+  certificates, and `ssh -o StrictHostKeyChecking=yes` with only the `@cert-authority` line accepts
+  a real `sshd`'s Ed25519, ECDSA and RSA host certificates and refuses another name (`Host key
+  verification failed`).
+
 ## Consumption
 
 ### `roll secrets` and `roll run`
@@ -648,7 +702,11 @@ roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
 roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain]
                      | certs ID | revoke ID SERIAL | rm ID
+roll secrets ssh-cas ls | add NAME [--principal P…] [--max-hours N] [--host-domain D…] [--max-host-days N] | key ID
+                     | sign-host ID [KEY.pub|-] --host H… [--days N] | known-hosts ID
+                     | sign-user ID KEY.pub --principal P… [--ttl-minutes N] | rm ID
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
+roll ssh [-p project] [-e production] [--cert SSH_CERT] [--identity SSH_KEY] -- <ssh arguments…>
 ```
 
 - The project is `-p`/`ROLL_PROJECT` (a name or id), the environment `-e`/`ROLL_ENV`, the path
@@ -1493,6 +1551,11 @@ isn't in the workspace is 404.
 | `POST /v1/secrets/ocsp/{id}` | an OCSP request (DER) | an OCSP response (`application/ocsp-response`); no token |
 | `GET /v1/secrets/ocsp/{id}/{request}` | | the same, the request base64 and URL-encoded (RFC 6960 A.1); no token |
 | `POST /cas/{id}/sign` | `{csr, days?, ttl_minutes?}` | `{certificate, ca, serial, names, not_after}` (`write`, audited); 400 for a name outside the policy or a lifetime past `max_days` |
+| `GET /ssh-cas` | | `SshCa[]` (`read` on the project; public keys, never private ones) |
+| `POST /ssh-cas` | `{name, principals, max_hours?, host_domains?, max_host_days?}` | 201 `SshCa` (`admin`) |
+| `DELETE /ssh-cas/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `POST /ssh-cas/{id}/sign-user` | `{public_key, principals, ttl_minutes?}` | `{certificate, serial, principals, valid_before}` (`reveal`, audited) |
+| `POST /ssh-cas/{id}/sign-host` | `{public_key, hosts, days?}` | `{certificate, known_hosts, serial, hosts, valid_before}` (`admin`, audited); 400 for a name outside `host_domains` or a weak key |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
 

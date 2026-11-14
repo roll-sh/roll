@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SignedCertificate, CaCertificate, Ca, Finding, ProjectFindings, SyncPreview, FileDiff } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, Ca, SshCa, HostCertificate, UserCertificate, Finding, ProjectFindings, SyncPreview, FileDiff, SignedCertificate, CaCertificate } from "@roll/secrets/types";
 import { withSession } from "./code-token";
 import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 
@@ -205,6 +205,14 @@ export function secretsApi(project: string) {
     cas: () => req<Ca[]>("GET", `${P}/cas`),
     addCa: (c: { name: string; domains: string[]; allow_ip?: boolean; max_days?: number }) => req<Ca>("POST", `${P}/cas`, c),
     deleteCa: (id: string) => req<null>("DELETE", `${P}/cas/${enc(id)}`),
+    /** SSH CAs (ssh links): servers trust their public keys. */
+    sshCas: () => req<SshCa[]>("GET", `${P}/ssh-cas`),
+    addSshCa: (c: { name: string; principals: string[]; max_hours?: number; host_domains?: string[]; max_host_days?: number }) => req<SshCa>("POST", `${P}/ssh-cas`, c),
+    /** Certify a person's own key (its public half) for logins the CA allows (reveal). */
+    signUserKey: (id: string, b: { public_key: string; principals: string[]; ttl_minutes?: number }) => req<UserCertificate>("POST", `${P}/ssh-cas/${enc(id)}/sign-user`, b),
+    /** Sign a server's host key for names under the CA's host domains (admin). */
+    signHostKey: (id: string, b: { public_key: string; hosts: string[]; days?: number }) => req<HostCertificate>("POST", `${P}/ssh-cas/${enc(id)}/sign-host`, b),
+    deleteSshCa: (id: string) => req<null>("DELETE", `${P}/ssh-cas/${enc(id)}`),
     /** Sign a CSR within the CA's policy: only its key and subjectAltName names are taken. */
     signCsr: (id: string, csr: string, days?: number) => req<SignedCertificate>("POST", `${P}/cas/${enc(id)}/sign`, { csr, days }),
     caCertificates: (id: string) => req<CaCertificate[]>("GET", `${P}/cas/${enc(id)}/certificates`),

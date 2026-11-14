@@ -13,6 +13,7 @@ base64.workspace = true
 bytes.workspace = true
 code-sql.workspace = true
 curve25519-dalek.workspace = true
+ed25519-dalek.workspace = true
 getrandom.workspace = true
 hkdf.workspace = true
 hmac.workspace = true

@@ -30,6 +30,7 @@ pub mod links;
 pub mod names;
 pub mod ocsp;
 pub mod pki;
+pub mod ssh;
 mod oidc;
 mod read;
 pub mod refs;
@@ -395,6 +396,7 @@ impl Secrets {
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
         db.ensure_schema(pki::SCHEMA)?;
+        db.ensure_schema(ssh::SCHEMA)?;
         // Rotators are a link kind of roll secrets' own: they call out through rolld.
         let mut links = opts.links;
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
@@ -405,6 +407,7 @@ impl Secrets {
         let crls = pki::Crls::default();
         if let Ok(keys) = &opts.keyring {
             links.register(Arc::new(pki::Provider { db: db.clone(), keys: keys.clone(), public_api: public_api.clone(), crls: crls.clone() }));
+            links.register(Arc::new(ssh::Provider { db: db.clone(), keys: keys.clone() }));
         }
         Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), public_api, crls })
     }
@@ -518,7 +521,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators", "cas", "ca_certs"];
+const REGISTRIES: &[&str] = &["rotators", "cas", "ca_certs", "ssh_cas"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked, and no
 /// certificate its CAs revoked is still within its lifetime (their CRLs, signed with the CA's key,

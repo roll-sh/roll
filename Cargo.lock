@@ -6843,6 +6843,7 @@ dependencies = [
  "code-sql",
  "curve25519-dalek",
  "der",
+ "ed25519-dalek",
  "getrandom 0.4.3",
  "hkdf",
  "hmac 0.12.1",
