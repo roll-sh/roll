@@ -690,6 +690,20 @@ impl apps_control::integrations::SecretSource for ForApps {
 
     /// apps' `…/variables/values` shows secrets' values: only to whoever may reveal `env` by roll
     /// secrets' own rules (a token's scope, a person's own projects, protected environments).
+    /// The environment's digest (versions and keyed fingerprints, nothing decrypted): apps keeps
+    /// it with each live deployment and says when the secrets changed since. None for a project
+    /// or environment roll secrets doesn't have.
+    async fn digest(&self, project: &str, env: &str) -> anyhow::Result<Option<String>> {
+        let Some((secrets, _)) = self.0.get().cloned() else { return Ok(None) };
+        let (project, env) = (project.to_string(), env.to_string());
+        tokio::task::spawn_blocking(move || match secrets.digest(&project, &env, "/", &roll_secrets::Caller::consumer("roll:apps")) {
+            Ok(d) => Ok(Some(d)),
+            Err(roll_secrets::Error::NotFound(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        })
+        .await?
+    }
+
     async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, project: &str, env: &str) -> bool {
         let Some((secrets, _)) = self.0.get().cloned() else { return false };
         match secrets.caller_of(who.operator, who.user, who.grant) {
@@ -850,6 +864,16 @@ mod tests {
         // The read is the service's in the audit log.
         let audit = secrets.audit(&project, roll_secrets::AuditFilter::default(), &roll_secrets::Caller::operator()).unwrap();
         assert!(audit.iter().any(|a| a.actor == "app:svc_web"), "{audit:?}");
+        // Apps learns a deploy's secrets changed since: the digest moves with a value, nothing
+        // decrypted, and there's none for an environment roll secrets doesn't have.
+        let before = apps.digest(&project, "production").await.unwrap().expect("a digest");
+        let set = axum::http::Request::put(format!("/v1/secrets/projects/{project}/environments/production/secrets/DB_URL"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(json!({ "value": "postgres://db/shop2" }).to_string()))
+            .unwrap();
+        assert!(roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap().status().is_success());
+        assert_ne!(apps.digest(&project, "production").await.unwrap(), Some(before));
+        assert_eq!(apps.digest(&project, "pr-9").await.unwrap(), None);
     }
 
     /// A KMS that decrypts one ciphertext, and only with roll secrets' encryption context.
