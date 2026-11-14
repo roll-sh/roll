@@ -128,9 +128,11 @@ async fn every_control_plane_route_needs_the_operator_token() {
     let routes = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
     // And how the permission catalogue classifies it for scoped tokens: `scoped=postgres`.
     let scoped = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
+    // And the methods each serves: `methods=GET,POST` (`*`: a nested service).
+    let methods = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
     let output = Arc::new(Mutex::new(String::new()));
     for pipe in [Box::new(child.stdout.take().unwrap()) as Box<dyn std::io::Read + Send>, Box::new(child.stderr.take().unwrap())] {
-        let (routes, scoped, output) = (routes.clone(), scoped.clone(), output.clone());
+        let (routes, scoped, methods, output) = (routes.clone(), scoped.clone(), methods.clone(), output.clone());
         std::thread::spawn(move || {
             for line in BufReader::new(pipe).lines().map_while(Result::ok) {
                 if line.contains("rolld::auth")
@@ -139,6 +141,8 @@ async fn every_control_plane_route_needs_the_operator_token() {
                     && let Some((route, rest)) = rest.split_once(" scoped=")
                     && let Some((class, access)) = rest.split_once(" access=")
                 {
+                    let (access, served) = access.split_once(" methods=").unwrap_or((access, "*"));
+                    methods.lock().unwrap().push((host.to_string(), route.to_string(), served.trim().to_string()));
                     routes.lock().unwrap().push((host.to_string(), route.to_string(), access.trim().to_string()));
                     scoped.lock().unwrap().push((host.to_string(), route.to_string(), class.trim().to_string()));
                 }
@@ -307,6 +311,7 @@ async fn every_control_plane_route_needs_the_operator_token() {
         ("/v1/code/agents/shares/{id}", "public shares"),
         ("/v1/code/mcp", "roll code's own MCP server: grants use /v1/mcp"),
         ("/v1/code/review-apps", "review apps: their own tokens"),
+        ("/v1/apps/hooks", "apps' deploy hooks: the secret in the URL"),
         ("/v1/code/names", "public name lookups"),
         ("/v1/apps/hooks", "deploy hooks: the secret in the URL"),
         ("/v1/accounts", "people's accounts: sign-in, sessions and invites are a person's, never a token's"),
@@ -319,6 +324,28 @@ async fn every_control_plane_route_needs_the_operator_token() {
         .map(|(_, r, _)| r.clone())
         .collect();
     assert!(unscoped.is_empty(), "routes no scoped token can be classified for (add catalogue rows in roll-access): {unscoped:#?}");
+    // A method a prefix row decides (no row of the route's own names it) takes the prefix's action,
+    // whatever it answers: each was looked at, and a new one is (a GET that answers values is
+    // reveal; the env of a preview was read until it was). Public routes aren't a grant's.
+    let public: Vec<String> = routes.iter().filter(|(h, _, a)| h == "api" && a.starts_with("public:")).map(|(_, r, _)| r.clone()).collect();
+    let mut unreviewed: Vec<String> = Vec::new();
+    for (h, r, served) in methods.lock().unwrap().iter() {
+        if h != "api" || public.contains(r) {
+            continue;
+        }
+        let list: Vec<&str> = if served == "*" { vec!["GET", "POST", "PUT", "PATCH", "DELETE"] } else { served.split(',').collect() };
+        for m in list {
+            if roll_access::catalog::method_by_prefix(m, r) && !roll_access::catalog::prefix_reviewed(m, r) {
+                unreviewed.push(format!("{m} {r}"));
+            }
+        }
+    }
+    unreviewed.sort();
+    unreviewed.dedup();
+    assert!(
+        unreviewed.is_empty(),
+        "methods decided only by a prefix row that nobody looked at: give each its own catalogue row (a GET whose answer holds a credential is reveal; changing what production runs is deploy), or add its `METHOD route` line to crates/roll-access/src/prefix-reviewed.txt: {unreviewed:#?}"
+    );
     // A token with every action on everything works where the operator's does.
     let made: serde_json::Value = http
         .post(format!("{api}/v1/access/tokens"))
@@ -337,6 +364,23 @@ async fn every_control_plane_route_needs_the_operator_token() {
         let body = resp.text().await.unwrap_or_default();
         assert_eq!(status, 200, "GET {path} with a full scoped token: {body}");
     }
+    // Every product this rolld serves routes for has its tools on MCP: one without a ROLL_PRODUCTS
+    // switch of its own (previews, with roll code) once went unlisted.
+    let served: std::collections::BTreeSet<String> = scoped.lock().unwrap().iter().filter(|(h, _, c)| h == "api" && roll_auth::scope::PRODUCTS.contains(&c.as_str())).map(|(_, _, c)| c.clone()).collect();
+    let list: serde_json::Value = http
+        .post(format!("{api}/v1/mcp"))
+        .header("authorization", &operator)
+        .header("accept", "application/json")
+        .json(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let listed: std::collections::BTreeSet<&str> = list["result"]["tools"].as_array().expect("tools").iter().filter_map(|t| t["_meta"]["roll/product"].as_str()).collect();
+    let missing: Vec<&String> = served.iter().filter(|p| !listed.contains(p.as_str())).collect();
+    assert!(missing.is_empty(), "products rolld serves with no MCP tools listed (rolld's MCP product list leaves them out): {missing:?}");
 
     // CORS: the dashboard's origin, nobody else's.
     let preflight = |origin: &'static str| {

@@ -10,6 +10,7 @@ publish.workspace = true
 axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
+chrono.workspace = true
 code-sql.workspace = true
 crc32fast.workspace = true
 futures.workspace = true

@@ -11,6 +11,7 @@ import {
   presetRules,
   productName,
   rulesOf,
+  SUB_RESOURCES,
   type Action,
   type Catalog,
   type Draft,
@@ -45,14 +46,17 @@ export function Builder({
   const ws = useWorkspace();
   const draft = draftOf(rules);
   const [preset, setPreset] = useState<string | null>(null);
-  const products = ["*", ...catalog.products];
+  // What this rolld runs, and any product the rules name already (so editing never drops one).
+  const products = ["*", ...catalog.products, ...rules.map((r) => r.product).filter((p) => p !== "*" && !catalog.products.includes(p))].filter((p, i, all) => all.indexOf(p) === i);
   // Every product's resources by name, for "only these" (what this rolld runs).
-  const [inventory, setInventory] = useState<Record<string, { id: string; name: string }[]>>({});
+  const [canvas, setCanvas] = useState<Record<string, { id: string; name: string }[]>>({});
   useEffect(() => {
     loadInventory()
-      .then((inv) => setInventory(resourcesByProduct(inv)))
+      .then((inv) => setCanvas(resourcesByProduct(inv)))
       .catch(() => {});
   }, []);
+  // Secrets' resources are the workspace's projects themselves (no canvas kind of their own).
+  const inventory = { ...canvas, secrets: ws.projects.map((p) => ({ id: p.id, name: p.name })) };
 
   const apply = (p: Preset) => {
     setPreset(p.id);
@@ -275,7 +279,7 @@ function Pick({ product, chosen, known, onChange }: { product: string; chosen: s
           ))}
         </div>
       )}
-      {product === "search" && known.map((k) => <Indices key={k.id} cluster={k} chosen={chosen} toggle={toggle} />)}
+      {PARTS[product] && known.map((k) => <Parts key={k.id} product={product} of={k} chosen={chosen} toggle={toggle} />)}
       <form
         className="flex flex-wrap items-center gap-1.5"
         onSubmit={(e) => {
@@ -293,8 +297,14 @@ function Pick({ product, chosen, known, onChange }: { product: string; chosen: s
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder={product === "search" ? "cl_… or cl_…/logs-*" : "Add by id"}
-          title={product === "search" ? "A cluster, or some of its indices: cl_…/logs-* (only through their index routes)" : undefined}
+          placeholder={product === "search" ? "cl_… or cl_…/logs-*" : product === "secrets" ? "prj_… or prj_…/key" : "Add by id"}
+          title={
+            product === "search"
+              ? "A cluster, or some of its indices: cl_…/logs-* (only through their index routes)"
+              : product === "secrets"
+                ? "A project, or some of its encryption keys: prj_…/payments or prj_…/pay-* (only through their own routes: encrypt, sign, HMAC)"
+                : undefined
+          }
           className={`${input} h-7 w-44 font-mono text-[11px]`}
           aria-label={`${productName(product)} resource ids`}
         />
@@ -303,25 +313,42 @@ function Pick({ product, chosen, known, onChange }: { product: string; chosen: s
   );
 }
 
+/** Named parts of a resource a rule can narrow to (`SUB_RESOURCES`): what each is, and how to list them. */
+const PARTS: Record<string, { one: string; note: string; load: (id: string) => Promise<string[]> }> = {
+  // Listing a cluster's indices wakes it, so it waits until asked.
+  search: {
+    one: "index",
+    note: "a token with only these reaches them through their index routes, never the cluster itself.",
+    load: (id) => accessApi.searchIndices(id).then((l) => l.map((i) => i.index).filter((n) => !n.startsWith("."))),
+  },
+  secrets: {
+    one: "key",
+    note: "a token with only these uses them (encrypt, decrypt, sign, verify), never the project's secrets or other keys.",
+    load: (id) => accessApi.encryptionKeys(id).then((l) => l.map((k) => k.name)),
+  },
+};
+
 /**
- * Some indices of a search cluster, ticked by name (`cl_1/logs-a`): loaded when opened, since
- * listing them wakes the cluster. A pattern (`cl_1/logs-*`) is typed in "Add by id".
+ * Some named parts of a resource, ticked by name (`cl_1/logs-a`, `prj_1/payments`): loaded when
+ * opened. A pattern (`cl_1/logs-*`) is typed in "Add by id".
  */
-function Indices({ cluster, chosen, toggle }: { cluster: { id: string; name: string }; chosen: string[]; toggle: (id: string) => void }) {
+function Parts({ product, of, chosen, toggle }: { product: string; of: { id: string; name: string }; chosen: string[]; toggle: (id: string) => void }) {
   const [names, setNames] = useState<string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const parts = PARTS[product];
+  const kind = SUB_RESOURCES[product];
   const load = () => {
     setError(null);
-    accessApi
-      .searchIndices(cluster.id)
-      .then((l) => setNames(l.map((i) => i.index).filter((n) => !n.startsWith(".")).sort()))
+    parts
+      .load(of.id)
+      .then((l) => setNames(l.sort()))
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   };
   if (names === null) {
     return (
       <p className="text-[11px] text-subtle">
         <button type="button" onClick={load} className="text-accent hover:underline">
-          Only some indices of {cluster.name}…
+          Only some {kind} of {of.name}…
         </button>
         {error && <span className="text-danger"> {error}</span>}
       </p>
@@ -330,15 +357,15 @@ function Indices({ cluster, chosen, toggle }: { cluster: { id: string; name: str
   return (
     <div className="space-y-1">
       <p className="text-[11px] text-subtle">
-        Indices of {cluster.name}: a token with only these reaches them through their index routes, never the cluster itself.
+        {kind[0].toUpperCase() + kind.slice(1)} of {of.name}: {parts.note}
       </p>
       <div className="flex flex-wrap gap-1.5">
-        {names.length === 0 && <span className="text-[11px] text-subtle">No indices yet.</span>}
+        {names.length === 0 && <span className="text-[11px] text-subtle">None yet.</span>}
         {names.map((n) => {
-          const id = `${cluster.id}/${n}`;
+          const id = `${of.id}/${n}`;
           return (
             <label key={id} className={`flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-[11px] ${chosen.includes(id) ? "border-fg/40 text-fg" : "border-line text-muted"}`}>
-              <input type="checkbox" checked={chosen.includes(id)} onChange={() => toggle(id)} className="size-3" aria-label={`${cluster.name} index ${n}`} />
+              <input type="checkbox" checked={chosen.includes(id)} onChange={() => toggle(id)} className="size-3" aria-label={`${of.name} ${parts.one} ${n}`} />
               {n}
             </label>
           );

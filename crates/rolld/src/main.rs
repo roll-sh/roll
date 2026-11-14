@@ -507,11 +507,22 @@ async fn run() -> anyhow::Result<()> {
     let accounts = accounts::open(&args, &home, code.as_ref().map(|c| c.code.clone()), !auth.enforcing()).await?;
     auth.sessions(accounts.sessions(), &accounts.config().api_url);
     router = router.merge(roll_accounts::router(accounts));
+    // The products this node runs, as rules name them: MCP lists their tools, the token builder
+    // offers them.
+    let mut mcp_products: Vec<String> = Product::ALL.into_iter().filter(|p| on.on(*p)).map(|p| p.name().to_string()).collect();
+    if on.on(Product::Code) {
+        mcp_products.push("agents".into());
+    }
+    // roll previews runs with roll code (no switch of its own).
+    if preview_hosts.is_some() {
+        mcp_products.push("previews".into());
+    }
     // Scoped tokens, approvals, audit and OAuth (access.rs): the evaluator joins the gate.
     let access = access::open(
         &args,
         &home,
         &auth,
+        &mcp_products,
         access::Products {
             postgres: postgres.as_ref().map(|p| p.control.clone()),
             redis: redis.as_ref().map(|r| r.control.clone()),
@@ -524,6 +535,9 @@ async fn run() -> anyhow::Result<()> {
         workspace,
     )?;
     router = router.merge(roll_access::api::router(access.clone()));
+    // A grant's rate is shared among the nodes serving requests (each enforces its share).
+    let nodes = cluster.clone();
+    let _ = access.nodes.set(Box::new(move || nodes.nodes().len()));
     // apps' deploy hooks found leaked (`rlk_`) stop working, like tokens.
     if let Some(a) = &apps {
         let apps = a.apps.clone();
@@ -538,10 +552,6 @@ async fn run() -> anyhow::Result<()> {
         access::leaks(&access, &c.code);
     }
     // roll's MCP server: each tool call is a request through the gated API.
-    let mut mcp_products: Vec<String> = Product::ALL.into_iter().filter(|p| on.on(*p)).map(|p| p.name().to_string()).collect();
-    if on.on(Product::Code) {
-        mcp_products.push("agents".into());
-    }
     let tool_sets: Vec<std::sync::Arc<dyn roll_mcp::ToolSet>> = match &code {
         Some(_) => vec![std::sync::Arc::new(access::CodeTools)],
         None => Vec::new(),

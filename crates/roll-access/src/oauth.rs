@@ -114,8 +114,36 @@ fn reg_error(code: &'static str, desc: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": code, "error_description": desc }))).into_response()
 }
 
+/// Registrations from one network (/24, /48) a minute at most, on a node: registration is open.
+const REGISTER_PER_MINUTE: u32 = 20;
+
 /// RFC 7591: open registration of public clients (PKCE, no secret).
-async fn register(State(a): S, body: axum::body::Bytes) -> Response {
+async fn register(State(a): S, req: axum::extract::Request) -> Response {
+    let ip = crate::evaluate::client_ip(&req, &a.config);
+    let network = ip.and_then(|i| crate::store::network_of(&i.to_string())).unwrap_or_else(|| "unknown".into());
+    {
+        let now = code_sql::now_ms();
+        let minute_ago = now - 60_000;
+        let mut seen = a.registrations.lock().unwrap_or_else(|e| e.into_inner());
+        // Networks with nothing in the last minute go once a minute; the map holds at most 10,000
+        // and refuses the rest.
+        if seen.swept < minute_ago {
+            seen.by.retain(|_, times| times.back().is_some_and(|t| *t > minute_ago));
+            seen.swept = now;
+        }
+        if !seen.by.contains_key(&network) && seen.by.len() >= 10_000 {
+            return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "60")], Json(json!({ "error": "too_many_requests", "error_description": "too many registrations lately: try again in a minute" }))).into_response();
+        }
+        let times = seen.by.entry(network).or_default();
+        while times.front().is_some_and(|t| *t <= minute_ago) {
+            times.pop_front();
+        }
+        if times.len() >= REGISTER_PER_MINUTE as usize {
+            return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "60")], Json(json!({ "error": "too_many_requests", "error_description": "too many registrations from this network: try again in a minute" }))).into_response();
+        }
+        times.push_back(now);
+    }
+    let Ok(body) = axum::body::to_bytes(req.into_body(), (16 << 10) + 1).await else { return reg_error("invalid_client_metadata", "the registration is too large") };
     if body.len() > 16 << 10 {
         return reg_error("invalid_client_metadata", "the registration is too large");
     }
@@ -129,7 +157,10 @@ async fn register(State(a): S, body: axum::body::Bytes) -> Response {
     if r.grant_types.as_ref().is_some_and(|g| g.iter().any(|t| t != "authorization_code" && t != "refresh_token")) {
         return reg_error("invalid_client_metadata", "grant_types: authorization_code and refresh_token");
     }
-    let name: String = r.client_name.as_deref().map(str::trim).filter(|n| !n.is_empty()).unwrap_or("MCP client").chars().filter(|c| !c.is_control()).take(80).collect();
+    // A name as consent and agents show it: no control or invisible characters, no backticks, at
+    // most 64 (what a token's name may be).
+    let cleaned: String = r.client_name.as_deref().unwrap_or("").chars().filter(|c| shown(*c)).take(64).collect();
+    let name = if cleaned.trim().is_empty() { "MCP client".to_string() } else { cleaned.trim().to_string() };
     let uri = r.client_uri.filter(|u| u.starts_with("https://") && u.len() <= 500);
     let uris = r.redirect_uris.clone();
     let client = match tokio::task::spawn_blocking(move || a.store.register_client(&name, uri.as_deref(), &uris)).await {
@@ -205,7 +236,7 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
         return Err(Error::BadRequest("redirect_uri isn't one the client registered".into()));
     }
     a.check_policy(c.expires_at)?;
-    let new = NewGrant { name: c.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| client.name.clone()), rules: c.rules.clone(), expires_at: c.expires_at, ip_allow: c.ip_allow.clone(), rate_per_minute: c.rate_per_minute, ask_otherwise: c.ask_otherwise };
+    let new = NewGrant { name: c.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| client.name.clone()), rules: c.rules.clone(), expires_at: c.expires_at, not_before: None, ip_allow: c.ip_allow.clone(), rate_per_minute: c.rate_per_minute, ask_otherwise: c.ask_otherwise };
     let (a2, cl, uri, ch, res, by) = (a.clone(), client.clone(), c.redirect_uri.clone(), c.code_challenge.clone(), Some(resource(&a)), crate::api::actor(&ext));
     let code = tokio::task::spawn_blocking(move || a2.store.issue_code(&cl, &new, &by, &uri, &ch, res.as_deref())).await.map_err(|e| Error::Internal(e.to_string()))??;
     let mut redirect = url::Url::parse(&c.redirect_uri).map_err(|_| Error::BadRequest("redirect_uri isn't a URL".into()))?;
@@ -286,7 +317,7 @@ pub async fn fetch_metadata(id: &str, allow_private: bool) -> Result<crate::stor
     if redirect_uris.is_empty() || redirect_uris.len() > 10 || !redirect_uris.iter().all(|u| redirect_ok(u)) {
         return Err("the client's metadata needs 1-10 redirect_uris, each https, http on localhost, or an app scheme".into());
     }
-    let name: String = doc["client_name"].as_str().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(url.host_str().unwrap_or("MCP client")).chars().filter(|c| !c.is_control()).take(80).collect();
+    let name: String = doc["client_name"].as_str().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(url.host_str().unwrap_or("MCP client")).chars().filter(|c| shown(*c)).take(80).collect();
     let uri = doc["client_uri"].as_str().filter(|u| u.starts_with("https://") && u.len() <= 500).map(str::to_string);
     Ok(crate::store::Client { id: id.to_string(), name, uri, redirect_uris, created_at: code_sql::now_ms(), last_used_at: None })
 }
@@ -331,7 +362,7 @@ async fn token(State(a): S, headers: HeaderMap, Form(f): Form<HashMap<String, St
         }
         Some("refresh_token") => {
             let Some(refresh) = get("refresh_token") else { return Error::OAuth("invalid_request", "refresh_token is required".into()).into_response() };
-            tokio::task::spawn_blocking(move || a.store.refresh(&refresh, &client_id)).await
+            tokio::task::spawn_blocking(move || a.store.refresh(&refresh, &client_id, a.config.refresh_grace.as_millis() as i64)).await
         }
         _ => return Error::OAuth("unsupported_grant_type", "grant_type is authorization_code or refresh_token".into()).into_response(),
     };
@@ -348,6 +379,15 @@ async fn revoke(State(a): S, Form(f): Form<HashMap<String, String>>) -> Response
         let _ = tokio::task::spawn_blocking(move || a.store.revoke_secret(&t)).await;
     }
     StatusCode::OK.into_response()
+}
+
+/// Whether a client's name keeps `c`: not a control character, a backtick, or one a person can't
+/// see but a model reads (zero-width and bidi controls, tag characters smuggling ASCII, variation
+/// selectors hiding bytes).
+fn shown(c: char) -> bool {
+    !c.is_control()
+        && c != '`'
+        && !matches!(c as u32, 0x00AD | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2069 | 0xFE00..=0xFE0F | 0xFEFF | 0xE0000..=0xE007F | 0xE0100..=0xE01EF)
 }
 
 #[cfg(test)]

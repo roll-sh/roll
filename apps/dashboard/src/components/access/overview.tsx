@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import {
   accessApi,
   CLIENT_NAMES,
+  CLIENT_TOOL_LIMIT,
   CLIENT_WHERE,
   CLIENTS,
   describeRule,
@@ -13,6 +14,10 @@ import {
   type Checkup,
   productName,
   withToolsets,
+  KEEP_OLD,
+  startsLater,
+  toolsetCost,
+  type ToolsetCost,
   mcpUrl,
   reach,
   statusOf,
@@ -67,13 +72,22 @@ export function ConnectPanel({ token }: { token?: string }) {
   // Toolsets: only some products' tools, so the agent's context isn't spent on the rest.
   const [products, setProducts] = useState<string[]>([]);
   const [picked, setPicked] = useState<string[]>([]);
+  const [readonly, setReadonly] = useState(false);
+  const [costs, setCosts] = useState<ToolsetCost[]>([]);
   useEffect(() => {
     accessApi
       .catalog()
       .then((c) => setProducts(c.products.filter((p) => p !== "access")))
       .catch(() => {});
+    accessApi
+      .toolsetCosts()
+      .then(setCosts)
+      .catch(() => {});
   }, []);
-  const url = withToolsets(mcpUrl(), picked);
+  const cost = toolsetCost(costs, picked, readonly);
+  const limit = CLIENT_TOOL_LIMIT[client];
+  const over = limit && cost.tools > limit.tools;
+  const url = withToolsets(mcpUrl(), picked, readonly);
   const cfg = mcpConfig(client, url, token);
   return (
     <Panel
@@ -129,6 +143,16 @@ export function ConnectPanel({ token }: { token?: string }) {
             </div>
           </div>
         )}
+        {costs.length > 0 && (
+          <p className={`text-[12px] ${over ? "text-danger" : "text-subtle"}`} role={over ? "alert" : undefined}>
+            {cost.tools} tools · ~{cost.tokens.toLocaleString("en")} tokens of the agent's context before it does anything
+            {over && limit ? `. ${limit.note}: pick the products it needs.` : ""}
+          </p>
+        )}
+        <label className="flex items-center gap-2 text-[12px] text-muted">
+          <input type="checkbox" checked={readonly} onChange={(e) => setReadonly(e.target.checked)} className="accent-accent" />
+          Read-only: the client sees and runs only tools that read, whatever its token allows
+        </label>
         <p className="text-[13px] text-muted">{CLIENT_WHERE[client]}</p>
         <div className="relative rounded-lg border border-line bg-bg">
           <pre className="overflow-x-auto p-3 pr-10 font-mono text-[12px] leading-relaxed">{cfg.text}</pre>
@@ -281,11 +305,17 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
   const { copied, copy } = useCopy();
   const status = statusOf(g);
   const r = reach(g);
+  // A rotation can leave the old secret working for a while, so deployments switch first.
+  const [keepOld, setKeepOld] = useState(0);
+  const [kept, setKept] = useState(0);
+  const [rotating, setRotating] = useState(false);
   const rotate = async () => {
     setBusy(true);
     setError(null);
     try {
-      setSecret((await accessApi.rotate(g.id)).token);
+      setSecret((await accessApi.rotate(g.id, keepOld)).token);
+      setKept(keepOld);
+      setRotating(false);
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -329,7 +359,7 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
           </div>
           <p className="mt-1 truncate text-[12px] text-muted">{g.rules.map((x) => describeRule(x, projectName)).join("  ·  ")}</p>
           <p className="mt-1 font-mono text-[11px] text-subtle">
-            {g.id} · used {relative(g.last_used_at)}
+            {g.id} · {startsLater(g) ? `starts ${relative(startsLater(g))} · ` : ""}used {relative(g.last_used_at)}
             {g.last_used_ip ? ` from ${g.last_used_ip}` : ""} · {g.expires_at === null ? "never expires" : `expires ${relative(g.expires_at)}`}
             {g.ip_allow.length > 0 ? ` · only ${g.ip_allow.join(", ")}` : ""}
             {g.rate_per_minute ? ` · ${g.rate_per_minute.toLocaleString("en")}/min` : ""}
@@ -350,7 +380,7 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
               Edit
             </button>
             {g.kind === "token" && (
-              <button onClick={rotate} disabled={busy} className={btn} title="A new secret with the same rules; the old one stops at once">
+              <button onClick={() => setRotating((r) => !r)} disabled={busy} className={btn} aria-expanded={rotating} title="A new secret with the same rules">
                 Rotate
               </button>
             )}
@@ -370,13 +400,33 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
           </span>
         )}
       </div>
+      {rotating && !secret && (
+        <div className="rise mt-3 ml-6 flex flex-wrap items-center gap-2 text-[12px] text-muted">
+          A new secret, the same rules. The old one
+          <select value={keepOld} onChange={(e) => setKeepOld(Number(e.target.value))} className={`${input} h-7 text-[12px]`} aria-label="The old secret after rotating">
+            {KEEP_OLD.map((k) => (
+              <option key={k.s} value={k.s}>
+                {k.label}
+              </option>
+            ))}
+          </select>
+          <button onClick={rotate} disabled={busy} className={btn}>
+            Rotate now
+          </button>
+          <button onClick={() => setRotating(false)} className="text-subtle hover:text-fg">
+            Cancel
+          </button>
+        </div>
+      )}
       {secret && (
         <div className="rise mt-3 ml-6 space-y-1.5">
           <div className="flex items-center gap-1 rounded-lg border border-line bg-bg px-3 py-2">
             <code className="min-w-0 flex-1 truncate font-mono text-[12px]">{secret}</code>
             <CopyButton id={`rotated-${g.id}`} text={secret} copied={copied} onCopy={copy} />
           </div>
-          <p className="text-[12px] text-subtle">The new secret: copy it now. The old one stopped working.</p>
+          <p className="text-[12px] text-subtle">
+            The new secret: copy it now. {kept ? `The old one keeps working for ${KEEP_OLD.find((k) => k.s === kept)?.label.replace("works ", "")}.` : "The old one stopped working."}
+          </p>
         </div>
       )}
       {editing && (
