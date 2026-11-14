@@ -1012,23 +1012,17 @@ async fn a_due_retention_deletion_wakes_its_sleeping_cluster() {
 }
 
 /// A snapshot lifecycle policy's next run wakes its sleeping cluster, which takes the snapshot
-/// on schedule, as Elasticsearch's scheduler does.
+/// on schedule, as Elasticsearch's scheduler does, into the default repository every cluster
+/// has without setup.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_due_slm_run_wakes_its_sleeping_cluster() {
-    let repo = std::env::temp_dir().join(format!("roll-search-slm-{}", std::process::id()));
-    let path = repo.to_string_lossy().into_owned();
-    let e = env_with(|c| {
-        c.job_wake_interval = Some(std::time::Duration::from_millis(200));
-        c.node_settings.push(("path.repo".into(), path));
-    })
-    .await;
+    let e = env_with(|c| c.job_wake_interval = Some(std::time::Duration::from_millis(200))).await;
     let c = e.post("/v1/search/clusters", json!({"name": "snaps"})).await;
     let (user, pw) = creds(&c);
     let calls = [
         (reqwest::Method::PUT, "/_cluster/settings", json!({"persistent": {"slm.minimum_interval": "0s"}})),
-        (reqwest::Method::PUT, "/_snapshot/repo", json!({"type": "fs", "settings": {"location": "repo"}})),
         (reqwest::Method::PUT, "/docs/_doc/1?refresh=true", json!({"a": 1})),
-        (reqwest::Method::PUT, "/_slm/policy/p", json!({"schedule": "4s", "name": "<snap-{now/d}>", "repository": "repo"})),
+        (reqwest::Method::PUT, "/_slm/policy/p", json!({"schedule": "4s", "name": "<snap-{now/d}>", "repository": "found-snapshots"})),
     ];
     for (m, uri, body) in calls {
         let (s, v) = e.es(&user, &pw, m, uri, Some(body)).await;
@@ -1056,14 +1050,142 @@ async fn a_due_slm_run_wakes_its_sleeping_cluster() {
         assert_eq!(s, 200, "{v}");
         if v["p"]["stats"]["snapshots_taken"].as_i64() >= Some(1) {
             let name = v["p"]["last_success"]["snapshot_name"].as_str().unwrap().to_string();
-            let (s, v) = e.es(&user, &pw, reqwest::Method::GET, &format!("/_snapshot/repo/{name}"), None).await;
+            let (s, v) = e.es(&user, &pw, reqwest::Method::GET, &format!("/_snapshot/found-snapshots/{name}"), None).await;
             assert_eq!((s, &v["snapshots"][0]["metadata"]["policy"]), (200, &json!("p")), "{v}");
             break;
         }
         assert!(tokio::time::Instant::now() < deadline, "the policy never took its snapshot: {v}");
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    let _ = std::fs::remove_dir_all(&repo);
+}
+
+/// An S3-compatible bucket in memory (path-style requests): objects, `If-None-Match: *` writes,
+/// `ListObjectsV2`, and the access key each request was signed with.
+#[derive(Clone, Default)]
+struct MockBucket {
+    objects: Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
+    signed_by: Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
+}
+
+impl MockBucket {
+    async fn start() -> (String, MockBucket) {
+        let m = MockBucket::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let router = axum::Router::new().fallback(Self::handle).with_state(m.clone());
+        tokio::spawn(async move { axum::serve(listener, router).await });
+        (endpoint, m)
+    }
+
+    fn keys(&self, prefix: &str) -> Vec<String> {
+        self.objects.lock().unwrap().keys().filter(|k| k.starts_with(prefix)).cloned().collect()
+    }
+
+    async fn handle(axum::extract::State(m): axum::extract::State<MockBucket>, method: axum::http::Method, uri: axum::http::Uri, headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default();
+        if let Some(key) = auth.split("Credential=").nth(1).and_then(|c| c.split('/').next()) {
+            m.signed_by.lock().unwrap().insert(key.to_string());
+        }
+        let key = uri.path().strip_prefix("/backups").unwrap_or_default().trim_start_matches('/').to_string();
+        let mut objects = m.objects.lock().unwrap();
+        match method.as_str() {
+            "GET" if key.is_empty() => {
+                let query = uri.query().unwrap_or_default();
+                let prefix = query.split('&').find_map(|p| p.strip_prefix("prefix=")).unwrap_or_default().replace("%2F", "/");
+                let items: String = objects.iter().filter(|(k, _)| k.starts_with(&prefix)).map(|(k, v)| format!("<Contents><Key>{k}</Key><Size>{}</Size></Contents>", v.len())).collect();
+                format!("<ListBucketResult><IsTruncated>false</IsTruncated>{items}</ListBucketResult>").into_response()
+            }
+            "GET" => match objects.get(&key) {
+                Some(v) => v.clone().into_response(),
+                None => (axum::http::StatusCode::NOT_FOUND, "<Error><Code>NoSuchKey</Code><Message>no</Message></Error>").into_response(),
+            },
+            "PUT" if headers.get("if-none-match").is_some() && objects.contains_key(&key) => axum::http::StatusCode::PRECONDITION_FAILED.into_response(),
+            "PUT" => {
+                objects.insert(key, body.to_vec());
+                axum::http::StatusCode::OK.into_response()
+            }
+            "DELETE" => {
+                objects.remove(&key);
+                axum::http::StatusCode::NO_CONTENT.into_response()
+            }
+            _ => axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response(),
+        }
+    }
+}
+
+/// An `s3` repository in a tenant's bucket: credentials sign every request and are never shown,
+/// snapshots are incremental, another cluster registering the bucket restores them (ids,
+/// routing, versions and sequence numbers intact), deleting a snapshot keeps what a later one
+/// shares, and `_cleanup` removes what no snapshot references.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_s3_repository_moves_indices_between_clusters() {
+    let (endpoint, bucket) = MockBucket::start().await;
+    let e = env_with(|c| {
+        c.node_settings.push((search_control::S3_ALLOW_PRIVATE.into(), "true".into()));
+        c.sealer = search_control::Sealer::from_secret("0123456789abcdef0123456789abcdef");
+    })
+    .await;
+    let (ua, pa) = creds(&e.post("/v1/search/clusters", json!({"name": "src"})).await);
+    let (ub, pb) = creds(&e.post("/v1/search/clusters", json!({"name": "dst"})).await);
+    let repo = json!({"type": "s3", "settings": {
+        "bucket": "backups", "base_path": "prod", "endpoint": endpoint, "path_style_access": true,
+        "access_key": "AKIDTENANT", "secret_key": "tenant-secret-key",
+    }});
+    for i in 0..20 {
+        let (s, v) = e.es(&ua, &pa, reqwest::Method::PUT, &format!("/docs/_doc/{i}?routing=r{}", i % 3), Some(json!({"n": i, "text": "hello world"}))).await;
+        assert_eq!(s, 201, "{v}");
+    }
+    e.es(&ua, &pa, reqwest::Method::POST, "/docs/_refresh", None).await;
+    let (s, v) = e.es(&ua, &pa, reqwest::Method::PUT, "/_snapshot/backup", Some(repo.clone())).await;
+    assert_eq!(s, 200, "{v}");
+    for (s, v) in [e.es(&ua, &pa, reqwest::Method::GET, "/_snapshot/backup", None).await, e.es(&ua, &pa, reqwest::Method::GET, "/_cluster/state/metadata", None).await] {
+        assert_eq!(s, 200);
+        assert!(!v.to_string().contains("tenant-secret-key") && !v.to_string().contains("AKIDTENANT"), "credentials shown: {v}");
+    }
+    let (s, v) = e.es(&ua, &pa, reqwest::Method::PUT, "/_snapshot/backup/one?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
+    assert_eq!((s, v["snapshot"]["state"].as_str()), (200, Some("SUCCESS")), "{v}");
+    assert_eq!(bucket.signed_by.lock().unwrap().iter().cloned().collect::<Vec<_>>(), vec!["AKIDTENANT".to_string()]);
+
+    // A second snapshot after one more document uploads only the new segment.
+    let (s, _) = e.es(&ua, &pa, reqwest::Method::PUT, "/docs/_doc/20?routing=r2&refresh=true", Some(json!({"n": 20}))).await;
+    assert_eq!(s, 201);
+    let (s, v) = e.es(&ua, &pa, reqwest::Method::PUT, "/_snapshot/backup/two?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&ua, &pa, reqwest::Method::GET, "/_snapshot/backup/two/_status", None).await;
+    let stats = &v["snapshots"][0]["stats"];
+    assert!(stats["incremental"]["file_count"].as_i64() < stats["total"]["file_count"].as_i64(), "{v}");
+
+    // Another cluster finds both and restores the first, as it was.
+    let (s, v) = e.es(&ub, &pb, reqwest::Method::PUT, "/_snapshot/backup", Some(repo)).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&ub, &pb, reqwest::Method::GET, "/_snapshot/backup/_all", None).await;
+    let names: Vec<&str> = v["snapshots"].as_array().unwrap().iter().filter_map(|s| s["snapshot"].as_str()).collect();
+    assert_eq!(names, ["one", "two"], "{v}");
+    let (s, v) = e.es(&ub, &pb, reqwest::Method::POST, "/_snapshot/backup/one/_restore?wait_for_completion=true", Some(json!({}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&ub, &pb, reqwest::Method::GET, "/docs/_count", None).await;
+    assert_eq!(v["count"], 20, "{v}");
+    let (_, from) = e.es(&ua, &pa, reqwest::Method::GET, "/docs/_doc/7?routing=r1", None).await;
+    let (s, to) = e.es(&ub, &pb, reqwest::Method::GET, "/docs/_doc/7?routing=r1", None).await;
+    assert_eq!(s, 200, "{to}");
+    for k in ["_source", "_seq_no", "_version", "_primary_term", "_routing"] {
+        assert_eq!(from[k], to[k], "{k}: {from} vs {to}");
+    }
+
+    // Deleting the first keeps what the second shares; the second still restores whole.
+    let (s, v) = e.es(&ua, &pa, reqwest::Method::DELETE, "/_snapshot/backup/one", None).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&ub, &pb, reqwest::Method::POST, "/_snapshot/backup/two/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "docs2"}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&ub, &pb, reqwest::Method::GET, "/docs2/_count", None).await;
+    assert_eq!(v["count"], 21, "{v}");
+
+    // `_cleanup` deletes what no snapshot references.
+    bucket.objects.lock().unwrap().insert("prod/roll/indices/stray/0/0123456789abcdef0123456789abcdef-1.0.gz".into(), vec![0; 10]);
+    let (s, v) = e.es(&ua, &pa, reqwest::Method::POST, "/_snapshot/backup/_cleanup", None).await;
+    assert_eq!((s, v["results"]["deleted_blobs"].as_i64()), (200, Some(1)), "{v}");
+    assert!(bucket.keys("prod/roll/indices/stray/").is_empty());
 }
 
 /// ES|QL and SQL read as their client: an API key limited to one index (what roll secrets hands

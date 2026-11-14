@@ -219,6 +219,42 @@ without naming either. With no key they are stored as given, as Elasticsearch do
 Elasticsearch does without cluster state encryption. Users' passwords are hashes and API keys
 are kept as hashes, never sealed.
 
+## Snapshots
+
+- **Where they live.** A repository's snapshots are recorded with the cluster's metadata, keyed
+  by the repository's location, so registering it again finds them. In roll's own repositories
+  (`fs`, `url`, and the default repository) each snapshotted shard is a pin
+  (`search/c/<cluster>/p/snap.<snapshot>.<index>/<shard>.json`): a copy of its commit point
+  sharing the index's segments, so a snapshot copies no data and garbage collection keeps what a
+  pin names. Branches copy pins; deleting a cluster deletes them with it (segments a branch
+  shares stay).
+- **The default repository** (`found-snapshots`, `SearchConfig::default_repository`) is
+  registered in memory whenever a cluster with object storage opens or changes, never stored
+  once, so every cluster has it without a write, a branch sees its parent's snapshots there, and
+  an idle cluster costs nothing more (no policy of its own: a tenant's SLM policy wakes the
+  cluster only when due). It shows as an `s3` repository with client `roll`, a client no tenant
+  can name, and can't be changed or unregistered. A deleted cluster's snapshots go with it, as
+  its data does: no API could reach them, and backups meant to outlive a cluster go to an `s3`
+  repository in the tenant's own bucket.
+- **`s3` repositories** (`search-es` `api/snapshots/s3.rs`, client `s3.rs`) keep everything in
+  the tenant's bucket under `<base_path>/roll/`: the repository data at each generation
+  (`index-N`, written only if absent, so two clusters never commit the same generation), and per
+  shard snapshot the segments it read, each segment's live documents as gzipped records (id,
+  routing, source with its vectors, sequence number, primary term, version) keyed by the
+  segment id and live count, so later snapshots reuse what didn't change. The cluster keeps a
+  copy of the repository data, read again before each operation on the repository. A restore
+  parses those records with bounds and indexes them again; it never opens segment files from a
+  bucket. Taking a snapshot reads the open shards' searchers (a closed index's last commit,
+  pinned only while it is read), so nothing stays in roll's storage.
+- **Credentials.** Elasticsearch takes an `s3` client's keys from its keystore; a roll tenant
+  has none, so `access_key`, `secret_key` and `session_token` come with the repository's
+  settings and are moved out of them at once into the repository's sealed secrets (`seal.rs`,
+  the deployment's `ROLL_SECRET_KEY`), opened only to sign a request (SigV4), never returned by
+  `GET _snapshot` or the cluster state and never logged. Without credentials requests are
+  anonymous: roll's own credentials are never used for a tenant's bucket. The endpoint is a URL
+  the tenant chose: public addresses only (`roll_net::PublicOnly`, `literal_private_host`), no
+  redirects, no proxy, bounded reads (`--search-repository-allow-private` for local MinIO).
+
 ## On the fleet (roll cloud)
 
 Search runs on the same rolld fleet as every other product (docs/cloud/README.md): no image,

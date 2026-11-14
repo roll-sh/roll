@@ -32,6 +32,7 @@ pub mod query;
 pub mod remote;
 pub mod rest;
 pub mod routes;
+pub mod s3;
 pub mod scripting;
 pub mod search;
 pub mod seal;

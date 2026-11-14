@@ -124,3 +124,55 @@ async fn a_cluster_runs_on_its_owner_and_moves_on_a_drain() {
     let (s, v) = call(&http, reqwest::Method::GET, format!("{}/items/_count", other.rest), auth, None).await;
     assert_eq!((s, v["count"].as_i64()), (200, Some(4)), "{v}");
 }
+
+/// Every cluster on the fleet has roll's default repository: a snapshot lifecycle policy takes
+/// a snapshot into it with no setup, the snapshot restores on whichever node owns the cluster
+/// next, and the repository can't be unregistered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_default_repository_snapshots_and_restores_on_the_fleet() {
+    let leases = MemoryStore::new();
+    let objects = search_store::test_objects("fleet-snapshots");
+    let catalog = Arc::new(search_control::store::Store::memory().unwrap());
+    let a = node("a", &leases, &objects, &catalog).await;
+    let b = node("b", &leases, &objects, &catalog).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while a.cluster.nodes().len() != 2 || b.cluster.nodes().len() != 2 {
+        assert!(tokio::time::Instant::now() < deadline, "the nodes never saw each other");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let http = reqwest::Client::new();
+    let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "shop"}))).await;
+    assert_eq!(s, 200, "{c}");
+    let pw = c["password"].as_str().unwrap().to_string();
+    let auth = Some(("shop", pw.as_str()));
+    for i in 0..3 {
+        let (s, v) = call(&http, reqwest::Method::PUT, format!("{}/items/_doc/{i}?refresh=true", a.rest), auth, Some(json!({"n": i}))).await;
+        assert_eq!(s, 201, "{v}");
+    }
+    let (s, v) = call(&http, reqwest::Method::GET, format!("{}/_snapshot", b.rest), auth, None).await;
+    assert_eq!((s, v["found-snapshots"]["type"].as_str()), (200, Some("s3")), "{v}");
+
+    let policy = json!({"schedule": "0 30 1 * * ?", "name": "<nightly-{now/d}>", "repository": "found-snapshots", "config": {"indices": ["items"]}});
+    let (s, v) = call(&http, reqwest::Method::PUT, format!("{}/_slm/policy/nightly", b.rest), auth, Some(policy)).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = call(&http, reqwest::Method::PUT, format!("{}/_slm/policy/nightly/_execute", a.rest), auth, None).await;
+    assert_eq!(s, 200, "{v}");
+    let name = v["snapshot_name"].as_str().unwrap().to_string();
+    let (s, v) = call(&http, reqwest::Method::GET, format!("{}/_snapshot/found-snapshots/{name}", a.rest), auth, None).await;
+    assert_eq!((s, v["snapshots"][0]["state"].as_str(), v["snapshots"][0]["metadata"]["policy"].as_str()), (200, Some("SUCCESS"), Some("nightly")), "{v}");
+
+    // The owner drains; the next owner restores the deleted index from the snapshot.
+    let key = search_control::cluster::key("shop");
+    let (owner, other) = if a.cluster.owns(&key) { (&a, &b) } else { (&b, &a) };
+    owner.cluster.drain(Duration::from_secs(20)).await;
+    let (s, v) = call(&http, reqwest::Method::DELETE, format!("{}/items", other.rest), auth, None).await;
+    assert_eq!(s, 200, "{v}");
+    assert!(other.cluster.owns(&key), "the other node owns it now");
+    let (s, v) = call(&http, reqwest::Method::POST, format!("{}/_snapshot/found-snapshots/{name}/_restore?wait_for_completion=true", owner.rest), auth, Some(json!({}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = call(&http, reqwest::Method::GET, format!("{}/items/_count", owner.rest), auth, None).await;
+    assert_eq!((s, v["count"].as_i64()), (200, Some(3)), "{v}");
+
+    let (s, v) = call(&http, reqwest::Method::DELETE, format!("{}/_snapshot/found-snapshots", owner.rest), auth, None).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (400, Some("illegal_argument_exception")), "{v}");
+}

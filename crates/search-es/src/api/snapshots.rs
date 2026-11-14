@@ -24,6 +24,11 @@
 //! `SnapshotsInProgress` and `RestoreInProgress`). Without one they live with the process:
 //! after a restart a snapshot restores its metadata only.
 //!
+//! `s3` repositories ([`s3`]) keep their snapshots in a bucket the tenant names instead: shard
+//! contents are uploaded as documents and the repository data lives there, the cluster keeping
+//! a copy. roll's default repository ([`install_default_repository`]) is an `s3` repository on
+//! roll's side, kept like the others in the cluster's own storage.
+//!
 //! While a snapshot is being taken it is visible as Elasticsearch shows a `SnapshotsInProgress`
 //! entry: `IN_PROGRESS` to `GET _snapshot` (and `_current`), `STARTED` with per-shard stages to
 //! `_status`, and its name is taken. Each shard's files (what its copy references and what it
@@ -41,6 +46,9 @@ use crate::obj;
 use crate::rest::{Ctx, Reply};
 use crate::xcontent::filter::glob_match;
 use std::sync::Arc;
+
+mod s3;
+pub use s3::ALLOW_PRIVATE as S3_ALLOW_PRIVATE;
 
 /// The shard contents of this process's snapshots, by snapshot uuid and index name (one
 /// searcher per shard), and the snapshot operations running here.
@@ -377,7 +385,9 @@ async fn drop_unused_copies(
     }
     let st = cluster.state();
     let mut used: std::collections::HashSet<(&str, String)> = std::collections::HashSet::new();
-    for d in st.metadata.repository_data.values() {
+    // Snapshots in a tenant's bucket keep no copies here (a closed index's pin lasts only while
+    // it is uploaded).
+    for (_, d) in st.metadata.repository_data.iter().filter(|(k, _)| !crate::meta::snapshots::bucket_location(k)) {
         for s in &d.snapshots {
             used.extend(recorded_indices(s).into_iter().map(|(u, _)| (s.uuid.as_str(), u)));
         }
@@ -563,6 +573,7 @@ fn validate_repository(ctx: &Ctx, name: &str, ty: &str, settings: &Settings) -> 
             }
         }
         "url" => validate_url(ctx, name, settings, &paths),
+        "s3" => s3::validate(ctx.cluster, name, settings),
         other => Err(repository_exception(name, format!("repository type [{other}] does not exist for project [default]"))),
     }
 }
@@ -642,9 +653,20 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     };
     let Some(ty) = ty else { return Err(EsError::action_request_validation(&["type is missing".into()])) };
     validate_repository_name(&name)?;
+    if let Some(r) = managed(&ctx.state().metadata, &name) {
+        // Registering it again as it is changes nothing.
+        if r.ty == ty && r.settings == settings {
+            return Reply::acknowledged();
+        }
+        return Err(managed_error(&name));
+    }
+    let mut settings = settings;
     validate_repository(ctx, &name, &ty, &settings)?;
-    let _ = verify;
-    let repo = Repository { ty, settings };
+    let secrets = if ty == "s3" { s3::take_secrets(ctx.cluster, &mut settings) } else { Default::default() };
+    let repo = Repository { ty, settings, secrets };
+    // A bucket is checked once registered (a write, a read and a delete); a repository that
+    // fails stays registered, as on Elasticsearch, and the error is the answer.
+    let registered = (repo.in_bucket() && verify).then(|| (name.clone(), repo.clone()));
     ctx.cluster
         .update(move |st| {
             let default = default_repository(&st.metadata).map(str::to_string);
@@ -667,7 +689,35 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
             Ok(())
         })
         .await?;
+    // The snapshots already in the bucket show from now on.
+    if let Some((name, repo)) = registered {
+        s3::Bucket::open(ctx.cluster, &name, &repo)?.verify().await?;
+        s3::refresh(ctx.cluster, &name, &repo).await?;
+    }
     Reply::acknowledged()
+}
+
+/// Repository `name` when it is roll's default repository.
+fn managed<'a>(md: &'a Metadata, name: &str) -> Option<&'a Arc<Repository>> {
+    md.repositories.get(name).filter(|r| r.roll_managed())
+}
+
+fn managed_error(name: &str) -> EsError {
+    EsError::illegal_argument(format!("[{name}] is the cluster's default repository, managed by roll: it can't be changed or unregistered"))
+}
+
+/// Registers roll's default repository as `name` (the cluster's configured default; `None`:
+/// none), replacing a default registered under another name. Like the stack templates it is
+/// put back on open and on every state change rather than stored once, so every cluster has it
+/// without a write and a branch keeps seeing its parent's snapshots there (the location is the
+/// same in every cluster).
+pub fn install_default_repository(md: &mut Metadata, name: Option<&str>) {
+    let Some(name) = name.filter(|n| !n.is_empty()) else { return };
+    if md.repositories.get(name).is_some_and(|r| r.roll_managed()) && md.repositories.values().filter(|r| r.roll_managed()).count() == 1 {
+        return;
+    }
+    md.repositories.retain(|_, r| !r.roll_managed());
+    md.repositories.insert(name.to_string(), Arc::new(Repository::roll_default()));
 }
 
 /// Repository names matching the `{repository}` expressions (`_all`, `*`, wildcards,
@@ -716,7 +766,12 @@ pub async fn delete_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let exprs = ctx.list_param("repository").unwrap_or_default();
     ctx.cluster
         .update(move |st| {
-            let names = match_repositories(&st.metadata, &exprs)?;
+            let mut names = match_repositories(&st.metadata, &exprs)?;
+            // Named, roll's default repository can't go; wildcards pass over it.
+            if let Some(n) = exprs.iter().find(|e| managed(&st.metadata, e).is_some()) {
+                return Err(managed_error(n));
+            }
+            names.retain(|n| managed(&st.metadata, n).is_none());
             if names.is_empty() && !exprs.is_empty() && exprs.iter().all(|e| !e.contains('*') && e != "_all") {
                 return Err(repository_missing(&exprs[0]));
             }
@@ -760,13 +815,17 @@ fn ensure_no_mounted_indices(st: &ClusterState, repo: &str) -> EsResult<()> {
     ))
 }
 
-/// `POST _snapshot/{repository}/_verify`: every (the one) node can access it.
-pub fn verify_repository(ctx: &Ctx) -> EsResult<Reply> {
+/// `POST _snapshot/{repository}/_verify`: every (the one) node can access it (a bucket: a
+/// write, a read and a delete there).
+pub async fn verify_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
     let name = ctx.path_param("repository").unwrap_or_default();
     let st = ctx.state();
     if !st.metadata.repositories.contains_key(name) {
         return Err(repository_missing(name));
+    }
+    if let Some(r) = s3::bucket_repository(&st, name) {
+        s3::Bucket::open(ctx.cluster, name, &r)?.verify().await?;
     }
     let node = &ctx.cluster.node;
     let mut nodes = Map::new();
@@ -774,16 +833,24 @@ pub fn verify_repository(ctx: &Ctx) -> EsResult<Reply> {
     Reply::ok(obj! { "nodes" => Value::Obj(nodes) })
 }
 
-/// `POST _snapshot/{repository}/_cleanup`: nothing unreferenced is ever left behind.
-pub fn cleanup_repository(ctx: &Ctx) -> EsResult<Reply> {
+/// `POST _snapshot/{repository}/_cleanup`: nothing unreferenced is ever left behind in the
+/// cluster's own storage; in a bucket, what a failed or interrupted operation left there goes.
+pub async fn cleanup_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
     let name = ctx.path_param("repository").unwrap_or_default();
-    let st = ctx.state();
-    let Some(r) = st.metadata.repositories.get(name) else { return Err(repository_missing(name)) };
-    if r.read_only() {
-        return Err(repository_exception(name, "cannot run cleanup on readonly repository"));
-    }
-    Reply::ok(obj! { "results" => obj! { "deleted_bytes" => 0, "deleted_blobs" => 0 } })
+    let r = {
+        let st = ctx.state();
+        let Some(r) = st.metadata.repositories.get(name) else { return Err(repository_missing(name)) };
+        if r.read_only() {
+            return Err(repository_exception(name, "cannot run cleanup on readonly repository"));
+        }
+        r.clone()
+    };
+    let (bytes, blobs) = match r.in_bucket() {
+        true => s3::cleanup(ctx, name, &r).await?,
+        false => (0, 0),
+    };
+    Reply::ok(obj! { "results" => obj! { "deleted_bytes" => bytes, "deleted_blobs" => blobs } })
 }
 
 /// `SnapshotsService.validate`: snapshot name rules.
@@ -1019,6 +1086,13 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
             st.metadata.repository_data.insert(key, Arc::new(data));
             Ok(snapshot)
         };
+    if let Some(r) = s3::bucket_repository(&ctx.state(), &repo) {
+        let snapshot = s3::create(ctx, &repo, &r, &snap_uuid, &files, build).await?;
+        if !wait {
+            return Reply::ok(obj! { "accepted" => true });
+        }
+        return Reply::ok(obj! { "snapshot" => snapshot_info(ctx, Some(&repo), &snapshot, true, true, false) });
+    }
     // Planned against the current state, the snapshot shows as running until it is recorded.
     let (planned, running) = {
         let st = ctx.state();
@@ -1077,10 +1151,16 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
 const STATES: &[&str] = &["IN_PROGRESS", "SUCCESS", "FAILED", "PARTIAL", "INCOMPATIBLE"];
 
 /// `GET _snapshot/{repository}/{snapshot}`.
-pub fn get(ctx: &Ctx) -> EsResult<Reply> {
+pub async fn get(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
+    let repos = match_repositories(&ctx.state().metadata, &ctx.list_param("repository").unwrap_or_default())?;
+    // A bucket's snapshots may come from other clusters: its data is read first.
+    for name in &repos {
+        if let Some(r) = s3::bucket_repository(&ctx.state(), name) {
+            s3::refresh(ctx.cluster, name, &r).await?;
+        }
+    }
     let st = ctx.state();
-    let repos = match_repositories(&st.metadata, &ctx.list_param("repository").unwrap_or_default())?;
     let snaps = ctx.list_param("snapshot").unwrap_or_default();
     let verbose = ctx.bool_param("verbose", true)?;
     let ignore_unavailable = ctx.bool_param("ignore_unavailable", false)?;
@@ -1180,9 +1260,9 @@ pub async fn delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let repo = ctx.path_param("repository").unwrap_or_default().to_string();
     let snaps = ctx.list_param("snapshot").unwrap_or_default();
     let snapshot_data = &ctx.cluster.snapshot_data;
-    let deleted = ctx
-        .cluster
-        .update(move |st| {
+    let bucket = s3::bucket_repository(&ctx.state(), &repo);
+    let repo_name = repo.clone();
+    let apply = move |st: &mut ClusterState| {
             let Some(r) = st.metadata.repositories.get(&repo).cloned() else { return Err(repository_missing(&repo)) };
             let key = r.location_key();
             let mut data = st.metadata.repository_data.get(&key).map(|d| (**d).clone()).unwrap_or_default();
@@ -1207,8 +1287,11 @@ pub async fn delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 st.metadata.repository_data.insert(key, Arc::new(data));
             }
             Ok(gone)
-        })
-        .await?;
+        };
+    let deleted = match &bucket {
+        Some(r) => s3::delete(ctx, &repo_name, r, apply).await?,
+        None => ctx.cluster.update(apply).await?,
+    };
     for uuid in &deleted {
         ctx.cluster.snapshot_data.forget(uuid);
     }
@@ -1416,9 +1499,16 @@ pub async fn clone(ctx: &Ctx<'_>) -> EsResult<Reply> {
     validate_snapshot_name(&repo, &target)?;
     let now = ctx.now_ms;
     let target_uuid = random_uuid();
-    let durable = ctx.cluster.engine.snapshot_storage();
+    let bucket = s3::bucket_repository(&ctx.state(), &repo);
+    let durable = ctx.cluster.engine.snapshot_storage().filter(|_| bucket.is_none());
     let _taking = durable.as_ref().map(|_| ctx.cluster.snapshot_data.taking(&target_uuid));
     let saving = std::sync::atomic::AtomicBool::new(false);
+    // In a bucket the clone's shard snapshots are written before it is recorded.
+    let written = match &bucket {
+        Some(r) => s3::clone_shards(ctx, &repo, r, &source, &target_uuid, &patterns).await?,
+        None => Vec::new(),
+    };
+    let repo_name = repo.clone();
     if let Some(store) = &durable {
         // The clone's contents are durable before it is recorded.
         let st = ctx.state();
@@ -1434,9 +1524,7 @@ pub async fn clone(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let doomed_uuid = target_uuid.clone();
     let saving_ref = &saving;
     let snapshot_data = &ctx.cluster.snapshot_data;
-    let cloned = ctx
-        .cluster
-        .update(move |st| {
+    let apply = move |st: &mut ClusterState| {
             let Some(r) = st.metadata.repositories.get(&repo).cloned() else { return Err(repository_missing(&repo)) };
             let key = r.location_key();
             let mut data = st.metadata.repository_data.get(&key).map(|d| (**d).clone()).unwrap_or_default();
@@ -1484,8 +1572,17 @@ pub async fn clone(ctx: &Ctx<'_>) -> EsResult<Reply> {
             st.metadata.repository_data.insert(key, Arc::new(data));
             saving_ref.store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(ids)
-        })
-        .await;
+        };
+    let cloned = match &bucket {
+        Some(r) => {
+            let out = s3::commit_with(ctx, &repo_name, r, apply).await;
+            if out.is_err() && !s3::recorded(ctx, &repo_name, r, &doomed_uuid).await {
+                s3::forget_keys(ctx, &repo_name, r, &written).await;
+            }
+            out
+        }
+        None => ctx.cluster.update(apply).await,
+    };
     match cloned {
         Ok((src, dst, indices)) => {
             ctx.cluster.snapshot_data.clone_into(&src, &dst, &indices);
@@ -1544,6 +1641,11 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
         _ => None,
     };
     let now = ctx.now_ms;
+    // A bucket's snapshot may come from another cluster: its data is read first.
+    let bucket = match s3::bucket_repository(&ctx.state(), &repo) {
+        Some(r) => Some(s3::refresh(ctx.cluster, &repo, &r).await?),
+        None => None,
+    };
     // Until the documents are copied, the snapshot can't be deleted.
     let _restoring = ctx.cluster.snapshot_data.restoring(&repo, &snap);
     let plan = move |st: &mut ClusterState| {
@@ -1654,8 +1756,13 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let _ = now;
     // Durable shard contents are read before any index is created: a snapshot whose contents
     // are missing fails without leaving empty indices behind.
-    let durable = ctx.cluster.engine.snapshot_storage();
+    let durable = ctx.cluster.engine.snapshot_storage().filter(|_| bucket.is_none());
     let mut loaded = std::collections::HashMap::new();
+    let mut from_bucket = std::collections::HashMap::new();
+    if let Some(b) = &bucket {
+        let (_, _, (snapshot_uuid, copies)) = plan.clone()(&mut (*ctx.state()).clone())?;
+        from_bucket = s3::read_restore(ctx, b, &snapshot_uuid, &copies).await?;
+    }
     if let Some(store) = &durable {
         let (_, _, (snapshot_uuid, copies)) = plan.clone()(&mut (*ctx.state()).clone())?;
         for (_, source, source_uuid) in &copies {
@@ -1672,7 +1779,11 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let st = ctx.state();
     for (target, source, source_uuid) in &copies {
         let Some(idx) = st.metadata.indices.get(target) else { continue };
-        if let Some(data) = ctx.cluster.snapshot_data.get(&snapshot_uuid, source) {
+        if let Some(b) = &bucket {
+            if let Some(shards) = from_bucket.get(source_uuid) {
+                s3::restore_index(ctx, b, idx, source_uuid, shards).await?;
+            }
+        } else if let Some(data) = ctx.cluster.snapshot_data.get(&snapshot_uuid, source) {
             crate::write::copy_docs(ctx.cluster, &data, idx)?;
         } else if let Some(store) = &durable {
             let shards = match loaded.remove(source_uuid) {
@@ -2081,15 +2192,20 @@ pub async fn verify_integrity(ctx: &Ctx<'_>) -> EsResult<Reply> {
         }
     }
     let _ = ctx.bool_param("verify_blob_contents", false)?;
+    if !ctx.state().metadata.repositories.contains_key(&name) {
+        return Err(repository_missing(&name));
+    }
+    let now = crate::time::now_millis();
+    let bucket = s3::bucket_repository(&ctx.state(), &name);
+    let copies: Option<std::collections::HashSet<(String, String, u32)>> = match (&bucket, ctx.cluster.engine.snapshot_storage()) {
+        (Some(r), _) => Some(s3::present_shards(ctx, &name, r).await?),
+        (None, Some(store)) => Some(store.copies().await?.into_iter().map(|c| (c.snapshot, c.index_uuid, c.shard)).collect()),
+        (None, None) => None,
+    };
     let data = {
         let st = ctx.state();
         let Some(r) = st.metadata.repositories.get(&name) else { return Err(repository_missing(&name)) };
         st.metadata.repository_data.get(&r.location_key()).cloned().unwrap_or_default()
-    };
-    let now = crate::time::now_millis();
-    let copies: Option<std::collections::HashSet<(String, String, u32)>> = match ctx.cluster.engine.snapshot_storage() {
-        Some(store) => Some(store.copies().await?.into_iter().map(|c| (c.snapshot, c.index_uuid, c.shard)).collect()),
-        None => None,
     };
     let mut log = Vec::new();
     let (mut snaps_ok, mut index_snaps, mut index_snaps_ok, mut blobs) = (0i64, 0i64, 0i64, 0i64);

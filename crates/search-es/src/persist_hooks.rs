@@ -147,6 +147,15 @@ impl Engine {
         Ok(out)
     }
 
+    /// The vector fields of `idx` a copy of its documents puts back into their source
+    /// ([`crate::engine::source_vectors::copied`]), from its mapping: for searchers that aren't
+    /// the index's own (a closed index's snapshot copy).
+    pub fn copied_vectors(&self, cluster: &crate::Cluster, st: &ClusterState, idx: &IndexMeta) -> EsResult<Vec<Arc<crate::engine::fields::FieldInfo>>> {
+        let analysis = Arc::new(cluster.index_analysis(st, idx)?);
+        let table = FieldTable::build(idx.mapping.clone(), analysis, &idx.mapping_ctx(), &Numbers::default(), &similarities(idx))?;
+        Ok(crate::engine::source_vectors::copied(&table))
+    }
+
     /// Applies one logged operation to shard `shard` of `idx` again (recovery). The index must
     /// be open ([`Engine::open_seeded`]). Stale and duplicate operations are no-ops.
     pub fn replay(&self, scripts: &crate::scripting::ScriptService, st: &crate::meta::ClusterState, idx: &IndexMeta, shard: u32, op: &LoggedOp<'_>) -> EsResult<()> {

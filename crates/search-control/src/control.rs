@@ -111,9 +111,14 @@ pub struct SearchConfig {
     pub catalog_connections: usize,
     pub defaults: Defaults,
     pub pricing: Pricing,
-    /// Seals the secrets clusters store (watch passwords, connector and Fleet secrets) under
-    /// the deployment's key (rolld: `ROLL_SECRET_KEY`); `None`: stored as given.
+    /// Seals the secrets clusters store (watch passwords, connector and Fleet secrets, `s3`
+    /// repository credentials) under the deployment's key (rolld: `ROLL_SECRET_KEY`); `None`:
+    /// stored as given.
     pub sealer: Option<Arc<search_es::seal::Sealer>>,
+    /// The name every cluster's default snapshot repository has (`found-snapshots`, as on
+    /// Elastic Cloud): an `s3` repository on roll's own object storage, so `_snapshot` and
+    /// snapshot lifecycle policies work without registering one. `None`: no default repository.
+    pub default_repository: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -159,6 +164,7 @@ impl SearchConfig {
             },
             pricing: Pricing::default(),
             sealer: None,
+            default_repository: Some("found-snapshots".into()),
         }
     }
 }
@@ -412,6 +418,7 @@ impl Control {
                 node_settings: cfg.node_settings.clone(),
                 memory_budget: cfg.memory_budget,
                 sealer: cfg.sealer.clone(),
+                default_repository: cfg.default_repository.clone(),
                 ..NodeConfig::default()
             },
             hooks.clone(),

@@ -24,11 +24,48 @@ use std::sync::Arc;
 pub struct Repository {
     pub ty: String,
     pub settings: Settings,
+    /// Credentials given with the settings (an `s3` repository's `access_key`, `secret_key` and
+    /// `session_token`), sealed with the cluster's sealer when it has one ([`crate::seal`]).
+    /// Kept apart from `settings` so nothing that prints a repository can show them.
+    pub secrets: BTreeMap<String, String>,
 }
 
+/// The `client` of roll's default repository: an `s3` repository on the cluster's own object
+/// storage ([`Repository::roll_default`]). Tenants can't name it.
+pub const ROLL_CLIENT: &str = "roll";
+
 impl Repository {
+    pub fn new(ty: impl Into<String>, settings: Settings) -> Repository {
+        Repository { ty: ty.into(), settings, secrets: BTreeMap::new() }
+    }
+
+    /// roll's default repository (`found-snapshots` unless configured otherwise): shown as an
+    /// `s3` repository, as Elastic Cloud's is, its contents kept like every other roll
+    /// repository's in the cluster's own storage (`api::snapshots`).
+    pub fn roll_default() -> Repository {
+        let mut s = Settings::new();
+        s.set("bucket", "roll");
+        s.set("base_path", "snapshots");
+        s.set("client", ROLL_CLIENT);
+        Repository::new("s3", s)
+    }
+
+    /// Whether this is roll's default repository.
+    pub fn roll_managed(&self) -> bool {
+        self.ty == "s3" && self.settings.get("client") == Some(ROLL_CLIENT)
+    }
+
+    /// Whether the contents live in a bucket the tenant named (an `s3` repository other than
+    /// roll's default) rather than in the cluster's own storage.
+    pub fn in_bucket(&self) -> bool {
+        self.ty == "s3" && !self.roll_managed()
+    }
+
     /// Where the repository's content lives: one key per type and location.
     pub fn location_key(&self) -> String {
+        if self.roll_managed() {
+            return "roll:default".into();
+        }
         let s = &self.settings;
         let loc = match self.ty.as_str() {
             "fs" => s.get("location").unwrap_or_default().to_string(),
@@ -46,12 +83,25 @@ impl Repository {
     }
 
     pub fn to_stored(&self) -> Value {
-        obj! { "type" => self.ty.clone(), "settings" => self.settings.to_flat_json() }
+        let mut v = obj! { "type" => self.ty.clone(), "settings" => self.settings.to_flat_json() };
+        if !self.secrets.is_empty()
+            && let Value::Obj(m) = &mut v
+        {
+            m.insert("secrets".into(), Value::Obj(self.secrets.iter().map(|(k, s)| (k.clone(), Value::from(s.clone()))).collect()));
+        }
+        v
     }
 
     pub fn from_stored(v: &Value) -> Option<Repository> {
-        Some(Repository { ty: v.get("type")?.as_str()?.to_string(), settings: Settings::from_json(v.get("settings")?).ok()? })
+        let secrets = v.get("secrets").and_then(Value::as_object).map(|m| m.iter().filter_map(|(k, s)| Some((k.clone(), s.as_str()?.to_string()))).collect()).unwrap_or_default();
+        Some(Repository { ty: v.get("type")?.as_str()?.to_string(), settings: Settings::from_json(v.get("settings")?).ok()?, secrets })
     }
+}
+
+/// Where locations whose contents live in a tenant's bucket start ([`Repository::in_bucket`]):
+/// their snapshots hold no copies in the cluster's own storage.
+pub fn bucket_location(key: &str) -> bool {
+    key.starts_with("s3:")
 }
 
 /// One snapshot.
@@ -216,11 +266,11 @@ mod tests {
     fn locations_identify_content() {
         let mut s = Settings::default();
         s.set("location", "loc");
-        let a = Repository { ty: "fs".into(), settings: s.clone() };
+        let a = Repository::new("fs", s.clone());
         s.set("read_only", "true");
-        let c = Repository { ty: "fs".into(), settings: s.clone() };
+        let c = Repository::new("fs", s.clone());
         s.set("readonly", "true");
-        let b = Repository { ty: "fs".into(), settings: s };
+        let b = Repository::new("fs", s);
         assert_eq!(a.location_key(), b.location_key());
         assert!(b.read_only() && !a.read_only() && !c.read_only());
         let r = Repository::from_stored(&a.to_stored()).unwrap();

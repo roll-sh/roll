@@ -268,15 +268,30 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `_nodes/plugins`. Left: `analysis-icu` (ICU tokenizer, normalizer, folding, collation,
    transforms: the word segmentation Thai, Lao, Khmer, Burmese and CJK text needs): 13 tests; then
    smartcn's speed.
-3. **Snapshots on the fleet.** `_snapshot` and snapshot lifecycle management work on a node with
-   `path.repo`, but clusters on roll's fleet get none and there is no object-storage repository
-   type, so in production a cluster can't take, schedule or restore a snapshot: the backup and
-   migration path Elastic Cloud (automatic snapshots) and Amazon OpenSearch Service offer. Add the
-   `s3` repository type (a tenant's bucket through `roll_net::PublicOnly`, credentials from the
-   repository's settings or roll secrets, never logged) and a default repository on roll's own
-   object storage per cluster, so SLM can snapshot without setup; restore from Elasticsearch's
-   repository format where it can be read, so a cluster moves from Elastic Cloud to roll by
-   snapshot.
+3. **Snapshots on the fleet.** Landed: every cluster whose data is in object storage (the fleet
+   and a single rolld) has a default repository, `found-snapshots` as on Elastic Cloud
+   (`--search-default-repository`), so `_snapshot` and snapshot lifecycle policies work without
+   setup; it can't be changed or unregistered, costs an idle cluster nothing (registered in
+   memory on open, no policy of its own) and keeps snapshots as pins in the cluster's own
+   storage (branches copy them, they go with the cluster). And the `s3` repository type: a bucket
+   the tenant names, reached through `roll_net::PublicOnly`, credentials sealed apart from the
+   settings and never shown, snapshots uploaded as documents per segment (incremental), so
+   another cluster restores them (docs/search/architecture.md, "Snapshots"). Left: `_analyze`
+   against a real bucket (it plans and answers without touching one), multipart uploads and a
+   `chunk_size` setting (a chunk is ~8 MiB; one object per chunk), the `gcs` and `azure` types,
+   `max_snapshot_bytes_per_sec`/`max_restore_bytes_per_sec` throttling of bucket traffic, and
+   credentials from roll secrets instead of the repository's settings. Restoring from a snapshot
+   Elasticsearch wrote: feasible but not built. It means reading Elasticsearch's repository
+   (`index-N`, `snap-*.dat`, `meta-*.dat`, shard `index-*`/`snap-*.dat`: SMILE inside Lucene
+   codec headers, DEFLATE-compressed) and each shard's Lucene files (segment infos, field infos,
+   compound files, LZ4/DEFLATE stored fields for `_id`, `_routing`, `_source`, numeric doc values
+   for `_seq_no`, `_primary_term`, `_version`, live docs, flat vectors for excluded source
+   vectors; Lucene 9 and 10 codecs for 8.x and 9.x snapshots), all as hostile input, then
+   re-indexing every document from `_source`: about 4,000 lines and Elasticsearch-made fixtures,
+   and a restore that is a full reindex. Indices without a stored `_source` (synthetic source,
+   the logsdb and time-series default, `_source.enabled: false`) can't come back that way.
+   Worth it only once tenants ask to move by backup alone; a live cluster moves by reindex from
+   remote.
 4. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
    Elasticsearch 9.5.5 and OpenSearch 3.9). Roll leads on indexing (4,735 docs/s against 3,585
    and 2,978 at 8 clients), merged `knn` (1.9 ms CPU against 6.1 and 4.9), `rrf` (3.2 against 13.8
@@ -336,9 +351,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `xpack/ilm_run.rs`, `xpack/slm.rs`; compatibility.md, "Known gaps"). They run time-based work
    at its due time and wake a sleeping cluster only for that. Left: ILM's `shrink` to fewer shards
    and `downsample` (roll has both APIs; the steps that swap the new index in aren't written),
-   `searchable_snapshot`, and the `ilm-history-*` data stream; a `path.repo` (or an object-storage
-   repository type) for clusters on the fleet, which can't register a repository for snapshots
-   or SLM yet.
+   `searchable_snapshot`, and the `ilm-history-*` data stream.
    The data stream lifecycle's force merges and downsampling rounds aren't run either.
 8. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
    endpoints, creates them (OpenAI or any compatible URL, Cohere, Anthropic; the API key sent
