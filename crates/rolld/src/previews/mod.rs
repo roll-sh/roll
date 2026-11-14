@@ -115,6 +115,7 @@ pub fn start(
     backend.attach(&engine);
     code.code.set_preview_backend(backend);
     drop(engine.start());
+    crate::logs::PreviewMetrics::start(&engine);
     tracing::info!("roll previews: on");
     Ok(Running { engine, runtime })
 }

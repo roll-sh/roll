@@ -405,6 +405,67 @@ impl ClusterMetrics {
     }
 }
 
+// ---- previews metrics ----
+
+/// Publishes what this node's previews engine did: converges, screenshots and their failures
+/// (JSON logs only), every minute while the engine runs.
+pub struct PreviewMetrics {
+    engine: std::sync::Weak<roll_previews::Engine>,
+    last: std::sync::Mutex<roll_previews::engine::Stats>,
+}
+
+impl PreviewMetrics {
+    pub fn start(engine: &Arc<roll_previews::Engine>) {
+        if !json_on() {
+            return;
+        }
+        let m = PreviewMetrics { engine: Arc::downgrade(engine), last: std::sync::Mutex::new(Default::default()) };
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(ClusterMetrics::EVERY);
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                if !m.flush() {
+                    return;
+                }
+            }
+        });
+    }
+
+    fn fields(d: roll_previews::engine::Stats) -> Map<String, Value> {
+        let mut f = Map::new();
+        f.insert("service".into(), SERVICE.into());
+        f.insert("PreviewConverges".into(), d.converges.into());
+        f.insert("PreviewConvergeFailures".into(), d.converge_failures.into());
+        f.insert("PreviewScreenshots".into(), d.screenshots.into());
+        f.insert("PreviewScreenshotFailures".into(), d.screenshot_failures.into());
+        f.insert(
+            "_aws".into(),
+            emf(&[("PreviewConverges", "Count"), ("PreviewConvergeFailures", "Count"), ("PreviewScreenshots", "Count"), ("PreviewScreenshotFailures", "Count")], &[&["service"]]),
+        );
+        f
+    }
+
+    /// `false` once the engine is gone.
+    fn flush(&self) -> bool {
+        let Some(engine) = self.engine.upgrade() else { return false };
+        let now = engine.stats();
+        let d = {
+            let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+            let d = roll_previews::engine::Stats {
+                converges: now.converges - last.converges,
+                converge_failures: now.converge_failures - last.converge_failures,
+                screenshots: now.screenshots - last.screenshots,
+                screenshot_failures: now.screenshot_failures - last.screenshot_failures,
+            };
+            *last = now;
+            d
+        };
+        write_line(line("INFO", "metrics", "previews", Self::fields(d)));
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,6 +516,9 @@ mod tests {
         let l = line("INFO", "metrics", "cluster", ClusterMetrics::fields("i-1", stats));
         check_emf(&l);
         assert_eq!((l["HandoffFailures"].as_u64(), l["LeaseTakeovers"].as_u64()), (Some(1), Some(2)));
+        let l = line("INFO", "metrics", "previews", PreviewMetrics::fields(roll_previews::engine::Stats { converges: 9, converge_failures: 1, screenshots: 4, screenshot_failures: 2 }));
+        check_emf(&l);
+        assert_eq!((l["PreviewConvergeFailures"].as_u64(), l["PreviewScreenshotFailures"].as_u64()), (Some(1), Some(2)));
         // Pushes and clones aren't code's API latency.
         assert_eq!((route_product("/git/{*rest}"), route_product("/v1/code/repos"), route_product(UNMATCHED)), ("git", "code", "rolld"));
     }

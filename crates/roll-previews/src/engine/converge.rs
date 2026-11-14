@@ -14,9 +14,11 @@ impl Engine {
         }
         let deleting = r.desired == Desired::Deleted;
         let result = if deleting { self.teardown(&r).await } else { self.converge(&r).await };
+        Counters::add(&self.counters.converges);
         match result {
             Ok(()) => {}
             Err(e) => {
+                Counters::add(&self.counters.converge_failures);
                 let msg = format!("{e:#}");
                 warn!(preview = %id, error = %msg, "previews: converging");
                 let now = self.store.now_ms().unwrap_or_default();
@@ -552,6 +554,7 @@ impl Engine {
                     self.compare_waiting(r).await;
                 }
                 if kept {
+                    Counters::add(&self.counters.screenshots);
                     self.shots_failed.lock().retain(|(p, _)| *p != r.id);
                     let _ = self.store.log(&r.id, &format!("took a screenshot of {}", first.name));
                 }
@@ -562,6 +565,7 @@ impl Engine {
                 false
             }
             Err(e) => {
+                Counters::add(&self.counters.screenshot_failures);
                 let first_try = self.shots_failed.lock().insert((r.id.clone(), r.build().to_string()));
                 let again = if first_try { " (trying again)" } else { "" };
                 let _ = self.store.log(&r.id, &format!("couldn't take a screenshot of {}{again}: {e:#}", first.name));

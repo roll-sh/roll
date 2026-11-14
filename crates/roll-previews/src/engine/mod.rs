@@ -99,6 +99,29 @@ impl Config {
     }
 }
 
+/// What an engine did since it started: converges and screenshots, and how many failed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    pub converges: u64,
+    pub converge_failures: u64,
+    pub screenshots: u64,
+    pub screenshot_failures: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct Counters {
+    converges: std::sync::atomic::AtomicU64,
+    converge_failures: std::sync::atomic::AtomicU64,
+    screenshots: std::sync::atomic::AtomicU64,
+    screenshot_failures: std::sync::atomic::AtomicU64,
+}
+
+impl Counters {
+    pub(crate) fn add(c: &std::sync::atomic::AtomicU64) {
+        c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 pub struct Engine {
     pub cfg: Config,
     pub store: Arc<Store>,
@@ -118,6 +141,8 @@ pub struct Engine {
     /// Screenshots that failed once at a head (preview, head): tried again once, since the service
     /// may have been stopped or redeployed underneath, before the head is given up on.
     shots_failed: Mutex<std::collections::HashSet<(String, String)>>,
+    /// What this node did, for rolld's metrics (`Engine::stats`).
+    counters: Counters,
     /// One screenshot at a time.
     shooting: Arc<tokio::sync::Semaphore>,
     /// Services a converge just deployed at a change's new head, woken after the pass (`warm`).
@@ -181,6 +206,7 @@ impl Engine {
             paths_seen: Mutex::new(HashMap::new()),
             shots_wanted: Mutex::new(std::collections::HashSet::new()),
             shots_failed: Mutex::new(std::collections::HashSet::new()),
+            counters: Counters::default(),
             shooting: Arc::new(tokio::sync::Semaphore::new(1)),
             warm_wanted: Mutex::new(Vec::new()),
             deploying_since: Mutex::new(HashMap::new()),
@@ -217,6 +243,13 @@ impl Engine {
                 drop(e);
             }
         })
+    }
+
+    /// What this node's engine did since it started (rolld publishes the change each minute).
+    pub fn stats(&self) -> Stats {
+        let get = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed);
+        let c = &self.counters;
+        Stats { converges: get(&c.converges), converge_failures: get(&c.converge_failures), screenshots: get(&c.screenshots), screenshot_failures: get(&c.screenshot_failures) }
     }
 
     /// Converge soon.
