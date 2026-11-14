@@ -92,6 +92,25 @@ const PROMPTS: &[Prompt] = &[
         },
     },
     Prompt {
+        name: "tune_slow_query",
+        title: "Tune a slow query",
+        description: "A slow Postgres query made faster on a branch first (Neon's query tuning): its plan, an index tried on a copy, the plans compared, then main only when you say so.",
+        args: &[Arg { name: "project", description: "Postgres project", required: true }],
+        needs: &["postgres_get_project", "postgres_slow_queries", "postgres_explain", "postgres_create_branch", "postgres_execute", "postgres_delete_branch"],
+        text: |a| {
+            format!(
+                "Make a slow query in Postgres project {} faster. postgres_get_project for main's endpoint; \
+                 postgres_slow_queries there (or ask me for the query); postgres_explain the slowest one. If the \
+                 plan scans a large table, postgres_create_branch from main, create the index you'd suggest on the \
+                 branch's endpoint with postgres_execute (CREATE INDEX), then postgres_explain the same query \
+                 there. Show me both plans' cost and what changed. Only if it's better and I say so, create the \
+                 same index on main (CREATE INDEX CONCURRENTLY; it may ask a person first). Then offer \
+                 postgres_delete_branch. Never change main first.",
+                a("project")
+            )
+        },
+    },
+    Prompt {
         name: "compare_branch_schemas",
         title: "Compare a branch's schema with main",
         description: "What a Postgres branch changed in the schema against main (tables and columns added, removed or changed), and what's worth fixing there: nothing is changed.",
