@@ -1586,6 +1586,10 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
+Later: the grid sends check-and-set too (#50), OCSP for project CAs (#44: checked with `openssl
+ocsp`), search links on OpenSearch clusters (#51, agreed with the search thread), and a fix from roll
+MCP's review on #30 (a grant naming the project by id reaches it inside roll secrets too).
+
 Then (2026-11-14, latest): `roll://` references in files (#49: `roll run --env-file`, `render`) and
 check-and-set writes (#50: `if_version`, the dashboard's editor), each its own pull request on #20.
 
@@ -1649,13 +1653,13 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **The grid edits with check-and-set too** (on #50): each cell carries the version it showed, so
-   comparing environments side by side can't overwrite a change made meanwhile.
-2. **OCSP for project CAs** (on #44): a public responder next to the CRL, for clients (Java,
-   browsers in some setups) that check status per certificate rather than fetching lists.
-3. *Waits on the search thread:* OpenSearch clusters' links issue an internal user (`username`,
-   `password` beside `url`, one credential), agreed with it; and *waits on #24/#25 meeting #47:*
-   transit keys scoped by name.
+1. **A sixth independent review** of what came after the fifth (`roll://` references, check-and-set
+   writes and the grid, OCSP, OpenSearch links, the grant id fix on #30), and its fixes.
+2. **Key-scoped tokens shown as such**: the project's tokens page shows a rule's key part
+   (`selector.index`), so a token on `prj_…/payments` reads as one for that key (on #30).
+3. *Waits on #24/#25 meeting #47:* transit keys scoped by name (`.index("name")` on the data-plane
+   rows, `Scope.key` passed as the resource's index); *waits on #29 and #51 in one build:* a live
+   check of OpenSearch links.
 4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
 5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
@@ -1689,6 +1693,8 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#51, search links on OpenSearch clusters** (after #20): an internal user (`user`,
+  `password`) where the cluster has no API keys; the wrong field for a flavor is refused when linked.
 - **#50, check-and-set writes** (after #20): `if_version` on a set or delete, refused as `stale`
   when the key moved; the dashboard's editor sends it.
 - **#49, `roll://` references in files** (after #20): `roll run --env-file` and `render` resolve
