@@ -1641,6 +1641,8 @@ credential under a name frameworks put in the browser bundle (`NEXT_PUBLIC_`, `V
 flagged on write and in health (#60). Measured again (9,900 keys, alternating with #20): health
 is unchanged by #60 and stays under the grid; a values answer takes its digest only when a watch
 asks (`digest=1`, #49), since that costs about a read.
+Then reach (#61): for a folder or key, the tokens and identities that reach it, whether untrusted
+code can, where it flows (syncs, shares, imports), and who read it in 30 days.
 
 Then (2026-11-14, latest): `roll run` masks values in what the command prints when it isn't a
 terminal (#54), as 1Password's `op run` and GitHub Actions do; pulling into Kubernetes with External
@@ -1796,6 +1798,8 @@ Open pull requests after this one:
   after its grace; a user with two keys already is refused, never pruned.
 - **#55, pulling into Kubernetes with External Secrets Operator** (after #20): its webhook
   provider (one store for whole environments and single keys) and `values?dynamic=false`.
+- **#61, reach** (after #20): who and what can read a folder or key; `GET …/reach`, `roll secrets
+  reach`, a key's "Who can read it…".
 - **#60, server credentials under browser-bundle names** (after #20): `NEXT_PUBLIC_`, `VITE_`,
   `PUBLIC_`… holding a server-only value; the write warns, health's `public` finding.
 - **#59, `roll completions` and direnv** (after #20): completion scripts for every command; a
