@@ -602,10 +602,14 @@ TLS certificates for services (mTLS between them), with no CA to run.
   `POST /v1/secrets/ocsp/{id}` (the request's DER as the body) or `GET /v1/secrets/ocsp/{id}/<base64
   of the request>` (cacheable), without a token. A certificate is `good` while the CA lists it
   unrevoked, `revoked` with its time once revoked, `unknown` when the CA didn't sign it, it has
-  expired or the request names another issuer; the CA signs each answer itself, nonces are echoed,
-  and an answer without one is kept a minute per node (a revocation drops the CA's). Every
+  expired or the request names another issuer; the CA signs each answer itself. The route is
+  public, so its cost is bounded: nonces aren't echoed (RFC 8954 allows it, as large public CAs
+  do), answers are kept a minute per node by the certificates asked about (a revocation drops the
+  CA's), and a CA signs at most 50 fresh answers a second per node (`tryLater` beyond). An answer is
+  good for ten minutes (`nextUpdate`; GET answers `max-age=60`): how long a revocation can take to
+  reach a client that keeps answers. Every
   certificate names the responder (Authority Information Access). Checked with `openssl ocsp`:
-  `good` and `revoked`, `Response verify OK`, over POST with a nonce and over GET. Clients that
+  `good` and `revoked`, `Response verify OK`, over POST and over GET. Clients that
   don't check CRLs or OCSP still trust a revoked
   certificate until it ends, so lifetimes stay short. A CA a key links to can't be deleted, nor one
   with a revoked certificate still within its lifetime (its CRL must keep answering; a deleted

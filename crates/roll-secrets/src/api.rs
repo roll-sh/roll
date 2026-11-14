@@ -95,7 +95,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/cas/{{id}}/revoke"), post(revoke_certificate))
         .route("/v1/secrets/crl/{id}", get(crl))
         .route("/v1/secrets/ocsp/{id}", post(ocsp_post).layer(axum::extract::DefaultBodyLimit::max(crate::ocsp::REQUEST_MAX)))
-        .route("/v1/secrets/ocsp/{id}/{request}", get(ocsp_get))
+        .route("/v1/secrets/ocsp/{id}/{*request}", get(ocsp_get))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
@@ -952,7 +952,7 @@ async fn ocsp_get(State(s): S, Path((id, request)): Path<(String, String)>) -> c
     // The path segment is percent-decoded already.
     let der = base64::engine::general_purpose::STANDARD.decode(request.trim()).unwrap_or_default();
     let answer = blocking(s, move |s| s.ocsp(&id, &der)).await?;
-    Ok(([(axum::http::header::CONTENT_TYPE, "application/ocsp-response"), (axum::http::header::CACHE_CONTROL, "public, max-age=300")], answer.to_vec()).into_response())
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/ocsp-response"), (axum::http::header::CACHE_CONTROL, "public, max-age=60")], answer.to_vec()).into_response())
 }
 
 async fn list_syncs(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
