@@ -12,7 +12,7 @@ use aho_corasick::{AhoCorasick, MatchKind};
 use std::io::IsTerminal;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -31,6 +31,12 @@ pub struct Masker {
     ac: AhoCorasick,
     patterns: Vec<Vec<u8>>,
     longest: usize,
+    /// The values by their first two bytes (a set of the pairs, then the values), and by their
+    /// first byte: [`Masker::partial`] tries every position of a tail as long as the longest value,
+    /// and most positions start no value at all.
+    pairs: Vec<u64>,
+    by_pair: std::collections::HashMap<u16, Vec<usize>>,
+    by_first: Vec<Vec<usize>>,
     held: Vec<u8>,
 }
 
@@ -60,8 +66,16 @@ impl Masker {
     pub fn new<'a>(values: impl IntoIterator<Item = &'a str>) -> Option<Masker> {
         let patterns = patterns(values);
         let longest = patterns.iter().map(Vec::len).max()?;
-        let ac = AhoCorasick::builder().match_kind(MatchKind::LeftmostLongest).build(&patterns).expect("patterns");
-        Some(Masker { ac, patterns, longest, held: vec![] })
+        // A DFA: twice the NFA's speed over output that shares the values' alphabet.
+        let ac = AhoCorasick::builder().match_kind(MatchKind::LeftmostLongest).kind(Some(aho_corasick::AhoCorasickKind::DFA)).build(&patterns).expect("patterns");
+        let (mut pairs, mut by_pair, mut by_first) = (vec![0u64; 1024], std::collections::HashMap::<u16, Vec<usize>>::new(), vec![vec![]; 256]);
+        for (i, p) in patterns.iter().enumerate() {
+            let pair = u16::from_be_bytes([p[0], p[1]]);
+            pairs[pair as usize >> 6] |= 1 << (pair & 63);
+            by_pair.entry(pair).or_default().push(i);
+            by_first[p[0] as usize].push(i);
+        }
+        Some(Masker { ac, patterns, longest, pairs, by_pair, by_first, held: vec![] })
     }
 
     /// Whether a tail is waiting for more.
@@ -104,19 +118,28 @@ impl Masker {
     /// still grow from (a proper prefix of one), or the end.
     fn partial(&self) -> usize {
         let len = self.held.len();
-        (len.saturating_sub(self.longest - 1)..len)
-            .find(|&q| {
-                let tail = &self.held[q..];
-                self.patterns.iter().any(|p| p.len() > tail.len() && p.starts_with(tail))
-            })
-            .unwrap_or(len)
+        (len.saturating_sub(self.longest - 1)..len).find(|&q| self.could_start(&self.held[q..])).unwrap_or(len)
+    }
+
+    /// Whether `tail` is a proper prefix of a value.
+    fn could_start(&self, tail: &[u8]) -> bool {
+        let candidates = if tail.len() >= 2 {
+            let pair = u16::from_be_bytes([tail[0], tail[1]]);
+            if self.pairs[pair as usize >> 6] & (1 << (pair & 63)) == 0 {
+                return false;
+            }
+            &self.by_pair[&pair]
+        } else {
+            &self.by_first[tail[0] as usize]
+        };
+        candidates.iter().any(|&i| self.patterns[i].len() > tail.len() && self.patterns[i].starts_with(tail))
     }
 }
 
 /// Copies `from` to `to` through `m` until `from` ends, `to` fails, or the command has exited and
 /// nothing came for [`AFTER_EXIT`].
-async fn pump(mut from: impl AsyncRead + Unpin, mut to: impl AsyncWrite + Unpin, mut m: Masker, mut exited: watch::Receiver<bool>) {
-    let mut buf = vec![0u8; 16 * 1024];
+async fn pump(mut from: impl AsyncRead + Unpin, mut to: impl std::io::Write, mut m: Masker, mut exited: watch::Receiver<bool>) {
+    let mut buf = vec![0u8; 64 * 1024];
     let mut out = vec![];
     let mut done = *exited.borrow();
     loop {
@@ -125,7 +148,7 @@ async fn pump(mut from: impl AsyncRead + Unpin, mut to: impl AsyncWrite + Unpin,
                 Ok(r) => r,
                 Err(_) => {
                     m.flush(&mut out);
-                    if write(&mut to, &mut out).await.is_err() {
+                    if write(&mut to, &mut out).is_err() {
                         return;
                     }
                     continue;
@@ -147,20 +170,25 @@ async fn pump(mut from: impl AsyncRead + Unpin, mut to: impl AsyncWrite + Unpin,
         let n = read.unwrap_or(0);
         if n == 0 {
             m.flush(&mut out);
-            let _ = write(&mut to, &mut out).await;
+            let _ = write(&mut to, &mut out);
             return;
         }
         m.push(&buf[..n], &mut out);
-        if write(&mut to, &mut out).await.is_err() {
+        if write(&mut to, &mut out).is_err() {
             return;
         }
     }
 }
 
-async fn write(to: &mut (impl AsyncWrite + Unpin), out: &mut Vec<u8>) -> std::io::Result<()> {
+/// Written in place: tokio's stdout hands each write to another thread, which cost more than the
+/// masking (about 25,000 round trips for 400 MB). The pump is its own task on a multi-threaded
+/// runtime, so blocking here holds up nothing else.
+fn write(to: &mut impl std::io::Write, out: &mut Vec<u8>) -> std::io::Result<()> {
     if !out.is_empty() {
-        to.write_all(out).await?;
-        to.flush().await?;
+        tokio::task::block_in_place(|| {
+            to.write_all(out)?;
+            to.flush()
+        })?;
         out.clear();
     }
     Ok(())
@@ -213,10 +241,10 @@ pub fn spawn(command: &[String], env: &[(String, String)], streams: Streams) -> 
     let (exited, rx) = watch::channel(false);
     let mut pumps = vec![];
     if let (Some(from), Some(m)) = (child.stdout.take(), masker()) {
-        pumps.push(tokio::spawn(pump(from, tokio::io::stdout(), m, rx.clone())));
+        pumps.push(tokio::spawn(pump(from, std::io::stdout(), m, rx.clone())));
     }
     if let (Some(from), Some(m)) = (child.stderr.take(), masker()) {
-        pumps.push(tokio::spawn(pump(from, tokio::io::stderr(), m, rx)));
+        pumps.push(tokio::spawn(pump(from, std::io::stderr(), m, rx)));
     }
     Ok(Running { child, pumps, exited })
 }

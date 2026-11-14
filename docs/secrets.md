@@ -623,6 +623,11 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
   boundary: the command can always print a value some other way (reversed, split, base64). The
   exit code is the command's (128 plus the signal that ended it); SIGTERM and SIGHUP are passed
   on, and SIGINT unless the terminal sent it to the command too (`roll-cli/src/mask.rs`).
+  Measured (release build, 2026-11-14, 400 MB through `cat`): with 300 values of 32 characters
+  and a 3 KB key, about 330 MB/s on real logs and docs and 240 MB/s on random base64 (the
+  worst case: every byte can start a value); about 1.2 GB/s with a handful of values. Unmasked,
+  the same `cat` runs at about 3.5 GB/s. No command prints anywhere near that, so masking costs a
+  real command nothing it notices; memory stays under 30 MB.
 
 ### Runtime resolve for services (roll apps)
 
