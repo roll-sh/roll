@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS grants (
     rate_per_minute INTEGER,
     revoked_why TEXT,
     temp_rules TEXT,
-    ask_otherwise INTEGER
+    ask_otherwise INTEGER,
+    not_before INTEGER
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS grant_secrets (
     hash TEXT PRIMARY KEY,
@@ -146,6 +147,8 @@ pub struct Grant {
     pub kind: &'static str,
     pub rules: Scope,
     pub expires_at: Option<i64>,
+    /// It works only from then on (unix ms); before, it's refused as an unknown token is.
+    pub not_before: Option<i64>,
     pub ip_allow: Vec<String>,
     pub created_by: String,
     pub created_at: i64,
@@ -192,9 +195,14 @@ impl Grant {
         if self.kind == "oauth" { GrantKind::Oauth } else { GrantKind::Token }
     }
 
-    /// Usable now: not revoked, not expired.
+    /// Not revoked, not expired (it may not have started: [`Grant::usable`]).
     pub fn live(&self, now: i64) -> bool {
         self.revoked_at.is_none() && self.expires_at.is_none_or(|e| e > now)
+    }
+
+    /// Honoured now: live, and past its `not_before`.
+    pub fn usable(&self, now: i64) -> bool {
+        self.live(now) && self.not_before.is_none_or(|b| b <= now)
     }
 }
 
@@ -217,6 +225,9 @@ pub struct NewGrant {
     pub rules: Scope,
     #[serde(default)]
     pub expires_at: Option<i64>,
+    /// It works only from then on (unix ms).
+    #[serde(default)]
+    pub not_before: Option<i64>,
     #[serde(default)]
     pub ip_allow: Vec<String>,
     #[serde(default)]
@@ -234,6 +245,8 @@ pub struct GrantChange {
     pub rules: Option<Scope>,
     #[serde(default, deserialize_with = "some")]
     pub expires_at: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "some")]
+    pub not_before: Option<Option<i64>>,
     pub ip_allow: Option<Vec<String>>,
     /// `null` takes the limit off.
     #[serde(default, deserialize_with = "some")]
@@ -458,9 +471,9 @@ fn write_audit(db: &Db, events: &[AuditEvent]) {
     }
 }
 
-/// A grant's columns, as `grant_row` reads them (21 of them: a query may add its own after).
+/// A grant's columns, as `grant_row` reads them (22 of them: a query may add its own after).
 const GRANT_COLUMNS: &str = "g.id, g.name, g.kind, g.rules, g.expires_at, g.ip_allow, g.created_by, g.created_at, g.last_used_at, g.last_used_ip, g.revoked_at, \
-     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.revoked_why, g.temp_rules, g.ask_otherwise";
+     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.revoked_why, g.temp_rules, g.ask_otherwise, g.not_before";
 const GRANT_FROM: &str = "grants g LEFT JOIN oauth_clients c ON c.id = g.client_id";
 
 fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
@@ -483,6 +496,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         kind: if r.get::<_, String>(2)? == "oauth" { "oauth" } else { "token" },
         rules: serde_json::from_str(&rules).unwrap_or_default(),
         expires_at: r.get(4)?,
+        not_before: r.get(21)?,
         ip_allow: serde_json::from_str(&ip).unwrap_or_default(),
         created_by: r.get(6)?,
         created_at: r.get(7)?,
@@ -624,6 +638,10 @@ impl Store {
         if !db.has_column("grants", "ask_otherwise")? {
             db.add_column("grants", "ask_otherwise", "INTEGER")?;
         }
+        // A token that works only from a time on (Cloudflare's TTL start).
+        if !db.has_column("grants", "not_before")? {
+            db.add_column("grants", "not_before", "INTEGER")?;
+        }
         let (audit_tx, rx) = std::sync::mpsc::sync_channel(AUDIT_QUEUE);
         let (writer, audit_pending) = (db.clone(), Arc::new(std::sync::atomic::AtomicUsize::new(0)));
         let pending = audit_pending.clone();
@@ -682,6 +700,11 @@ impl Store {
         if new.expires_at.is_some_and(|e| e <= now) {
             return Err(Error::BadRequest("expires_at is in the past".into()));
         }
+        if let (Some(b), Some(e)) = (new.not_before, new.expires_at)
+            && b >= e
+        {
+            return Err(Error::BadRequest("not_before must come before expires_at".into()));
+        }
         let id = new_id("tok");
         let (prefix, secret_kind, secret_expiry) = match kind {
             GrantKind::Token => (TOKEN_PREFIX, "token", None),
@@ -698,8 +721,8 @@ impl Store {
                 return Err(Error::Conflict(format!("at most {MAX_GRANTS} tokens: revoke some first")));
             }
             c.execute(
-                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, ask_otherwise) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, new.name.trim(), kind_s, rules, new.expires_at, ip, created_by, now, client_id, new.rate_per_minute.map(i64::from), new.ask_otherwise],
+                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, ask_otherwise, not_before) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, new.name.trim(), kind_s, rules, new.expires_at, ip, created_by, now, client_id, new.rate_per_minute.map(i64::from), new.ask_otherwise, new.not_before],
             )?;
             c.execute(
                 "INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -729,14 +752,14 @@ impl Store {
             c.query_row(
                 &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id LEFT JOIN oauth_clients c ON c.id = g.client_id WHERE s.hash = ?"),
                 [&h],
-                |r| Ok((grant_row(r)?, r.get::<_, String>(21)?, r.get::<_, Option<i64>>(22)?)),
+                |r| Ok((grant_row(r)?, r.get::<_, String>(22)?, r.get::<_, Option<i64>>(23)?)),
             )
             .optional()
         })?;
         // A refresh token opens nothing but the token endpoint.
         // Only what signs a request in: a token's secret or an access token (never a refresh
         // token, spent or not).
-        Ok(row.filter(|(g, kind, exp)| matches!(kind.as_str(), "token" | "access") && exp.is_none_or(|e| e > now) && g.live(now)).map(|(g, ..)| g))
+        Ok(row.filter(|(g, kind, exp)| matches!(kind.as_str(), "token" | "access") && exp.is_none_or(|e| e > now) && g.usable(now)).map(|(g, ..)| g))
     }
 
     pub fn update(&self, id: &str, change: &GrantChange) -> Result<Grant> {
@@ -767,6 +790,9 @@ impl Store {
             }
             if let Some(e) = &change.expires_at {
                 c.execute("UPDATE grants SET expires_at = ? WHERE id = ?", params![*e, id])?;
+            }
+            if let Some(b) = &change.not_before {
+                c.execute("UPDATE grants SET not_before = ? WHERE id = ?", params![*b, id])?;
             }
             if let Some(ip) = &change.ip_allow {
                 c.execute("UPDATE grants SET ip_allow = ? WHERE id = ?", params![serde_json::to_string(ip).unwrap_or_default(), id])?;
