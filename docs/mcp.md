@@ -479,43 +479,44 @@ start and pre-deploy commands, schedule, kind, port, volume and `run.public`, ar
 a day or less); workload tokens (`Access::mint_workload`: minutes, within an identity's scope, owned
 by its maker, out of the list and caps) for secrets' identity logins; a person's own tokens' news is
 mailed to them (an approval waiting on them, used from a new network, revoked as leaked, about to
-expire; only their own, never a secret); previews' tools listed (they never were: roll previews runs
-with roll code and has no product switch, so MCP's product list left it out; rolld's auth test now
-fails on any product it serves with no tools listed); the token builder offers only the products
-this rolld runs (and any a token's rules name already), not all sixteen; checked live on #25's build
-(both official SDKs end to end, progress during an approval, URL elicitation; `serverInfo.icons`
-answered), which found roll code's fronted tools still carrying the approval argument for the
-operator (37 of 78): they drop it too now; the fourteenth review (key-scoped rules, before any row
-uses them): secrets' key names are literal (a key named `_all` is only that key; a list or a `*` in
-a request names none) and an approval remembers only a request that named one key; a pending answer
-says the call finds its approval without the argument too; the approval argument only where a person
-can be asked (a model reads every tool's schema: 92 → 73 KB for the operator and for tokens that
-only allow, every product on; `tools/list` 140 → 120 KB, 190 tools); the builder lists a secrets
-project's encryption keys to tick (one picker with search's indices; secrets' projects come from the
-workspace); encryption keys as MCP tools (`secrets_transit_encrypt`, `_decrypt`, `_sign`, `_verify`,
-`_public_key`; secrets #47: their rows narrow to one key); roll's mark as the server's icon
-(`serverInfo.icons`); a rule can narrow a secrets project to some of its encryption keys (`{id,
-index}`, as search's indices: signing with one key needn't be write on the project; secrets' transit
-rows add `.index("name")`); `secrets_list_rotations` and `secrets_ca_certificates` (secrets #48,
-#44); `tools/list` 11% smaller with every product on (183 tools, 150 → 134 KB: the approval
-argument's description shortened, the title not repeated in annotations); apps' plan, activity,
-deploys, links, cron runs and limits as MCP tools (apps-next #26; the shell, tunnel, hooks and
-webhook notifications stay out); secrets' history and workflow as MCP tools (changes, versions,
-compare, rotate, promote, change requests and proposing one: how an agent changes a protected
-environment); `previews_revoke_share` and `previews_settings` (previews-next #28); `apps_pending`
-and `apps_deploy_commits` (what the next deploy changes, what a deploy brought; apps-next #26), and
-`debug_failing_service` uses them; `roll token tools <id>` (what an agent sees, from the CLI); roll
-code's stream and device-login caps take the client the trusted proxy saw (the right-most
-`X-Forwarded-For` entry that isn't the proxy, over every line, only an address), not the left-most a
-client wrote; apps-next's head passes the per-method check with #25; the thirteenth review
-(X-Forwarded-For only from listed proxies, every line, a bad entry stopping the walk, IPv4-mapped
-addresses matched; nothing listed, the header counts for nothing; MCP tool calls carry the gate's
-address; unconsented client ids good for 90 days and kept ids small enough for Postgres);
-`ROLL_TRUSTED_PROXIES` (X-Forwarded-For only from the edge's addresses, the client the right-most
-entry that isn't one: a direct request can't name its own address for IP allowlists or
-registration's limit); sealed apps variables explained to agents (apps-next #26); the prefix check
-per method (rolld logs each route's methods; 194 `METHOD route` lines reviewed, 7 newly found and
-looked at: a route with its own row for one method can't gain another a prefix decides unseen);
+expire; only their own, never a secret); a tool any token may call (`apps_plan`) is listed only
+where its product runs (it showed with apps off); previews' tools listed (they never were: roll
+previews runs with roll code and has no product switch, so MCP's product list left it out; rolld's
+auth test now fails on any product it serves with no tools listed); the token builder offers only
+the products this rolld runs (and any a token's rules name already), not all sixteen; checked live
+on #25's build (both official SDKs end to end, progress during an approval, URL elicitation;
+`serverInfo.icons` answered), which found roll code's fronted tools still carrying the approval
+argument for the operator (37 of 78): they drop it too now; the fourteenth review (key-scoped rules,
+before any row uses them): secrets' key names are literal (a key named `_all` is only that key; a
+list or a `*` in a request names none) and an approval remembers only a request that named one key;
+a pending answer says the call finds its approval without the argument too; the approval argument
+only where a person can be asked (a model reads every tool's schema: 92 → 73 KB for the operator and
+for tokens that only allow, every product on; `tools/list` 140 → 120 KB, 190 tools); the builder
+lists a secrets project's encryption keys to tick (one picker with search's indices; secrets'
+projects come from the workspace); encryption keys as MCP tools (`secrets_transit_encrypt`,
+`_decrypt`, `_sign`, `_verify`, `_public_key`; secrets #47: their rows narrow to one key); roll's
+mark as the server's icon (`serverInfo.icons`); a rule can narrow a secrets project to some of its
+encryption keys (`{id, index}`, as search's indices: signing with one key needn't be write on the
+project; secrets' transit rows add `.index("name")`); `secrets_list_rotations` and
+`secrets_ca_certificates` (secrets #48, #44); `tools/list` 11% smaller with every product on (183
+tools, 150 → 134 KB: the approval argument's description shortened, the title not repeated in
+annotations); apps' plan, activity, deploys, links, cron runs and limits as MCP tools (apps-next
+#26; the shell, tunnel, hooks and webhook notifications stay out); secrets' history and workflow as
+MCP tools (changes, versions, compare, rotate, promote, change requests and proposing one: how an
+agent changes a protected environment); `previews_revoke_share` and `previews_settings`
+(previews-next #28); `apps_pending` and `apps_deploy_commits` (what the next deploy changes, what a
+deploy brought; apps-next #26), and `debug_failing_service` uses them; `roll token tools <id>` (what
+an agent sees, from the CLI); roll code's stream and device-login caps take the client the trusted
+proxy saw (the right-most `X-Forwarded-For` entry that isn't the proxy, over every line, only an
+address), not the left-most a client wrote; apps-next's head passes the per-method check with #25;
+the thirteenth review (X-Forwarded-For only from listed proxies, every line, a bad entry stopping
+the walk, IPv4-mapped addresses matched; nothing listed, the header counts for nothing; MCP tool
+calls carry the gate's address; unconsented client ids good for 90 days and kept ids small enough
+for Postgres); `ROLL_TRUSTED_PROXIES` (X-Forwarded-For only from the edge's addresses, the client
+the right-most entry that isn't one: a direct request can't name its own address for IP allowlists
+or registration's limit); sealed apps variables explained to agents (apps-next #26); the prefix
+check per method (rolld logs each route's methods; 194 `METHOD route` lines reviewed, 7 newly found
+and looked at: a route with its own row for one method can't gain another a prefix decides unseen);
 sensitive secrets explained to agents (`secrets_reveal` and `roll://guide`: a 403 and `withheld` are
 expected; secrets #46); open registration stores nothing (a client's id is the client, signed; kept
 once a person consents, else good for a day), so a flood has nothing to fill; the twelfth review's
