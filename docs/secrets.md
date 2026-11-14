@@ -691,7 +691,7 @@ grace period (its revocation goes through the rotator).
 
 ### Databases outside roll
 
-A Postgres, MySQL or Redis server roll doesn't run (Amazon RDS, Supabase, Neon, PlanetScale, ElastiCache, Upstash, a server of the customer's own)
+A Postgres, MySQL, Redis or MongoDB server roll doesn't run (Amazon RDS, Supabase, Neon, PlanetScale, ElastiCache, Upstash, MongoDB Atlas, a server of the customer's own)
 has its logins rotated by roll itself, with no rotator to write, as Infisical's secret rotation
 does, and issues a login per lease, as Vault's database engine does. A project registers it
 (`POST …/outside-databases {name, url, roles?, group?, ca?}`, `admin`; `roll secrets databases add
@@ -755,7 +755,22 @@ and channels>`; a template with selectors is refused. Ending the lease is `ACL D
 closes the user's connections; Redis has no expiry for a user, so a dynamic login lasts until roll
 ends its lease. Every change is kept across a restart the way the server keeps its users: `ACL
 SAVE` with an ACL file (a failure fails the change, or a restart would bring back a retired
-password), else `CONFIG REWRITE` where there's a config file. The server is the tenant's, so its replies are read by a small parser that bounds
+password), else `CONFIG REWRITE` where there's a config file.
+
+**MongoDB** (`mongodb+srv://user:password@cluster.example.net`, Atlas's form, or
+`mongodb://user:password@host1,host2/?tls=true&authSource=admin`; `tls=true` is required unless
+private addresses are allowed, and the URL may carry what Atlas's strings do, nothing else). User
+management runs on the primary, found with `hello` among the seed hosts only: a server naming a
+primary outside them is refused, and a `mongodb+srv://` name's SRV targets must sit inside its own
+domain (the spec's rule), so a server or a DNS answer can't send roll anywhere else. roll logs in with
+SCRAM-SHA-256, checks the server's signature (a server that can't prove it knows the admin's
+password isn't the one the URL names), and refuses an iteration count past 1,000,000. Rotation is
+`updateUser` with a new `pwd` over TLS (MongoDB keeps only SCRAM credentials and redacts them from
+its logs); `group` is a role, `name` in `authSource` or `name@db` (`read@shop`); a dynamic login is
+`createUser` with it, and ending the lease kills its sessions where the admin may
+(`killAllSessionsByPattern`) and drops it. MongoDB has no expiry for a user. Replies are read by a
+small BSON reader that checks every length against the bytes present, caps nesting, and reads at
+most 1 MiB. The server is the tenant's, so its replies are read by a small parser that bounds
 nesting, counts and lengths by the bytes present.
 
 **ClickHouse** too, over its HTTPS interface (`clickhouse://admin:…@host:8443/db`, ClickHouse

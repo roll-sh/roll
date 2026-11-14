@@ -1,11 +1,12 @@
-//! Databases outside roll (roll-secrets' outside.rs), Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ or Redis by the URL's scheme: the
+//! Databases outside roll (roll-secrets' outside.rs), Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis or MongoDB by the URL's scheme: the
 //! address is the tenant's, so the host is resolved here, private addresses are refused (unless
 //! rolld allows them for local development), and the connection goes to the address that was
 //! checked. TLS is required off private addresses. Postgres gets a new password as a SCRAM
 //! verifier, so neither the wire nor the server's statement log ever sees it (MySQL: mysql.rs;
-//! SQL Server: mssql.rs; ClickHouse: clickhouse.rs; RabbitMQ: rabbitmq.rs; Redis: redis.rs).
+//! SQL Server: mssql.rs; ClickHouse: clickhouse.rs; RabbitMQ: rabbitmq.rs; Redis: redis.rs; MongoDB: mongo.rs).
 
 mod clickhouse;
+mod mongo;
 mod mssql;
 mod mysql;
 mod rabbitmq;
@@ -34,6 +35,9 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         }
         if let Some(u) = self.redis(url)? {
             return self.rd(u, ca, async move |c| redis::check(c, &roles, group.as_deref()).await);
+        }
+        if let Some(u) = self.mongo(url)? {
+            return self.mg(u, ca, async move |c| mongo::check(c, &roles, group.as_deref()).await);
         }
         if let Some(u) = self.mssql(url)? {
             return self.ms(u, ca, async move |c| mssql::check(c, &roles, group.as_deref()).await);
@@ -68,6 +72,9 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.redis(url)? {
             return self.rd(u, ca, async move |c| redis::set_password(c, role, password).await);
         }
+        if let Some(u) = self.mongo(url)? {
+            return self.mg(u, ca, async move |c| mongo::set_password(c, role, password).await);
+        }
         if let Some(u) = self.mssql(url)? {
             return self.ms(u, ca, async move |c| mssql::set_password(c, role, password).await);
         }
@@ -89,6 +96,9 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.redis(url)? {
             return self.rd(u, ca, async move |c| redis::create_login(c, name, password, group).await);
         }
+        if let Some(u) = self.mongo(url)? {
+            return self.mg(u, ca, async move |c| mongo::create_login(c, name, password, group).await);
+        }
         if let Some(u) = self.mssql(url)? {
             return self.ms(u, ca, async move |c| mssql::create_login(c, name, password, group).await);
         }
@@ -103,8 +113,8 @@ impl roll_secrets::outside::OutsideDb for Guarded {
     }
 
     fn extend_login(&self, url: &str, ca: Option<&str>, name: &str, until: i64) -> Result<(), String> {
-        // MySQL, SQL Server, ClickHouse, RabbitMQ and Redis have no expiry for a login: it lasts until roll ends the lease.
-        if self.mysql(url)?.is_some() || self.mssql(url)?.is_some() || self.clickhouse(url)?.is_some() || self.rabbitmq(url)?.is_some() || self.redis(url)?.is_some() {
+        // MySQL, SQL Server, ClickHouse, RabbitMQ, Redis and MongoDB have no expiry for a login: it lasts until roll ends the lease.
+        if self.mysql(url)?.is_some() || self.mssql(url)?.is_some() || self.clickhouse(url)?.is_some() || self.rabbitmq(url)?.is_some() || self.redis(url)?.is_some() || self.mongo(url)?.is_some() {
             return Ok(());
         }
         let sql = format!("ALTER ROLE {} VALID UNTIL '{}'", ident(name), stamp(until)?);
@@ -117,6 +127,9 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         }
         if let Some(u) = self.redis(url)? {
             return self.rd(u, ca, async move |c| redis::drop_login(c, name).await);
+        }
+        if let Some(u) = self.mongo(url)? {
+            return self.mg(u, ca, async move |c| mongo::drop_login(c, name).await);
         }
         if let Some(u) = self.mssql(url)? {
             return self.ms(u, ca, async move |c| mssql::drop_login(c, name).await);
@@ -164,6 +177,15 @@ impl Guarded {
     /// A `redis://` or `rediss://` URL's settings; `None` for the others.
     fn redis(&self, url: &str) -> Result<Option<redis::Url>, String> {
         if url.starts_with("redis://") || url.starts_with("rediss://") { redis::parse(url, self.allow_private).map(Some) } else { Ok(None) }
+    }
+
+    /// A `mongodb://` or `mongodb+srv://` URL's settings; `None` for the others.
+    fn mongo(&self, url: &str) -> Result<Option<mongo::Url>, String> {
+        if url.starts_with("mongodb://") || url.starts_with("mongodb+srv://") { mongo::parse(url, self.allow_private).map(Some) } else { Ok(None) }
+    }
+
+    fn mg<T>(&self, u: mongo::Url, ca: Option<&str>, work: impl AsyncFnOnce(&mut mongo::Conn) -> Result<T, String>) -> Result<T, String> {
+        tokio::runtime::Handle::current().block_on(mongo::run(u, ca.map(str::to_string), self.allow_private, work))
     }
 
     fn rd<T>(&self, u: redis::Url, ca: Option<&str>, work: impl AsyncFnOnce(&mut redis::Conn) -> Result<T, String>) -> Result<T, String> {
@@ -336,6 +358,10 @@ mod tests {
         // Redis: rediss:// unless private addresses are allowed.
         assert!(g.redis("redis://:pw@cache.example.com").err().unwrap().contains("rediss://"));
         assert!(g.redis("rediss://admin:pw@cache.example.com:6380").unwrap().is_some());
+        // MongoDB: tls=true (mongodb+srv:// implies it), and nothing but what Atlas's strings carry.
+        assert!(g.mongo("mongodb://a:b@db.example.com:27017/").err().unwrap().contains("tls=true"));
+        assert!(g.mongo("mongodb://a:b@db.example.com/?tls=true&tlsInsecure=true").err().unwrap().contains("tlsInsecure"));
+        assert!(g.mongo("mongodb+srv://a:b@cluster0.abcde.mongodb.net/?retryWrites=true&w=majority&appName=c").unwrap().is_some());
         // SQL Server: TLS always (encrypt=false is refused even where private addresses are allowed).
         assert!(Guarded { allow_private: true }.mssql("sqlserver://a:b@db.example.com/x?encrypt=false").err().unwrap().contains("TLS"));
         assert!(g.mssql("sqlserver://a:b@db.example.com/x?trustServerCertificate=true").err().unwrap().contains("trustServerCertificate"));
@@ -360,5 +386,23 @@ mod tests {
         assert!(read_reply("*1\r\n".repeat(50).as_bytes()).is_err(), "nesting is capped");
         let template = Reply::Array(vec![Reply::Bulk(b"flags".to_vec()), Reply::Array(vec![]), Reply::Bulk(b"commands".to_vec()), Reply::Bulk(b"-@all +@read".to_vec()), Reply::Bulk(b"keys".to_vec()), Reply::Bulk(b"~app:*".to_vec()), Reply::Bulk(b"channels".to_vec()), Reply::Bulk(b"".to_vec())]);
         assert_eq!(redis::rules_of(&template).unwrap(), [b"-@all".to_vec(), b"+@read".to_vec(), b"~app:*".to_vec()]);
+    }
+
+    /// A tenant's MongoDB can send anything: BSON lengths are checked against the bytes present.
+    #[test]
+    fn a_hostile_bson_reply_is_bounded() {
+        use mongo::{Bson, decode};
+        let ok = [13, 0, 0, 0, 0x10, b'o', b'k', 0, 1, 0, 0, 0, 0];
+        assert_eq!(decode(&ok).unwrap(), Bson::Doc(vec![("ok".into(), Bson::I32(1))]));
+        // A string claiming 2 GiB, a document claiming more than it has, nesting past the cap.
+        assert!(decode(&[14, 0, 0, 0, 2, b's', 0, 0xff, 0xff, 0xff, 0x7f, b'x', 0, 0]).unwrap_err().contains("malformed"));
+        assert!(decode(&[0xff, 0xff, 0, 0, 0]).is_err());
+        let mut deep = vec![];
+        for _ in 0..40 {
+            deep = [vec![0u8; 4], vec![3, b'a', 0], deep, vec![0]].concat();
+            let n = deep.len() as i32;
+            deep[..4].copy_from_slice(&n.to_le_bytes());
+        }
+        assert!(decode(&deep).unwrap_err().contains("deep"));
     }
 }

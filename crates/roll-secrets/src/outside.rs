@@ -1,4 +1,4 @@
-//! Postgres, MySQL and Redis servers roll doesn't run (docs/secrets.md, "Databases outside roll"): roll
+//! Postgres, MySQL, Redis and MongoDB servers roll doesn't run (docs/secrets.md, "Databases outside roll"): roll
 //! rotates a login's password itself, without a webhook of the customer's, as Infisical's secret
 //! rotation.
 //!
@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS outside_dbs (
 
 pub(crate) const KIND: &str = "outside_database";
 
-/// A Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ or Redis server outside roll, by the URL's scheme (rolld: TLS to a public address it
+/// A Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis or MongoDB server outside roll, by the URL's scheme (rolld: TLS to a public address it
 /// resolved itself). Calls block; errors never carry a password.
 /// `ca` is the server's CA certificates (PEM), trusted as well as the system's.
 pub trait OutsideDb: Send + Sync {
@@ -163,8 +163,17 @@ fn aad(project: &str, id: &str) -> String {
     format!("roll-secrets:outside_database:{project}:{id}:url")
 }
 
+/// A role, user or account name: letters, digits and _ (quoted where the engine needs it).
 fn check_role(r: &str) -> bool {
-    (1..=63).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') && !r.as_bytes()[0].is_ascii_digit()
+    (1..=63).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') && !r.as_bytes()[0].is_ascii_digit()
+}
+
+/// A group: a role, or for MongoDB a role in another database (`readWrite@app`).
+fn check_group(g: &str) -> bool {
+    match g.split_once('@') {
+        Some((r, db)) => check_role(r) && !db.is_empty() && db.len() <= 64 && db.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+        None => check_role(g),
+    }
 }
 
 /// A password nobody chose: 40 upper- and lowercase letters and digits, each class present
@@ -382,15 +391,15 @@ impl Secrets {
         }
         let group = n.group.map(|g| g.trim().to_string()).filter(|g| !g.is_empty());
         let pair = n.roles.len() == 2 && n.roles[0] != n.roles[1];
-        if !(pair || n.roles.is_empty()) || !n.roles.iter().chain(&group).all(|r| check_role(r)) || (n.roles.is_empty() && group.is_none()) {
-            return Err(Error::BadRequest("roles are two different login roles that take turns (managed), group a role dynamic logins join; one or both (lowercase letters, digits and _)".into()));
+        if !(pair || n.roles.is_empty()) || !n.roles.iter().all(|r| check_role(r)) || group.as_ref().is_some_and(|g| !check_group(g)) || (n.roles.is_empty() && group.is_none()) {
+            return Err(Error::BadRequest("roles are two different login roles that take turns (managed), group a role dynamic logins join; one or both (letters, digits and _; MongoDB's group may be role@db)".into()));
         }
         if group.as_ref().is_some_and(|g| n.roles.contains(g)) {
             return Err(Error::BadRequest("the group role isn't one of the two that take turns".into()));
         }
         let host = authority_host(&n.url)?;
-        if !["postgres://", "postgresql://", "mysql://", "sqlserver://", "clickhouse://", "rabbitmq://", "redis://", "rediss://"].iter().any(|p| n.url.starts_with(p)) || host.is_empty() || n.url.len() > 2048 {
-            return Err(Error::BadRequest("the URL is postgres://user:password@host:5432/db, mysql://…@host:3306/db, sqlserver://…@host:1433/db, clickhouse://…@host:8443/db, rabbitmq://…@host:15671/vhost or rediss://…@host:6379".into()));
+        if !["postgres://", "postgresql://", "mysql://", "sqlserver://", "clickhouse://", "rabbitmq://", "redis://", "rediss://", "mongodb://", "mongodb+srv://"].iter().any(|p| n.url.starts_with(p)) || host.is_empty() || n.url.len() > 2048 {
+            return Err(Error::BadRequest("the URL is postgres://user:password@host:5432/db, mysql://…@host:3306/db, sqlserver://…@host:1433/db, clickhouse://…@host:8443/db, rabbitmq://…@host:15671/vhost, rediss://…@host:6379 or mongodb+srv://…@cluster".into()));
         }
         let ca = n.ca.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
         if ca.as_ref().is_some_and(|c| c.len() > 64 * 1024 || !c.contains("-----BEGIN CERTIFICATE-----")) {
