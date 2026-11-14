@@ -211,12 +211,22 @@ pub struct Consent {
     pub ask_otherwise: bool,
 }
 
-/// The consent screen's answer, from the signed-in operator: a code for the client, in the
-/// redirect the dashboard sends the browser to.
+/// The consent screen's answer, from the operator or a signed-in user (whose connection is
+/// their own: it acts as them): a code for the client, in the redirect the dashboard sends the
+/// browser to.
 pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
-    if !matches!(crate::api::who(&a, &ext)?, crate::api::Who::Operator) {
-        return Err(Error::Forbidden("only the operator connects MCP clients".into()));
-    }
+    // A person's connection past what the policy has an admin approve waits for one, as their
+    // tokens do (`asker`: their handle, for the admins' mail).
+    let mut asker = None;
+    let user = match crate::api::who(&a, &ext)? {
+        // A signed-in admin's connection is theirs (it acts as the operator while they're one).
+        crate::api::Who::Operator => ext.get::<roll_auth::SignedIn>().map(|u| u.user.clone()),
+        crate::api::Who::User(u) => {
+            asker = Some(u.handle);
+            Some(u.user)
+        }
+        crate::api::Who::Grant(_) => return Err(Error::Forbidden("a token never connects an MCP client".into())),
+    };
     let c: Consent = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
     if c.code_challenge_method.as_deref().unwrap_or("S256") != "S256" {
         return Err(Error::BadRequest("code_challenge_method must be S256".into()));
@@ -236,9 +246,19 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
         return Err(Error::BadRequest("redirect_uri isn't one the client registered".into()));
     }
     a.check_policy(c.expires_at)?;
-    let new = NewGrant { name: c.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| client.name.clone()), rules: c.rules.clone(), expires_at: c.expires_at, not_before: None, ip_allow: c.ip_allow.clone(), rate_per_minute: c.rate_per_minute, ask_otherwise: c.ask_otherwise };
+    let new = NewGrant { name: c.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| client.name.clone()), rules: c.rules.clone(), expires_at: c.expires_at, not_before: None, ip_allow: c.ip_allow.clone(), rate_per_minute: c.rate_per_minute, ask_otherwise: c.ask_otherwise, pending: false };
+    let asker = asker.filter(|_| a.policy_now().needs_approval(&new.rules, new.ask_otherwise));
+    let new = NewGrant { pending: asker.is_some(), ..new };
     let (a2, cl, uri, ch, res, by) = (a.clone(), client.clone(), c.redirect_uri.clone(), c.code_challenge.clone(), Some(resource(&a)), crate::api::actor(&ext));
-    let code = tokio::task::spawn_blocking(move || a2.store.issue_code(&cl, &new, &by, &uri, &ch, res.as_deref())).await.map_err(|e| Error::Internal(e.to_string()))??;
+    let (code, grant_id) = tokio::task::spawn_blocking(move || a2.store.issue_code(&cl, &new, crate::store::Issuer { created_by: &by, user: user.as_deref() }, &uri, &ch, res.as_deref()))
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))??;
+    if let Some(handle) = asker {
+        let a3 = a.clone();
+        if let Ok(Ok(g)) = tokio::task::spawn_blocking(move || a3.store.get(&grant_id)).await {
+            a.tell_admins_waiting(&g, &handle);
+        }
+    }
     let mut redirect = url::Url::parse(&c.redirect_uri).map_err(|_| Error::BadRequest("redirect_uri isn't a URL".into()))?;
     {
         let mut q = redirect.query_pairs_mut();

@@ -412,6 +412,17 @@ impl Accounts {
         Ok(Some(roll_auth::Session::Full(roll_auth::SignedIn { user, handle, admin, code_owner, session: id })))
     }
 
+    /// A user as they are now, for a token of theirs (roll-access): `None` once disabled or gone.
+    pub fn person(&self, user: &str) -> Result<Option<roll_auth::SignedIn>> {
+        let row = self.db.read(|c| {
+            c.query_row("SELECT handle, admin, disabled, code_owner_id FROM users WHERE id = ?", [user], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?, r.get::<_, bool>(2)?, r.get::<_, Option<String>>(3)?))
+            })
+            .optional()
+        })?;
+        Ok(row.filter(|(_, _, disabled, _)| !disabled).map(|(handle, admin, _, code_owner)| roll_auth::SignedIn { user: user.to_string(), handle, admin, code_owner, session: String::new() }))
+    }
+
     /// A new session for `user`: full, or owing a second factor when they have one on.
     pub fn issue(&self, user: &str, user_agent: &str) -> Result<Issued> {
         self.provision_owner(user);
@@ -822,6 +833,41 @@ impl roll_auth::Sessions for Resolver {
         let accounts = self.0.clone();
         let token = zeroize::Zeroizing::new(token.to_string());
         Box::pin(async move { tokio::task::spawn_blocking(move || accounts.resolve(&token).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())? })
+    }
+
+    fn person<'a>(&'a self, user: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SignedIn>, String>> {
+        let (accounts, user) = (self.0.clone(), user.to_string());
+        Box::pin(async move { tokio::task::spawn_blocking(move || accounts.person(&user).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())? })
+    }
+
+    fn person_now(&self, user: &str) -> Result<Option<roll_auth::SignedIn>, String> {
+        self.0.person(user).map_err(|e| e.to_string())
+    }
+
+    fn tell<'a>(&'a self, user: &'a str, subject: &'a str, text: &'a str) -> roll_auth::BoxFuture<'a, Result<(), String>> {
+        let (accounts, id) = (self.0.clone(), user.to_string());
+        Box::pin(async move {
+            if !accounts.mail_on() {
+                return Ok(());
+            }
+            let found = tokio::task::spawn_blocking({
+                let accounts = accounts.clone();
+                move || accounts.db.read(|c| load_user(c, &id)).map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+            let Some(user) = found.filter(|u| !u.disabled) else { return Ok(()) };
+            accounts.mailer.send(&Mail { to: user.email, subject: subject.to_string(), text: text.to_string() }).await.map_err(|e| e.to_string())
+        })
+    }
+
+    fn admins(&self) -> roll_auth::BoxFuture<'_, Result<Vec<String>, String>> {
+        let accounts = self.0.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || accounts.db.read(|c| c.query("SELECT id FROM users WHERE admin = 1 AND disabled = 0 ORDER BY created_at LIMIT 50", (), |r| r.get::<_, String>(0))).map_err(|e| e.to_string()))
+                .await
+                .map_err(|e| e.to_string())?
+        })
     }
 }
 

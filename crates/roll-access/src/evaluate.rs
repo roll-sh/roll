@@ -299,11 +299,12 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         // choice, not an agent's).
         Ok(Some(g)) if access.policy_now().idle(&g, code_sql::now_ms()) => return invalid_token(&access),
         Ok(Some(g)) => g,
-        // One that starts later says when, so its holder isn't left guessing.
+        // One that waits for an admin, or starts later, says so: its holder isn't left guessing.
         Ok(None) => {
             let a = access.clone();
-            return match blocking(move || a.store.not_started(&token)).await {
-                Ok(Some(at)) => {
+            return match blocking(move || a.store.not_yet(&token)).await {
+                Ok(Some(crate::store::NotYet::Pending)) => deny(StatusCode::UNAUTHORIZED, "pending_approval", "this token waits for an admin's approval".into(), json!({})),
+                Ok(Some(crate::store::NotYet::Starts(at))) => {
                     let when = chrono::DateTime::from_timestamp_millis(at).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)).unwrap_or_default();
                     deny(StatusCode::UNAUTHORIZED, "not_yet_valid", format!("this token works from {when}"), json!({ "not_before": at }))
                 }
@@ -352,18 +353,48 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // Used: from an address it may be used from (a refused address neither keeps it from idling
     // nor becomes its last address).
     if !decided_before && access.store.touch_due(&crate::store::use_key(&ctx.grant.id, ip.map(|i| i.to_string()).as_deref())) {
-        let (a, id, name, ip) = (access.clone(), ctx.grant.id.clone(), ctx.grant.name.clone(), ip.map(|i| i.to_string()));
+        let (a, id, name, user, ip) = (access.clone(), ctx.grant.id.clone(), ctx.grant.name.clone(), ctx.grant.user.clone(), ip.map(|i| i.to_string()));
+        let workload = ctx.grant.kind == "workload";
         tokio::spawn(async move {
             let a2 = a.clone();
             if let Ok(Some(new)) = tokio::task::spawn_blocking(move || a2.store.record_use(&id, ip.as_deref()).map(|n| (id, n))).await {
-                a.network_notice(&name, &new.0, &new.1);
+                // A workload's token is a CI job's for minutes: where it runs isn't news.
+                if !workload {
+                    a.network_notice(&name, &new.0, user.as_deref(), &new.1);
+                }
             }
         });
+    }
+    // A user's own token acts as them (docs/permissions.md, "Users' own tokens"): as they are now
+    // (disabled or gone, the token is dead), and only where their session reaches.
+    let person = match ctx.grant.user.clone() {
+        None => None,
+        Some(user) => {
+            let Some(people) = access.people.get().cloned() else { return invalid_token(&access) };
+            match people.person(&user).await {
+                Ok(Some(p)) => Some(p),
+                Ok(None) => return invalid_token(&access),
+                Err(e) => {
+                    tracing::warn!(error = %e, "looking up a token's user");
+                    return deny(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "accounts are unavailable; try again".into(), json!({}));
+                }
+            }
+        }
+    };
+    let as_user = person.as_ref().is_some_and(|p| !p.admin);
+    let reachable = matches!(
+        req.extensions().get::<roll_auth::RouteAccess>(),
+        Some(roll_auth::RouteAccess(roll_auth::Access::Public(_) | roll_auth::Access::Product(_) | roll_auth::Access::User(_)))
+    );
+    if as_user && !reachable {
+        ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
+        return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents and projects".into(), json!({}));
     }
     // A nested service (storage) sees its path without the prefix: the original has it.
     let mut original = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().clone(), |o| o.0.clone());
     // A signed hop to an owner or leader: the request it carries is the one to decide.
-    if let Some((_, h)) = catalog::FORWARDS.iter().find(|(r, _)| *r == ctx.route) {
+    let hop = catalog::FORWARDS.iter().find(|(r, _, _)| *r == ctx.route).map(|(_, _, p)| *p);
+    if let Some((_, h, _)) = catalog::FORWARDS.iter().find(|(r, _, _)| *r == ctx.route) {
         match req.headers().get(*h).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<axum::http::Uri>().ok()) {
             Some(u) => original = u,
             None => return deny(StatusCode::BAD_REQUEST, "bad_request", "a forwarded request without its path".into(), json!({})),
@@ -374,6 +405,20 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         return deny(StatusCode::FORBIDDEN, "operator_only", format!("{} {} is the operator's: no token can call it", ctx.method, ctx.route), json!({}));
     };
     let row = found.row;
+    // A hop carries its own product's routes only: anything else would be decided by another
+    // product's row while this one's handler runs it.
+    if hop.is_some_and(|p| p != row.product) {
+        ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
+        return deny(StatusCode::FORBIDDEN, "forbidden", format!("a {} hop carries only {} routes", hop.unwrap_or_default(), hop.unwrap_or_default()), json!({}));
+    }
+    // A user's token on a signed hop: the request it carries must be one their session may call too.
+    if as_user && hop.is_some() {
+        let carried = req.extensions().get::<roll_auth::RouteRules>().map(|r| r.access(row.route));
+        if !matches!(carried, Some(roll_auth::Access::Public(_) | roll_auth::Access::Product(_) | roll_auth::Access::User(_))) {
+            ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
+            return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents and projects".into(), json!({}));
+        }
+    }
     // Matched by its real path (a catch-all, a nest, a signed hop): the log names the real route.
     if found.params.is_some() {
         ctx.route = row.route.to_string();
@@ -553,7 +598,13 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     if let Ok(v) = axum::http::HeaderValue::from_str(&reviewer_name(&ctx.grant)) {
         parts.headers.insert("x-roll-agent", v);
     }
-    parts.extensions.insert(roll_auth::Operator);
+    // As the operator, narrowed; a user's token as that user (an admin also as the operator).
+    if !as_user {
+        parts.extensions.insert(roll_auth::Operator);
+    }
+    if let Some(p) = &person {
+        parts.extensions.insert(roll_auth::SignedIn { session: ctx.grant.id.clone(), ..p.clone() });
+    }
     if let Some(ip) = ctx.ip {
         parts.extensions.insert(roll_auth::ClientIp(ip));
         parts.extensions.insert(roll_cluster::ClientAddr(ip.to_string()));
@@ -565,6 +616,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         name: ctx.grant.name.as_str().into(),
         kind: ctx.grant.kind(),
         scope: scope.clone(),
+        user: ctx.grant.user.as_deref().map(Into::into),
         ask_otherwise: ctx.grant.ask_otherwise,
     });
     // A list filtered, an answer's credentials redacted, a create placed: the answer is read.
@@ -855,7 +907,7 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
             })
             .await
             .map_err(|e| Box::new(e.into_response()))
-            .inspect(|a| access.announce(a))?
+            .inspect(|a| access.announce(a, ctx.grant.user.as_deref()))?
         }
     };
     let max = if ctx.mcp.as_ref().is_some_and(|m| m.elicits) { std::time::Duration::ZERO } else { access.config.approval_wait };

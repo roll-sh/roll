@@ -131,10 +131,15 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
     let Some(grant) = looked else {
         return Json(json!({ "tools": [], "prompts": [], "live": false })).into_response();
     };
+    // A person's own token reaches only what their account does: as `tools/list` would for them.
+    let as_user = grant.user.as_deref().is_some_and(|u| {
+        m.config.access.as_ref().and_then(|a| a.people.get()).and_then(|p| p.person_now(u).ok().flatten()).is_some_and(|p| !p.admin)
+    });
     let ctx = Ctx {
         m,
         headers: HeaderMap::new(),
         principal: Principal::Grant(grant),
+        as_user,
         ip: None,
         url_elicitation: false,
         toolsets: None,
@@ -169,7 +174,7 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
     if !caller {
         return unauthorized(&m.config);
     }
-    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, toolsets: None, readonly: false, client: None, names: Default::default() };
+    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, toolsets: None, readonly: false, client: None, as_user: false, names: Default::default() };
     let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
     for t in ctx.tools() {
         let e = by.entry(t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string()).or_default();
@@ -304,6 +309,8 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     // The gate worked it out (trusted proxies, the edge) and left it on a token's request; the
     // operator's is the connection's own (behind the edge, the client's).
     let ip = ext.get::<roll_auth::ClientIp>().map(|c| c.0).or_else(|| ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_canonical()));
+    // A user's own token (the gate signed them in): only the products their account reaches.
+    let as_user = ext.get::<roll_auth::SignedIn>().is_some_and(|u| !u.admin);
     // Whether the client opens URLs for elicitation: from `initialize` in this message, else the
     // session id it was given.
     let declared = messages.iter().find(|m| m["method"] == "initialize").map(|m| m["params"]["capabilities"]["elicitation"].get("url").is_some());
@@ -320,7 +327,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).and_then(session_client))
         .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
         .map(Arc::from);
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, url_elicitation, toolsets, readonly, client, names: Default::default() });
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, toolsets, readonly, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
@@ -398,6 +405,8 @@ struct Ctx {
     headers: HeaderMap,
     principal: Principal,
     ip: Option<std::net::IpAddr>,
+    /// A signed-in user's own token: tools only for what their account reaches.
+    as_user: bool,
     /// The client opens URLs for elicitation: an approval comes back as one to open, then retry.
     url_elicitation: bool,
     /// The products whose tools are listed (`None`: every product's).
@@ -415,7 +424,7 @@ impl Ctx {
     /// Whether the caller might use a tool for this product and these actions at all, and asked
     /// for its toolset.
     fn may(&self, product: &str, actions: &[Action]) -> bool {
-        self.on(product) && match &self.principal {
+        self.on(product) && self.reaches(product) && match &self.principal {
             Principal::Operator => true,
             // A token that asks for anything else may use any tool (some of them by asking).
             Principal::Grant(g) => g.ask_otherwise || actions.iter().any(|a| g.scope.may(product, *a)),
@@ -431,6 +440,11 @@ impl Ctx {
         }
     }
 
+    /// A person's own token reaches only what their session can (`USER_REACH`).
+    fn reaches(&self, product: &str) -> bool {
+        !self.as_user || product == "access" || roll_access::USER_REACH.contains(&product)
+    }
+
     /// Whether this rolld runs the product and the connection asked for its toolset.
     fn on(&self, product: &str) -> bool {
         self.asked(product) && (product == "access" || product == "workspace" || self.m.config.products.iter().any(|p| p == product))
@@ -444,7 +458,7 @@ impl Ctx {
     fn usable(&self, t: &tools::Tool) -> bool {
         // One any token may call is still its product's: listed only where the product runs.
         if t.open() {
-            return self.on(t.product);
+            return self.on(t.product) && self.reaches(t.product);
         }
         self.may(t.product, &t.actions())
     }

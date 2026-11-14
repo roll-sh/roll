@@ -362,7 +362,9 @@ The decision is the same wherever the request comes from: the HTTP API, the CLI,
 A request forwarded to another node is evaluated again there, which is cheap (one indexed
 read): roll code's repo owners get the request as it was, and the signed hops to storage's metadata
 owner and the tasks cell's leader (`/internal/storage/control`, `/internal/tasks`) are decided as
-the original request their header carries (`x-roll-storage-uri`, `x-roll-tasks-uri`). Those routes
+the original request their header carries (`x-roll-storage-uri`, `x-roll-tasks-uri`), and only
+their own product's (a storage hop carrying a workspace route is refused: another product's row
+would decide while storage's handler ran it). Those routes
 take only signed requests, so nobody outside the cluster can put a path there. On the owner:
 
 - the client's address is the one the first node saw (`x-roll-code-client`, signed), so IP
@@ -546,6 +548,61 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
   sent again 5 minutes later, or at once with "Retry now" (`POST …/sinks/{id}/retry`). Rows the
   log prunes before a sink catches up are gone. At most 10 sinks.
 
+## Users' own tokens
+
+With accounts (docs/accounts.md), a signed-in person who isn't an admin makes tokens and connects
+MCP clients for themselves, as GitHub's fine-grained tokens act for the person who made them:
+
+- `POST /v1/access/tokens` with their session makes a grant with `user: "usr_…"`, and so does the
+  consent screen. A token theirs makes is theirs too.
+- **An admin approves what reaches far** (GitHub's organization approval of fine-grained tokens).
+  The policy's `approve_people` (`["admin", "reveal"]`, set on the access page) names actions.
+  A person's own token whose rules reach one of them, or that asks for anything else, is made
+  `pending`: it answers 401 `pending_approval` until an admin approves it
+  (`POST /v1/access/tokens/{id}/approve`) or denies it (`…/deny`: revoked, "an admin denied it").
+  Admins are mailed when one waits (who asked, what it may do, where to decide; never a secret).
+  A person is told first: `GET /v1/access` lists `approve_people`, and the new-token page and the
+  consent screen say "an admin approves this first" as soon as the rules reach one of them.
+  Only an admin decides, never the person or a token, and the person is mailed either way
+  (`roll token list --pending`, `roll token approve|deny <id>` from the CLI).
+  Widening an approved token's rules past the policy makes it wait again, in the same
+  transaction. A waiting token's rules can't change until an admin decides (409), so an approval
+  never takes rules the admin didn't see. A person's OAuth connection waits the same way. One
+  their token makes stays within that token, so it doesn't wait. A person's token made before the
+  policy asked keeps working, and an admin's checkup lists it as `unapproved` to approve or deny.
+  Admins are mailed at most once an hour per waiting token.
+- **It acts as them, never as more.** On every request the evaluator looks the person up as they
+  are now (`roll_auth::Sessions::person`, never cached): disabled or gone, the token answers 401.
+  A product's own background work that looks a stored grant up (`roll_auth::Grants::grant`: a
+  sync a token made) gets `None` for it then too (`Sessions::person_now`).
+  An admin's token runs as the operator's, narrowed. Anyone else's token runs as their session
+  would: only routes their session may call (the gate's `User`, `Product` and `Public` rules, which
+  it hands the evaluator as `roll_auth::RouteAccess`), as them (`roll_auth::SignedIn`, no
+  `Operator`), then narrowed again by its rules. So roll code sees their own owner (git checks the
+  repo as them before it takes the gate's word), projects are their own, and every other product
+  answers `403 operator_only`, whatever the rules say.
+- They see and manage only their own tokens, connections, approvals and audit rows, and **they
+  decide their own token's approvals** (a token never decides one). The operator sees everyone's.
+- A token or connection made from an admin's session is that admin's too: it acts as the operator
+  while they're an admin, as their own session would once they aren't, and stops when their
+  account does. Tokens made with the operator's token belong to nobody.
+- A person holds at most 100 live tokens and connections (`USER_MAX_GRANTS`), so nobody signed in
+  can fill everyone's room (10,000 live grants in all).
+- The builder and the consent screen offer only what they reach (`GET /v1/access` answers
+  `{kind: "user", reach: ["code", "agents", "workspace"]}`).
+- **Their tokens' news is mailed to them** (GitHub mails a token's owner), as well as posted
+  where approvals go: an approval one of their tokens waits on (they decide it), a token of theirs
+  used from a new network, one roll revoked as leaked, and, once a day, the ones that expire
+  within a week (made for more than a day). Each person hears of their own tokens only, a
+  disabled person hears nothing (`roll_auth::Sessions::tell`, accounts' mailer).
+  - **A mail holds roll's words, not anyone else's.** Names are shown as words only (`mail_name`:
+    letters, digits, spaces, `-` and `_`, 40 characters), since a token's or client's name is
+    anyone's text; an approval's mail names the token, the product and the action, never the
+    resource or the request's arguments (a request can name anything); a leak's mail doesn't say
+    where it was found (the token's page does). No secret, and every link is to roll's own pages.
+  - **No floods:** one approval mail per token per ten minutes (more show on the approvals page),
+    and at most 20 mails a person an hour on a node.
+
 ## Managing grants
 
 - The operator manages grants. A grant may too when it has `admin` on product `access`, and then
@@ -567,6 +624,16 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
   with `Access::create_grant` and the caller's request: the function `POST /v1/access/tokens` is,
   with the same owner, coverage, policy and caps, never a second way in. Its page lists them with
   `GET /v1/access/tokens?product=&resource=`.
+- A workload that proved who it is (roll secrets' identity logins: a CI job's OIDC token) gets a
+  token for 5 to 60 minutes from `Access::mint_workload`: rules within the identity's scope, owned
+  by whoever set the identity up (none while they can't sign in), its `ip_allow` the identity's.
+  The login is the authentication, so no caller is gated. Workload tokens (`kind: "workload"`)
+  stay out of the token list (`?kind=workload` lists the latest 500), the checkup, the expiry
+  digest, new-network notices and the tokens' caps (10,000 live of their own, 1,000 per owner), and go a day after
+  they end. One is fixed: never edited, rotated or grown by a remembered approval (`409`), only
+  revoked or left to end. It makes and changes no tokens (`403`): what it made would be a
+  credential nobody set up. The product that minted it stops it with `Access::revoke_workload(id,
+  why)` (its identity deleted): only a workload grant, with why and an audit row. Their requests are audited as any token's, and each mint is a row.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.
 
 ### Tighten to what it used
@@ -698,7 +765,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access` | any grant | the caller: the operator, or its own grant (rules, expiry) |
 | `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
-| `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}`; `?product=` (and `&resource=`) only those with a rule on that product by name (naming that `{id}` or `{project}`), as a product's page lists its own tokens |
+| `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}`; `?product=` (and `&resource=`) only those with a rule on that product by name (naming that `{id}` or `{project}`), as a product's page lists its own tokens; `?kind=workload` the workload tokens instead |
 | `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?}` → 201 `{grant, token}`; `token` is shown this once |
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |

@@ -45,9 +45,13 @@ impl FromRequestParts<Arc<Code>> for Caller {
 
     async fn from_request_parts(parts: &mut Parts, code: &Arc<Code>) -> Result<Self, Self::Rejection> {
         // A scoped roll token (docs/permissions.md): rolld's gate decided this request already and
-        // sends it on as the operator's, narrowed to what the token allows.
+        // sends it on as the operator's, narrowed to what the token allows; a user's own token as
+        // that user (the gate signed them in).
         if roll_auth::Grant::on(&parts.extensions).is_some() {
-            return Ok(Caller::Admin);
+            return match parts.extensions.get::<roll_auth::SignedIn>() {
+                Some(user) => code.session_caller(user),
+                None => Ok(Caller::Admin),
+            };
         }
         let token = token(parts);
         // A session rolld's gate signed in (docs/accounts.md): only without a token of its own.
@@ -155,9 +159,15 @@ pub fn router(code: Arc<Code>) -> Router {
     let git_config = code_git::ServerConfig { memory_budget: Some(code.git_budget.clone()), ..code_git::ServerConfig::default() };
     let git = code_git::router(GitAdapter::new(code.clone()), git_config);
     // A scoped token's git request, decided by rolld's gate: roll code's git server takes the
-    // gate's word for it (code_git::Vouched), named for the token.
-    let git = git.layer(axum::middleware::from_fn(|mut req: axum::extract::Request, next: axum::middleware::Next| async move {
+    // gate's word for it (code_git::Vouched), named for the token. A user's own token reaches
+    // only the repos that user can: checked here as them first.
+    let git = git.layer(axum::middleware::from_fn_with_state(code.clone(), |State(code): S, mut req: axum::extract::Request, next: axum::middleware::Next| async move {
         if let Some(g) = roll_auth::Grant::on(req.extensions()) {
+            if let Some(user) = req.extensions().get::<roll_auth::SignedIn>().cloned()
+                && let Err(e) = code.user_may_git(&user, req.uri())
+            {
+                return e.into_response();
+            }
             let name = format!("token:{}", g.name);
             req.extensions_mut().insert(code_git::Vouched(name));
         }
@@ -208,6 +218,7 @@ async fn info(
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
         .map(|(_, t)| t.trim().to_string());
     let resolved = match (&token, user) {
+        (_, Some(axum::Extension(u))) if roll_auth::Grant::on(&ext).is_some() => code.session_caller(&u),
         _ if roll_auth::Grant::on(&ext).is_some() => Ok(Caller::Admin),
         (None, Some(axum::Extension(u))) => code.session_caller(&u),
         _ => code.caller(token.as_deref()),

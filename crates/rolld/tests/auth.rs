@@ -280,11 +280,33 @@ async fn every_control_plane_route_needs_the_operator_token() {
     };
     let token = minted["token"].as_str().expect("a token").to_string();
     assert_eq!(as_token(token.clone()).await, "owner");
+    // A scoped roll token the person makes is theirs (docs/permissions.md, "Users' own tokens"):
+    // roll code sees them, an operator's route stays shut whatever its rules say, and it stops
+    // with their account.
+    let mine: serde_json::Value = http
+        .post(format!("{api}/v1/access/tokens"))
+        .header("cookie", &cookie)
+        .header("origin", DASHBOARD)
+        .header("x-roll-csrf", session["csrf"].as_str().unwrap())
+        .json(&serde_json::json!({ "name": "cursor", "rules": [{ "product": "*", "resources": "*", "actions": { "read": "allow" } }] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let adas = mine["token"].as_str().unwrap_or_else(|| panic!("{mine}")).to_string();
+    let as_ada: serde_json::Value = http.get(format!("{api}/v1/code")).bearer_auth(&adas).send().await.unwrap().json().await.unwrap();
+    assert_eq!((as_ada["auth"]["caller"]["kind"].as_str(), as_ada["auth"]["caller"]["owner"].as_str()), (Some("owner"), Some("ada")), "{as_ada}");
+    let projects = http.get(format!("{api}/v1/workspace/projects")).bearer_auth(&adas).send().await.unwrap().status();
+    let operators = http.get(format!("{api}/v1/redis/databases")).bearer_auth(&adas).send().await.unwrap().status();
+    assert!(projects.is_success() && operators == 403, "projects {projects}, redis {operators}");
     let users: serde_json::Value = http.get(format!("{api}/v1/accounts/users")).header("authorization", &operator).send().await.unwrap().json().await.unwrap();
     let ada = users.as_array().unwrap().iter().find(|u| u["handle"] == "ada").unwrap()["id"].as_str().unwrap().to_string();
     let off = http.patch(format!("{api}/v1/accounts/users/{ada}")).header("authorization", &operator).json(&serde_json::json!({ "disabled": true })).send().await.unwrap();
     assert_eq!(off.status(), 200);
     assert_ne!(as_token(token).await, "owner", "a disabled account's roll code token still works");
+    assert_eq!(http.get(format!("{api}/v1/code")).bearer_auth(&adas).send().await.unwrap().status(), 401, "a disabled account's scoped token still works");
 
     // `/v1/info` answers before the gate: the dashboard's sidebar reads it before sign-in.
     assert_eq!(send("internal", "api".into(), "/v1/info".into(), None).await, 200);

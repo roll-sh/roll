@@ -56,11 +56,14 @@ export interface AgentSees {
 export interface Grant {
   id: string;
   name: string;
-  kind: "token" | "oauth";
+  /** `workload`: a short-lived token a workload got by proving who it is (roll secrets' identity logins). */
+  kind: "token" | "oauth" | "workload";
   rules: Rule[];
   expires_at: number | null;
   /** It works only from then on (Cloudflare's TTL start); before, it's refused. */
   not_before?: number | null;
+  /** A person's token waiting for an admin's approval: it doesn't work until then. */
+  pending?: boolean;
   ip_allow: string[];
   /** "operator", or the grant that made it. */
   created_by: string;
@@ -95,11 +98,11 @@ export interface NewGrant {
 export interface Checkup {
   grant: { id: string; name: string; kind: Grant["kind"]; last_used_at: number | null; expires_at: number | null; created_at: number };
   /** Most serious first. */
-  findings: { kind: "everything" | "never_expires" | "unused" | "narrower" | "roams"; why: string; fix: "tighten" | "expire" | "revoke" | "limit_addresses" }[];
+  findings: { kind: "pending" | "unapproved" | "everything" | "never_expires" | "unused" | "narrower" | "roams"; why: string; fix: "approve" | "tighten" | "expire" | "revoke" | "limit_addresses" }[];
 }
 
 /** Checkup findings, most serious first. */
-const FINDING_ORDER: Checkup["findings"][number]["kind"][] = ["everything", "never_expires", "unused", "roams", "narrower"];
+const FINDING_ORDER: Checkup["findings"][number]["kind"][] = ["pending", "unapproved", "everything", "never_expires", "unused", "roams", "narrower"];
 
 /** The checkup's tokens, the most serious first (by each one's worst finding, then how many). */
 export function byConcern(list: Checkup[]): Checkup[] {
@@ -109,6 +112,7 @@ export function byConcern(list: Checkup[]): Checkup[] {
 
 /** What a checkup fix is called on its button. */
 export const FIX_LABEL: Record<Checkup["findings"][number]["fix"], string> = {
+  approve: "Approve or deny",
   tighten: "Tighten",
   expire: "Give it an expiry",
   revoke: "Revoke",
@@ -234,7 +238,23 @@ export interface Catalog {
   api_url: string;
 }
 
-export type Me = { kind: "operator"; locked: boolean } | { kind: "token" | "oauth"; grant: Grant; locked: boolean };
+export type Me =
+  | { kind: "operator"; locked: boolean }
+  | { kind: "token" | "oauth"; grant: Grant; locked: boolean }
+  /** A signed-in user who isn't an admin: their tokens act as them and reach only `reach`. */
+  | { kind: "user"; user: { id: string; handle: string }; reach: string[]; approve_people?: Action[]; locked: boolean };
+
+/** Whether a token `me` makes with these rules waits for an admin (the server's `Policy::needs_approval`). */
+export function waitsForAdmin(me: Me | null, rules: Rule[], askOtherwise: boolean): boolean {
+  const approve = me?.kind === "user" ? (me.approve_people ?? []) : [];
+  return approve.length > 0 && (askOtherwise || rules.some((r) => (Object.keys(r.actions) as Action[]).some((a) => approve.includes(a))));
+}
+
+/** The catalogue as `me` may use it: a user's tokens reach only what their account does. */
+export function catalogFor(c: Catalog, me: Me | null): Catalog {
+  if (me?.kind !== "user") return c;
+  return { ...c, products: c.products.filter((p) => me.reach.includes(p)) };
+}
 
 /** How long a rotated token's old secret may keep working, in seconds (0: it stops at once). */
 export const KEEP_OLD: { label: string; s: number }[] = [
@@ -249,7 +269,12 @@ export interface Policy {
   require_expiry?: boolean;
   /** Tokens unused this many days stop working. */
   max_idle_days?: number | null;
+  /** A person's token reaching any of these waits for an admin's approval (GitHub's organizations' rule). */
+  approve_people?: Action[];
 }
+
+/** The actions an admin may require approval for in people's tokens, strongest first. */
+export const APPROVABLE: Action[] = ["admin", "reveal", "deploy", "delete"];
 
 export interface Consent {
   client_id: string;
@@ -312,6 +337,8 @@ export const accessApi = {
   me: () => call<Me>("GET", "/v1/access"),
   catalog: () => call<Catalog>("GET", "/v1/access/catalog"),
   tokens: () => call<Grant[]>("GET", "/v1/access/tokens"),
+  /** The latest workload tokens (they're not in `tokens`). */
+  workloads: () => call<Grant[]>("GET", "/v1/access/tokens?kind=workload"),
   token: (id: string) => call<Grant>("GET", token(id)),
   /** The token is in the answer this once. */
   create: (g: NewGrant) => call<{ grant: Grant; token: string }>("POST", "/v1/access/tokens", g),
@@ -332,6 +359,9 @@ export const accessApi = {
   /** A new secret, the same rules; the old one stops at once. Shown this once. */
   /** A new secret; `keepOldS`: the old one keeps working that long (at most a week), as Stripe's roll key. */
   rotate: (id: string, keepOldS?: number) => call<{ grant: Grant; token: string }>("POST", `${token(id)}/rotate`, keepOldS ? { keep_old_for_s: keepOldS } : {}),
+  /** An admin decides a person's pending token: approved it works, denied it's revoked. */
+  approveToken: (id: string) => call<Grant>("POST", `${token(id)}/approve`),
+  denyToken: (id: string) => call<Grant>("POST", `${token(id)}/deny`),
   /** What the evaluator would decide for a request, without running it (`token`: the operator asks for one). */
   check: (method: string, path: string, opts: { body?: unknown; token?: string } = {}) =>
     call<{ decision: "allow" | "ask" | "deny"; product?: string; action?: Action; resource?: string | null; route?: string; why?: string }>(

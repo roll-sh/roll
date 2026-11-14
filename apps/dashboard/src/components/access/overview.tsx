@@ -14,6 +14,7 @@ import {
   type Checkup,
   productName,
   withToolsets,
+  APPROVABLE,
   KEEP_OLD,
   startsLater,
   toolsetCost,
@@ -49,7 +50,13 @@ export function AccessOverview() {
           </p>
         )}
         <ConnectPanel />
-        <PolicyPanel />
+        {me?.kind === "operator" && <PolicyPanel />}
+        {me?.kind === "user" && (
+          <p className="text-[12px] text-muted">
+            Your tokens and connections act as you: they reach what your account does (roll code, agents and your projects), never
+            more, and their approvals come to you.
+          </p>
+        )}
         <ErrorNote error={error} />
         {checkup && checkup.length > 0 && (
           <Attention
@@ -60,6 +67,7 @@ export function AccessOverview() {
           />
         )}
         {grants === null && !error ? <Connecting /> : <Grants grants={grants ?? []} refresh={refresh} />}
+        <Workloads />
       </div>
     </AccessShell>
   );
@@ -286,6 +294,27 @@ function Grants({ grants, refresh }: { grants: Grant[]; refresh: () => Promise<v
   );
 }
 
+/** Workload tokens live: each a workload's for minutes (a CI job that proved who it is), listed
+ * apart from the tokens people make. Nothing shows when there are none. */
+function Workloads() {
+  const { data, refresh } = usePoll(() => accessApi.workloads(), 30_000);
+  const live = (data ?? []).filter((g) => statusOf(g) === "active");
+  if (live.length === 0) return null;
+  return (
+    <Panel title="Workload tokens" aside={<span className="font-mono text-[12px] text-subtle">{live.length} live</span>}>
+      <p className="border-b border-line px-5 py-2.5 text-[12px] text-muted">
+        Workloads that proved who they are (a CI job signing in to roll secrets) get a token for minutes, within their identity&apos;s
+        scope. They can&apos;t be changed; revoke one to stop it now.
+      </p>
+      <ul className="divide-y divide-line">
+        {live.map((g) => (
+          <GrantRow key={g.id} g={g} refresh={refresh} />
+        ))}
+      </ul>
+    </Panel>
+  );
+}
+
 const REACH_TONE: Record<ReturnType<typeof reach>, string> = {
   "read only": "text-muted border-line",
   "can change things": "text-fg border-line-2",
@@ -293,6 +322,10 @@ const REACH_TONE: Record<ReturnType<typeof reach>, string> = {
 };
 
 /** A token in a list (its name links to its page) or at the top of its own page. */
+/** Who's looking, asked once for every row that needs it (a pending token's Approve and Deny). */
+let me: Promise<{ kind: string }> | null = null;
+const meOnce = () => (me ??= accessApi.me().catch(() => ({ kind: "unknown" })));
+
 export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () => Promise<void>; linked?: boolean }) {
   const ws = useWorkspace();
   const projectName = (id: string) => ws.projects.find((p) => p.id === id)?.name ?? id;
@@ -305,6 +338,23 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
   const { copied, copy } = useCopy();
   const status = statusOf(g);
   const r = reach(g);
+  // A pending token: an admin decides it here (a person sees that it waits).
+  const [admin, setAdmin] = useState(false);
+  useEffect(() => {
+    if (g.pending) void meOnce().then((m) => setAdmin(m.kind === "operator"));
+  }, [g.pending]);
+  const decide = async (approve: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await (approve ? accessApi.approveToken(g.id) : accessApi.denyToken(g.id));
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
   // A rotation can leave the old secret working for a while, so deployments switch first.
   const [keepOld, setKeepOld] = useState(0);
   const [kept, setKept] = useState(0);
@@ -350,7 +400,18 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
             ) : (
               <span className="truncate text-[14px] font-medium">{g.name}</span>
             )}
-            <span className="rounded border border-line px-1.5 text-[11px] text-subtle">{g.kind === "oauth" ? (g.client?.name ?? "OAuth") : "token"}</span>
+            <span className="rounded border border-line px-1.5 text-[11px] text-subtle">{g.kind === "oauth" ? (g.client?.name ?? "OAuth") : g.kind}</span>
+            {g.pending && status === "active" && <span className="rounded border border-accent/50 px-1.5 text-[11px] text-accent">waits for an admin</span>}
+            {g.pending && admin && status === "active" && (
+              <span className="flex items-center gap-1.5">
+                <button onClick={() => void decide(true)} disabled={busy} className={`${btn} h-6 px-2 text-[11px]`}>
+                  Approve
+                </button>
+                <button onClick={() => void decide(false)} disabled={busy} className={`${btn} h-6 px-2 text-[11px] text-danger`}>
+                  Deny
+                </button>
+              </span>
+            )}
             {status === "active" ? (
               <span className={`rounded border px-1.5 text-[11px] ${REACH_TONE[r]}`}>{r}</span>
             ) : (
@@ -376,9 +437,12 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
         </div>
         {status === "active" && !confirm && (
           <span className="flex shrink-0 gap-1.5">
-            <button onClick={() => setEditing((e) => !e)} className={btn} aria-expanded={editing}>
-              Edit
-            </button>
+            {/* A waiting token's rules are fixed until an admin decides (the API answers 409). */}
+            {g.kind !== "workload" && !g.pending && (
+              <button onClick={() => setEditing((e) => !e)} className={btn} aria-expanded={editing}>
+                Edit
+              </button>
+            )}
             {g.kind === "token" && (
               <button onClick={() => setRotating((r) => !r)} disabled={busy} className={btn} aria-expanded={rotating} title="A new secret with the same rules">
                 Rotate
@@ -585,6 +649,23 @@ function PolicyPanel() {
         <input type="checkbox" checked={Boolean(p.require_expiry)} onChange={(e) => void save({ ...p, require_expiry: e.target.checked })} />
         must expire
       </label>
+      <span className="flex flex-wrap items-center gap-1.5">
+        people's tokens that can
+        {APPROVABLE.map((act) => {
+          const on = (p.approve_people ?? []).includes(act);
+          return (
+            <label key={act} className="flex items-center gap-1">
+              <input
+                type="checkbox"
+                checked={on}
+                onChange={() => void save({ ...p, approve_people: on ? (p.approve_people ?? []).filter((x) => x !== act) : [...(p.approve_people ?? []), act] })}
+              />
+              {act}
+            </label>
+          );
+        })}
+        need your approval
+      </span>
       <label className="flex items-center gap-1.5">
         stops after
         <input

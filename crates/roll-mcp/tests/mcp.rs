@@ -15,8 +15,24 @@ use tower::ServiceExt;
 
 const OPERATOR: &str = "operator-token-0123456789abcdef-0123";
 
+/// One person, not an admin, as accounts would answer for her.
+struct Alice;
+
+impl roll_auth::Sessions for Alice {
+    fn cookie(&self) -> &str {
+        "roll_session"
+    }
+    fn resolve<'a>(&'a self, _token: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::Session>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn person_now(&self, user: &str) -> Result<Option<roll_auth::SignedIn>, String> {
+        Ok((user == "usr_alice").then(|| roll_auth::SignedIn { user: user.into(), handle: "alice".into(), admin: false, code_owner: None, session: String::new() }))
+    }
+}
+
 struct Daemon {
     router: Router,
+    access: Arc<Access>,
     _dir: tempfile::TempDir,
 }
 
@@ -59,7 +75,8 @@ impl Daemon {
         let api = products().merge(roll_workspace::router(workspace.clone())).merge(roll_access::api::router(access.clone()));
         let mcp_config = roll_mcp::Config { api_url: "http://127.0.0.1:7070".into(), web_url: "http://localhost:3000".into(), locked: true, products: on, access: Some(access.clone()) };
         let mcp = roll_mcp::routes(api.clone().layer(layer()), mcp_config, vec![Arc::new(Fronted) as Arc<dyn roll_mcp::ToolSet>]);
-        Daemon { router: api.merge(mcp).layer(layer()), _dir: dir }
+        let _ = access.people.set(Arc::new(Alice));
+        Daemon { router: api.merge(mcp).layer(layer()), access, _dir: dir }
     }
 
     /// The MCP audit log once `until` holds of it (rows go through a batching writer), at most 5 s.
@@ -321,4 +338,18 @@ async fn a_tokens_page_shows_what_an_agent_sees() {
     // Asked as the caller: a token that may not read tokens learns nothing.
     assert_eq!(d.http(&token, Method::GET, &format!("/v1/access/tokens/{id}/tools"), None).await.0, StatusCode::FORBIDDEN);
     assert_eq!(d.http(OPERATOR, Method::GET, "/v1/access/tokens/tok_nope/tools", None).await.0, StatusCode::NOT_FOUND);
+}
+
+/// A person's own token's page shows only what their account reaches (as `tools/list` would for
+/// them): rules for everything, but Postgres is the operator's, so none of its tools.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_persons_token_page_shows_only_their_reach() {
+    let d = Daemon::new();
+    let new = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "alices", "rules": [{ "product": "*", "resources": "*", "actions": { "read": "allow" } }] })).unwrap();
+    let (g, _) = d.access.store.create(&new, roll_auth::GrantKind::Token, "usr_alice", None, Some("usr_alice")).unwrap();
+    let (s, _, seen) = d.http(OPERATOR, Method::GET, &format!("/v1/access/tokens/{}/tools", g.id), None).await;
+    assert_eq!(s, StatusCode::OK, "{seen}");
+    let tools: Vec<&str> = seen["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(tools.contains(&"workspace_list_projects"), "{tools:?}");
+    assert!(!tools.iter().any(|t| t.starts_with("postgres_")), "a person's token never reaches Postgres: {tools:?}");
 }

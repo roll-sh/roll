@@ -123,6 +123,9 @@ pub struct Grant {
     pub name: Arc<str>,
     pub kind: GrantKind,
     pub scope: Arc<scope::Scope>,
+    /// A signed-in user's own token (`usr_…`): it acts as that user (docs/permissions.md, "Users'
+    /// own tokens"), never as more. `None`: the operator's (or an admin's from before).
+    pub user: Option<Arc<str>>,
     /// What `scope` doesn't allow asks a person instead of being refused.
     pub ask_otherwise: bool,
 }
@@ -146,7 +149,7 @@ impl Grant {
 
 impl fmt::Debug for Grant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Grant").field("id", &self.id).field("name", &self.name).field("kind", &self.kind).finish()
+        f.debug_struct("Grant").field("id", &self.id).field("name", &self.name).field("kind", &self.kind).field("user", &self.user).finish()
     }
 }
 
@@ -218,6 +221,47 @@ pub trait Sessions: Send + Sync + 'static {
     /// The cookie's name: `__Host-roll_session`, or `roll_session` on plain-HTTP local setups.
     fn cookie(&self) -> &str;
     fn resolve<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<Option<Session>, String>>;
+    /// A user as they are now (`session` left empty), for a token of theirs: `None` once they're
+    /// disabled or gone. Never cached.
+    fn person<'a>(&'a self, user: &'a str) -> BoxFuture<'a, Result<Option<SignedIn>, String>> {
+        let _ = user;
+        Box::pin(async { Ok(None) })
+    }
+    /// [`Sessions::person`] for callers off the request path (a product's background work checking
+    /// a stored grant): blocking, never cached. `None` by default: an implementation that can't
+    /// say keeps a person's grants dead there.
+    fn person_now(&self, user: &str) -> Result<Option<SignedIn>, String> {
+        let _ = user;
+        Ok(None)
+    }
+    /// Mail a person about something of theirs (a token of theirs used from a new network,
+    /// revoked as leaked, or about to expire). Nothing when they're disabled or gone, or mail is
+    /// off. `text` holds no secret.
+    fn tell<'a>(&'a self, user: &'a str, subject: &'a str, text: &'a str) -> BoxFuture<'a, Result<(), String>> {
+        let _ = (user, subject, text);
+        Box::pin(async { Ok(()) })
+    }
+    /// The admins who can sign in now (ids), to be told of what waits for one (a person's token
+    /// waiting for approval). None without accounts.
+    fn admins(&self) -> BoxFuture<'_, Result<Vec<String>, String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
+/// In the request an [`Authorizer`] decides: who the gate's rules let call its route, so a user's
+/// token reaches only what that user's session would.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RouteAccess(pub Access);
+
+/// The gate's rules, for an [`Authorizer`] to class a route other than the one matched (the request
+/// a signed hop carries).
+#[derive(Clone)]
+pub struct RouteRules(pub Arc<Gate>);
+
+impl RouteRules {
+    pub fn access(&self, route: &str) -> Access {
+        self.0.access(route)
+    }
 }
 
 /// The CSRF header a write with a session cookie carries (docs/accounts.md, "CSRF").
@@ -335,6 +379,9 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
         && let (Some(a), Some(p)) = (gate.authorizer.get(), grant_credential(req.headers()))
         && a.claims(&p)
     {
+        let access = req.extensions().get::<MatchedPath>().map_or(Access::Operator, |m| gate.access(m.as_str()));
+        req.extensions_mut().insert(RouteAccess(access));
+        req.extensions_mut().insert(RouteRules(gate.clone()));
         return a.handle(req, next).await;
     }
     // A request with an `Authorization` header is judged by it alone: the cookie is ignored.
