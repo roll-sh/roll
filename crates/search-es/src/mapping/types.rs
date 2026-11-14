@@ -861,7 +861,7 @@ pub static TYPES: &[TypeDef] = &[
     TypeDef { in_multi_field: false, ..def!("pattern_text", PATTERN_TEXT, Family::Text) },
     TypeDef { multi_fields: false, in_multi_field: false, ..def!("percolator", META_ONLY, Family::Other) },
     def!("point", POINT, Family::Geo),
-    TypeDef { multi_fields: false, ..def!("rank_feature", RANK_FEATURE, Family::Other) },
+    TypeDef { multi_fields: false, validate: Some(validate_rank_feature), ..def!("rank_feature", RANK_FEATURE, Family::Other) },
     TypeDef { multi_fields: false, ..def!("rank_features", RANK_FEATURES, Family::Other) },
     def!("scaled_float", SCALED_FLOAT, Family::Numeric).with_validate(validate_number),
     TypeDef { multi_fields: false, ..def!("search_as_you_type", SEARCH_AS_YOU_TYPE, Family::Text) },
@@ -1084,6 +1084,16 @@ fn validate_number(f: &FieldMapper, ctx: &MappingCtx) -> Result<(), EsError> {
     precludes(f, ctx, "time_series_metric", &["time_series_dimension"])?;
     if f.ty == "scaled_float" && f.effective("scaling_factor", ctx).is_null() {
         return Err(EsError::illegal_argument("Field [scaling_factor] is required"));
+    }
+    Ok(())
+}
+
+/// `RankFeatureFieldMapper`'s `null_value` validator.
+fn validate_rank_feature(f: &FieldMapper, ctx: &MappingCtx) -> Result<(), EsError> {
+    if let Some(v) = f.effective("null_value", ctx).as_f64()
+        && v <= 0.0
+    {
+        return Err(EsError::illegal_argument("[null_value] must be a positive normal float for field of type [rank_feature]"));
     }
     Ok(())
 }

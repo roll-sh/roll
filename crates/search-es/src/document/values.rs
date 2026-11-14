@@ -735,7 +735,12 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
             while let Some(t) = w.p.next_token() {
                 match t {
                     Token::EndObject => break,
-                    Token::FieldName => key = w.p.current_name().unwrap_or("").to_string(),
+                    Token::FieldName => {
+                        key = w.p.current_name().unwrap_or("").to_string();
+                        if f.ty == "rank_features" && key.contains('.') {
+                            return Err(ValueError::plain(EsError::illegal_argument(format!("[rank_features] fields do not support dots in feature names but found [{key}]"))));
+                        }
+                    }
                     _ => {
                         let v = w.p.float_value()?;
                         if f.ty == "rank_features" {

@@ -366,7 +366,10 @@ fn rank_feature(ctx: &QueryCtx, r: &crate::query::specialized::RankFeature) -> E
             }
         }
     };
-    let _ = positive;
+    // `RankFeatureQueryBuilder.doToQuery`.
+    if !positive && matches!(r.function, F::Log { .. }) {
+        return Err(EsError::illegal_argument("Cannot use the [log] function with a field that has a negative score impact as it would trigger negative scores"));
+    }
     let q = match &r.function {
         F::Linear => search_index::query::FeatureQuery::linear(field, feature.into_bytes(), 1.0),
         F::Log { scaling_factor } => search_index::query::FeatureQuery::log(field, feature.into_bytes(), 1.0, *scaling_factor),
