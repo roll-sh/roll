@@ -542,25 +542,28 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: a person is told before making a token or connecting a client that it will wait for an admin (GitHub's "this token will require approval"; `approve_people` in `GET /v1/access`) (#25); the sixteenth review's #25 findings fixed: a person's OAuth connection past the policy
-waits too (it didn't), a waiting token's rules are frozen until an admin decides (an approval took
-whatever it had become), widening and waiting again are one transaction, admins' mail is cleaned
-names and once an hour per token, and tokens made before the policy show as `unapproved` in an
-admin's checkup; the approval of people's tokens checked live with accounts and mail
-(`users-live/approval.sh`: waits, 401 `pending_approval`, the admin mailed, approved from the CLI,
-the person mailed, then 200); a person's pending token leads an admin's checkup ("Needs attention":
-approve or deny), and stays out of the person's own (#25); admins are mailed when a person's token
-waits for them (who asked, what it may do, the link to decide; `Sessions::admins`, accounts' list)
-(#25); `roll token list --pending` and `roll token approve|deny <id>` (#25); people's tokens past
-the policy wait for an admin (#25; GitHub's organization approval: `approve_people`, 401
-`pending_approval`, approve or deny on the access page, the person mailed, widening waits again);
-the ninth review's findings (people's mail in roll's words only: names as words, an approval's mail
-without its resource, a leak's without where, one approval mail per token per ten minutes and 20 a
-person an hour; workload tokens capped per owner and a person's listed before the limit; a refresh
-token's retry within its grace audited; apps settings that change what production runs, its source,
-build, start and pre-deploy commands, schedule, kind, port, volume and `run.public`, are deploy;
-`create_grant` refuses extensions that name no caller; the expiry digest leaves out tokens made for
-a day or less); every answer to an expiring token says when (`Roll-Token-Expiration`, GitHub's
+Done lately: a person is told before making a token or connecting a client that it will wait for an
+admin (GitHub's "this token will require approval"; `approve_people` in `GET /v1/access`) (#25); the
+sixteenth review's #25 findings fixed: a person's OAuth connection past the policy waits too (it
+didn't), a waiting token's rules are frozen until an admin decides (an approval took whatever it had
+become), widening and waiting again are one transaction, admins' mail is cleaned names and once an
+hour per token, and tokens made before the policy show as `unapproved` in an admin's checkup; the
+approval of people's tokens checked live with accounts and mail (`users-live/approval.sh`: waits,
+401 `pending_approval`, the admin mailed, approved from the CLI, the person mailed, then 200); a
+person's pending token leads an admin's checkup ("Needs attention": approve or deny), and stays out
+of the person's own (#25); admins are mailed when a person's token waits for them (who asked, what
+it may do, the link to decide; `Sessions::admins`, accounts' list) (#25); `roll token list
+--pending` and `roll token approve|deny <id>` (#25); people's tokens past the policy wait for an
+admin (#25; GitHub's organization approval: `approve_people`, 401 `pending_approval`, approve or
+deny on the access page, the person mailed, widening waits again); the ninth review's findings
+(people's mail in roll's words only: names as words, an approval's mail without its resource, a
+leak's without where, one approval mail per token per ten minutes and 20 a person an hour; workload
+tokens capped per owner and a person's listed before the limit; a refresh token's retry within its
+grace audited; apps settings that change what production runs, its source, build, start and
+pre-deploy commands, schedule, kind, port, volume and `run.public`, are deploy; `create_grant`
+refuses extensions that name no caller; the expiry digest leaves out tokens made for a day or less);
+`apps_set_environment` takes `paused` and `apps_create_service` a repo's `branch` (apps-next); every
+answer to an expiring token says when (`Roll-Token-Expiration`, GitHub's
 `GitHub-Authentication-Token-Expiration`), and the CLI warns a week ahead; `apps_import` (a
 roll.toml or compose file checked before `roll up --all`; apps-next); the approval UI checked in a
 browser against `users-live` (the policy's checkboxes, a waiting token's badge with an admin's
