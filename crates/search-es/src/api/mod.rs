@@ -162,6 +162,9 @@ handlers! { ctx;
     TasksList => tasks::list(ctx).await,
     TasksGet => tasks::get(ctx).await,
     TasksCancel => tasks::cancel(ctx),
+    ReindexGet => tasks::reindex_get(ctx).await,
+    ReindexList => tasks::reindex_list(ctx).await,
+    ReindexCancel => tasks::reindex_cancel(ctx).await,
 
     IndicesGetAlias => aliases::get_alias(ctx),
     IndicesExistsAlias => aliases::get_alias(ctx),

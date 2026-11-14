@@ -219,6 +219,7 @@ fn api_capabilities(api: routes::Api) -> &'static [&'static str] {
         IndicesUpdateAliases => &["fix_filtered_data_stream_alias_removal"],
         IndicesRollover => &["return-404-on-missing-target", "index_expression_selectors", "max_size_deprecation"],
         IlmPutLifecycle => &["max_size_deprecation", "searchable_snapshot_force_merge_on_clone"],
+        ReindexGet | ReindexList | ReindexCancel => &["reindex_management_api"],
         IndicesResolveIndex => &["mode_filter"],
         IngestPutPipeline => &["pipeline_tracking_info", "field_access_pattern.flexible"],
         CatNodes => &["available_processors_availability"],

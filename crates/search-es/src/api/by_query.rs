@@ -942,6 +942,8 @@ pub async fn delete_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
                     }
                     if !throttle.before_batch(batch.len()).await {
                         s.canceled = Some("by user request".into());
+                        // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
+                        publish(&live, &s, &throttle);
                         break;
                     }
                     s.batches += 1;
@@ -1018,6 +1020,8 @@ pub async fn update_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
                     }
                     if !throttle.before_batch(batch.len()).await {
                         s.canceled = Some("by user request".into());
+                        // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
+                        publish(&live, &s, &throttle);
                         break;
                     }
                     s.batches += 1;
@@ -1327,6 +1331,8 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 for chunk in docs.chunks(batch.max(1) as usize) {
                     if !throttle.before_batch(chunk.len()).await {
                         s.canceled = Some("by user request".into());
+                        // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
+                        publish(&live, &s, &throttle);
                         break;
                     }
                     let sds: Vec<SourceDoc> = chunk.iter().map(|d| SourceDoc { index: d.index.clone(), id: d.id.clone(), routing: d.routing.clone(), version: d.version, source: d.source.clone() }).collect();
@@ -1361,6 +1367,8 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
                             }
                             if !throttle.before_batch(docs.len()).await {
                                 s.canceled = Some("by user request".into());
+                                // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
+                                publish(&live, &s, &throttle);
                                 break;
                             }
                             s.batches += 1;

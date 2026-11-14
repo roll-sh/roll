@@ -357,3 +357,133 @@ fn persisted_result(ctx: &Ctx, raw: &str) -> EsResult<Option<Value>> {
         None => Ok(None),
     }
 }
+
+const REINDEX: &str = "indices:data/write/reindex";
+
+/// A reindex as the reindex management APIs show it (`GET _reindex/<id>`, `GET _reindex`,
+/// `POST _reindex/<id>/_cancel`): its task flattened. `task` is a task as `GET _tasks` prints
+/// it; `completed` and the outcome only for a single reindex.
+fn reindex_view(ctx: &Ctx, task: &Map, completed: Option<bool>, outcome: Option<(&str, &Value)>, cancelled: bool, status: bool) -> Value {
+    let human = ctx.query("human").is_some_and(|v| v != "false");
+    let mut m = Map::new();
+    if let Some(c) = completed {
+        m.insert("completed".into(), c.into());
+    }
+    let node = task.get("node").map(Value::to_es_string).unwrap_or_default();
+    let id = task.get("id").map(Value::to_es_string).unwrap_or_default();
+    m.insert("id".into(), Value::from(format!("{node}:{id}")));
+    if let Some(d) = task.get("description") {
+        m.insert("description".into(), d.clone());
+    }
+    m.insert("cancelled".into(), cancelled.into());
+    let start = task.get("start_time_in_millis").and_then(Value::as_i64).unwrap_or(0);
+    if human {
+        m.insert("start_time".into(), Value::from(crate::time::java_instant_string(start)));
+    }
+    m.insert("start_time_in_millis".into(), start.into());
+    let running = task.get("running_time_in_nanos").and_then(Value::as_i64).unwrap_or(0);
+    if human {
+        let t = crate::units::TimeValue { duration: running, unit: crate::units::TimeUnit::Nanos };
+        m.insert("running_time".into(), Value::from(t.human()));
+    }
+    m.insert("running_time_in_nanos".into(), running.into());
+    if status && let Some(s) = task.get("status") {
+        m.insert("status".into(), s.clone());
+    }
+    if let Some((k, v)) = outcome {
+        m.insert(k.into(), v.clone());
+    }
+    Value::Obj(m)
+}
+
+/// Whether a task (as `GET _tasks` prints it) is a reindex the management APIs show: the
+/// request's own task, not one of its slices.
+fn is_reindex(task: &Map) -> bool {
+    task.get("action").and_then(Value::as_str) == Some(REINDEX) && !task.contains_key("parent_task_id")
+}
+
+/// `GET _reindex/<task_id>`.
+pub async fn reindex_get(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    let raw = ctx.path_param("task_id").unwrap_or_default();
+    let (node, n) = parse_task_id(raw)?;
+    let wait = ctx.bool_param("wait_for_completion", false)?;
+    let timeout = ctx.time_param("timeout", crate::units::TimeValue::seconds(30))?;
+    let missing = || EsError::resource_not_found(format!("Reindex operation [{raw}] not found"));
+    if node != ctx.cluster.node.id {
+        return Err(missing());
+    }
+    let tasks = &ctx.cluster.tasks;
+    if let Some(t) = tasks.get(n) {
+        if t.action != REINDEX || t.parent.is_some() {
+            return Err(missing());
+        }
+        if wait && !tasks.wait_until(std::time::Duration::from_millis(timeout.as_millis().max(0) as u64), || tasks.get(n).is_none()).await {
+            return Err(EsError::new(500, "elasticsearch_timeout_exception", format!("Timed out waiting for completion of task [{raw}]")));
+        }
+    }
+    // A finished reindex: its stored result. `cancelled` isn't kept with it (Elasticsearch
+    // doesn't serialize it to the `.tasks` index), so it reads false.
+    let finished = match tasks.stored(n) {
+        Some(done) => Some(result_value(ctx, &done)),
+        None => persisted_result(ctx, raw)?,
+    };
+    if let Some(Value::Obj(v)) = finished {
+        let Some(Value::Obj(task)) = v.get("task") else { return Err(missing()) };
+        if !is_reindex(task) {
+            return Err(missing());
+        }
+        let outcome = v.get("response").map(|r| ("response", r)).or_else(|| v.get("error").map(|e| ("error", e)));
+        return Reply::ok(reindex_view(ctx, task, Some(true), outcome, false, true));
+    }
+    match tasks.get(n) {
+        Some(t) if t.action == REINDEX && t.parent.is_none() => {
+            let Value::Obj(task) = task_value(ctx, &t, true) else { return Err(missing()) };
+            let cancelled = t.cancelled.load(std::sync::atomic::Ordering::Relaxed);
+            Reply::ok(reindex_view(ctx, &task, Some(false), None, cancelled, true))
+        }
+        _ => Err(missing()),
+    }
+}
+
+/// `GET _reindex`: the reindexes running now (not their slices); `status` with `detailed`.
+pub async fn reindex_list(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    let detailed = ctx.bool_param("detailed", false)?;
+    let mut out = Vec::new();
+    for t in ctx.cluster.tasks.list() {
+        if t.action != REINDEX || t.parent.is_some() {
+            continue;
+        }
+        if let Value::Obj(task) = task_value(ctx, &t, true) {
+            let cancelled = t.cancelled.load(std::sync::atomic::Ordering::Relaxed);
+            out.push(reindex_view(ctx, &task, None, None, cancelled, detailed));
+        }
+    }
+    Reply::ok(obj! { "reindex" => Value::Arr(out) })
+}
+
+/// `POST _reindex/<task_id>/_cancel`: cancels a running reindex and (by default) waits for it
+/// to stop, then shows it as `GET _reindex/<id>` does, cancelled.
+pub async fn reindex_cancel(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    let raw = ctx.path_param("task_id").unwrap_or_default();
+    let (node, n) = parse_task_id(raw)?;
+    let wait = ctx.bool_param("wait_for_completion", true)?;
+    let missing = || EsError::resource_not_found(format!("reindex task [{raw}] either not found or completed"));
+    let tasks = &ctx.cluster.tasks;
+    let t = match tasks.get(n) {
+        Some(t) if node == ctx.cluster.node.id && t.action == REINDEX && t.parent.is_none() && t.cancellable => t,
+        _ => return Err(missing()),
+    };
+    t.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+    if wait {
+        tasks.wait_until(std::time::Duration::from_secs(60), || tasks.get(n).is_none()).await;
+        if let Some(done) = tasks.stored(n)
+            && let Value::Obj(v) = result_value(ctx, &done)
+            && let Some(Value::Obj(task)) = v.get("task")
+        {
+            let outcome = v.get("response").map(|r| ("response", r)).or_else(|| v.get("error").map(|e| ("error", e)));
+            return Reply::ok(reindex_view(ctx, task, Some(true), outcome, true, true));
+        }
+    }
+    let Value::Obj(task) = task_value(ctx, &t, true) else { return Err(missing()) };
+    Reply::ok(reindex_view(ctx, &task, Some(false), None, true, true))
+}
