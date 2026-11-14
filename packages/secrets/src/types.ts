@@ -238,6 +238,8 @@ export type SyncKind = { kind: string; label: string; values: boolean; signed: b
 /** `resealed`: "all", or how many projects still need the previous key (null without a key); `links`, `syncs`: the kinds registered. */
 /** `customer_managed`: projects whose data key a customer's own KMS key wraps too. */
 export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; resealed: "all" | number | null; customer_managed: number; links: string[]; syncs: string[] };
+/** An AWS role a project registered for dynamic credentials (its trust policy pins `sts:ExternalId` = `roll-secrets:<project>`). */
+export type AwsRole = { id: string; name: string; role_arn: string; created_at: number; created_by: string };
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */

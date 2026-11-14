@@ -993,6 +993,11 @@ static ROWS: &[Row] = &[
     // A customer-managed key wrapping the project's data key: seeing, setting and removing it are
     // the project admin's (it decides whether roll can read the project at all).
     row("*", "/v1/secrets/projects/{project}/kms", "secrets", ADMIN, one(&["project"], "project")),
+    // AWS roles a project registers for dynamic credentials: listing is a read; adding one (roll
+    // assumes it to check) and deleting one are admin.
+    row("GET", "/v1/secrets/projects/{project}/aws-roles", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/aws-roles", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/aws-roles/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/rotators", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/rotators", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/rotators/{id}", "secrets", ADMIN, one(&["project"], "project")),

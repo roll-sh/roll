@@ -83,6 +83,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/health"), get(project_health))
         .route("/v1/secrets/findings", get(all_health))
         .route(&format!("{P}/kms"), get(kms_key).put(set_kms_key).delete(unset_kms_key))
+        .route(&format!("{P}/aws-roles"), get(aws_roles).post(add_aws_role))
+        .route(&format!("{P}/aws-roles/{{id}}"), axum::routing::delete(delete_aws_role))
         .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
         .route(&format!("{P}/required"), get(required).put(set_required))
@@ -857,6 +859,20 @@ async fn set_kms_key(State(s): S, Who(c): Who, Path(project): Path<String>, b: B
 async fn unset_kms_key(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
     blocking(s, move |s| s.set_kms_key(&project, None, &c)).await?;
     Ok(ok(json!({ "key": null })))
+}
+
+async fn aws_roles(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.aws_roles(&project, &c)).await?))
+}
+
+async fn add_aws_role(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::aws::NewAwsRole = body(&b)?;
+    Ok(created(json!(blocking(s, move |s| s.add_aws_role(&project, n, &c)).await?)))
+}
+
+async fn delete_aws_role(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_aws_role(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn rotators(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

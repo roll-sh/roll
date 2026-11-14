@@ -187,6 +187,45 @@ impl roll_secrets::kms::ProjectKms for CustomerKms {
     }
 }
 
+/// STS for dynamic AWS credentials from roles projects register (roll-secrets' aws.rs): roll's own
+/// credentials assume the customer's role with the project's ExternalId. Errors are STS's code.
+pub struct RollSts {
+    conf: tokio::sync::OnceCell<aws_config::SdkConfig>,
+}
+
+impl RollSts {
+    pub fn new(conf: Option<aws_config::SdkConfig>) -> RollSts {
+        RollSts { conf: tokio::sync::OnceCell::new_with(conf) }
+    }
+}
+
+impl roll_secrets::aws::Sts for RollSts {
+    fn assume(&self, role_arn: &str, external_id: &str, session_name: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+        // The store calls from its blocking threads (and nothing else may): wait for STS there.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let conf = self.conf.get_or_init(|| aws_config::load_defaults(aws_config::BehaviorVersion::latest())).await;
+                let out = aws_sdk_sts::Client::new(conf)
+                    .assume_role()
+                    .role_arn(role_arn)
+                    .external_id(external_id)
+                    .role_session_name(session_name)
+                    .duration_seconds(seconds)
+                    .send()
+                    .await
+                    .map_err(|e| aws_sdk_sts::error::ProvideErrorMetadata::code(&e).unwrap_or("no answer").to_string())?;
+                let c = out.credentials.ok_or("STS answered without credentials")?;
+                Ok(roll_secrets::aws::Session {
+                    expires_at: c.expiration.to_millis().map_err(|_| "STS answered an expiry roll can't read")?,
+                    access_key_id: Value::new(c.access_key_id),
+                    secret_access_key: Value::new(c.secret_access_key),
+                    session_token: Value::new(c.session_token),
+                })
+            })
+        })
+    }
+}
+
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     #[cfg(unix)]
@@ -212,7 +251,7 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     let web_url = std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.trim().is_empty());
     // Syncs' webhooks go to private addresses only where roll code's may (local development).
     let allow_private = args.code_webhook_allow_private.unwrap_or(open);
-    let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))), grants, people: Some(Arc::new(people)), kms: Some(Arc::new(CustomerKms::new(None))),
+    let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))), grants, people: Some(Arc::new(people)), kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))),
     };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
@@ -909,6 +948,7 @@ mod tests {
             grants: None,
             people: None,
             kms: None,
+            sts: None,
         };
         let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
         let set = axum::http::Request::put(format!("/v1/secrets/projects/{project}/environments/production/secrets/DB_URL"))
@@ -984,6 +1024,44 @@ mod tests {
         assert_eq!(kms.decrypt(key, "prj_other", &ct).unwrap_err(), "AccessDeniedException", "another project's context");
         let regions: Vec<String> = seen.lock().unwrap().iter().map(|(_, r, _)| r.clone()).collect();
         assert!(regions.iter().all(|r| r == "ap-south-1"), "the key's own region: {regions:?}");
+    }
+
+    /// A project's AWS role is assumed with its ExternalId and the session's name and duration;
+    /// a refusal is STS's code.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_aws_role_is_assumed_with_the_projects_external_id() {
+        use roll_secrets::aws::Sts;
+        let seen: Arc<Mutex<Vec<String>>> = Default::default();
+        let s = seen.clone();
+        let app = axum::Router::new().fallback(move |body: axum::body::Bytes| {
+            let s = s.clone();
+            async move {
+                let form = String::from_utf8_lossy(&body).to_string();
+                s.lock().unwrap().push(form.clone());
+                if form.contains("ExternalId=roll-secrets%3Aprj_a") && form.contains("RoleArn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2Froll") {
+                    let xml = r#"<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleResult><Credentials><AccessKeyId>ASIATEST</AccessKeyId><SecretAccessKey>secret</SecretAccessKey><SessionToken>token</SessionToken><Expiration>2030-01-01T00:00:00Z</Expiration></Credentials><AssumedRoleUser><Arn>arn:aws:sts::123456789012:assumed-role/roll/s</Arn><AssumedRoleId>AROA:s</AssumedRoleId></AssumedRoleUser></AssumeRoleResult></AssumeRoleResponse>"#;
+                    (axum::http::StatusCode::OK, [("content-type", "text/xml")], xml.to_string())
+                } else {
+                    let xml = r#"<ErrorResponse><Error><Type>Sender</Type><Code>AccessDenied</Code><Message>no</Message></Error></ErrorResponse>"#;
+                    (axum::http::StatusCode::FORBIDDEN, [("content-type", "text/xml")], xml.to_string())
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conf = aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new("eu-west-1"))
+            .endpoint_url(&base)
+            .credentials_provider(aws_sdk_sts::config::SharedCredentialsProvider::new(aws_sdk_sts::config::Credentials::new("AKIATEST", "secret", None, None, "test")))
+            .build();
+        let sts = super::RollSts::new(Some(conf));
+        let s = sts.assume("arn:aws:iam::123456789012:role/roll", "roll-secrets:prj_a", "roll-app-web", 1200).unwrap();
+        assert_eq!((s.access_key_id.expose(), s.session_token.expose(), s.expires_at), ("ASIATEST", "token", 1_893_456_000_000));
+        let form = seen.lock().unwrap()[0].clone();
+        assert!(form.contains("RoleSessionName=roll-app-web") && form.contains("DurationSeconds=1200"), "{form}");
+        assert_eq!(sts.assume("arn:aws:iam::123456789012:role/roll", "roll-secrets:prj_other", "x", 900).err().as_deref(), Some("AccessDenied"));
     }
 
     /// A KMS that decrypts one ciphertext, and only with roll secrets' encryption context.
