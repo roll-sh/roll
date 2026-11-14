@@ -74,8 +74,8 @@ fn time(ms: i64) -> Result<OcspGeneralizedTime> {
 impl Secrets {
     /// The CA's OCSP answer (DER) to a request (DER). A request that doesn't parse gets
     /// `malformedRequest`, as RFC 6960 says; a CA that doesn't exist is a 404.
-    pub fn ocsp(&self, id: &str, request: &[u8]) -> Result<Arc<Vec<u8>>> {
-        let malformed = || -> Result<Arc<Vec<u8>>> { Ok(Arc::new(OcspResponse::malformed_request().to_der().map_err(|e| Error::Internal(e.to_string()))?)) };
+    pub fn ocsp(&self, id: &str, request: &[u8]) -> Result<(Arc<Vec<u8>>, bool)> {
+        let malformed = || -> Result<(Arc<Vec<u8>>, bool)> { Ok((Arc::new(OcspResponse::malformed_request().to_der().map_err(|e| Error::Internal(e.to_string()))?), false)) };
         if request.len() > REQUEST_MAX {
             return malformed();
         }
@@ -93,12 +93,16 @@ impl Secrets {
             if let Some((at, _, der)) = cache.ocsp.get(&key)
                 && now - at < 60_000
             {
-                return Ok(der.clone());
+                return Ok((der.clone(), true));
             }
             cache.revoked.get(id).copied().unwrap_or_default()
         };
-        let (ca_pem, ca_key, _) = self.pki()?.open(id).map_err(|_| Error::NotFound(format!("no CA {id}")))?;
-        // Counted only for a CA that exists, so made-up ids grow nothing.
+        // Counted only for a CA that exists (made-up ids grow nothing), and before its key is
+        // opened (going over the cap costs no unsealing).
+        let exists: Option<i64> = self.db.read(|c| c.query_row("SELECT 1 FROM cas WHERE id = ?", [id], |r| r.get(0)).optional())?;
+        if exists.is_none() {
+            return Err(Error::NotFound(format!("no CA {id}")));
+        }
         {
             let mut cache = self.crls.lock().expect("crls");
             let second = now / 1000;
@@ -111,9 +115,10 @@ impl Secrets {
             }
             *n += 1;
             if *n > SIGN_PER_SECOND {
-                return Ok(Arc::new(OcspResponse::try_later().to_der().map_err(|e| Error::Internal(e.to_string()))?));
+                return Ok((Arc::new(OcspResponse::try_later().to_der().map_err(|e| Error::Internal(e.to_string()))?), false));
             }
         }
+        let (ca_pem, ca_key, _) = self.pki()?.open(id).map_err(|_| Error::NotFound(format!("no CA {id}")))?;
         let (_, pem) = x509_parser::pem::parse_x509_pem(ca_pem.as_bytes()).map_err(|_| Error::Internal("the CA's certificate doesn't parse".into()))?;
         let ca = x509_cert::Certificate::from_der(&pem.contents).map_err(|_| Error::Internal("the CA's certificate doesn't parse".into()))?;
         let name = ca.tbs_certificate.subject.to_der().map_err(|e| Error::Internal(e.to_string()))?;
@@ -162,6 +167,6 @@ impl Secrets {
         if cache.revoked.get(id).copied().unwrap_or_default() == generation && cache.ocsp.len() < 10_000 {
             cache.ocsp.insert(key, (now, generation, der.clone()));
         }
-        Ok(der)
+        Ok((der, true))
     }
 }

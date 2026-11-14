@@ -606,7 +606,7 @@ TLS certificates for services (mTLS between them), with no CA to run.
   public, so its cost is bounded: nonces aren't echoed (RFC 8954 allows it, as large public CAs
   do), answers are kept a minute per node by the certificates asked about (a revocation drops the
   CA's), and a CA signs at most 50 fresh answers a second per node (`tryLater` beyond). An answer is
-  good for ten minutes (`nextUpdate`; GET answers `max-age=60`): how long a revocation can take to
+  good for ten minutes (`nextUpdate`; GET answers `max-age=60`, and `no-store` on anything but a signed answer): how long a revocation can take to
   reach a client that keeps answers. Every
   certificate names the responder (Authority Information Access). Checked with `openssl ocsp`:
   `good` and `revoked`, `Response verify OK`, over POST and over GET. Clients that

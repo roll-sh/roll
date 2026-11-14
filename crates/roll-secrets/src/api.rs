@@ -941,7 +941,7 @@ async fn crl(State(s): S, Path(id): Path<String>, axum::extract::Query(q): axum:
 
 /// OCSP over POST: the request's DER as the body (`application/ocsp-request`). No token.
 async fn ocsp_post(State(s): S, Path(id): Path<String>, b: Bytes) -> crate::Result<Response> {
-    let der = blocking(s, move |s| s.ocsp(&id, &b)).await?;
+    let (der, _) = blocking(s, move |s| s.ocsp(&id, &b)).await?;
     Ok(([(axum::http::header::CONTENT_TYPE, "application/ocsp-response")], der.to_vec()).into_response())
 }
 
@@ -951,8 +951,10 @@ async fn ocsp_get(State(s): S, Path((id, request)): Path<(String, String)>) -> c
     use base64::Engine as _;
     // The path segment is percent-decoded already.
     let der = base64::engine::general_purpose::STANDARD.decode(request.trim()).unwrap_or_default();
-    let answer = blocking(s, move |s| s.ocsp(&id, &der)).await?;
-    Ok(([(axum::http::header::CONTENT_TYPE, "application/ocsp-response"), (axum::http::header::CACHE_CONTROL, "public, max-age=60")], answer.to_vec()).into_response())
+    let (answer, successful) = blocking(s, move |s| s.ocsp(&id, &der)).await?;
+    // Only a signed answer may be kept by a cache: never a tryLater or a malformedRequest.
+    let cache = if successful { "public, max-age=60" } else { "no-store" };
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/ocsp-response"), (axum::http::header::CACHE_CONTROL, cache)], answer.to_vec()).into_response())
 }
 
 async fn list_syncs(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
