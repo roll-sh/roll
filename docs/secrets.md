@@ -618,8 +618,8 @@ the URL's host (the system's roots and `ca`), follows no redirect and uses no pr
 most 64 KiB of an answer. Values go as query parameters (`{n:String}`), never into SQL. Passwords
 go as `IDENTIFIED WITH sha256_hash`, so the server never sees one (its query log holds the hash):
 rotation is `ALTER USER` on two users that take turns; a dynamic login is `CREATE USER`, `GRANT
-<group>` and `DEFAULT ROLE <group>` (the group is a role); ending it stops its queries (`KILL
-QUERY`) and drops the user. ClickHouse has no expiry for a user, so a dynamic login lasts until
+<group>` and `DEFAULT ROLE <group>` (the group is a role); ending it drops the user, then stops
+what it's still running (`KILL QUERY`). ClickHouse has no expiry for a user, so a dynamic login lasts until
 roll ends its lease. Users made over SQL need the admin's `access_management`; on a self-managed
 cluster, keep users in replicated access storage. Checked against ClickHouse 25.8: rotation (the old
 password refused, the new one taken), a dynamic login that signs in with the role and can't once
