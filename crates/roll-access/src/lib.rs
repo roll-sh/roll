@@ -448,6 +448,15 @@ impl Resolver for Fns {
     }
 }
 
+/// Open registrations by network, each with its last minute's times: a sliding window, so a burst
+/// across a minute's edge counts as one minute (a fixed window let through twice the limit there).
+#[derive(Default)]
+pub(crate) struct Registrations {
+    /// When the map was last swept of networks idle a minute (one sweep a minute, no scan per request).
+    pub swept: i64,
+    pub by: std::collections::HashMap<String, std::collections::VecDeque<i64>>,
+}
+
 /// The access service: the store, the catalogue and the resolvers.
 pub struct Access {
     pub store: Store,
@@ -470,8 +479,9 @@ pub struct Access {
     pub(crate) mail_gate: std::sync::Mutex<MailGate>,
     /// GitHub's secret scanning keys, cached.
     pub(crate) github_keys: leaks::GithubKeys,
-    /// OAuth registrations lately, per network: `(minute, count)` (open registration's limit).
-    pub(crate) registrations: std::sync::Mutex<std::collections::HashMap<String, (i64, u32)>>,
+    /// OAuth registrations lately, per network: their times in the last minute (open
+    /// registration's limit).
+    pub(crate) registrations: std::sync::Mutex<Registrations>,
     /// The token policy as last read (`policy_now`).
     policy_cache: std::sync::Mutex<Option<(std::time::Instant, Policy)>>,
 }
