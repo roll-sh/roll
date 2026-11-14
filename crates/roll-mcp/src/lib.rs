@@ -569,7 +569,7 @@ fn initialize(ctx: &Ctx, params: &Value) -> Value {
     json!({
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false }, "completions": {} },
-        "serverInfo": { "name": "roll", "title": "roll", "version": env!("CARGO_PKG_VERSION") },
+        "serverInfo": { "name": "roll", "title": "roll", "version": env!("CARGO_PKG_VERSION"), "icons": [server_icon()] },
         "instructions": format!(
             "roll: serverless Postgres, Redis, storage, streams, queues, tasks, NoSQL, source control (roll code) and coding agents, grouped into workspace projects. \
 Tools are named <product>_<verb>. Ids are each product's own (Postgres projects prj_…, Redis rdb_…, streams st_…, buckets by name, repos owner/name). \
@@ -579,6 +579,17 @@ postgres_query is read-only (postgres_execute changes data). Credentials come ba
 Read the resource roll://access/me for what this connection may do, in words, and roll://guide for more."
         ),
     })
+}
+
+/// roll's Horizon mark for clients that show a server's icon (2025-11-25): the dashboard's favicon,
+/// the brand export's output, inline so it needs no public URL. Sent once, in `initialize`.
+fn server_icon() -> Value {
+    use base64::Engine;
+    static ICON: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let svg = include_str!("../../../apps/dashboard/public/icon.svg");
+        format!("data:image/svg+xml;base64,{}", base64::engine::general_purpose::STANDARD.encode(svg.trim()))
+    });
+    json!({ "src": ICON.as_str(), "mimeType": "image/svg+xml", "sizes": ["any"] })
 }
 
 /// Run a tool: one of ours, or a fronted set's.
