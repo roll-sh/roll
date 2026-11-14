@@ -969,14 +969,14 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             } else {
                 std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?
             };
-            let (text, leases, _) = render_env(&c, &env, &file, &tpl).await?;
+            let (text, leases, follow) = render_env(&c, &env, &file, &tpl).await?;
             let Some(out) = out else {
                 print!("{text}");
                 return Ok(());
             };
             replace_private(&out, &text)?;
             if watch {
-                render_watch(&c, &env, &file, &tpl, &out, text, leases, interval, exec.as_deref()).await?;
+                render_watch(&c, &env, &file, &tpl, &out, text, leases, follow, interval, exec.as_deref()).await?;
             }
         }
         Secrets::Health { all: false, code } => {
@@ -2102,9 +2102,9 @@ fn replace_private(path: &str, text: &str) -> anyhow::Result<()> {
 /// `roll secrets render --watch`: write the file again when the environment's digest changes and
 /// the text with it, then run `exec`; renew dynamic credentials' leases every 10 minutes.
 #[allow(clippy::too_many_arguments)]
-async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &str, mut text: String, mut leases: Vec<String>, interval: u64, exec: Option<&str>) -> anyhow::Result<()> {
-    // The environment's digest, and every one its references read.
-    let mut follow = render_env(c, env, file, tpl).await.map(|(_, _, f)| f).unwrap_or_else(|_| vec![format!("{env}/digest?{}", c.q())]);
+async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &str, mut text: String, mut leases: Vec<String>, mut follow: Vec<String>, interval: u64, exec: Option<&str>) -> anyhow::Result<()> {
+    // The environment's digest, and every one its references read (from the first render: a
+    // second one would read and issue everything again).
     let mut last = digests(c, &follow).await?;
     let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
     loop {
