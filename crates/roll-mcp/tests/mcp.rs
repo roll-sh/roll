@@ -64,6 +64,18 @@ impl Daemon {
         Daemon { router: api.merge(mcp).layer(layer()), access, _dir: dir }
     }
 
+    /// The MCP audit log once `until` holds of it (rows go through a batching writer), at most 5 s.
+    async fn audit_until(&self, until: impl Fn(&Value) -> bool) -> Value {
+        for _ in 0..50 {
+            let (_, _, log) = self.http(OPERATOR, Method::GET, "/v1/access/audit?source=mcp", None).await;
+            if until(&log) {
+                return log;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        self.http(OPERATOR, Method::GET, "/v1/access/audit?source=mcp", None).await.2
+    }
+
     async fn http(&self, token: &str, method: Method, path: &str, body: Option<Value>) -> (StatusCode, axum::http::HeaderMap, Value) {
         self.http_with(token, method, path, body, &[]).await
     }
@@ -199,8 +211,7 @@ async fn tools_follow_the_tokens_rules() {
     assert_eq!((out["error"]["code"].as_i64(), e["mode"].as_str()), (Some(-32042), Some("url")), "{out}");
     assert!(e["url"].as_str().unwrap().contains(e["elicitationId"].as_str().unwrap()), "{out}");
     // And it's named in the audit log by what it called itself (the session id carries it).
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let (_, _, log) = d.http(OPERATOR, Method::GET, "/v1/access/audit?source=mcp&limit=1", None).await;
+    let log = d.audit_until(|l| l[0]["client"] == "cursor 1.2").await;
     assert_eq!(log[0]["client"], "cursor 1.2", "{log}");
 
     // Every call is audited with its tool and redacted arguments.
@@ -208,8 +219,7 @@ async fn tools_follow_the_tokens_rules() {
     d.tool(&reader, "postgres_query", json!({ "endpoint": "ep_x", "sql": "select 'password'", "approval": "apr_secret" })).await;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     d.tool(OPERATOR, "postgres_list_projects", json!({})).await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let (_, _, log) = d.http(OPERATOR, Method::GET, "/v1/access/audit?source=mcp", None).await;
+    let log = d.audit_until(|l| l.as_array().is_some_and(|a| a.iter().any(|e| e["grant_id"].is_null() && e["tool"] == "postgres_list_projects"))).await;
     assert!(log.as_array().unwrap().iter().any(|e| e["grant_id"].is_null() && e["tool"] == "postgres_list_projects"), "the operator's calls too: {log}");
     let tools: Vec<_> = log.as_array().unwrap().iter().map(|e| e["tool"].as_str().unwrap_or("")).collect();
     assert!(tools.contains(&"postgres_delete_project") && tools.contains(&"postgres_list_projects"), "{log}");
