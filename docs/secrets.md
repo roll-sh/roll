@@ -1223,7 +1223,9 @@ minutes.
   (`jwks`, a JWKS document up to 64 KiB with at least one RS256 or ES256 key; as Vault's
   `jwt_validation_pubkeys`): the issuer is then only compared with the token's `iss`, never
   fetched, and only those keys verify a login (`pinned_keys` counts them). When the cluster's keys
-  change, delete the identity and add it again.
+  change, replace them (`PUT …/identities/{id}/jwks`, `roll secrets identities keys ID --jwks
+  FILE`): the id, and every pod's `ROLL_IDENTITY`, stays. During a rotation, give the old and the
+  new keys in one JWKS.
 
   ```sh
   kubectl get --raw /openid/v1/jwks > jwks.json
@@ -1414,6 +1416,7 @@ isn't in the workspace is 404.
 | `GET /identities` | | `Identity[]` (admin) |
 | `POST /identities` | `NewIdentity` | 201 `Identity` |
 | `DELETE /identities/{id}` | | 204 (its tokens revoked) |
+| `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept |
 | `POST /v1/secrets/login` | `{identity, token}` | `{token, expires_at, project, identity}` (public) |
 | `GET /audit?env=&key=&actor=&action=&before=&since=&limit=&format=` | | `AuditEntry[]` newest first, or CSV/JSONL with `format` |
 | `GET /required` | | `Required[]` |

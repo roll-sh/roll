@@ -1188,6 +1188,12 @@ async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token()
     let (s, l) = api.call(Method::POST, "/v1/secrets/login", Some(pod(&cluster))).await;
     assert_eq!(s, StatusCode::OK, "{l}");
     assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(pod(&issuer))).await.0, StatusCode::UNAUTHORIZED, "only its own keys");
+    // The cluster rotates its signing key: the identity's keys are replaced, its id kept.
+    let rotated = Issuer::new();
+    let k = api.ok(Method::PUT, &format!("/identities/{}/jwks", p["id"].as_str().unwrap()), Some(json!({ "jwks": rotated.jwks().to_string() }))).await;
+    assert_eq!((k["id"].clone(), k["pinned_keys"].clone()), (p["id"].clone(), json!(1)));
+    assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(pod(&rotated))).await.0, StatusCode::OK);
+    assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(pod(&cluster))).await.0, StatusCode::UNAUTHORIZED, "the old key no longer");
 
     // Deleting the identity ends what it gave out.
     api.ok(Method::DELETE, &format!("/identities/{id}"), None).await;

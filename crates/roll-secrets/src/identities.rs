@@ -233,6 +233,26 @@ impl Secrets {
         Ok(i)
     }
 
+    /// Replace an identity's pinned keys (a cluster rotated its signing key): its id, and so every
+    /// workload's `ROLL_IDENTITY`, stays. During a rotation, give the old and the new keys together.
+    pub fn set_identity_keys(&self, project: &str, id: &str, jwks: &str, caller: &Caller) -> Result<Identity> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        if caller.principal.starts_with("identity:") || caller.principal.starts_with("token:") {
+            return Err(Error::Forbidden("an identity's keys are set by people, not tokens or logins".into()));
+        }
+        let jwks = jwks.trim();
+        let n = crate::oidc::pinned_keys(jwks).map_err(bad)?;
+        self.project(project)?;
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            let name: Option<String> = c.query_row("SELECT name FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?;
+            let name = name.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
+            c.execute("UPDATE identities SET jwks = ? WHERE id = ?", params![jwks, id])?;
+            audit::record(c, project, caller, "identity.keys", None, None, &[], &format!("identity {name} now pins {n} key{}", if n == 1 { "" } else { "s" }), now)?;
+            Ok::<_, Error>(c.query_row(&format!("SELECT {COLUMNS} FROM identities WHERE id = ?"), [id], identity_row)?.0)
+        })
+    }
+
     /// Delete an identity and revoke the tokens it gave out.
     pub fn delete_identity(&self, project: &str, id: &str, caller: &Caller) -> Result<()> {
         caller.need(Action::Admin, &Scope::project(project))?;

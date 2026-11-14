@@ -628,6 +628,13 @@ pub enum Identities {
         #[arg(long, value_name = "FILE")]
         jwks: Option<String>,
     },
+    /// Replace an identity's pinned keys (the cluster rotated its signing key); its id stays.
+    Keys {
+        id: String,
+        /// The JWKS file (`-` for stdin): `kubectl get --raw /openid/v1/jwks`.
+        #[arg(long, value_name = "FILE")]
+        jwks: String,
+    },
     /// Delete an identity; the tokens it gave out stop working.
     Rm { id: String },
 }
@@ -1392,6 +1399,14 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 println!("{}", s(&v["id"]));
                 eprintln!("Created {}. In the workload: ROLL_IDENTITY={} (and ROLL_API_URL), then `roll run …` logs in by itself.", s(&v["name"]), s(&v["id"]));
+            }
+            Identities::Keys { id, jwks } => {
+                let doc = if jwks == "-" { std::io::read_to_string(std::io::stdin().take(1 << 20))? } else { std::fs::read_to_string(&jwks).with_context(|| format!("reading {jwks}"))? };
+                let v = c.call(Method::PUT, &format!("{}/identities/{}/jwks", c.base(), enc(&id)), Some(json!({ "jwks": doc }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("{} now pins {} key(s)", s(&v["name"]), v["pinned_keys"]);
             }
             Identities::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/identities/{}", c.base(), enc(&id)), None).await?;
