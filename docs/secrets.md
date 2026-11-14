@@ -1243,6 +1243,9 @@ exist) never falls back, and neither does a file older than `--fallback-max-age`
   data: a file can't be swapped for another project's or environment's, or edited to look fresher.
 - It's written 0600 through a new file renamed over the old one. Only what resolved cleanly is
   kept. A dynamic credential in it may have ended with its lease.
+- With `--env-file`, the file's `roll://` references are kept too, as they resolved (under their
+  own text: no variable's name has `://`). Plain values are read from the env file again; a
+  reference added since the last fetch can't start from the file, and says so.
 - When the project can only be found by asking rolld (a name, or the token's own), the file's own
   project is used, and checked again when it's opened. `--watch` started from a fallback reloads
   the command once rolld answers.
@@ -2732,14 +2735,12 @@ user's call).
    notice.
 9. *Waits on #30 meeting #24/#25:* the Access tab shows roll-access tokens waiting for an admin's
    approval (`pending`) and rotations that keep the old secret working (`keep_old_for_s`).
-10. `roll run --fallback` with `--env-file`: an env file's `roll://` references still need rolld;
-   the fallback file could keep them too.
-11. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
+10. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
    installs list Slack user ids and act as the owner's automation; a review must count as the
    person who pressed the button (their permissions, the request's gates), never as the app.
-12. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
+11. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
    project can link their own databases, buckets and streams.
-13. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+12. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
    environment).
 
 ### Landing

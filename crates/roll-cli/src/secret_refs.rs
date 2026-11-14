@@ -14,6 +14,13 @@ pub struct Ref {
 }
 
 impl Ref {
+    /// The reference as written in a file: `roll://[PROJECT@]ENV[/folder]/KEY`.
+    pub fn text(&self) -> String {
+        let project = self.project.as_ref().map(|p| format!("{p}@")).unwrap_or_default();
+        let folder = if self.path == "/" { "" } else { self.path.as_str() };
+        format!("roll://{project}{}{folder}/{}", self.env, self.key)
+    }
+
     /// `value` as a reference, if it's one (`roll://…`); an error if it's a malformed one.
     pub fn parse(value: &str) -> anyhow::Result<Option<Ref>> {
         let Some(rest) = value.trim().strip_prefix("roll://") else { return Ok(None) };

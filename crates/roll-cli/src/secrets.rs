@@ -3420,6 +3420,13 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(Strin
     let path = format!("{}/values?{}{digest}", c.env(&at.env), c.q());
     let digest_path = format!("{}/digest?{}", c.env(&at.env), c.q());
     let header = |fetched_at| crate::fallback::Header { v: 1, asked: at.project.clone().unwrap_or_default(), project: c.project.clone(), environment: at.env.clone(), path: at.path.clone(), fetched_at };
+    // Env files, read first: their entries win over the environment's.
+    let mut files = vec![];
+    for file in &r.env_files {
+        let text = std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
+        files.push(crate::secret_refs::parse_env_file(&text, file)?);
+    }
+    let refs: Vec<crate::secret_refs::Ref> = files.iter().flatten().filter_map(|(_, v)| crate::secret_refs::Ref::parse(v).transpose()).collect::<anyhow::Result<_>>()?;
     let v = match (c.api.answer(Method::GET, &path, None).await, &r.fallback) {
         (Ok(Ok(v)), _) => v,
         // Refused (a revoked token, no such environment): never the fallback.
@@ -3438,50 +3445,58 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(Strin
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
             let (values, h) = crate::fallback::read(file, &secret, &header(0), now, crate::fallback::duration_ms(&r.fallback_max_age)?).with_context(|| format!("{why}; and the fallback didn't do"))?;
             eprintln!("roll run: {why}; starting from {} (fetched {} minutes ago)", file.display(), (now - h.fetched_at) / 60_000);
+            // The file keeps the env files' references as they resolved, under their `roll://…`
+            // text (no variable's name has `://`).
+            let (kept, values): (Vec<_>, Vec<_>) = values.into_iter().map(|(k, v)| (k, v.as_str().unwrap_or_default().to_string())).partition(|(k, _)| k.starts_with("roll://"));
+            let kept: std::collections::HashMap<String, String> = kept.into_iter().collect();
+            let resolved = refs.iter().map(|rf| kept.get(&rf.text()).map(|v| (rf.clone(), v.clone())).ok_or_else(|| anyhow::anyhow!("{why}; and {} isn't in the fallback (added after its last fetch)", rf.text()))).collect::<anyhow::Result<_>>()?;
             // A digest no folder has: the first one rolld answers reloads the command (`--watch`).
-            return Ok((env_of(values.into_iter(), r), Vec::new(), Digests::from([(digest_path, "fallback".into())])));
+            return Ok((with_env_files(values, &files, &resolved, r)?, Vec::new(), Digests::from([(digest_path, "fallback".into())])));
         }
     };
     let problems: Vec<String> = v["problems"].as_array().into_iter().flatten().map(|p| format!("{}: {}", s(&p["key"]), s(&p["problem"]))).collect();
     if !problems.is_empty() && !r.allow_unresolved {
         bail!("{} of {}:{} didn't resolve (pass --allow-unresolved to run anyway):\n  {}", problems.len(), at.env, at.path, problems.join("\n  "));
     }
-    // Only what resolved cleanly is kept for an outage.
-    if let (Some(file), true) = (&r.fallback, problems.is_empty()) {
-        let kept = crate::fallback::secret(c.api.key.as_deref()).and_then(|secret| {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
-            crate::fallback::write(file, &secret, header(now), v["values"].as_object().unwrap_or(&serde_json::Map::new()))
-        });
-        if let Err(e) = kept {
-            eprintln!("roll run: couldn't keep the fallback ({e:#})");
-        }
-    }
-    let mut env: Vec<(String, String)> = v["values"].as_object().into_iter().flatten().map(|(k, val)| (k.clone(), val.as_str().unwrap_or_default().to_string())).collect();
+    let values: Vec<(String, String)> = v["values"].as_object().into_iter().flatten().map(|(k, val)| (k.clone(), val.as_str().unwrap_or_default().to_string())).collect();
     let mut leases: Vec<String> = v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(|l| format!("{}/leases/{}", c.base(), enc(l)))).collect();
     let mut follow = Digests::from([(digest_path, answered(&v))]);
     let withheld: Vec<&str> = v["withheld"].as_array().into_iter().flatten().filter_map(|k| k.as_str()).collect();
     if !withheld.is_empty() {
         eprintln!("roll run: left out {} (sensitive: only roll's runtimes read them)", withheld.join(", "));
     }
-    // Env files: plain values as written, references resolved; theirs win over the environment's.
-    for file in &r.env_files {
-        let text = std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
-        let entries = crate::secret_refs::parse_env_file(&text, file)?;
-        let refs: Vec<crate::secret_refs::Ref> = entries.iter().filter_map(|(_, v)| crate::secret_refs::Ref::parse(v).transpose()).collect::<anyhow::Result<_>>()?;
-        let (resolved, more_leases, more_follow) = resolve_refs(c, &refs, r.watch).await?;
-        leases.extend(more_leases);
-        follow.extend(more_follow);
-        for (k, raw) in entries {
-            let value = match crate::secret_refs::Ref::parse(&raw)? {
-                Some(rf) => resolved[&rf].clone(),
-                None => raw,
-            };
-            env.retain(|(have, _)| have != &k);
-            env.push((k, value));
+    let (resolved, more_leases, more_follow) = resolve_refs(c, &refs, r.watch).await?;
+    leases.extend(more_leases);
+    follow.extend(more_follow);
+    // Only what resolved cleanly is kept for an outage: the values, and the env files' references
+    // under their `roll://…` text.
+    if let (Some(file), true) = (&r.fallback, problems.is_empty()) {
+        let mut kept: serde_json::Map<String, Value> = values.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
+        kept.extend(resolved.iter().map(|(rf, v)| (rf.text(), Value::String(v.clone()))));
+        let written = crate::fallback::secret(c.api.key.as_deref()).and_then(|secret| {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+            crate::fallback::write(file, &secret, header(now), &kept)
+        });
+        if let Err(e) = written {
+            eprintln!("roll run: couldn't keep the fallback ({e:#})");
         }
     }
+    Ok((with_env_files(values, &files, &resolved, r)?, leases, follow))
+}
+
+/// The variables to set: the environment's values, then the env files' entries over them (plain
+/// values as written, references as `resolved` has them); the shell's own win unless `--override`.
+fn with_env_files(mut env: Vec<(String, String)>, files: &[Vec<(String, String)>], resolved: &std::collections::HashMap<crate::secret_refs::Ref, String>, r: &Run) -> anyhow::Result<Vec<(String, String)>> {
+    for (k, raw) in files.iter().flatten() {
+        let value = match crate::secret_refs::Ref::parse(raw)? {
+            Some(rf) => resolved[&rf].clone(),
+            None => raw.clone(),
+        };
+        env.retain(|(have, _)| have != k);
+        env.push((k.clone(), value));
+    }
     env.retain(|(k, _)| r.override_env || std::env::var_os(k).is_none());
-    Ok((env, leases, follow))
+    Ok(env)
 }
 
 /// Resolve `roll://` references: one read per project, environment and folder. Their values,
@@ -3566,11 +3581,6 @@ async fn digests_since(c: &Client<'_>, before: &Digests, follow: &Digests) -> Di
 /// (a 4xx: a revoked token, a customer's key that refused, 423) never is.
 pub(crate) fn no_answer(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.downcast_ref::<reqwest::Error>().is_some() || c.downcast_ref::<crate::ApiStatus>().is_some_and(|s| s.status.is_server_error()))
-}
-
-/// The variables to set: the shell's own win unless `--override`.
-fn env_of(values: impl Iterator<Item = (String, Value)>, r: &Run) -> Vec<(String, String)> {
-    values.filter(|(k, _)| r.override_env || std::env::var_os(k).is_none()).map(|(k, val)| (k, val.as_str().unwrap_or_default().to_string())).collect()
 }
 
 /// `roll run`: resolve, then exec the command with the values in its environment; with
