@@ -457,7 +457,7 @@ pub struct Pruned {
     pub image: Option<String>,
 }
 
-const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor, pruned_at";
+const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor, pruned_at, error_detail";
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> code_sql::Result<T> {
     serde_json::from_str(s).map_err(|e| code_sql::Error::Conversion(e.to_string()))
@@ -560,6 +560,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         vars_hash: r.get(16)?,
         actor: r.get(17)?,
         pruned_at: r.get(18)?,
+        error_detail: r.get(19)?,
         steps: Vec::new(),
     })
 }
@@ -598,6 +599,8 @@ impl Store {
         db.add_column("env_access", "bypass_hash", "TEXT")?;
         db.add_column("deployments", "actor", "TEXT")?;
         db.add_column("deployments", "pruned_at", "INTEGER")?;
+        db.add_column("deployments", "retired_at", "INTEGER")?;
+        db.add_column("deployments", "error_detail", "TEXT")?;
         db.add_column("runs", "instance", "TEXT")?;
         db.add_column("domains", "warned_at", "INTEGER")?;
         // Targets made before filters follow every environment, previews too, as they did.
@@ -835,7 +838,8 @@ impl Store {
             }
             c.execute("UPDATE environments SET active = ? WHERE service = ? AND name = ?", params![to, service, env])?;
             if let Some(f) = from.filter(|f| *f != to) {
-                c.execute("UPDATE deployments SET status = 'inactive' WHERE id = ? AND status = 'active'", [f])?;
+                // When it stopped being live: what pruning's day of grace counts from.
+                c.execute("UPDATE deployments SET status = 'inactive', retired_at = ? WHERE id = ? AND status = 'active'", params![now, f])?;
             }
             c.execute(
                 "UPDATE deployments SET status = 'active', finished_at = COALESCE(finished_at, ?), ready_ms = COALESCE(?, ready_ms), error = NULL WHERE id = ?",
@@ -859,12 +863,13 @@ impl Store {
     }
 
     /// A deploy failed: its status, and the event, in one transaction.
-    pub fn fail_deployment(&self, id: &str, error: &str) -> Result<bool> {
+    /// `detail`: what the app or the build printed, the owner's to read (never in the event).
+    pub fn fail_deployment(&self, id: &str, error: &str, detail: Option<&str>) -> Result<bool> {
         let now = self.now()?;
         self.db.write(|c| {
             let n = c.execute(
-                "UPDATE deployments SET status = 'failed', error = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ? AND status IN ('queued', 'building', 'deploying')",
-                params![error, now, id],
+                "UPDATE deployments SET status = 'failed', error = ?, error_detail = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ? AND status IN ('queued', 'building', 'deploying')",
+                params![error, detail, now, id],
             )?;
             if n == 0 {
                 return Ok(false);
@@ -1075,6 +1080,13 @@ impl Store {
         let id = new_id("dep");
         let now = self.now()?;
         self.db.write(|c| {
+            // A rollback to one pruned meanwhile (its image may be gone): refused here, in the
+            // transaction that would make it.
+            if let Some(of) = &d.rollback_of
+                && c.query_row("SELECT 1 FROM deployments WHERE id = ? AND pruned_at IS NOT NULL", [of], |_| Ok(())).optional()?.is_some()
+            {
+                return Err(Error::Conflict(format!("{of} is older than what's kept to roll back to and its image was cleaned up; deploy its revision again")));
+            }
             if let Some(k) = key {
                 let had: Option<String> = c.query_row("SELECT deployment FROM deploy_keys WHERE service = ? AND env = ? AND key = ?", params![service, env, k], |r| r.get(0)).optional()?;
                 if let Some(had) = had {
@@ -1091,7 +1103,7 @@ impl Store {
                 )?;
             }
             c.execute(
-                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, NULL, ?)"),
+                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, ?)"),
                 params![
                     id,
                     service,
@@ -1157,6 +1169,12 @@ impl Store {
         Ok(())
     }
 
+    /// Whether a deployment not pruned runs an image of this digest (any service's).
+    pub fn digest_in_use(&self, digest: &str) -> Result<bool> {
+        let like = format!("%{}", digest.replace(['%', '_'], ""));
+        Ok(self.db.query_row("SELECT 1 FROM deployments WHERE pruned_at IS NULL AND image LIKE ? LIMIT 1", [like], |_| Ok(())).optional()?.is_some())
+    }
+
     /// Newest first; `before` (ms): only those made before then (the next page).
     pub fn deployments(&self, service: &str, env: &str, limit: usize, before: Option<i64>) -> Result<Vec<Deployment>> {
         Ok(self.db.query(
@@ -1167,14 +1185,16 @@ impl Store {
     }
 
     /// A service's deployments past what's kept, marked pruned in one transaction: what's kept
-    /// is each environment's newest `keep` built ones, its live one, any pending, live or ready,
-    /// and any that ended since `recent` (draining, skew protection) unless its environment was
-    /// deleted. The images no deployment left names (another's may: a promotion, a rollback).
+    /// is each environment's newest `keep` that were live (the rollback targets; a failed or
+    /// superseded build never counts), its live one, any pending, live or ready, and any that
+    /// stopped being live (or ended, never live) since `recent` (draining, skew protection)
+    /// unless its environment was deleted. The images no deployment left names (another's may: a
+    /// promotion, a rollback).
     pub fn prune_deployments(&self, service: &str, keep: usize, recent: i64) -> Result<Vec<Pruned>> {
         let now = self.now()?;
         Ok(self.db.write(|c| {
             let rows: Vec<(String, String, String, Option<String>, i64)> = c.query(
-                "SELECT id, env, status, image, COALESCE(finished_at, created_at) FROM deployments WHERE service = ? AND pruned_at IS NULL ORDER BY created_at DESC, id DESC",
+                "SELECT id, env, status, image, COALESCE(retired_at, finished_at, created_at) FROM deployments WHERE service = ? AND pruned_at IS NULL ORDER BY created_at DESC, id DESC",
                 [service],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )?;
@@ -1183,7 +1203,7 @@ impl Store {
             let mut out = Vec::new();
             for (id, env, status, image, ended) in rows {
                 let removed = status == "removed";
-                if image.is_some() && !removed {
+                if image.is_some() && matches!(status.as_str(), "active" | "inactive") {
                     let n = built.entry(env).or_default();
                     *n += 1;
                     if *n <= keep {
@@ -1598,8 +1618,9 @@ impl Store {
     /// A run, `running`, or `skipped` when one is still going (any of them, not just the newest:
     /// skipped rows come between), decided in one transaction. A `running` row older than
     /// `timeout_ms` is one a stopped node left: its run is over whatever the row says.
-    pub fn start_run(&self, service: &str, env: &str, deployment: &str, timeout_ms: i64) -> Result<CronRun> {
-        let id = new_id("run");
+    /// `id`: made by the caller, which knows it's running before its row says so.
+    pub fn start_run(&self, id: &str, service: &str, env: &str, deployment: &str, timeout_ms: i64) -> Result<CronRun> {
+        let id = id.to_string();
         let now = self.now()?;
         self.db.write(|c| {
             let going = c
@@ -1616,10 +1637,10 @@ impl Store {
         })
     }
 
-    pub fn finish_run(&self, id: &str, status: RunStatus, exit_code: Option<i32>) -> Result<()> {
-        let now = self.now()?;
-        self.db.execute("UPDATE runs SET status = ?, exit_code = ?, finished_at = ? WHERE id = ?", params![status.as_str(), exit_code, now, id])?;
-        Ok(())
+    /// A cron run ends, if it's still running: a failure is its `cron.failed` event in the same
+    /// transaction. Whether it was still running.
+    pub fn finish_run(&self, id: &str, status: RunStatus, exit_code: Option<i32>) -> Result<bool> {
+        self.finish("runs", "cron.failed", "run", id, status, exit_code)
     }
 
     // ── private registries ──
@@ -1682,24 +1703,43 @@ impl Store {
         Ok(Job { id, deployment: deployment.into(), command: command.into(), tasks, status: RunStatus::Running, exit_code: None, started_at: now, finished_at: None })
     }
 
-    pub fn finish_job(&self, id: &str, status: RunStatus, exit_code: Option<i32>) -> Result<()> {
+    /// A job ends, if it's still running (a takeover may have failed it first): a failure is its
+    /// `job.failed` event in the same transaction. Whether it was still running.
+    pub fn finish_job(&self, id: &str, status: RunStatus, exit_code: Option<i32>) -> Result<bool> {
+        self.finish("jobs", "job.failed", "job", id, status, exit_code)
+    }
+
+    fn finish(&self, table: &str, kind: &str, key: &str, id: &str, status: RunStatus, exit_code: Option<i32>) -> Result<bool> {
         let now = self.now()?;
-        self.db.execute("UPDATE jobs SET status = ?, exit_code = ?, finished_at = ? WHERE id = ? AND status = 'running'", params![status.as_str(), exit_code, now, id])?;
-        Ok(())
+        Ok(self.db.write(|c| {
+            let row: Option<(String, String, String)> = c.query_row(&format!("SELECT service, env, deployment FROM {table} WHERE id = ? AND status = 'running'"), [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            let Some((svc, env, dep)) = row else { return Ok::<_, code_sql::Error>(false) };
+            if c.execute(&format!("UPDATE {table} SET status = ?, exit_code = ?, finished_at = ? WHERE id = ? AND status = 'running'"), params![status.as_str(), exit_code, now, id])? == 0 {
+                return Ok(false);
+            }
+            if matches!(status, RunStatus::Failed | RunStatus::TimedOut) {
+                insert_event(c, now, kind, &svc, &env, Some(&dep), &serde_json::json!({ key: id, "status": status.as_str(), "exit_code": exit_code }))?;
+            }
+            Ok(true)
+        })?)
     }
 
     /// Jobs a node that stopped had running: their containers went with it.
     /// A service's cron runs and jobs still `running` that no process runs any more (their node
     /// stopped; `spare`: those this one does): failed, each with its `cron.failed`/`job.failed`
     /// event in the same transaction. How many.
-    pub fn fail_orphans(&self, service: &str, spare: &[String]) -> Result<usize> {
+    /// `before`: only those started before then (the database's ms: when this node took the
+    /// service), never one this node started since.
+    pub fn fail_orphans(&self, service: &str, spare: &[String], before: i64) -> Result<usize> {
         let now = self.now()?;
         Ok(self.db.write(|c| {
             let mut n = 0;
             for (table, kind, key) in [("runs", "cron.failed", "run"), ("jobs", "job.failed", "job")] {
-                let rows: Vec<(String, String, String)> = c.query(&format!("SELECT id, env, deployment FROM {table} WHERE service = ? AND status = 'running'"), [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+                let rows: Vec<(String, String, String)> = c.query(&format!("SELECT id, env, deployment FROM {table} WHERE service = ? AND status = 'running' AND started_at < ?"), params![service, before], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
                 for (id, env, dep) in rows.into_iter().filter(|(id, ..)| !spare.contains(id)) {
-                    c.execute(&format!("UPDATE {table} SET status = 'failed', finished_at = ? WHERE id = ? AND status = 'running'"), params![now, id])?;
+                    if c.execute(&format!("UPDATE {table} SET status = 'failed', finished_at = ? WHERE id = ? AND status = 'running'"), params![now, id])? == 0 {
+                        continue;
+                    }
                     let data = serde_json::json!({ key: id, "status": "failed", "exit_code": null, "why": "its node stopped before it finished" });
                     insert_event(c, now, kind, service, &env, Some(&dep), &data)?;
                     n += 1;

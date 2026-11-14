@@ -73,7 +73,7 @@ impl Apps {
         let cancel = CancellationToken::new();
         self.cancels.lock().insert(job.id.clone(), cancel.clone());
         let (this, id, cmd) = (self.clone(), job.id.clone(), command.to_string());
-        let (sid, e, dep) = (service.to_string(), env.to_string(), tpl.deployment.clone());
+        let sid = service.to_string();
         tokio::spawn(async move {
             // Its tasks, at most PARALLEL at once, each told which it is.
             let outcomes: Vec<(RunStatus, Option<i32>)> = futures::stream::iter(0..tasks)
@@ -108,15 +108,12 @@ impl Apps {
             log.stream(Stream::System).line(format!("{} ({})", status.as_str(), code.map_or("no exit code".into(), |c| format!("exit {c}"))));
             this.cancels.lock().remove(&id);
             this.running_jobs.lock().remove(&id);
+            // A job that failed (not one canceled) is its `job.failed` event (off by default), in
+            // the same transaction, if it was still running (a takeover may have failed it).
             let id2 = id.clone();
             let _ = this.db(move |s| s.finish_job(&id2, status, code)).await;
             // Whoever follows the service sees it end.
             this.changed(&sid);
-            // A job that failed (not one canceled) is an event: `job.failed`, off by default.
-            if matches!(status, RunStatus::Failed | RunStatus::TimedOut) {
-                let data = serde_json::json!({ "job": id, "status": status.as_str(), "exit_code": code });
-                let _ = this.db(move |s| s.add_event("job.failed", &sid, &e, Some(&dep), &data)).await;
-            }
             this.logs.flush().await;
             this.logs.retire(&format!("job:{id}"));
         });

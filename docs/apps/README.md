@@ -272,9 +272,12 @@ every deployment is immutable with instant rollback.
   deployment.
 - **Instant rollback**: the old image is still in the registry, so a rollback is a rollout with
   no build: seconds, not minutes.
-- **A failed deploy says why**: a build's error is BuildKit's own (the failing step, how it
-  ended, and that step's last line of output), not only its exit code; a rollout that fails copies
-  the new instances' output into the deploy's log and its last line into the error; and while the
+- **A failed deploy says why**: a build's failing step (how it ended, and that step's last line
+  of output, as BuildKit said it), not only its exit code; a rollout that fails copies the new
+  instances' output into the deploy's log and its last line into the deployment. What the app or
+  the build printed is `error_detail`, shown to its owner and never sent out: the commit status,
+  the `deploy.failed` event and its notifications carry only roll's words (a stack trace or a
+  printed connection string must not reach a public repo's checks or a chat). While the
   health check waits, the sandbox's listening sockets are read: an app on its port but only on
   loopback fails at once ("listen on 0.0.0.0:8080"), one on another port is named when it times
   out ("listens on 0.0.0.0:3000, not on port 8080: listen on $PORT"), as Render's "no open ports"

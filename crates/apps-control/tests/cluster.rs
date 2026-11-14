@@ -430,7 +430,7 @@ async fn a_cron_service_runs_on_the_node_that_takes_it_over() {
     let owner = f.nodes.iter().position(|n| n.apps.deps.cluster.owns(&key)).unwrap();
     // A run the owner was in the middle of when it died.
     let (sid, d) = (id.clone(), dep.clone());
-    let orphan = f.nodes[owner].apps.db(move |s| s.start_run(&sid, "production", &d, 3_600_000)).await.unwrap();
+    let orphan = f.nodes[owner].apps.db(move |s| s.start_run(&apps_control::model::new_id("run"), &sid, "production", &d, 3_600_000)).await.unwrap();
     let dead = f.nodes.remove(owner);
     dead.server.abort();
     dead.apps.deps.cluster.fault_kill();

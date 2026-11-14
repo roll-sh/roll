@@ -446,6 +446,13 @@ async fn old_deployments_are_pruned_past_what_an_environment_keeps() {
         images.push(call(&w.api, "GET", &format!("{base}/{d}"), None).await.1["image"].as_str().unwrap().to_string());
     }
     let (old0, old1, kept) = (images[0].clone(), images[1].clone(), images[2].clone());
+    // Builds that never went live (failed health checks) don't push the rollback targets out.
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"health_path": "/healthz", "health_timeout_s": 1}}))).await;
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{id}/environments/production/variables"), Some(json!({"set": {"FAKE_UNHEALTHY": "1"}}))).await;
+    for _ in 0..2 {
+        let (_, d) = call(&w.api, "POST", &base, Some(json!({}))).await;
+        assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "failed");
+    }
     w.apps.prune().await;
     let removed = w.fake.removed.lock().clone();
     assert!(removed.contains(&old0) && removed.contains(&old1) && !removed.contains(&kept), "{removed:?}");
@@ -458,7 +465,7 @@ async fn old_deployments_are_pruned_past_what_an_environment_keeps() {
     let (_, page) = call(&w.api, "GET", &base, None).await;
     let last = page.as_array().unwrap().last().unwrap()["created_at"].as_i64().unwrap();
     let (_, older) = call(&w.api, "GET", &format!("{base}?before={last}"), None).await;
-    assert!(older.as_array().unwrap().is_empty() && page.as_array().unwrap().len() == 5, "{page}");
+    assert!(older.as_array().unwrap().is_empty() && page.as_array().unwrap().len() == 7, "{page}");
     // Pruned once: a second pass removes nothing again.
     w.apps.prune().await;
     assert_eq!(w.fake.removed.lock().len(), removed.len());
@@ -594,8 +601,10 @@ async fn a_deploy_that_fails_its_health_check_leaves_the_old_one_serving() {
     let d2 = settled(&w, id, "production", d2["id"].as_str().unwrap()).await;
     assert_eq!(d2["status"], "failed", "{d2}");
     assert!(d2["error"].as_str().unwrap().contains("health check"), "{d2}");
-    // What the new instance said is in the deploy's log and its error, not only the environment's.
-    assert!(d2["error"].as_str().unwrap().contains("its last output: listening on"), "{d2}");
+    // What the new instance said is in the deploy's log and its detail, not only the
+    // environment's; never in the error that goes out (commit statuses, notifications).
+    assert!(d2["error_detail"].as_str().unwrap_or("").contains("its last output: listening on"), "{d2}");
+    assert!(!d2["error"].as_str().unwrap().contains("listening on"), "{d2}");
     let (_, dlog) = call(&w.api, "GET", &format!("{base}/deploys/{}/logs", d2["id"].as_str().unwrap()), None).await;
     assert!(dlog.as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap_or("").contains(": listening on")), "{dlog}");
     let (_, env) = call(&w.api, "GET", &base, None).await;
