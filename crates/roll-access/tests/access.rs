@@ -881,7 +881,10 @@ async fn a_persons_token_past_the_policy_waits_for_an_admin() {
     assert_eq!((s, made["grant"]["pending"].as_bool()), (StatusCode::CREATED, Some(true)), "{made}");
     let (token, id) = (made["token"].as_str().unwrap().to_string(), made["grant"]["id"].as_str().unwrap().to_string());
     let (s, e) = d.call(&token, Method::GET, "/v1/workspace/projects", None).await;
-    assert_eq!((s, e["code"].as_str()), (StatusCode::UNAUTHORIZED, Some("pending_approval")), "{e}");
+    assert_eq!((s, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("pending_approval")), "{e}");
+    // On MCP too: a 403, so an OAuth client doesn't send her through sign-in again.
+    let (s, e) = d.call(&token, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("pending_approval")), "{e}");
     // What the admin will decide doesn't change under them.
     assert_eq!(d.as_user("usr_alice", Method::PATCH, &format!("/v1/access/tokens/{id}"), Some(json!({ "rules": [{ "product": "*", "resources": "*", "actions": { "admin": "allow" } }] }))).await.0, StatusCode::CONFLICT);
     // It leads an admin's checkup; hers doesn't list it (she sees it waits, and it isn't hers to decide).

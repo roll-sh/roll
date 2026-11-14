@@ -558,7 +558,8 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
 - **An admin approves what reaches far** (GitHub's organization approval of fine-grained tokens).
   The policy's `approve_people` (`["admin", "reveal"]`, set on the access page) names actions.
   A person's own token whose rules reach one of them, or that asks for anything else, is made
-  `pending`: it answers 401 `pending_approval` until an admin approves it
+  `pending`: it answers 403 `pending_approval` until an admin approves it (403, not 401: an MCP
+  client given a 401 signs in again, for a connection that's only waiting)
   (`POST /v1/access/tokens/{id}/approve`) or denies it (`…/deny`: revoked, "an admin denied it").
   Admins are mailed when one waits (who asked, what it may do, where to decide; never a secret).
   A person is told first: `GET /v1/access` lists `approve_people`, and the new-token page and the
