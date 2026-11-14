@@ -246,6 +246,8 @@ export type ProjectFindings = { project: string; project_name: string; findings:
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
 /** A project's certificate authority: what it signs for, and its certificate (PEM) for clients to trust. */
 export type Ca = { id: string; name: string; certificate: string; domains: string[]; allow_ip: boolean; max_days: number; created_at: number; created_by: string };
+/** A project's SSH CA: the principals it signs for, and its public key for servers' TrustedUserCAKeys. */
+export type SshCa = { id: string; name: string; public_key: string; principals: string[]; max_hours: number; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 

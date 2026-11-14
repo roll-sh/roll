@@ -86,6 +86,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
         .route(&format!("{P}/cas"), get(cas).post(add_ca))
         .route(&format!("{P}/cas/{{id}}"), axum::routing::delete(delete_ca))
+        .route(&format!("{P}/ssh-cas"), get(ssh_cas).post(add_ssh_ca))
+        .route(&format!("{P}/ssh-cas/{{id}}"), axum::routing::delete(delete_ssh_ca))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
@@ -866,6 +868,20 @@ async fn add_ca(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes)
 
 async fn delete_ca(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_ca(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn ssh_cas(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.ssh_cas(&project, &c)).await?))
+}
+
+async fn add_ssh_ca(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::ssh::NewSshCa = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_ssh_ca(&project, n, &c)).await?))
+}
+
+async fn delete_ssh_ca(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_ssh_ca(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

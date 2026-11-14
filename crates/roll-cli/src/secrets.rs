@@ -285,6 +285,9 @@ pub enum Secrets {
     /// The project's certificate authorities: list, add, print one's certificate, remove.
     #[command(subcommand)]
     Cas(CasCmd),
+    /// The project's SSH CAs: list, add, print one's public key (for TrustedUserCAKeys), remove.
+    #[command(subcommand, name = "ssh-cas")]
+    SshCas(SshCasCmd),
     /// A key pair for backups: the secret key written to a file only you can read, the public key
     /// printed (give it to `backup --to`).
     Keygen {
@@ -497,6 +500,24 @@ pub enum Requests {
         bypass: bool,
     },
     Close { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum SshCasCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Make an SSH CA that signs for these logins.
+    Add {
+        name: String,
+        #[arg(long = "principal", required = true)]
+        principals: Vec<String>,
+        /// The longest a certificate lives (hours, 168 at most; 24 by default).
+        #[arg(long)]
+        max_hours: Option<u32>,
+    },
+    /// Print an SSH CA's public key, for servers' TrustedUserCAKeys.
+    Key { id: String },
+    Rm { id: String },
 }
 
 #[derive(Subcommand)]
@@ -1189,6 +1210,38 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             println!("{} is {}", s(&v["id"]), s(&v["state"]));
         }
+        Secrets::SshCas(cmd) => match cmd {
+            SshCasCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/ssh-cas", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for a in v.as_array().into_iter().flatten() {
+                    let p: Vec<&str> = a["principals"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    println!("{}  {:<16} {}  up to {} h", s(&a["id"]), s(&a["name"]), p.join(","), a["max_hours"]);
+                }
+            }
+            SshCasCmd::Add { name, principals, max_hours } => {
+                let mut body = json!({ "name": name, "principals": principals });
+                if let Some(h) = max_hours {
+                    body["max_hours"] = json!(h);
+                }
+                let v = c.call(Method::POST, &format!("{}/ssh-cas", c.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Made {} ({}): servers trust `roll secrets ssh-cas key {}`; link SSH_CERT and SSH_KEY to it with options.principals.", s(&v["name"]), s(&v["id"]), s(&v["name"]));
+            }
+            SshCasCmd::Key { id } => {
+                let v = c.call(Method::GET, &format!("{}/ssh-cas", c.base()), None).await?;
+                let ca = v.as_array().into_iter().flatten().find(|a| a["id"] == id.as_str() || a["name"] == id.as_str()).ok_or_else(|| anyhow::anyhow!("no SSH CA {id}"))?;
+                println!("{}", s(&ca["public_key"]));
+            }
+            SshCasCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/ssh-cas/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
         Secrets::Cas(cmd) => match cmd {
             CasCmd::Ls => {
                 let v = c.call(Method::GET, &format!("{}/cas", c.base()), None).await?;

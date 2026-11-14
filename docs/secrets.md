@@ -578,6 +578,26 @@ TLS certificates for services (mTLS between them), with no CA to run.
   lease that ends leaves its certificate valid until it expires. A CA a key links to can't be
   deleted; deleting one leaves what it signed valid until it expires.
 
+### SSH certificates
+
+A project's own SSH CA, as Vault's SSH engine signs them: short-lived user certificates instead of
+long-lived public keys on every server. Servers trust one CA key (`TrustedUserCAKeys`).
+
+- `POST …/ssh-cas {name, principals, max_hours?}` (admin; `roll secrets ssh-cas add NAME --principal
+  deploy`, the Integrations tab) makes an Ed25519 key, sealed with the project's data key and bound to
+  the CA. Its public key (`ssh-ed25519 …`, `roll secrets ssh-cas key NAME`) is what servers trust.
+  `principals` are the logins it signs for; `max_hours` (24 by default, a week at most) is the longest
+  a certificate lives.
+- The link kind `ssh` has `certificate` (the `…-cert.pub` line) and `private_key` (an unencrypted
+  OpenSSH key), one credential, with the logins in `options.principals` (the Link dialog asks); a
+  login the CA doesn't allow is refused. Each issue makes a new Ed25519 key and a user certificate
+  (`permit-pty`, `permit-port-forwarding`; the key id names the lease): `dynamic` for the lease's TTL
+  plus five minutes, `managed` for twice `rotate_days` (one day by default), at most `max_hours`.
+- The certificate and key formats are OpenSSH's (`PROTOCOL.certkeys`, `PROTOCOL.key`), written by roll
+  and checked against OpenSSH 10: `ssh-keygen -L` reads them, and `sshd` with `TrustedUserCAKeys`
+  takes the certificate for its principal and nobody else's. A certificate can't be taken back, so
+  lifetimes stay short; an SSH CA a key links to can't be deleted.
+
 ## Consumption
 
 ### `roll secrets` and `roll run`
@@ -607,6 +627,7 @@ roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
 roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | rm ID
+roll secrets ssh-cas ls | add NAME --principal P… [--max-hours N] | key ID | rm ID
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -1446,6 +1467,9 @@ isn't in the workspace is 404.
 | `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
 | `POST /cas` | `{name, domains, allow_ip?, max_days?}` | 201 `Ca` (`admin`) |
 | `DELETE /cas/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `GET /ssh-cas` | | `SshCa[]` (`read` on the project; public keys, never private ones) |
+| `POST /ssh-cas` | `{name, principals, max_hours?}` | 201 `SshCa` (`admin`) |
+| `DELETE /ssh-cas/{id}` | | 204; 409 while a key links to it (`admin`) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
 
