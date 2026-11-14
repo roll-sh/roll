@@ -331,6 +331,27 @@ FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname 
 ORDER BY mean_exec_time DESC LIMIT 20" })
 }
 
+/// TypeScript interfaces for every table, written by the query itself (Supabase's generated
+/// types): one per table, enums as unions of their labels, arrays, nullable columns `| null`.
+fn typescript_types() -> Value {
+    json!({ "read_only": true, "sql": "SELECT coalesce(string_agg(def, E'\\n\\n' ORDER BY schema_name, table_name), '// no tables') AS typescript FROM ( \
+  SELECT c.table_schema AS schema_name, c.table_name, \
+    'export interface ' || CASE WHEN c.table_schema = 'public' THEN '' ELSE replace(initcap(replace(c.table_schema, '_', ' ')), ' ', '') END || replace(initcap(replace(c.table_name, '_', ' ')), ' ', '') || E' {\\n' || \
+    string_agg('  ' || CASE WHEN c.column_name ~ '^[A-Za-z_][A-Za-z0-9_]*$' THEN c.column_name ELSE '\"' || replace(c.column_name, '\"', '\\\"') || '\"' END || ': ' || \
+      (CASE \
+        WHEN c.data_type = 'ARRAY' THEN (CASE WHEN substr(c.udt_name, 2) IN ('int2', 'int4', 'int8', 'float4', 'float8', 'numeric', 'oid') THEN 'number' WHEN substr(c.udt_name, 2) = 'bool' THEN 'boolean' WHEN substr(c.udt_name, 2) IN ('json', 'jsonb') THEN 'unknown' ELSE 'string' END) || '[]' \
+        WHEN c.udt_name IN ('int2', 'int4', 'int8', 'float4', 'float8', 'numeric', 'oid', 'money') THEN 'number' \
+        WHEN c.udt_name = 'bool' THEN 'boolean' \
+        WHEN c.udt_name IN ('json', 'jsonb') THEN 'unknown' \
+        WHEN c.data_type = 'USER-DEFINED' AND EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typname = c.udt_name AND n.nspname = c.udt_schema AND t.typtype = 'e') \
+          THEN (SELECT string_agg(quote_literal(e.enumlabel), ' | ' ORDER BY e.enumsortorder) FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typname = c.udt_name AND n.nspname = c.udt_schema) \
+        ELSE 'string' \
+      END) || CASE WHEN c.is_nullable = 'YES' THEN ' | null' ELSE '' END || ';', E'\\n' ORDER BY c.ordinal_position) || E'\\n}' AS def \
+  FROM information_schema.columns c JOIN information_schema.tables t ON t.table_schema = c.table_schema AND t.table_name = c.table_name AND t.table_type = 'BASE TABLE' \
+  WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema') GROUP BY c.table_schema, c.table_name \
+) d" })
+}
+
 fn extensions() -> Value {
     json!({ "read_only": true, "sql": "SELECT a.name, a.default_version, e.extversion AS installed_version, a.comment FROM pg_available_extensions a LEFT JOIN pg_extension e ON e.extname = a.name ORDER BY e.extname IS NULL, a.name" })
 }
@@ -409,6 +430,7 @@ static TOOLS: &[Tool] = &[
     t("postgres_slow_queries", "Slowest queries", "The 20 slowest statements by mean time, with calls, rows and cache hit rate (pg_stat_statements; if it's missing, CREATE EXTENSION pg_stat_statements once with postgres_execute).", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(slow_queries),
     t("postgres_advisors", "Database advice", "What's worth fixing: unused indexes, foreign keys without an index, tables without a primary key, large tables read by sequential scans.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(advisors),
     t("postgres_list_extensions", "Extensions", "Extensions installed and available, with versions.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(extensions),
+    t("postgres_typescript_types", "TypeScript types", "TypeScript interfaces for every table on an endpoint (enums as unions, arrays, nullable columns as | null): to write typed code against the schema.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(typescript_types),
     t("postgres_start_endpoint", "Start an endpoint", "Wake an endpoint's compute.", "postgres", "POST", "/v1/endpoints/{endpoint}/start", &[ENDPOINT]),
     t("postgres_suspend_endpoint", "Suspend an endpoint", "Suspend an endpoint's compute.", "postgres", "POST", "/v1/endpoints/{endpoint}/suspend", &[ENDPOINT]),
     t("postgres_usage", "Postgres usage", "Compute and storage use of a project, with cost estimates.", "postgres", "GET", "/v1/projects/{project}/usage", &[PROJECT, DAYS]),
