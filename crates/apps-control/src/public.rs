@@ -762,6 +762,7 @@ fn strip_roll_headers(h: &mut axum::http::HeaderMap) {
 /// answer metered.
 async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, req: Request) -> Response {
     let (began, seen) = (Instant::now(), Seen::of(&req));
+    let path = crate::model::normal_path(&seen.path);
     let r = proxy_inner(apps.clone(), service, env, deployment, req).await;
     // An answer roll gave itself, before any instance (an allow list's, a rate limit's, a wake
     // that failed): in the access log with why, and metered, so its errors count.
@@ -773,8 +774,21 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
     let mut r = their_page(&apps, service, env, r).await;
     // A preview's answers (and a deployment's own URL, a copy of what's live) are never indexed,
     // whatever the app says (Vercel's): roll's pages, the 401 and the access link's redirect too.
-    let preview = apps.gate(&apps.live(service, env)).await.is_ok_and(|g| g.preview);
-    if deployment.is_some() || preview {
+    let gate = apps.gate(&apps.live(service, env)).await.ok();
+    // The environment's own headers (HSTS, a CSP): the app's own of the same name win unless the
+    // rule replaces them, as a static site's `_headers` do.
+    if let Some(g) = &gate {
+        for rule in g.headers.iter().filter(|h| h.matches(&path)) {
+            for (k, v) in &rule.set {
+                if let (Ok(name), Ok(value)) = (axum::http::HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v))
+                    && (rule.replace || !r.headers().contains_key(&name))
+                {
+                    r.headers_mut().insert(name, value);
+                }
+            }
+        }
+    }
+    if deployment.is_some() || gate.as_ref().is_some_and(|g| g.preview) {
         r.headers_mut().insert("x-robots-tag", HeaderValue::from_static("noindex"));
     }
     r

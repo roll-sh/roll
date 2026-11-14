@@ -512,6 +512,38 @@ async fn one_instance_is_restarted_without_the_rest() {
     assert_eq!(call(&w.api, "POST", &format!("{base}/instances/nope/restart"), None).await.0, StatusCode::NOT_FOUND);
 }
 
+/// An environment's own headers (HSTS, a CSP) on its answers, by path; the app's own header of
+/// the same name wins unless the rule replaces it; nothing that frames the answer or is roll's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environments_headers_are_on_its_answers() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let base = format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap());
+    let rules = json!([
+        {"set": {"Strict-Transport-Security": "max-age=63072000", "Content-Type": "text/plain"}},
+        {"path": "/api/*", "set": {"Cache-Control": "no-store", "Content-Type": "application/problem+json"}, "replace": true},
+    ]);
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"headers": rules}))).await;
+    assert_eq!(st, StatusCode::OK, "{env}");
+    assert_eq!(env["headers"][0]["set"]["strict-transport-security"], "max-age=63072000", "kept lower case: {env}");
+    let get = |path: &str| {
+        let req = Request::builder().uri(path).header("host", host(&env["url"]).as_str()).body(Body::empty()).unwrap();
+        w.public.clone().oneshot(req)
+    };
+    let r = get("/").await.unwrap();
+    let h = |r: &axum::response::Response, k: &str| r.headers().get(k).map(|v| v.to_str().unwrap().to_string());
+    assert_eq!(h(&r, "strict-transport-security").as_deref(), Some("max-age=63072000"));
+    assert_eq!(h(&r, "content-type").as_deref(), Some("application/json"), "the app's own wins");
+    assert_eq!(h(&r, "cache-control"), None, "not on this path");
+    let r = get("/API/users").await.unwrap();
+    assert_eq!((h(&r, "cache-control").as_deref(), h(&r, "content-type").as_deref()), (Some("no-store"), Some("application/problem+json")), "replaced");
+    for bad in [json!({"set": {"Set-Cookie": "a=b"}}), json!({"set": {"X-Roll-Via": "x"}}), json!({"set": {"X-A": "a\r\nX-B: b"}}), json!({"path": "api", "set": {"X-A": "a"}})] {
+        assert_eq!(call(&w.api, "PUT", &base, Some(json!({"headers": [bad.clone()]}))).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (_, env) = call(&w.api, "PUT", &base, Some(json!({"headers": null}))).await;
+    assert!(env.get("headers").is_none(), "{env}");
+}
+
 /// A GET that finds its instance gone (killed: nothing listens, and roll doesn't know yet) goes
 /// to a fresh instance instead of a 503; a request with a body isn't sent twice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

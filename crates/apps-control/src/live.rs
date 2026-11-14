@@ -226,6 +226,8 @@ pub struct Gate {
     pub pages: crate::model::Pages,
     /// A preview's (ephemeral): never indexed.
     pub preview: bool,
+    /// Headers its answers carry.
+    pub headers: Vec<crate::model::HeaderRule>,
 }
 
 /// Clients a rate limit remembers at most (a full bucket is the same as none, so those go first).

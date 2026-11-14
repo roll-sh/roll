@@ -1,6 +1,6 @@
 import { Lock, Rocket, Trash2, Unlock } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { appsApi, formatFirewall, parseAllowList, parseFirewall, PRODUCTION, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
+import { appsApi, formatFirewall, formatHeaders, parseAllowList, parseFirewall, parseHeaders, PRODUCTION, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
 import { btn, Confirm, CopyButton, danger, input, Panel, primary, useCopy } from "../ui";
 import { clock, CPU, MEMORY, mb, StateBadge, SureButton, type Runner } from "./shared";
@@ -69,6 +69,9 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   const fwText = formatFirewall(env.firewall ?? []);
   const [fw, setFw] = useState(fwText);
   useEffect(() => setFw(fwText), [fwText]);
+  const hdrText = formatHeaders(env.headers ?? []);
+  const [hdr, setHdr] = useState(hdrText);
+  useEffect(() => setHdr(hdrText), [hdrText]);
   const rateText = env.rate_limit ? String(env.rate_limit.per_minute) : "";
   const [rate, setRate] = useState(rateText);
   useEffect(() => setRate(rateText), [rateText]);
@@ -325,6 +328,31 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
               placeholder={"allow /admin/health\ndeny /admin/*"}
               spellCheck={false}
               aria-label="Firewall rules, one a line"
+              className={`${input} mt-2 w-full font-mono text-[12px]`}
+            />
+          </div>
+        )}
+
+        {service.run.type === "web" && !service.run.tcp && (
+          <div className="px-5 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-[13px] font-medium">Response headers</p>
+                <p className="mt-1 text-[12px] text-muted">
+                  One a line, on every answer or a path's: <code className="font-mono">/api/* Cache-Control: no-store</code>. The app's own header wins unless the line starts with <code className="font-mono">!</code>.
+                </p>
+              </div>
+              <button className={btn} disabled={busy || hdr === hdrText} onClick={() => runner.run("headers", () => appsApi.putEnvironment(service.id, env.name, { headers: parseHeaders(hdr) }))}>
+                Save
+              </button>
+            </div>
+            <textarea
+              value={hdr}
+              onChange={(e) => setHdr(e.target.value)}
+              rows={Math.min(8, Math.max(2, hdr.split("\n").length))}
+              placeholder={"Strict-Transport-Security: max-age=63072000\nX-Frame-Options: DENY"}
+              spellCheck={false}
+              aria-label="Response headers, one a line"
               className={`${input} mt-2 w-full font-mono text-[12px]`}
             />
           </div>

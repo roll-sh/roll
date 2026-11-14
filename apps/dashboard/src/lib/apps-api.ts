@@ -250,6 +250,48 @@ export function formatFirewall(rules: FirewallRule[]): string {
     .join("\n");
 }
 
+/** Headers an environment's answers carry, on a path (or every path); the app's own of the same name wins unless `replace`. */
+export interface HeaderRule {
+  path?: string;
+  set: Record<string, string>;
+  replace?: boolean;
+}
+
+/**
+ * Header rules as typed, one header a line: `[!][/path] Name: value` (`!`: replace the app's own;
+ * no path: every answer). Lines with the same path and `!` are one rule.
+ */
+export function parseHeaders(text: string): HeaderRule[] {
+  const rules: HeaderRule[] = [];
+  for (const raw of text.split("\n")) {
+    let l = raw.trim();
+    if (!l || l.startsWith("#")) continue;
+    const replace = l.startsWith("!");
+    if (replace) l = l.slice(1).trim();
+    let path: string | undefined;
+    if (l.startsWith("/")) {
+      const at = l.search(/\s/);
+      path = at < 0 ? l : l.slice(0, at);
+      l = at < 0 ? "" : l.slice(at).trim();
+    }
+    const colon = l.indexOf(":");
+    if (colon <= 0) continue;
+    const [name, value] = [l.slice(0, colon).trim(), l.slice(colon + 1).trim()];
+    let rule = rules.find((r) => r.path === path && !!r.replace === replace);
+    if (!rule) {
+      rule = { ...(path ? { path } : {}), set: {}, ...(replace ? { replace } : {}) };
+      rules.push(rule);
+    }
+    rule.set[name] = value;
+  }
+  return rules;
+}
+
+/** The rules as one header a line, as `parseHeaders` reads them. */
+export function formatHeaders(rules: HeaderRule[]): string {
+  return rules.flatMap((r) => Object.entries(r.set).map(([k, v]) => `${r.replace ? "!" : ""}${r.path ? `${r.path} ` : ""}${k}: ${v}`)).join("\n");
+}
+
 /** An allow list as typed, one network per line with an optional description after it. */
 export function parseAllowList(text: string): IpRule[] {
   return text
@@ -285,6 +327,7 @@ export interface EnvironmentPut {
   rate_limit?: { per_minute: number; burst?: number } | null;
   /** Its firewall rules, in order (the first match decides); null or [] for none. */
   firewall?: FirewallRule[] | null;
+  headers?: HeaderRule[] | null;
   /** Its own size and scale over the service's; a null field goes back to the service's. */
   run?: Partial<Record<EnvRunField, number | null>>;
 }
@@ -362,6 +405,8 @@ export interface Environment extends EnvironmentSummary {
   rate_limit?: { per_minute: number; burst?: number | null } | null;
   /** Its firewall rules, in order. */
   firewall?: FirewallRule[];
+  /** Headers its answers carry. */
+  headers?: HeaderRule[];
   created_at: number;
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deployChange, describePending, formatFirewall, parseEnv, parseFirewall, stepDurations, toEnv, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
+import { deployChange, describePending, formatFirewall, formatHeaders, parseEnv, parseFirewall, parseHeaders, stepDurations, toEnv, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
 import { service } from "./workspace-resources";
 
 const svc = (env: Partial<EnvironmentSummary>, id = "svc_a"): Service => ({
@@ -103,3 +103,15 @@ describe("pending changes", () => {
   });
 });
 
+describe("response headers", () => {
+  it("group one header a line into rules by path and replace, and come back the same", () => {
+    const text = "Strict-Transport-Security: max-age=63072000\n/api/* Cache-Control: no-store\n!/api/* Content-Type: application/problem+json\n# a note\nnot a header";
+    const rules = parseHeaders(text);
+    expect(rules).toEqual([
+      { set: { "Strict-Transport-Security": "max-age=63072000" } },
+      { path: "/api/*", set: { "Cache-Control": "no-store" } },
+      { path: "/api/*", set: { "Content-Type": "application/problem+json" }, replace: true },
+    ]);
+    expect(parseHeaders(formatHeaders(rules))).toEqual(rules);
+  });
+});

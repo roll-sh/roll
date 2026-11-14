@@ -609,6 +609,13 @@ pub enum AppsCmd {
         /// No firewall rules.
         #[arg(long)]
         no_firewall: bool,
+        /// A header its answers carry, `[!][/path] Name: value` (`!`: over the app's own; no
+        /// path: every answer), repeatable; the list replaces the environment's.
+        #[arg(long = "header", value_name = "[!][/PATH] NAME: VALUE", conflicts_with = "no_headers")]
+        header: Vec<String>,
+        /// Its answers carry no headers of the environment's own again.
+        #[arg(long)]
+        no_headers: bool,
         /// Its own page (an HTML file, at most 64 KiB) for the 502, 503 and 504 visitors get
         /// while the app can't answer or wake (Heroku's error page).
         #[arg(long, value_name = "HTML_FILE")]
@@ -2416,7 +2423,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, private, open, maintenance, serve, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, error_page, maintenance_page, roll_pages } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, private, open, maintenance, serve, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, error_page, maintenance_page, roll_pages } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -2462,6 +2469,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("firewall".into(), Value::Array(firewall.iter().map(|r| firewall_rule(r)).collect::<anyhow::Result<_>>()?));
             } else if no_firewall {
                 body.insert("firewall".into(), Value::Null);
+            }
+            if !header.is_empty() {
+                body.insert("headers".into(), header_rules(&header)?);
+            } else if no_headers {
+                body.insert("headers".into(), Value::Null);
             }
             let mut pages = serde_json::Map::new();
             for (k, f) in [("error", &error_page), ("maintenance", &maintenance_page)] {
@@ -2578,6 +2590,47 @@ fn firewall_rule(line: &str) -> anyhow::Result<Value> {
     Ok(rule)
 }
 
+
+/// `--header` lines (`[!][/path] Name: value`) as the API's rules: those of one path and `!` are
+/// one rule, as the dashboard's editor groups them.
+fn header_rules(lines: &[String]) -> anyhow::Result<Value> {
+    let mut rules: Vec<(Option<String>, bool, serde_json::Map<String, Value>)> = Vec::new();
+    for raw in lines {
+        let mut l = raw.trim();
+        let replace = l.starts_with('!');
+        if replace {
+            l = l[1..].trim_start();
+        }
+        let mut path = None;
+        if l.starts_with('/') {
+            let (p, rest) = l.split_once(char::is_whitespace).unwrap_or((l, ""));
+            path = Some(p.to_string());
+            l = rest.trim();
+        }
+        let (name, value) = l.split_once(':').filter(|(n, _)| !n.trim().is_empty()).ok_or_else(|| anyhow::anyhow!("--header is [!][/path] Name: value, not {raw:?}"))?;
+        match rules.iter_mut().find(|(p, r, _)| *p == path && *r == replace) {
+            Some((_, _, set)) => {
+                set.insert(name.trim().to_string(), json!(value.trim()));
+            }
+            None => rules.push((path, replace, serde_json::Map::from_iter([(name.trim().to_string(), json!(value.trim()))]))),
+        }
+    }
+    Ok(Value::Array(
+        rules
+            .into_iter()
+            .map(|(path, replace, set)| {
+                let mut r = json!({ "set": set });
+                if let Some(p) = path {
+                    r["path"] = json!(p);
+                }
+                if replace {
+                    r["replace"] = json!(true);
+                }
+                r
+            })
+            .collect(),
+    ))
+}
 
 #[cfg(test)]
 mod tests {

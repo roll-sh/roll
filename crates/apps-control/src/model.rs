@@ -875,6 +875,9 @@ pub struct Environment {
     pub rate_limit: Option<RateLimit>,
     /// Its firewall rules, in order ([]: none).
     pub firewall: Vec<FirewallRule>,
+    /// Headers its answers carry ([]: none).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<HeaderRule>,
     /// A worker that follows its work: the backlog it last read (null before the first read)
     /// and the instances that wants.
     pub scaling: Option<Scaling>,
@@ -972,19 +975,79 @@ impl FirewallRule {
     /// `path` as [`normal_path`] gives it. Paths compare in any case and without a trailing
     /// slash (`/admin/*` takes `/admin` too); HEAD is a GET.
     pub fn matches(&self, method: &str, path: &str, user_agent: &str) -> bool {
-        let trim = |p: &str| if p.len() > 1 { p.trim_end_matches('/').to_ascii_lowercase() } else { p.to_ascii_lowercase() };
-        let path = trim(path);
-        let path_ok = self.path.as_deref().is_none_or(|p| match p.strip_suffix('*') {
-            Some(prefix) => {
-                let prefix = prefix.to_ascii_lowercase();
-                path.starts_with(&prefix) || path == trim(&prefix)
-            }
-            None => path == trim(p),
-        });
+        let path_ok = self.path.as_deref().is_none_or(|p| path_matches(p, path));
         let method = if method.eq_ignore_ascii_case("HEAD") { "GET" } else { method };
         let method_ok = self.methods.is_empty() || self.methods.iter().any(|m| m.eq_ignore_ascii_case(method));
         let ua_ok = self.user_agent.as_deref().is_none_or(|u| user_agent.to_ascii_lowercase().contains(u));
         path_ok && method_ok && ua_ok
+    }
+}
+
+/// Whether `path` ([`normal_path`]'s) is `pattern`: a path, or a prefix ending in `*` (which
+/// takes the prefix itself too); any case, no trailing slash.
+pub fn path_matches(pattern: &str, path: &str) -> bool {
+    let trim = |p: &str| if p.len() > 1 { p.trim_end_matches('/').to_ascii_lowercase() } else { p.to_ascii_lowercase() };
+    let path = trim(path);
+    match pattern.strip_suffix('*') {
+        Some(prefix) => {
+            let prefix = prefix.to_ascii_lowercase();
+            path.starts_with(&prefix) || path == trim(&prefix)
+        }
+        None => path == trim(pattern),
+    }
+}
+
+/// Headers an environment's answers carry (HSTS, a CSP, `X-Frame-Options`), on the paths a rule
+/// names: Vercel's and Netlify's `headers`. The app's own header of the same name wins unless
+/// the rule `replace`s it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeaderRule {
+    /// A path, or a prefix ending in `*` (`/assets/*`); none: every path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub set: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replace: bool,
+}
+
+/// The most header rules an environment has.
+pub const MAX_HEADER_RULES: usize = 20;
+
+impl HeaderRule {
+    /// Checked as given, names kept lower case. Never one that frames the answer or is roll's
+    /// own (`content-length`, `set-cookie`, `x-roll-*`…).
+    pub fn check(mut self) -> Result<HeaderRule> {
+        let bad = |m: String| Err(Error::BadRequest(format!("headers: {m}")));
+        if let Some(p) = &self.path
+            && (!p.starts_with('/') || p.len() > 512 || p.strip_suffix('*').unwrap_or(p).contains('*'))
+        {
+            return bad("a path starts with / (at most 512 characters, `*` only at its end)".into());
+        }
+        if self.set.is_empty() || self.set.len() > 20 {
+            return bad("a rule sets 1–20 headers".into());
+        }
+        const FORBIDDEN: [&str; 12] = ["content-length", "transfer-encoding", "connection", "keep-alive", "upgrade", "host", "te", "trailer", "set-cookie", "content-encoding", "proxy-authenticate", "proxy-connection"];
+        let mut set = std::collections::BTreeMap::new();
+        for (k, v) in &self.set {
+            let name = k.trim().to_ascii_lowercase();
+            if name.is_empty() || name.len() > 64 || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) {
+                return bad(format!("{k:?} isn't a header name"));
+            }
+            if FORBIDDEN.contains(&name.as_str()) || name.starts_with("x-roll-") || name.starts_with("proxy-") {
+                return bad(format!("{name} is the connection's or roll's to set"));
+            }
+            if v.len() > 1024 || !v.bytes().all(|b| b == b'\t' || (b' '..=b'~').contains(&b)) {
+                return bad(format!("{name}'s value is at most 1024 printable characters"));
+            }
+            set.insert(name, v.trim().to_string());
+        }
+        self.set = set;
+        Ok(self)
+    }
+
+    pub fn matches(&self, path: &str) -> bool {
+        self.path.as_deref().is_none_or(|p| path_matches(p, path))
     }
 }
 
