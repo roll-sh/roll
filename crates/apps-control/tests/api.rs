@@ -1271,6 +1271,15 @@ async fn a_5xx_rate_past_the_alert_is_an_event_once() {
     assert_eq!((alerts[0]["data"]["value"].as_i64(), alerts[0]["data"]["threshold"].as_i64()), (Some(20), Some(10)));
     // Memory stayed low and no latency alert is set: nothing else.
     assert!(!ev.to_string().contains("alert.memory") && !ev.to_string().contains("alert.latency"), "{ev}");
+    // Five clean minutes: it's said once that it cleared, naming the alert.
+    let now = code_sql::now_ms() / 60_000;
+    w.apps.store.put_minutes(&id, "production", &(0..=6).map(|i| minute(now - i, 0)).collect::<Vec<_>>()).unwrap();
+    w.apps.judge_alerts(&live).await;
+    w.apps.judge_alerts(&live).await;
+    let (_, ev) = call(&w.api, "GET", "/v1/apps/events?after=0", None).await;
+    let resolved: Vec<&Value> = ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "alert.resolved").collect();
+    assert_eq!(resolved.len(), 1, "{ev}");
+    assert_eq!(resolved[0]["data"]["alert"], "alert.errors");
 }
 
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
@@ -1766,6 +1775,13 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");
     assert_eq!(call(&w.api, "POST", &format!("{base}/{}/test", hook["id"].as_str().unwrap()), None).await.1["ok"], true);
+    // Edited in place: what's given changes, the rest (and its URL and secret) stays.
+    let (st, edited) = call(&w.api, "PATCH", &format!("{base}/{}", down["id"].as_str().unwrap()), Some(json!({"events": ["deploy.failed", "crash_loop"], "environments": ["production"]}))).await;
+    assert_eq!(st, StatusCode::OK, "{edited}");
+    assert_eq!((&edited["events"], &edited["environments"], &edited["host"]), (&json!(["deploy.failed", "crash_loop"]), &json!(["production"]), &down["host"]), "{edited}");
+    let (st, v) = call(&w.api, "PATCH", &format!("{base}/{}", down["id"].as_str().unwrap()), Some(json!({"url": "https://example.com/x"}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "a new URL is a new target: {v}");
+    call(&w.api, "PATCH", &format!("{base}/{}", down["id"].as_str().unwrap()), Some(json!({"environments": null}))).await;
     // A deploy fails its health check: both targets get a try.
     let (svc, _) = image_service(&w, "api", json!({"port": 80, "health_path": "/healthz", "health_timeout_s": 1})).await;
     let id = svc["id"].as_str().unwrap();

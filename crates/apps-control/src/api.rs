@@ -67,7 +67,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
         .route("/v1/apps/projects/{project}/drains/{did}", axum::routing::delete(delete_drain))
-        .route("/v1/apps/projects/{project}/notifications/{nid}", axum::routing::delete(delete_target))
+        .route("/v1/apps/projects/{project}/notifications/{nid}", axum::routing::delete(delete_target).patch(update_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/test", post(test_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries", get(deliveries))
         .route("/v1/apps/services/{id}/registry", put(put_registry).delete(delete_registry))
@@ -367,6 +367,10 @@ async fn targets(State(apps): S, Path(project): Path<String>) -> R {
 async fn add_target(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
     let t = apps.add_target(&project, body(&b)?).await?;
     Ok((StatusCode::CREATED, Json(t)).into_response())
+}
+
+async fn update_target(State(apps): S, Path((project, nid)): Path<(String, String)>, b: Bytes) -> R {
+    ok(apps.update_target(&project, &nid, body(&b)?).await?)
 }
 
 async fn delete_target(State(apps): S, Path((project, nid)): Path<(String, String)>) -> R {

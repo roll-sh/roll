@@ -637,15 +637,23 @@ pub enum AppsCmd {
         add: Option<String>,
         #[arg(long, default_value = "webhook")]
         kind: String,
-        /// With `--add`: only this environment's events (repeat it for more).
-        #[arg(long = "only-env", requires = "add")]
+        /// With `--add` or `--edit`: what it's sent, comma-separated (`deploy.failed,deploy.active`;
+        /// default for a new one: what needs someone). A resolved alert goes to whoever gets the alert.
+        #[arg(long, value_name = "EVENTS")]
+        events: Option<String>,
+        /// With `--add` or `--edit`: only this environment's events (repeat it for more).
+        #[arg(long = "only-env")]
         only_env: Vec<String>,
-        /// With `--add`: only this service's events (a name or id; repeat it for more).
-        #[arg(long = "only-service", requires = "add")]
+        /// With `--add` or `--edit`: only this service's events (a name or id; repeat it for more).
+        #[arg(long = "only-service")]
         only_service: Vec<String>,
-        /// With `--add`: preview environments' events too (left out by default).
-        #[arg(long, requires = "add")]
+        /// With `--add` or `--edit`: preview environments' events too (left out by default).
+        #[arg(long)]
         previews: bool,
+        /// Change a target in place (its events and filters; given ones replace, the rest stay):
+        /// its URL and secret stay.
+        #[arg(long, value_name = "ID", conflicts_with_all = ["add", "remove"])]
+        edit: Option<String>,
         #[arg(long)]
         remove: Option<String>,
         /// Send one a test event now (not retried) and print how it answered.
@@ -2477,11 +2485,42 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::Notifications { target, add, kind, only_env, only_service, previews, remove, test } => {
+        AppsCmd::Notifications { target, add, kind, events, only_env, only_service, previews, remove, test, edit } => {
+            if add.is_none() && edit.is_none() && (events.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews) {
+                bail!("--events, --only-env, --only-service and --previews go with --add or --edit");
+            }
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/projects/{}/notifications", enc(&s(&svc["project"])));
-            if let Some(url) = add {
-                let t = api.post(&path, json!({ "kind": kind, "url": url, "environments": only_env, "services": only_service, "previews": previews })).await?;
+            let events: Option<Vec<String>> = events.map(|e| e.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect());
+            if let Some(id) = edit {
+                let mut body = serde_json::Map::new();
+                if let Some(e) = events {
+                    body.insert("events".into(), json!(e));
+                }
+                if !only_env.is_empty() {
+                    body.insert("environments".into(), json!(only_env));
+                }
+                if !only_service.is_empty() {
+                    body.insert("services".into(), json!(only_service));
+                }
+                if previews {
+                    body.insert("previews".into(), json!(true));
+                }
+                if body.is_empty() {
+                    bail!("nothing to change: --events, --only-env, --only-service or --previews");
+                }
+                let t = api.call(reqwest::Method::PATCH, &format!("{path}/{}", enc(&id)), Some(Value::Object(body))).await?;
+                if !json_out {
+                    println!("{}  {} {}  events {}", s(&t["id"]), s(&t["kind"]), s(&t["host"]), t["events"]);
+                    return Ok(());
+                }
+                t
+            } else if let Some(url) = add {
+                let mut body = json!({ "kind": kind, "url": url, "environments": only_env, "services": only_service, "previews": previews });
+                if let Some(e) = events {
+                    body["events"] = json!(e);
+                }
+                let t = api.post(&path, body).await?;
                 if !json_out {
                     println!("{}  {} {}  events {}", s(&t["id"]), s(&t["kind"]), s(&t["host"]), t["events"]);
                     if let Some(secret) = t["secret"].as_str() {

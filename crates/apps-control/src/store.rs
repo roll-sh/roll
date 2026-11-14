@@ -921,6 +921,17 @@ impl Store {
         })
     }
 
+    pub fn update_target(&self, project: &str, id: &str, events: &[String], filters: &TargetFilters) -> Result<NotifyTarget> {
+        let n = self.db.execute(
+            "UPDATE notify_targets SET events = ?, environments = ?, services = ?, previews = ? WHERE id = ? AND project = ?",
+            params![serde_json::to_string(events).expect("JSON"), to_json(&filters.environments), to_json(&filters.services), filters.previews, id, project],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("no notification target {id}")));
+        }
+        self.targets(project)?.into_iter().find(|t| t.id == id).ok_or_else(|| Error::NotFound(format!("no notification target {id}")))
+    }
+
     pub fn targets(&self, project: &str) -> Result<Vec<NotifyTarget>> {
         Ok(self.db.query(&format!("SELECT {TARGET_COLS} FROM notify_targets WHERE project = ? ORDER BY created_at"), [project], target_row)?)
     }

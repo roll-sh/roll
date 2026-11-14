@@ -33,6 +33,15 @@ pub const EVENTS: [&str; 15] = [
     "domain.tls_failed",
 ];
 const DEFAULT_EVENTS: [&str; 12] = ["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed"];
+/// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
+/// (whoever heard an alert hears it clear; there's nothing else to ask for).
+fn wants(events: &[String], kind: &str, data: &Value) -> bool {
+    match kind {
+        "alert.resolved" => data["alert"].as_str().is_some_and(|a| events.iter().any(|e| e == a)),
+        k => events.iter().any(|e| e == k),
+    }
+}
+
 /// Targets per project.
 const MAX_TARGETS: usize = 20;
 /// After the first try: the waits before the next ones.
@@ -49,51 +58,8 @@ impl Apps {
         let kind = o.get("kind").and_then(Value::as_str).unwrap_or("webhook").to_string();
         let url = o.get("url").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("url is required".into()))?.trim().to_string();
         let host = self.check_target(&kind, &url)?;
-        let events: Vec<String> = match o.get("events") {
-            None | Some(Value::Null) => DEFAULT_EVENTS.map(String::from).to_vec(),
-            Some(Value::Array(a)) => {
-                let e: Vec<String> = a.iter().filter_map(Value::as_str).map(String::from).collect();
-                if e.is_empty() || e.len() != a.len() || e.iter().any(|x| !EVENTS.contains(&x.as_str())) {
-                    return Err(Error::BadRequest(format!("events are some of {}", EVENTS.join(", "))));
-                }
-                e
-            }
-            Some(_) => return Err(Error::BadRequest("events is a list".into())),
-        };
-        let names = |field: &str| -> Result<Vec<String>> {
-            match o.get(field) {
-                None | Some(Value::Null) => Ok(Vec::new()),
-                Some(Value::Array(a)) if a.len() <= 50 => {
-                    let v: Vec<String> = a.iter().filter_map(Value::as_str).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-                    if v.len() != a.len() {
-                        return Err(Error::BadRequest(format!("{field} is a list of names")));
-                    }
-                    Ok(v)
-                }
-                Some(_) => Err(Error::BadRequest(format!("{field} is a list of at most 50 names"))),
-            }
-        };
-        let environments = names("environments")?;
-        // A service by its name or id, kept by id (a rename doesn't drop it); only the project's.
+        let (events, filters) = self.target_fields(project, &o, None).await?;
         let p = project.to_string();
-        let mut services = Vec::new();
-        let wanted = names("services")?;
-        if !wanted.is_empty() {
-            let pp = p.clone();
-            let all = self.db(move |s| s.services(Some(&pp))).await?;
-            for w in wanted {
-                let svc = all.iter().find(|s| s.id == w || s.name == w).ok_or_else(|| Error::BadRequest(format!("services: the project has no service {w}")))?;
-                services.push(svc.id.clone());
-            }
-        }
-        // New targets leave previews out (each pull request's failed deploys would reach the
-        // team), unless asked, or unless they name an environment that is one.
-        let previews = match o.get("previews") {
-            None | Some(Value::Null) => false,
-            Some(Value::Bool(b)) => *b,
-            Some(_) => return Err(Error::BadRequest("previews is true or false".into())),
-        };
-        let filters = crate::store::TargetFilters { environments, services, previews };
         {
             let this = self.clone();
             let p = p.clone();
@@ -111,6 +77,74 @@ impl Apps {
             v["secret"] = json!(s);
         }
         Ok(v)
+    }
+
+    /// A target's events and filters from a body: what's absent is `current`'s (an edit), else
+    /// the defaults (a new one). A service by its name or id, kept by id; only the project's.
+    async fn target_fields(self: &Arc<Self>, project: &str, o: &serde_json::Map<String, Value>, current: Option<&NotifyTarget>) -> Result<(Vec<String>, crate::store::TargetFilters)> {
+        let events: Vec<String> = match o.get("events") {
+            None | Some(Value::Null) => current.map_or_else(|| DEFAULT_EVENTS.map(String::from).to_vec(), |c| c.events.clone()),
+            Some(Value::Array(a)) => {
+                let e: Vec<String> = a.iter().filter_map(Value::as_str).map(String::from).collect();
+                if e.is_empty() || e.len() != a.len() || e.iter().any(|x| !EVENTS.contains(&x.as_str())) {
+                    return Err(Error::BadRequest(format!("events are some of {}", EVENTS.join(", "))));
+                }
+                e
+            }
+            Some(_) => return Err(Error::BadRequest("events is a list".into())),
+        };
+        let names = |field: &str| -> Result<Option<Vec<String>>> {
+            match o.get(field) {
+                None => Ok(None),
+                Some(Value::Null) => Ok(Some(Vec::new())),
+                Some(Value::Array(a)) if a.len() <= 50 => {
+                    let v: Vec<String> = a.iter().filter_map(Value::as_str).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    if v.len() != a.len() {
+                        return Err(Error::BadRequest(format!("{field} is a list of names")));
+                    }
+                    Ok(Some(v))
+                }
+                Some(_) => Err(Error::BadRequest(format!("{field} is a list of at most 50 names"))),
+            }
+        };
+        let environments = match names("environments")? {
+            Some(v) => v,
+            None => current.map(|c| c.environments.clone()).unwrap_or_default(),
+        };
+        // A service by its name or id, kept by id (a rename doesn't drop it); only the project's.
+        let p = project.to_string();
+        let mut services = current.map(|c| c.services.clone()).unwrap_or_default();
+        if let Some(wanted) = names("services")? {
+            services.clear();
+            let pp = p.clone();
+            let all = self.db(move |s| s.services(Some(&pp))).await?;
+            for w in wanted {
+                let svc = all.iter().find(|s| s.id == w || s.name == w).ok_or_else(|| Error::BadRequest(format!("services: the project has no service {w}")))?;
+                services.push(svc.id.clone());
+            }
+        }
+        // New targets leave previews out (each pull request's failed deploys would reach the
+        // team), unless asked, or unless they name an environment that is one.
+        let previews = match o.get("previews") {
+            None => current.is_some_and(|c| c.previews),
+            Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err(Error::BadRequest("previews is true or false".into())),
+        };
+        Ok((events, crate::store::TargetFilters { environments, services, previews }))
+    }
+
+    /// `PATCH …/notifications/{nid}`: its events, environments, services and previews (what's
+    /// absent stays). Its URL and secret don't change: a new URL is a new target.
+    pub async fn update_target(self: &Arc<Self>, project: &str, id: &str, body: Value) -> Result<NotifyTarget> {
+        let o = body.as_object().cloned().unwrap_or_default();
+        if let Some(k) = o.keys().find(|k| !["events", "environments", "services", "previews"].contains(&k.as_str())) {
+            return Err(Error::BadRequest(format!("{k} can't be changed (a new URL is a new target)")));
+        }
+        let current = self.targets(project).await?.into_iter().find(|t| t.id == id).ok_or_else(|| Error::NotFound(format!("no notification target {id}")))?;
+        let (events, filters) = self.target_fields(project, &o, Some(&current)).await?;
+        let (p, i) = (project.to_string(), id.to_string());
+        self.db(move |s| s.update_target(&p, &i, &events, &filters)).await
     }
 
     /// A target's URL: HTTPS, a public host, and for Slack and Discord their webhook hosts.
@@ -224,7 +258,7 @@ impl Apps {
                 }
             };
             for t in self.db(move |s| s.targets(&p)).await.unwrap_or_default() {
-                if t.events.contains(&e.kind) && t.follows(&e.service, &e.environment, preview) {
+                if wants(&t.events, &e.kind, &e.data) && t.follows(&e.service, &e.environment, preview) {
                     queued.push((t.id.clone(), e.seq, e.kind.clone()));
                 }
             }
@@ -307,6 +341,16 @@ impl Apps {
             "alert.errors" => (format!("{what}: errors"), format!("{}% of its {} requests in five minutes answered 5xx (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["threshold"])),
             "alert.latency" => (format!("{what}: slow"), format!("Its p95 latency reached {} ms (the alert is at {} ms).", e.data["value"], e.data["threshold"])),
             "alert.log" => (format!("{what}: its log says {}", e.data["pattern"]), format!("{} lines in five minutes matched (the alert is at {}).", e.data["count"], e.data["threshold"])),
+            "alert.resolved" => {
+                let which = match e.data["alert"].as_str() {
+                    Some("alert.memory") => "memory",
+                    Some("alert.errors") => "errors",
+                    Some("alert.latency") => "latency",
+                    Some("alert.log") => "log",
+                    _ => "an",
+                };
+                (format!("{what}: {which} alert resolved"), format!("The {which} alert cleared: the last five minutes are under its threshold."))
+            }
             "cron.failed" | "job.failed" => {
                 let what_ran = if e.kind == "cron.failed" { "A scheduled run" } else { "A job" };
                 let how = match (e.data["status"].as_str(), e.data["exit_code"].as_i64()) {

@@ -1484,7 +1484,12 @@ impl Apps {
                     }
                 }
                 None => {
-                    self.looping.lock().remove(&key);
+                    // It was firing and isn't now: said once, to whoever heard the alert.
+                    if self.looping.lock().remove(&key) {
+                        let (sid, e, dep) = (l.service.clone(), l.env.clone(), tpl.deployment.clone());
+                        let _ = self.db(move |s| s.add_event("alert.resolved", &sid, &e, Some(&dep), &serde_json::json!({ "alert": kind }))).await;
+                        l.log.stream(Stream::System).line(format!("alert: {kind} resolved"));
+                    }
                 }
             }
         }
