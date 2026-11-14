@@ -1886,8 +1886,17 @@ pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String
     } else {
         anyhow::bail!("ROLL_IDENTITY is set but there's no OIDC token: set ROLL_OIDC_TOKEN or ROLL_OIDC_TOKEN_FILE, or run in GitHub Actions with `permissions: id-token: write`");
     };
-    let anon = Api { base: api.base.clone(), http: api.http.clone(), key: None, headers: api.headers.clone(), login: None };
-    let v = anon.post("/v1/secrets/login", json!({ "identity": identity, "token": oidc.trim() })).await.context("logging in with the workload identity")?;
+    // A request of its own, without a token (never through `Api::call`, which renews logins).
+    let mut req = api.http.post(format!("{}/v1/secrets/login", api.base)).json(&json!({ "identity": identity, "token": oidc.trim() }));
+    for (k, v) in &api.headers {
+        req = req.header(k, v);
+    }
+    let res = req.send().await.with_context(|| format!("can't reach {} to log in", api.base))?;
+    let status = res.status();
+    let v: Value = res.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        bail!("logging in with the workload identity: {}", v["error"].as_str().map(String::from).unwrap_or_else(|| status.to_string()));
+    }
     let token = v["token"].as_str().map(str::to_string).context("the login answered no token")?;
     // Without it every request would log in again: an answer that isn't roll's.
     let ends = v["expires_at"].as_i64().context("the login answered no expiry")?;
@@ -1895,10 +1904,11 @@ pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String
 }
 
 /// A workload identity's login that renews itself: a login lasts minutes, and `roll run --watch`
-/// in a pod runs for days. A quarter of the way before it ends (at least 30 s), the next request
-/// logs in again, reading the OIDC token again (Kubernetes rotates a projected token's file). A
-/// login that fails or takes over [`LOGIN_TIMEOUT`] leaves the current token in use while it
-/// lasts (tried again every [`RETRY`]); a 401 logs in again at once.
+/// in a pod runs for days. A quarter of the way before it ends (at least 30 s), it logs in again in
+/// the background, reading the OIDC token again (Kubernetes rotates a projected token's file),
+/// while requests go on with the current token. A login that fails or takes over [`LOGIN_TIMEOUT`]
+/// leaves the current token in use while it lasts (tried again every [`RETRY`]); a token that has
+/// ended, or that the server refused (401), logs in again before the next request.
 pub struct Relogin {
     identity: String,
     /// The first login's token.
@@ -1914,6 +1924,8 @@ struct Held {
     ends: std::time::Instant,
     /// After a failed login: not before then.
     retry: Option<std::time::Instant>,
+    /// A login running in the background.
+    renewing: Option<tokio::task::JoinHandle<()>>,
 }
 
 const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1925,12 +1937,20 @@ impl Held {
         let life = std::time::Duration::from_millis((expires_at - now_ms()).clamp(60_000, 3_660_000) as u64);
         let now = std::time::Instant::now();
         let ends = now + life;
-        Held { token, renew: ends - (life / 4).max(std::time::Duration::from_secs(30)), ends, retry: None }
+        Held { token, renew: ends - (life / 4).max(std::time::Duration::from_secs(30)), ends, retry: None, renewing: None }
     }
 }
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// A login with a deadline.
+async fn login_within(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
+    match tokio::time::timeout(LOGIN_TIMEOUT, identity_login(api, identity)).await {
+        Ok(r) => r,
+        Err(_) => anyhow::bail!("no answer in {} s", LOGIN_TIMEOUT.as_secs()),
+    }
 }
 
 impl Relogin {
@@ -1939,34 +1959,43 @@ impl Relogin {
         Ok(Relogin { identity: identity.to_string(), first: token.clone(), held: tokio::sync::Mutex::new(Held::new(token, expires_at)) })
     }
 
-    pub async fn token(&self, api: &Api) -> anyhow::Result<String> {
+    pub async fn token(self: &std::sync::Arc<Self>, api: &Api) -> anyhow::Result<String> {
         let mut held = self.held.lock().await;
         let now = std::time::Instant::now();
-        if now >= held.renew && held.retry.is_none_or(|r| now >= r) {
-            // Boxed: the login is itself a request (an anonymous one, so this doesn't recurse).
-            match tokio::time::timeout(LOGIN_TIMEOUT, Box::pin(identity_login(api, &self.identity))).await {
-                Ok(Ok((token, expires_at))) => *held = Held::new(token, expires_at),
-                failed => {
-                    let why = match failed {
-                        Ok(Err(e)) => format!("{e:#}"),
-                        _ => format!("no answer in {} s", LOGIN_TIMEOUT.as_secs()),
-                    };
-                    if now >= held.ends {
-                        anyhow::bail!("logging in again as {} failed ({why}), and the last login has ended", self.identity);
+        if now >= held.ends {
+            // Ended (or refused): nothing to go on with. Log in now.
+            let (token, expires_at) = login_within(api, &self.identity).await.map_err(|e| anyhow::anyhow!("logging in again as {} failed ({e:#})", self.identity))?;
+            *held = Held::new(token, expires_at);
+        } else if now >= held.renew && held.retry.is_none_or(|r| now >= r) && held.renewing.as_ref().is_none_or(|h| h.is_finished()) {
+            let (me, anon) = (self.clone(), Api { base: api.base.clone(), http: api.http.clone(), key: None, headers: api.headers.clone(), login: None });
+            held.renewing = Some(tokio::spawn(async move {
+                let got = login_within(&anon, &me.identity).await;
+                let mut held = me.held.lock().await;
+                match got {
+                    Ok((token, expires_at)) => *held = Held::new(token, expires_at),
+                    Err(e) => {
+                        eprintln!("roll: logging in again as {} failed ({e:#}); the current login lasts a while yet", me.identity);
+                        held.retry = Some(std::time::Instant::now() + RETRY);
                     }
-                    eprintln!("roll: logging in again as {} failed ({why}); the current login lasts a while yet", self.identity);
-                    held.retry = Some(now + RETRY);
                 }
-            }
+            }));
         }
         Ok(held.token.clone())
     }
 
-    /// The server refused the token (401): log in again on the next request.
+    /// The server refused the token (401): log in again before the next request.
     pub async fn refused(&self) {
         let mut held = self.held.lock().await;
-        held.renew = std::time::Instant::now();
-        held.retry = None;
+        held.ends = std::time::Instant::now();
+    }
+
+    /// Waits for a background login (tests).
+    #[cfg(test)]
+    async fn settle(&self) {
+        let h = self.held.lock().await.renewing.take();
+        if let Some(h) = h {
+            let _ = h.await;
+        }
     }
 }
 
@@ -2600,10 +2629,15 @@ mod relogin_tests {
         assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_1", "not yet");
         std::fs::write(&file, "jwt-2\n").unwrap();
         due().await;
+        // Renewed in the background: this request goes on with the current token, the next has the new one.
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_1");
+        login.settle().await;
         assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_2");
         // roll is down when it's time to renew: the current token goes on.
         down.store(true, Ordering::SeqCst);
         due().await;
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_2");
+        login.settle().await;
         assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_2");
         // A 401 (its clock ran ahead): logs in again and the request goes through.
         down.store(false, Ordering::SeqCst);
