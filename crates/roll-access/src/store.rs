@@ -217,7 +217,6 @@ pub struct Client {
     pub last_used_at: Option<i64>,
 }
 
-/// What a new grant is.
 /// What a token is made from. Code outside this crate builds it with `..Default::default()`, so
 /// a field added here (a start, an approval) doesn't break it.
 #[derive(Clone, Debug, Default, Deserialize)]
