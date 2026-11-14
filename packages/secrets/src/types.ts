@@ -110,7 +110,8 @@ export type CompareStatus = "same" | "different" | "only_from" | "only_to";
 export type CompareRow = { key: string; status: CompareStatus; from: number | null; to: number | null };
 export type Compare = { from: string; to: string; path: string; rows: CompareRow[] };
 export type RequestState = "open" | "approved" | "rejected" | "applied" | "closed" | "stale";
-export type Review = { by: string; verdict: "approve" | "reject"; comment: string; at: number };
+/** `gates`: the gates (folder, or null for the environment's) the review counts for. */
+export type Review = { by: string; verdict: "approve" | "reject"; comment: string; at: number; gates?: (string | null)[] };
 /** One item of a change request with its values: `now` is null for a new key or a live/dynamic link. */
 /** `proposed_weak`: why the proposed credential is easy to guess. */
 export type RequestValue = { key: string; path: string; type: "shared" | "personal"; delete: boolean; now: string | null; now_link: Link | null; proposed: string | null; proposed_link: Link | null; proposed_weak?: string };

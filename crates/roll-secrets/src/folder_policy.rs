@@ -87,10 +87,15 @@ pub(crate) fn gates(c: &Conn<'_>, env: &EnvRow, paths: &[&str]) -> Result<Vec<Ga
     Ok(out)
 }
 
-/// Approvals from `reviews` that count for `gate`: distinct approvers other than the author, and
-/// among the gate's approvers when it names them.
+/// Approvals from `reviews` that count for `gate`: distinct approvers other than the author, among
+/// the gate's approvers when it names them, whose review counts for this gate (they were admin of
+/// its scope).
 pub(crate) fn counted(gate: &Gate, reviews: &[crate::requests::Review], author: &str) -> i64 {
-    let mut by: Vec<&str> = reviews.iter().filter(|r| r.verdict == "approve" && r.by != author && (gate.approvers.is_empty() || gate.approvers.contains(&r.by))).map(|r| r.by.as_str()).collect();
+    let mut by: Vec<&str> = reviews
+        .iter()
+        .filter(|r| r.verdict == "approve" && r.by != author && (gate.approvers.is_empty() || gate.approvers.contains(&r.by)) && r.gates.as_ref().is_none_or(|g| g.contains(&gate.path)))
+        .map(|r| r.by.as_str())
+        .collect();
     by.sort();
     by.dedup();
     by.len() as i64

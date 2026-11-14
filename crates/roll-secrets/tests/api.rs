@@ -546,6 +546,16 @@ async fn protected_environments_take_change_requests_that_another_principal_appr
     assert_eq!((s, r["state"].as_str()), (StatusCode::OK, Some("approved")));
     api.ok(Method::POST, &format!("/environments/staging/requests/{id}/apply"), None).await;
     assert_eq!(api.values("staging", "/payments/eu").await["values"]["STRIPE"], "sk_1");
+    // Protected as well: an admin of /payments only approves for its folder's gate, never for the
+    // environment's.
+    api.ok(Method::PUT, "/environments/staging/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    let folder_admin = api.ok(Method::POST, "/tokens", Some(json!({ "name": "payments", "environments": ["staging"], "paths": ["/payments"], "actions": ["read", "write", "admin"] }))).await;
+    let r = api.ok(Method::POST, "/environments/staging/requests", Some(json!({ "path": "/payments/eu", "ops": [{ "op": "set", "key": "STRIPE", "value": "sk_2" }] }))).await;
+    let id = r["id"].as_str().unwrap();
+    let (s, r) = api.req(Method::POST, &format!("/environments/staging/requests/{id}/review"), Some(json!({ "verdict": "approve" })), folder_admin["token"].as_str()).await;
+    assert_eq!((s, r["state"].as_str()), (StatusCode::OK, Some("open")), "{r}");
+    assert_eq!(r["gates"].as_array().unwrap().iter().map(|g| g["approved"].as_i64().unwrap()).collect::<Vec<_>>(), [0, 1], "the environment's gate, then /payments'");
+    api.ok(Method::PUT, "/environments/staging/policy", Some(json!({ "protected": false }))).await;
     // Nor by deleting the folder, or one above it.
     for folder in ["/payments", "/payments/eu"] {
         let (s, e) = api.call(Method::DELETE, &format!("/environments/staging/folders?path={folder}"), None).await;

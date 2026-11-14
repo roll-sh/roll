@@ -737,16 +737,14 @@ impl Secrets {
         self.project(project)?;
         let now = self.db.now_ms()?;
         // On a protected environment, or in a folder with a change policy, imports change what it
-        // resolves to without a change: an admin's decision, like its policy.
-        let guarded = self.db.read(|c| {
-            let env = by_slug(c, project, slug)?;
-            Ok::<_, Error>(env.protected || !crate::folder_policy::covering(c, &env.id, &[path.as_str()])?.is_empty())
-        })?;
-        if guarded {
-            caller.need(Action::Admin, &Scope::at(project, slug, &path))?;
-        }
+        // resolves to without a change: an admin's decision, like its policy. Checked in the write,
+        // so a policy added meanwhile counts.
+        let admin = caller.allows(Action::Admin, &Scope::at(project, slug, &path));
         self.db.write(|c| {
             let env = by_slug(c, project, slug)?;
+            if !admin && (env.protected || !crate::folder_policy::covering(c, &env.id, &[path.as_str()])?.is_empty()) {
+                return Err(Error::Forbidden(format!("imports into {slug}:{path} change what it resolves to without approval: an admin's to set")));
+            }
             c.execute("DELETE FROM imports WHERE env_id = ? AND path = ?", [&env.id, &path])?;
             for (n, i) in list.iter().enumerate() {
                 // Another project's environment that's missing and one that isn't shared answer

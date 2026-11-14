@@ -33,6 +33,11 @@ pub struct Review {
     pub verdict: String,
     pub comment: String,
     pub at: i64,
+    /// The gates (by folder; `None`: the environment's) this review counts for: those whose
+    /// scope its reviewer was admin of, and an approver of when the gate names them. Absent on
+    /// reviews from before folder policies, which needed admin on the whole environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gates: Option<Vec<Option<String>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -368,12 +373,24 @@ impl Secrets {
                 caller.need(Action::Admin, &Scope::at(project, slug, &i.path))?;
             }
             let gates = request_gates(c, &env, &r)?;
-            if !crate::folder_policy::may_review(&gates, &caller.principal) {
+            // A folder's admin approves for its folder's gate, never for the environment's.
+            let may: Vec<Option<String>> = gates
+                .iter()
+                .filter(|g| {
+                    let scope = match &g.path {
+                        Some(p) => Scope::at(project, slug, p),
+                        None => Scope::env(project, slug),
+                    };
+                    caller.allows(Action::Admin, &scope) && crate::folder_policy::may_review(std::slice::from_ref(g), &caller.principal)
+                })
+                .map(|g| g.path.clone())
+                .collect();
+            if may.is_empty() {
                 return Err(Error::Forbidden(format!("{} isn't an approver of what {id} changes", caller.principal)));
             }
             let mut reviews: Vec<Review> = from_json(&r.reviews);
             reviews.retain(|x| x.by != caller.principal);
-            reviews.push(Review { by: caller.principal.clone(), verdict: v.verdict.clone(), comment: v.comment.clone(), at: now });
+            reviews.push(Review { by: caller.principal.clone(), verdict: v.verdict.clone(), comment: v.comment.clone(), at: now, gates: Some(may) });
             let state = if reviews.iter().any(|x| x.verdict == "reject") {
                 "rejected"
             } else if crate::folder_policy::satisfied(&gates, &reviews, &r.by) {
