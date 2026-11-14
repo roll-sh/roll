@@ -310,7 +310,7 @@ the discovery/store plugins.
 <!-- test-search: watcher-security >= 9 -->
 <!-- test-search: wildcard >= 9 -->
 <!-- test-search: platinum >= 1064 -->
-<!-- test-search: inference >= 117 -->
+<!-- test-search: inference >= 139 -->
 <!-- test-search: esql >= 549 -->
 
 `platinum` by directory (roll / Elasticsearch passes): `ml` 349/618, `analytics` 113/114, `spatial`
@@ -967,10 +967,28 @@ Tests: `crates/search-es/tests/inference.rs` runs every service against a mock s
   API (`crates/search-es/tests/inference.rs` runs this as a user with `read` and `write` on one
   index).
 
-Not yet: highlighting chunks (the `semantic` highlighter), the retrievers' simplified
-`query`/`fields` form, `copy_to` into `semantic_text` fields and multi-fields under them,
-validation of `index_options` (kept as given), the multimodal `embedding` task type and the new
-`semantic` field type, the `random_reranker` and `text_similarity_reranker` retrievers.
+- Highlighting: the `semantic` highlighter, the default for `semantic_text` fields, scores each
+  chunk against the field's query embedding (taken from the rewritten query, no extra call) and
+  returns the best `number_of_fragments` (5) chunks' text, by score with `order: score` and in
+  text order otherwise; without a semantic query on the field, the first chunks.
+- `copy_to` into a `semantic_text` field embeds every source's values, chunks kept per source as
+  Elasticsearch keeps them; multi-fields under `semantic_text` are indexed as usual.
+- Retrievers: `rrf` and `linear` take the simplified `query`/`fields` form, expanded against the
+  targets' mappings as `MultiFieldsInnerRetrieverUtils` expands it (a lexical `multi_match`,
+  `most_fields`, over the text fields; a semantic query per `semantic_text` field, fused with the
+  fields' weights; `index.query.default_field` when no fields are given), with Elasticsearch's
+  validation (rank-rrf's simplified-form tests, run against the test services: 32 of 36). A
+  `text_similarity_reranker` at the top of the request reranks its child's `rank_window_size` hits
+  with a rerank endpoint (each value of `field` an input, a document scoring its best;
+  `min_score`, `allow_rerank_failures`, the endpoint's `top_n` checked), and queries inside
+  compound retrievers are embedded like the top-level query.
+- `exists` on a `semantic_text` field matches documents with chunks.
+
+Not yet: `semantic_text` as a multi-field of a `text` field, validation of `index_options` (kept
+as given), the multimodal `embedding` task type and the new `semantic` field type, the
+`random_reranker` retriever (its scores are seeded by Lucene doc ids, which roll's don't match),
+a `text_similarity_reranker` inside a compound retriever, its `chunk_rescorer`, and the reranker's
+explanation and profile details.
 
 ## Per area
 
