@@ -98,7 +98,7 @@ type Rule = {
 
 type Selector =
   | { project: string }             // a workspace project: every resource in it, as it is now
-  | { id: string; index?: string }; // one resource, by its product's id; search: only some indices
+  | { id: string; index?: string }; // one resource, by its product's id; search and secrets: only some indices or encryption keys
 // A selector has exactly these fields: any other is refused, never dropped.
 
 type Product = "workspace" | "postgres" | "redis" | "storage" | "streams" | "nosql" | "queues"
@@ -291,6 +291,16 @@ A rule can grant some indices of a search cluster: `{id: "cl_1", index: "logs-*,
   `FROM`, wildcards, `LOOKUP JOIN` and SQL reach only the indices it may read.
 - An approval about some indices names them (`cl_1/logs-a`), and remembering it allows those
   indices only.
+
+### Secrets' encryption keys
+
+A rule can grant some of a project's encryption keys the same way, matched as index names are:
+`{id: "prj_1", index: "payments,pay-*"}` (the builder writes it `prj_1/payments,pay-*`). It
+covers the routes of one key (`/v1/secrets/projects/{project}/transit/{name}/…`: encrypt,
+decrypt, sign, verify, HMAC, the public key), at their own actions, so a service that signs with
+one key needs write on that key only, not on the project. Listing, creating, rotating and deleting
+keys stay the project's (`roll_auth::scope::sub_resources` lists the products that have such
+names; secrets' rows name `{name}` with `.index("name")`).
 
 ### Presets
 
