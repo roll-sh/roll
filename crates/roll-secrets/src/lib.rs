@@ -28,6 +28,8 @@ pub mod insights;
 pub mod leaks;
 pub mod links;
 pub mod names;
+pub mod ocsp;
+pub mod pki;
 mod oidc;
 mod read;
 pub mod refs;
@@ -328,6 +330,10 @@ pub struct Secrets {
     logins: oidc::Window,
     /// roll code's search, once rolld has it (health's `code` check).
     code_refs: std::sync::OnceLock<Arc<dyn health::CodeRefs>>,
+    /// Where clients reach rolld's API, once rolld says (certificates' CRL distribution point).
+    public_api: Arc<std::sync::OnceLock<String>>,
+    /// Signed CRLs by CA, with when they were made (pki.rs): the public route signs one a minute.
+    crls: pki::Crls,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -388,12 +394,19 @@ impl Secrets {
         db.ensure_schema(notices::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
+        db.ensure_schema(pki::SCHEMA)?;
         // Rotators are a link kind of roll secrets' own: they call out through rolld.
         let mut links = opts.links;
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
             links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), deliver: deliver.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
+        // A project's CAs are roll secrets' own: nothing to reach outside.
+        let public_api: Arc<std::sync::OnceLock<String>> = Default::default();
+        let crls = pki::Crls::default();
+        if let Ok(keys) = &opts.keyring {
+            links.register(Arc::new(pki::Provider { db: db.clone(), keys: keys.clone(), public_api: public_api.clone(), crls: crls.clone() }));
+        }
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), public_api, crls })
     }
 
     pub fn links(&self) -> &Links {
@@ -482,15 +495,22 @@ impl Secrets {
             c.execute("DELETE FROM exports WHERE to_project = ?", [project])?;
             c.execute("DELETE FROM environments WHERE project_id = ?", [project])?;
             c.execute("UPDATE projects SET forgotten_at = ? WHERE project_id = ?", code_sql::params![now, project])?;
-            forget_if_done(c, project)
+            forget_if_done(c, project, now)
         })
     }
 
     /// Forgotten projects whose last lease is revoked: their key and registries go.
     pub(crate) fn sweep_forgotten(&self) -> Result<()> {
+        let now = self.db.now_ms()?;
         self.db.write(|c| {
-            for p in c.query("SELECT project_id FROM projects WHERE forgotten_at IS NOT NULL LIMIT 100", (), |r| r.get::<_, String>(0))? {
-                forget_if_done(c, &p)?;
+            // Those still serving revocations (pki.rs) wait apart, so they don't crowd out the rest.
+            let due = c.query(
+                "SELECT project_id FROM projects p WHERE forgotten_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ca_certs k WHERE k.project_id = p.project_id AND k.revoked_at IS NOT NULL AND k.not_after >= ?) LIMIT 100",
+                [now],
+                |r| r.get::<_, String>(0),
+            )?;
+            for p in due {
+                forget_if_done(c, &p, now)?;
             }
             Ok(())
         })
@@ -498,12 +518,15 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators"];
+const REGISTRIES: &[&str] = &["rotators", "cas", "ca_certs"];
 
-/// Drop a forgotten project's key and registries once no lease of its waits to be revoked.
-fn forget_if_done(c: &code_sql::Conn<'_>, project: &str) -> Result<()> {
+/// Drop a forgotten project's key and registries once no lease of its waits to be revoked, and no
+/// certificate its CAs revoked is still within its lifetime (their CRLs, signed with the CA's key,
+/// keep being served until then: a client that can't fetch one would trust the certificate again).
+fn forget_if_done(c: &code_sql::Conn<'_>, project: &str, now: i64) -> Result<()> {
     let waiting: i64 = c.query_row("SELECT COUNT(*) FROM leases WHERE project_id = ? AND revoked_at IS NULL", [project], |r| r.get(0))?;
-    if waiting == 0 {
+    let revoked: i64 = c.query_row("SELECT COUNT(*) FROM ca_certs WHERE project_id = ? AND revoked_at IS NOT NULL AND not_after >= ?", code_sql::params![project, now], |r| r.get(0))?;
+    if waiting == 0 && revoked == 0 {
         c.execute("DELETE FROM leases WHERE project_id = ?", [project])?;
         for t in REGISTRIES {
             c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;

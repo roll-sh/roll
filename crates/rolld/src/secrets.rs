@@ -149,6 +149,8 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))), grants, people: Some(Arc::new(people)) };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
+    // Where clients reach rolld: a CA's certificates name its CRL there.
+    secrets.set_public_api(args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())));
     // A deleted project's secrets go with it.
     let s = secrets.clone();
     workspace.on_delete(Box::new(move |id| {

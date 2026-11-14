@@ -240,10 +240,16 @@ export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; res
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
+export type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
+/** A project's certificate authority: what it signs for, and its certificate (PEM) for clients to trust. */
+/** A certificate a CA signed for a CSR (`POST …/cas/{id}/sign`): the device keeps its key. */
+/** A certificate a CA signed and that hasn't expired (`GET …/cas/{id}/certificates`). */
+export type CaCertificate = { serial: string; names: string[]; source: "csr" | "link"; not_after: number; issued_at: number; issued_by: string; revoked_at?: number };
+export type SignedCertificate = { certificate: string; ca: string; serial: string; names: string[]; not_after: number };
+export type Ca = { id: string; name: string; certificate: string; domains: string[]; allow_ip: boolean; max_days: number; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 

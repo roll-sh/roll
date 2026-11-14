@@ -1007,6 +1007,137 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
 }
 
 #[tokio::test]
+async fn a_projects_ca_signs_short_lived_certificates_for_its_names_only() {
+    use x509_parser::prelude::*;
+    let api = Api::new().await;
+    api.secrets.set_public_api("https://roll.example".into());
+    let ca = api.ok(Method::POST, "/cas", Some(json!({ "name": "internal", "domains": ["svc.internal"] }))).await;
+    let ca_pem = ca["certificate"].as_str().unwrap().to_string();
+    let link = |field: &str, mode: &str, names: Value| json!({ "kind": "pki", "ref": ca["id"], "field": field, "mode": mode, "options": { "names": names, "ttl_minutes": 60, "rotate_days": 7 } });
+    // Each resolve gets a certificate of its own, signed by the CA, for the link's names.
+    let names = json!(["api.svc.internal"]);
+    let ops: Vec<Value> = [("certificate", "TLS_CERT"), ("private_key", "TLS_KEY"), ("ca", "TLS_CA")].iter().map(|(f, k)| json!({ "op": "set", "key": k, "link": link(f, "dynamic", names.clone()) })).collect();
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": ops }))).await;
+    let r = api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "app:api" }))).await;
+    let (cert, key, chain) = (r["values"]["TLS_CERT"].as_str().unwrap(), r["values"]["TLS_KEY"].as_str().unwrap(), r["values"]["TLS_CA"].as_str().unwrap());
+    assert!(key.starts_with("-----BEGIN PRIVATE KEY-----") && chain == ca_pem);
+    let (_, ca_der) = parse_x509_pem(ca_pem.as_bytes()).unwrap();
+    let (_, ca_cert) = parse_x509_certificate(&ca_der.contents).unwrap();
+    let (_, der) = parse_x509_pem(cert.as_bytes()).unwrap();
+    let (_, leaf) = parse_x509_certificate(&der.contents).unwrap();
+    leaf.verify_signature(Some(ca_cert.public_key())).expect("signed by the project's CA");
+    let sans: Vec<String> = leaf.subject_alternative_name().unwrap().unwrap().value.general_names.iter().map(|n| format!("{n}")).collect();
+    assert_eq!(sans, ["DNSName(api.svc.internal)"]);
+    let life = leaf.validity().not_after.timestamp() - leaf.validity().not_before.timestamp();
+    assert!((3900..=4000).contains(&life), "the lease's TTL plus five minutes: {life}");
+    // The CA is limited to its domains and no IP addresses, so trusting it trusts nothing else.
+    let nc = ca_cert.name_constraints().unwrap().unwrap().value;
+    assert_eq!(nc.permitted_subtrees.as_ref().map(Vec::len), Some(1));
+    assert_eq!(nc.excluded_subtrees.as_ref().map(Vec::len), Some(2));
+    // A name outside its domains is refused; managed certificates live twice their rotation.
+    let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/WEB_CERT", Some(json!({ "link": link("certificate", "managed", json!("web.example.com")) }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("doesn't sign for web.example.com"), "{e}");
+    // A managed certificate rotates before it ends, or isn't taken.
+    for options in [json!({ "names": "web.svc.internal" }), json!({ "names": "web.svc.internal", "rotate_days": 60 })] {
+        let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/WEB_CERT", Some(json!({ "link": { "kind": "pki", "ref": ca["id"], "field": "certificate", "mode": "managed", "options": options } }))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    }
+    api.ok(Method::PUT, "/environments/staging/secrets/WEB_CERT", Some(json!({ "link": link("certificate", "managed", json!("web.svc.internal, *.web.svc.internal")) }))).await;
+    let stored = api.values("staging", "/").await["values"]["WEB_CERT"].as_str().unwrap().to_string();
+    let (_, der) = parse_x509_pem(stored.as_bytes()).unwrap();
+    let (_, managed) = parse_x509_certificate(&der.contents).unwrap();
+    assert_eq!((managed.validity().not_after.timestamp() - managed.validity().not_before.timestamp()) / 86_400, 14);
+    // A CSR: its key stays with the device; only its key and names are taken, never what else it
+    // asks for (here, to be a CA itself and to sign code).
+    let device = rcgen::KeyPair::generate().unwrap();
+    let csr = |names: &[&str]| {
+        let mut p = rcgen::CertificateParams::new(names.iter().map(|n| n.to_string()).collect::<Vec<_>>()).unwrap();
+        p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        p.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::CodeSigning];
+        p.serialize_request(&device).unwrap().pem().unwrap()
+    };
+    let at = format!("/cas/{}/sign", ca["id"].as_str().unwrap());
+    let sign = |csr: String, days: u32| api.call(Method::POST, &at, Some(json!({ "csr": csr, "days": days })));
+    let (s, signed) = sign(csr(&["sensor-7.svc.internal"]), 3).await;
+    assert_eq!(s, StatusCode::OK, "{signed}");
+    let (_, der) = parse_x509_pem(signed["certificate"].as_str().unwrap().as_bytes()).unwrap();
+    let (_, leaf) = parse_x509_certificate(&der.contents).unwrap();
+    leaf.verify_signature(Some(ca_cert.public_key())).expect("signed by the project's CA");
+    assert_eq!(leaf.public_key().subject_public_key.data.as_ref(), rcgen::PublicKeyData::der_bytes(&device), "the device's own key");
+    assert!(!leaf.is_ca() && !leaf.extended_key_usage().unwrap().unwrap().value.code_signing, "not what the CSR asked beyond its names");
+    assert_eq!((leaf.validity().not_after.timestamp() - leaf.validity().not_before.timestamp()) / 86_400, 3);
+    assert_eq!(sign(csr(&["sensor-7.example.com"]), 3).await.0, StatusCode::BAD_REQUEST, "a name outside the CA's domains");
+    assert_eq!(sign(csr(&["sensor-7.svc.internal"]), 91).await.0, StatusCode::BAD_REQUEST, "longer than the CA allows");
+    // Revoking: a lost device's certificate by hand, a lease's when it ends. The CA's CRL (public)
+    // lists both, and every certificate names where it is.
+    let id = ca["id"].as_str().unwrap();
+    let crl_url = format!("https://roll.example/v1/secrets/crl/{id}");
+    assert!(der.contents.windows(crl_url.len()).any(|w| w == crl_url.as_bytes()), "the CRL distribution point");
+    let listed = api.ok(Method::GET, &format!("/cas/{id}/certificates"), None).await;
+    assert!(listed.as_array().unwrap().iter().any(|c| c["serial"] == signed["serial"] && c["source"] == "csr") && listed.as_array().unwrap().iter().any(|c| c["source"] == "link"), "{listed}");
+    let revoke_at = format!("/cas/{id}/revoke");
+    let revoke = |serial: Value| api.call(Method::POST, &revoke_at, Some(json!({ "serial": serial })));
+    assert_eq!(revoke(signed["serial"].clone()).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(revoke(json!("00")).await.0, StatusCode::NOT_FOUND);
+    // A CRL fetched now is kept a minute; a revocation still shows in the next one.
+    assert_eq!(api.call(Method::GET, &format!("/v1/secrets/crl/{id}?format=pem"), None).await.0, StatusCode::OK);
+    let lease_cert = parse_x509_pem(cert.as_bytes()).unwrap().1;
+    let lease_serial = parse_x509_certificate(&lease_cert.contents).unwrap().1.raw_serial().to_vec();
+    assert_eq!(api.call(Method::DELETE, &format!("/leases/{}", r["leases"][0].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
+    let (s, crl) = api.call(Method::GET, &format!("/v1/secrets/crl/{id}?format=pem"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, pem) = parse_x509_pem(crl.as_str().unwrap().as_bytes()).unwrap();
+    let (_, crl) = parse_x509_crl(&pem.contents).unwrap();
+    crl.verify_signature(ca_cert.public_key()).expect("signed by the CA");
+    let revoked: Vec<Vec<u8>> = crl.iter_revoked_certificates().map(|r| r.raw_serial().to_vec()).collect();
+    assert!(revoked.contains(&leaf.raw_serial().to_vec()) && revoked.contains(&lease_serial), "both revoked: {revoked:?}");
+    // A CA whose revocations still matter keeps serving them: it can't be deleted until they end.
+    let devices = api.ok(Method::POST, "/cas", Some(json!({ "name": "devices", "domains": ["dev.internal"] }))).await;
+    let dev_id = devices["id"].as_str().unwrap();
+    let one = api.ok(Method::POST, &format!("/cas/{dev_id}/sign"), Some(json!({ "csr": csr(&["d1.dev.internal"]), "days": 2 }))).await;
+    api.call(Method::POST, &format!("/cas/{dev_id}/revoke"), Some(json!({ "serial": one["serial"] }))).await;
+    let (s, e) = api.call(Method::DELETE, &format!("/cas/{dev_id}"), None).await;
+    assert!(s == StatusCode::CONFLICT && e.to_string().contains("revocation list"), "{e}");
+    // A CSR's certificate ending within two weeks is health's to say (nothing renews it); a
+    // revoked one isn't.
+    let d2 = api.ok(Method::POST, &format!("/cas/{dev_id}/sign"), Some(json!({ "csr": csr(&["d2.dev.internal"]), "days": 5 }))).await;
+    let health = api.ok(Method::GET, "/health", None).await;
+    let ending: Vec<&Value> = health.as_array().unwrap().iter().filter(|f| f["issue"] == "certificate_expiring").collect();
+    assert_eq!(ending.iter().map(|f| (f["key"].as_str().unwrap(), f["path"].as_str().unwrap())).collect::<Vec<_>>(), [("d2.dev.internal", "devices")], "{health}");
+    // OCSP, beside the CRL: one revoked and one good certificate, answered and signed by the CA.
+    {
+        use der::{Decode, Encode};
+        let ca_pem = devices["certificate"].as_str().unwrap();
+        let (_, pem) = parse_x509_pem(ca_pem.as_bytes()).unwrap();
+        let ca = x509_cert::Certificate::from_der(&pem.contents).unwrap();
+        let sha1 = |b: &[u8]| der::asn1::OctetString::new(ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, b).as_ref().to_vec()).unwrap();
+        let (name_hash, key_hash) = (sha1(&ca.tbs_certificate.subject.to_der().unwrap()), sha1(ca.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes()));
+        let ask = |serial: &str| x509_ocsp::Request {
+            req_cert: x509_ocsp::CertId {
+                hash_algorithm: x509_cert::spki::AlgorithmIdentifierOwned { oid: der::oid::ObjectIdentifier::new_unwrap("1.3.14.3.2.26"), parameters: None },
+                issuer_name_hash: name_hash.clone(),
+                issuer_key_hash: key_hash.clone(),
+                serial_number: x509_cert::serial_number::SerialNumber::new(&(0..serial.len()).step_by(2).map(|i| u8::from_str_radix(&serial[i..i + 2], 16).unwrap()).collect::<Vec<_>>()).unwrap(),
+            },
+            single_request_extensions: None,
+        };
+        let request = x509_ocsp::OcspRequest { tbs_request: x509_ocsp::TbsRequest { version: Default::default(), requestor_name: None, request_list: vec![ask(one["serial"].as_str().unwrap()), ask(d2["serial"].as_str().unwrap())], request_extensions: None }, optional_signature: None };
+        let req = Request::builder().method(Method::POST).uri(format!("/v1/secrets/ocsp/{dev_id}")).body(Body::from(request.to_der().unwrap())).unwrap();
+        let resp = api.router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let answer = x509_ocsp::OcspResponse::from_der(&bytes).unwrap();
+        let basic = x509_ocsp::BasicOcspResponse::from_der(answer.response_bytes.unwrap().response.as_bytes()).unwrap();
+        let statuses: Vec<&str> = basic.tbs_response_data.responses.iter().map(|r| match r.cert_status { x509_ocsp::CertStatus::Good(_) => "good", x509_ocsp::CertStatus::Revoked(_) => "revoked", x509_ocsp::CertStatus::Unknown(_) => "unknown" }).collect();
+        assert_eq!(statuses, ["revoked", "good"]);
+        let public = ca.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes();
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_ASN1, public).verify(&basic.tbs_response_data.to_der().unwrap(), basic.signature.raw_bytes()).expect("signed by the CA");
+    }
+    // A CA a key links to stays.
+    assert_eq!(api.call(Method::DELETE, &format!("/cas/{}", ca["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn reads_unlike_the_reader_are_alerted() {
     let api = Api::new().await;
     api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
