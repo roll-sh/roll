@@ -3361,6 +3361,107 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     - Item 2's batches past the scan (joined rows from batches, the probe hits aggregated from
       columns), item 4 (streaming merge joins) and item 5 (work_mem for hash tables and sorts)
       are not started.
+- **Executor, round 17: storage sources found by binary search, memtables skipped by relation,
+  numeric hash keys without allocation, one statement-start clock reading** (agent 232; BENCH.md
+  "Executor, round 17"). Lane C, all three servers at max_parallel_workers_per_gather 2,
+  max_parallel_workers 8 and a 2 GB cache, the host at load 15-40 (other agents' trains and
+  builds): TPC-H SF1 14.22 -> 13.49 s against PostgreSQL's 18.11 and pgrust's 11.85 (CPU 37.08 -> 35.35 s against 46.47 and 19.17; user instructions -2.0 to -2.4% in six rounds; engine peak 1,692-1,700 -> 1,692-1,703
+  MB). Point selects at 8 clients: the clock change -5.3% user instructions a read (every pair
+  -3.9 to -6.8%), the storage changes -3.9% more; roll 80,440 ops/s against pgrust's 76,212 and
+  PostgreSQL's 46,527 (plain dist).
+  - **A merging scan's L1 files by two binary searches** (`storage::l1_in`, used by `sources`
+    and `same_sources`): every `Scan::new` and every `Scan::reseek` tested each L1 file's
+    first and last key against the range (two memcmps a file, SF1's bench database has 76
+    files), and a worker's lookup scan is sought on for every outer row (`Lookup::entries`,
+    agent 212's reseek). The level is in key order and no file overlaps another, so the files
+    of a range are a slice: `partition_point` on the last keys, then on the first keys (debug
+    builds compare it with the filter). User instructions q03 -5.4 / -6.3 / -6.2, q07 -5.5 /
+    -5.8 / -5.6, q20 -5.4 / -5.6 / -5.7, q21 -3.7 / -3.4 / -3.2, q04 -3.4 / -3.3 / -3.3, q22
+    and q05 -2.4 to -3.7.
+  - **A memtable's relations as bits** (`Memtable::prefixes`, `hot::PrefixBits`: 256 bits of
+    the 8-byte relation prefixes it holds keys of, set before an entry goes in, read without a
+    lock): a point read (`mem_get`), a unique probe's first key (`smallest_key`) and a merging
+    scan's memtable cursor (`Cursor::fill`) of a relation the memtable holds no key of leave
+    the skip list alone (no epoch pin, no search). After a load the memtable holds the catalog's
+    and the statistics' writes, so every lookup of TPC-H's tables searched it. q07 -3.7 x3,
+    q08 -3.1 / -3.1 / -3.4, q03 / q09 -2 to -4.4.
+  - **A numeric hash key without allocating** (`pghash::hash_numeric_small`): hash_numeric made
+    the value's base-10000 digits through `DecInt` vectors (abs, mul_pow10, base10000, the
+    digits, the bytes: five allocations a row); a value of up to 19 digits at a scale of up to
+    16 has them on the stack, the same hash (unit test against the general path over 4,000
+    values). q02's hash on ps_supplycost: -4.6 / -4.5 / -4.6%, own-run wall 3 of 3 pairs.
+  - **One statement-start clock reading per message** (`Session::message_starts`, read at
+    Query, Parse, Bind, Execute and a fastpath call, as SetCurrentStatementStartTimestamp):
+    pg_stat_activity's query_start and state_change, `statement_timestamp()`, an implicit
+    transaction's start (`now()`, xact_start: the first message since the last transaction
+    ended, `xact_from`, as start_xact_command's StartTransaction), BEGIN's, log_duration's
+    start (`duration_logged` reads the clock only when a duration may be logged), and
+    pg_prepared_statements' / pg_cursors' times share it. Besides: no planning timer without
+    pg_stat_statements tracking, no auto_explain timer without auto_explain, no
+    `Database::touch` per statement (a database with sessions is never idle; a transaction's
+    end touches it at most once a millisecond a session), lock holds ordered by the time stamp
+    counter on x86-64 (`locks::hold_clock`), the unused `Txn::started` gone. 25 clock reads a
+    point select at one client (perf uprobe on clock_gettime; 6.6 of them the read's spin) ->
+    5.7-7.0 (16.5-21 before). Behaviour: checked against PostgreSQL 18.6 (a232-pgref) with a raw-protocol
+    probe, messages 20 ms apart. PostgreSQL: statement_timestamp() = query_start for the
+    backend's own row in every case; now() = query_start for a one-statement transaction (and
+    the second statement of a two-statement Query); now() < statement_timestamp() in a block
+    and in the extended protocol (the transaction begins at the Parse, or at the Bind of a
+    prepared statement); query_start <= state_change. roll before: statement_timestamp() =
+    query_start false everywhere, now() < statement_timestamp() even for one statement, and
+    query_start after state_change in the extended protocol. Now all as PostgreSQL's
+    (`tests/wire.rs` `statement_timestamps_follow_the_messages`). Left: PostgreSQL's
+    pg_stat_activity is a snapshot per transaction (two Executes in one implicit transaction:
+    the second sees the first's query_start); roll reads the live row.
+  - Dropped (patches with numbers in `~/.cache/a232/patches/`):
+    - Lead 1, the hot ranges' lock off the read path (`Hot::mask`, the kept prefixes as bits,
+      `get` / `scan` skip the `RwLock` for a relation no range keeps): user instructions -0.6%
+      on q07 (the bar is 3%), cycles -1.9 / -5.6% over the 22 queries in the two clean rounds,
+      own-run wall q07 3 of 3 (-1 to -6%), q08 3 of 3. A cycles-only win; it lands if the gate
+      admits cycles.
+    - Lead 4, nested loops that rescan (`NestLoopNode::rescan`: the outer side rescanned or
+      opened again, an unparameterized inner side's node kept and rescanned) and an Aggregate
+      opening again only an input that can't rescan (q17's bitmap heap scan): q02 -2.2 / -2.3
+      / -2.3%, q17 flat. q02's SubPlan is 7.4% of its instructions afterwards, 6.0 of it the
+      kept tree's index scans; q17's per-run cost is the bitmap scan's open, which a kept
+      Aggregate doesn't save.
+    - Tuple sizes of a hash join's rows (an ASCII char(n)'s characters not counted again, a
+      numeric's digit count in u64): q02 -3.5 / -2.7 / -3.1 (two rounds above 1.0 foreign
+      core).
+  - Measured, not changed:
+    - q02 (0.6 s against PostgreSQL's 0.25): 65% is the hash build of 158,720 nested-loop rows
+      (the partsupp index scan's 1,984 runs of 80 random row fetches through a merging scan
+      each, `get_sorted`; the rows' decode; `concat_rows`; the 8 batches' spill and reload),
+      the SubPlan 7-13%.
+    - q07 / q05 / q08's workers' lookups: `Store::get_with` 35% of q07's cycles, 60% of its own
+      the row's first byte (a cache miss), `block_with` 8% (the block cache's shard mutex and
+      `Arc`), `Block::seek` 12% (misses on restarts and entries); in instructions the point
+      path is spread thin (seek 4.7%, read 3.2%, memcmp 9%).
+    - Clock reads left in a point select: the message's (2: Bind and Execute), the Sync's
+      state change (1), pgstat's flush check at the transaction's end (1), and the read's spin.
+  - Tests: two verification trains (`tools/verification-train.sh`, `TRAIN_NO_CHECKOUT=1`). First
+    on every commit of the round on `eccaa9b8f` (`a13671c43`): release crate tests pass, Clippy
+    20 warnings (none in a changed file), crash_random seeds 1-30 x 4, power_cut 4 passed, the
+    power and async power crash rounds pass, debug crate tests pass (crash_bulk's
+    `kill_during_compactions_after_deletes` too, on agent 228's 64 MB thread), the regression
+    suite 51,148 / 51,150 units with none newly differing, isolation 1,647 / 1,648 permutations
+    (intra-grant-inplace, as on the other trains), pg_dump TAP 14,609 passed. The L1 search, the
+    memtable bits and the numeric hash then landed on agent 229's commits (`db44d835f` ..
+    `c6845b8fa`, files of theirs untouched) after the targeted release set on that tree (lib,
+    wire, golden, parallel_scan, query_spill, heap_order_scan, big_tables, txn_spill,
+    kept_plans, the storage tests, twophase, crash_random 1-30): all pass but
+    `wire::parallel_workers_seen_by_others` once (a wait event sampled under load; 3 of 3 alone).
+    Second, the clock commit rebased onto that head (`25865c3ea`; agent 229 had changed BEGIN's
+    path in `session/mod.rs`): the same, but the debug crate tests' `wire::
+    big_bytea_values_go_out_in_linear_time` took 23.6 s against its 20 s bound at load 30
+    (17.4 and 19.2 s alone). Unit tests: `pghash::small_numeric_hash_is_hash_numeric`; `l1_in`
+    is checked against the per-file filter on every call in debug builds.
+  - Next steps (largest first): q02's hash build (the inner index scan's random row fetches:
+    a batched sorted multi-get over the 80 keys of a run, prefetching the next block; the
+    rows' decode into `Value`s and their copy into joined rows); the point read's cache misses
+    (prefetch for a chunk's sorted keys, a block cache without a mutex and reference count per
+    lookup); q17's bitmap heap scan rescan; the hot-range lock (above) if the gate takes
+    cycles.
 - **Executor, round 16: SubPlan trees rescanned, behaviour fixes, q13's customer hash in the
   workers** (agent 227; BENCH.md "Executor, round 16"). Lane C, all three servers at
   max_parallel_workers_per_gather 2, max_parallel_workers 8 and a 2 GB cache, the host loaded
