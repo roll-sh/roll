@@ -1159,3 +1159,70 @@ const SECRET_KEYS =
 export function redactSecrets(text: string): string {
   return text.replace(SECRET_KEYS, (_m, key: string, sep: string) => `"${key}"${sep}"<redacted>"`);
 }
+
+/** One line of a search profile as the console draws it. */
+export interface ProfileRow {
+  depth: number;
+  /** The query, collector or aggregation type (`BooleanQuery`, `SimpleTopScoreDocCollector`). */
+  label: string;
+  /** Its description (the Lucene query, the aggregation's name, the collector's reason). */
+  detail: string;
+  ns: number;
+  /** Of the section's total (0–1). */
+  share: number;
+  /** The breakdown's largest timings (`score`, `next_doc`, ...), largest first. */
+  breakdown: [string, number][];
+}
+
+/** A shard's profile: one section per search phase part. */
+export interface ProfileShard {
+  /** `[index][shard]` as Elasticsearch names it. */
+  shard: string;
+  sections: { title: string; ns: number; rows: ProfileRow[] }[];
+}
+
+interface ProfileNode {
+  type?: string;
+  name?: string;
+  description?: string;
+  reason?: string;
+  time_in_nanos?: number;
+  breakdown?: Record<string, number>;
+  children?: ProfileNode[];
+}
+
+function flatten(nodes: ProfileNode[] | undefined, total: number, depth: number, out: ProfileRow[]) {
+  for (const n of nodes ?? []) {
+    const ns = n.time_in_nanos ?? 0;
+    const breakdown = Object.entries(n.breakdown ?? {})
+      .filter(([k, v]) => !k.endsWith("_count") && v > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 4);
+    out.push({ depth, label: n.type ?? n.name ?? "", detail: n.description ?? n.reason ?? "", ns, share: total > 0 ? ns / total : 0, breakdown });
+    flatten(n.children, total, depth + 1, out);
+  }
+}
+
+function section(title: string, nodes: ProfileNode[] | undefined) {
+  const ns = (nodes ?? []).reduce((t, n) => t + (n.time_in_nanos ?? 0), 0);
+  const rows: ProfileRow[] = [];
+  flatten(nodes, ns, 0, rows);
+  return { title, ns, rows };
+}
+
+/** A `"profile": true` search's answer as rows per shard (`null` when it holds no profile). */
+export function profileShards(resp: unknown): ProfileShard[] | null {
+  const shards = (resp as { profile?: { shards?: unknown[] } } | null)?.profile?.shards;
+  if (!Array.isArray(shards)) return null;
+  return shards.map((raw) => {
+    const s = raw as { id?: string; searches?: { query?: ProfileNode[]; collector?: ProfileNode[] }[]; aggregations?: ProfileNode[]; fetch?: ProfileNode };
+    const sections = [];
+    for (const search of s.searches ?? []) {
+      sections.push(section("Query", search.query));
+      sections.push(section("Collectors", search.collector));
+    }
+    if (s.aggregations?.length) sections.push(section("Aggregations", s.aggregations));
+    if (s.fetch) sections.push(section("Fetch", [s.fetch]));
+    return { shard: s.id ?? "", sections: sections.filter((x) => x.rows.length > 0) };
+  });
+}

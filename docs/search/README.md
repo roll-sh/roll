@@ -157,7 +157,7 @@ then the API's URL query parameters after `?` and their allowed values after `=`
 Elasticsearch's REST API spec, `scripts/gen-search-params.mjs`);
 body keys, query and aggregation types, mapping parameters, field types and the index's field
 names (from its mapping) in the body, line by line for `_bulk` and `_msearch`. It highlights JSON
-and copies a request as curl. The dashboard never re-encodes JSON it sends or shows: console and
+and copies a request as curl; a profiled search opens on its profile tree. The dashboard never re-encodes JSON it sends or shows: console and
 document bodies go out as typed (`1.0` stays a float to dynamic mapping, longs above 2^53 stay
 exact, key order is kept), `_source` is cut from the response text, and responses are re-indented
 token by token (`lib/search-docs.ts`: `formatJson`, `hitSources`, `sourceCells`). Index names and mappings are fetched only when a completion needs
@@ -276,8 +276,10 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    browsed as Discover does: range presets, documents over time (`auto_date_histogram`, counted
    from the points tree), a click on a bar narrows to it, newest first unless a column sorts; and
    a Data streams panel (backing indices, documents, size, the lifecycle's retention set in place
-   or the ILM policy that manages the stream). Next: index templates listed per index, `_profile` of a
-   console search drawn as a tree, saved console requests. Signed-in users who aren't admins follow
+   or the ILM policy that manages the stream), and a profiled console search (`"profile": true`)
+   drawn as Kibana's Search Profiler draws it (per shard: the query tree, collectors,
+   aggregations and fetch with times and shares). Next: index templates listed per index, saved
+   console requests. Signed-in users who aren't admins follow
    accounts' phase 2: today every product but code, agents and projects answers them 403
    (docs/accounts.md), search included.
 5. **Compatibility gaps** from the extended suites (4,956 of the 5,541 Elasticsearch passes),

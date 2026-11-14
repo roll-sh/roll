@@ -1,9 +1,10 @@
 import { Play, RotateCcw } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { envPrefix, parseConsole, searchApi, type ConsoleResponse, type SearchCluster } from "@/lib/search-api";
-import { redactSecrets } from "@/lib/search-console";
+import { profileShards, redactSecrets, type ProfileShard } from "@/lib/search-console";
 import { formatJson } from "@/lib/search-docs";
 import { useMarkState } from "../mark-state";
+import { Segmented } from "../redis/shared";
 import { btn, CopyButton, Panel, primary, useCopy } from "../ui";
 import { JsonText } from "./json-view";
 import { RequestEditor, type RequestEditorHandle } from "./request-editor";
@@ -151,6 +152,17 @@ export function SearchConsole({ cluster, prefill }: { cluster: SearchCluster; pr
 
   const r = current?.response;
   const out = r ? pretty(r) : "";
+  const [view, setView] = useState<"json" | "profile">("json");
+  const profile = useMemo(() => {
+    if (!r?.json || !r.body) return null;
+    try {
+      return profileShards(JSON.parse(r.body));
+    } catch {
+      return null;
+    }
+  }, [r]);
+  // A profiled search opens on its profile.
+  useEffect(() => setView(profile ? "profile" : "json"), [profile]);
 
   return (
     <div className="space-y-4">
@@ -229,9 +241,27 @@ export function SearchConsole({ cluster, prefill }: { cluster: SearchCluster; pr
             <p className="rise px-5 py-4 text-[13px] text-danger">{current.error}</p>
           ) : r ? (
             <>
-              <pre className="rise max-h-[32rem] min-h-80 flex-1 overflow-auto px-5 py-4 font-mono text-[12px] leading-relaxed text-muted">
-                {out ? <JsonText text={out} json={r.json} /> : <span className="text-subtle">(no body)</span>}
-              </pre>
+              {profile && (
+                <div className="border-b border-line px-5 py-2">
+                  <div className="w-40">
+                    <Segmented
+                      value={view}
+                      options={[
+                        { label: "profile", value: "profile" },
+                        { label: "json", value: "json" },
+                      ]}
+                      onChange={setView}
+                    />
+                  </div>
+                </div>
+              )}
+              {profile && view === "profile" ? (
+                <ProfileView shards={profile} />
+              ) : (
+                <pre className="rise max-h-[32rem] min-h-80 flex-1 overflow-auto px-5 py-4 font-mono text-[12px] leading-relaxed text-muted">
+                  {out ? <JsonText text={out} json={r.json} /> : <span className="text-subtle">(no body)</span>}
+                </pre>
+              )}
               {r.truncated && <p className="border-t border-line px-5 py-2 text-[11px] text-subtle">Cut at 4 MiB.</p>}
             </>
           ) : (
@@ -251,6 +281,54 @@ export function SearchConsole({ cluster, prefill }: { cluster: SearchCluster; pr
           Clear response
         </button>
       )}
+    </div>
+  );
+}
+
+function ms(ns: number) {
+  const v = ns / 1e6;
+  return v >= 100 ? `${v.toFixed(0)} ms` : v >= 1 ? `${v.toFixed(1)} ms` : `${v.toFixed(3)} ms`;
+}
+
+/**
+ * A `"profile": true` search drawn as Kibana's Search Profiler draws it: per shard, the query
+ * tree, the collectors, aggregations and fetch, each line with its time and its share of the
+ * section; the breakdown's largest timings on hover.
+ */
+function ProfileView({ shards }: { shards: ProfileShard[] }) {
+  if (shards.length === 0) return <p className="px-5 py-4 text-[13px] text-subtle">The profile is empty (no shard was searched).</p>;
+  return (
+    <div className="rise max-h-[32rem] min-h-80 flex-1 space-y-4 overflow-auto px-5 py-4">
+      {shards.map((sh) => (
+        <div key={sh.shard} className="space-y-2">
+          <p className="truncate font-mono text-[11px] text-subtle">{sh.shard}</p>
+          {sh.sections.map((sec, i) => (
+            <div key={`${sec.title}-${i}`} className="rounded-lg border border-line">
+              <div className="flex items-center justify-between border-b border-line px-3 py-1.5 text-[12px]">
+                <span className="font-medium">{sec.title}</span>
+                <span className="font-mono text-muted">{ms(sec.ns)}</span>
+              </div>
+              <ul>
+                {sec.rows.map((row, j) => (
+                  <li
+                    key={j}
+                    className="grid grid-cols-[minmax(0,1fr)_5rem_4.5rem] items-center gap-3 px-3 py-1 font-mono text-[11px]"
+                    title={row.breakdown.length ? row.breakdown.map(([k, v]) => `${k} ${ms(v)}`).join(" · ") : undefined}
+                  >
+                    <span className="min-w-0 truncate" style={{ paddingLeft: `${row.depth * 14}px` }}>
+                      <span className="text-fg/90">{row.label}</span> <span className="text-subtle">{row.detail}</span>
+                    </span>
+                    <span className="h-1 overflow-hidden rounded-full bg-panel-2">
+                      <span className="block h-full rounded-full bg-fg/30" style={{ width: `${Math.round(row.share * 100)}%` }} />
+                    </span>
+                    <span className="text-right text-muted tabular-nums">{ms(row.ns)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      ))}
     </div>
   );
 }

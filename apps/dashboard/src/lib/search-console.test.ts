@@ -1,7 +1,7 @@
 // Tests of the console completion (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { applyCompletion, bodyKind, complete, jsonContext, mappingFields, ndjsonRole, parseConsole, redactSecrets, requestIndex, type Completion, type CompletionSources } from "./search-console";
+import { applyCompletion, bodyKind, complete, jsonContext, mappingFields, ndjsonRole, parseConsole, profileShards, redactSecrets, requestIndex, type Completion, type CompletionSources } from "./search-console";
 
 const FIELDS = [
   { name: "price", type: "float" },
@@ -254,4 +254,38 @@ test("history keeps requests without their credentials", () => {
   assert.ok(!out.includes("sk-a") && !out.includes("hunter22"), out);
   assert.ok(out.includes('"api_key" : "<redacted>"') && out.includes('"password":"<redacted>"'), out);
   assert.ok(out.includes('"model_id":"m"') && out.includes('"key":"kept"'), out);
+});
+
+test("a profiled search's answer as rows per shard", () => {
+  const resp = {
+    profile: {
+      shards: [
+        {
+          id: "[n1][products][0]",
+          searches: [
+            {
+              query: [{ type: "BooleanQuery", description: "+title:shoe", time_in_nanos: 4000, breakdown: { score: 3000, next_doc: 500, score_count: 9 }, children: [{ type: "TermQuery", description: "title:shoe", time_in_nanos: 1000 }] }],
+              collector: [{ name: "QueryPhaseCollector", reason: "search_query_phase", time_in_nanos: 2000 }],
+            },
+          ],
+          aggregations: [],
+          fetch: { type: "fetch", description: "", time_in_nanos: 500 },
+        },
+      ],
+    },
+  };
+  const [sh] = profileShards(resp)!;
+  assert.equal(sh.shard, "[n1][products][0]");
+  assert.deepEqual(
+    sh.sections.map((s) => [s.title, s.ns, s.rows.length]),
+    [
+      ["Query", 4000, 2],
+      ["Collectors", 2000, 1],
+      ["Fetch", 500, 1],
+    ],
+  );
+  const q = sh.sections[0].rows;
+  assert.deepEqual([q[1].depth, q[1].label, q[1].share], [1, "TermQuery", 0.25]);
+  assert.deepEqual(q[0].breakdown, [["score", 3000], ["next_doc", 500]]);
+  assert.equal(profileShards({ hits: {} }), null);
 });
