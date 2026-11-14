@@ -582,20 +582,26 @@ TLS certificates for services (mTLS between them), with no CA to run.
   subjectAltName names (DNS names and IP addresses, each within the policy; the subject's CN isn't
   read) are taken: usages, lifetime (30 days, or the CA's `max_days` if shorter, by default; 5
   minutes to `max_days`) and everything else are the CA's own, whatever the CSR asks (being a CA
-  itself, signing code). It answers `{certificate, ca, serial, names, not_after}`. Checked with
+  itself, signing code). The CSR's key must match its signature (a P-384 key signed with SHA-384,
+  not SHA-256). It answers `{certificate, ca, serial, names, not_after}`. Checked with
   OpenSSL's CSRs (P-256 and RSA): `openssl verify -x509_strict` passes against the CA.
 - Every certificate a CA signs is listed until it expires (`GET …/cas/{id}/certificates`: serial,
   names, `csr` or `link`, its end, who asked, when it was revoked; `roll secrets cas certs NAME`).
   `…/cas/{id}/revoke {serial}` (`write`, audited; `roll secrets cas revoke NAME SERIAL`, the
   dashboard's Revoke) takes one back, a lost device's, say; roll revokes a lease's certificate
   when the lease ends and a managed one's when its grace runs out. The CA signs a CRL of the
-  revoked certificates that haven't expired, made on each request and good for an hour:
+  revoked certificates that haven't expired, good for an hour and signed at most once a minute per
+  node (a revocation shows in that node's next one at once, another node's within a minute):
   `GET /v1/secrets/crl/{id}` (DER, `application/pkix-crl`; `?format=pem`), without a token, as any
   CRL is fetched. Every certificate names it in its CRL distribution point (rolld's
   `ROLL_CODE_PUBLIC_URL`). Checked with OpenSSL: `openssl verify -crl_check` refuses a revoked one
   (`certificate revoked`) and passes the rest. Clients that don't check CRLs still trust a revoked
-  certificate until it ends, so lifetimes stay short. A CA a key links to can't be deleted;
-  deleting one leaves what it signed valid until it expires.
+  certificate until it ends, so lifetimes stay short. A CA a key links to can't be deleted, nor one
+  with a revoked certificate still within its lifetime (its CRL must keep answering; a deleted
+  project's CAs keep serving theirs until then too); deleting one leaves what it signed valid until
+  it expires. One CA keeps at most 10,000 certificates from CSRs valid at once. Serials are
+  random, positive and never start with a zero byte, so the serial a client shows is the one to
+  revoke.
 
 ### SSH certificates
 

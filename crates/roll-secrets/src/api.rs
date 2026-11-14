@@ -922,11 +922,11 @@ async fn crl(State(s): S, Path(id): Path<String>, axum::extract::Query(q): axum:
     let der = blocking(s, move |s| s.crl(&id)).await?;
     let pem = q.get("format").is_some_and(|f| f == "pem");
     let (kind, body) = if pem {
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der.as_slice());
         let lines: Vec<&str> = b64.as_bytes().chunks(64).map(|c| std::str::from_utf8(c).expect("base64")).collect();
         ("application/x-pem-file", format!("-----BEGIN X509 CRL-----\n{}\n-----END X509 CRL-----\n", lines.join("\n")).into_bytes())
     } else {
-        ("application/pkix-crl", der)
+        ("application/pkix-crl", der.to_vec())
     };
     Ok(([(axum::http::header::CONTENT_TYPE, kind), (axum::http::header::CACHE_CONTROL, "public, max-age=300")], body).into_response())
 }

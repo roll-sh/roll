@@ -28,6 +28,7 @@ use code_sql::{Db, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS cas (
@@ -139,6 +140,7 @@ pub(crate) struct Provider {
     pub db: Db,
     pub keys: Keyring,
     pub public_api: std::sync::Arc<std::sync::OnceLock<String>>,
+    pub crls: Crls,
 }
 
 impl Provider {
@@ -240,6 +242,7 @@ impl LinkProvider for Provider {
         if let Some(serial) = handle["serial"].as_str() {
             let now = self.db.now_ms()?;
             self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE ca_certs SET revoked_at = ?, revoked_by = 'roll' WHERE ca_id = ? AND serial = ? AND revoked_at IS NULL", params![now, r#ref, serial])?))?;
+            self.crls.lock().expect("crls").remove(r#ref);
         }
         Ok(())
     }
@@ -327,10 +330,12 @@ pub struct Signed {
 }
 
 /// 16 random bytes, the top bit clear (a positive serial).
+/// 16 random bytes, positive and with no leading zero byte (DER would drop it, and the serial
+/// clients show wouldn't be the one roll keeps).
 fn serial() -> [u8; 16] {
     let mut s = [0u8; 16];
     getrandom::fill(&mut s).expect("system randomness");
-    s[0] &= 0x7f;
+    s[0] = (s[0] & 0x7f).max(1);
     s
 }
 
@@ -340,6 +345,35 @@ fn serial_of(p: &rcgen::CertificateParams) -> Vec<u8> {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Signed CRLs (DER) by CA, with when each was made; a revocation drops its CA's.
+pub(crate) type Crls = Arc<std::sync::Mutex<std::collections::HashMap<String, (i64, Arc<Vec<u8>>)>>>;
+
+/// The most certificates from CSRs one CA keeps valid at once (each is on its list, and a revoked
+/// one on its CRL, until it expires).
+const CSR_MAX: i64 = 10_000;
+
+/// A CSR's key is what its signature algorithm says (rcgen reads the key's type from the
+/// signature: a P-384 key signed with SHA-256 would come out labelled P-256).
+fn key_matches(pem: &str, alg: &rcgen::SignatureAlgorithm) -> Result<()> {
+    use x509_parser::prelude::FromDer;
+    let bad = || Error::BadRequest("not a CSR this CA signs".into());
+    let (_, p) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).map_err(|_| bad())?;
+    let (_, csr) = x509_parser::certification_request::X509CertificationRequest::from_der(&p.contents).map_err(|_| bad())?;
+    let spki = &csr.certification_request_info.subject_pki.algorithm;
+    let curve = spki.parameters.as_ref().and_then(|p| p.as_oid().ok()).map(|o| o.to_id_string());
+    let wanted: &[&rcgen::SignatureAlgorithm] = match (spki.algorithm.to_id_string().as_str(), curve.as_deref()) {
+        ("1.2.840.10045.2.1", Some("1.2.840.10045.3.1.7")) => &[&rcgen::PKCS_ECDSA_P256_SHA256],
+        ("1.2.840.10045.2.1", Some("1.3.132.0.34")) => &[&rcgen::PKCS_ECDSA_P384_SHA384],
+        ("1.3.101.112", _) => &[&rcgen::PKCS_ED25519],
+        ("1.2.840.113549.1.1.1", _) => &[&rcgen::PKCS_RSA_SHA256, &rcgen::PKCS_RSA_SHA384, &rcgen::PKCS_RSA_SHA512],
+        _ => return Err(Error::BadRequest("a CSR's key is ECDSA P-256 or P-384, Ed25519 or RSA".into())),
+    };
+    if !wanted.contains(&alg) {
+        return Err(Error::BadRequest("the CSR's signature doesn't match its key: sign a P-256 key with SHA-256 and a P-384 key with SHA-384 (openssl req -sha384)".into()));
+    }
+    Ok(())
 }
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
@@ -421,6 +455,12 @@ impl Secrets {
             if !linked.is_empty() {
                 return Err(Error::Conflict("in_use", format!("{name} still issues {}: unlink them first", linked.join(", "))));
             }
+            // Its CRL must keep answering while a certificate it revoked is still within its
+            // lifetime: a client that can't fetch it would trust that certificate again.
+            let until: Option<i64> = c.query_row("SELECT MAX(not_after) FROM ca_certs WHERE ca_id = ? AND revoked_at IS NOT NULL AND not_after >= ?", params![id, now], |r| r.get(0))?;
+            if let Some(t) = until {
+                return Err(Error::Conflict("in_use", format!("{name} revoked certificates that are valid until {}: its revocation list is served until then", chrono_day(t))));
+            }
             c.execute("DELETE FROM cas WHERE id = ?", [id])?;
             c.execute("DELETE FROM ca_certs WHERE ca_id = ?", [id])?;
             audit::record(c, project, caller, "ca.delete", None, None, &[], &format!("deleted CA {name}"), now)
@@ -439,6 +479,7 @@ impl Secrets {
         }
         // Parsed and its signature checked: whoever asks holds the key it names.
         let csr = rcgen::CertificateSigningRequestParams::from_pem(req.csr.trim()).map_err(|e| Error::BadRequest(format!("not a CSR this CA signs: {e}")))?;
+        key_matches(req.csr.trim(), csr.public_key.algorithm())?;
         let mut names = vec![];
         for san in &csr.params.subject_alt_names {
             names.push(match san {
@@ -464,6 +505,10 @@ impl Secrets {
         }
         let ca_key = rcgen::KeyPair::from_pem(ca_key.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
         let issuer = rcgen::Issuer::from_ca_cert_pem(&ca_pem, &ca_key).map_err(|e| Error::Internal(format!("the CA's certificate: {e}")))?;
+        let live: i64 = self.db.read(|c| c.query_row("SELECT COUNT(*) FROM ca_certs WHERE ca_id = ? AND source = 'csr' AND not_after >= ?", params![id, self.db.now_ms()?], |r| r.get(0)))?;
+        if live >= CSR_MAX {
+            return Err(Error::Conflict("limit", format!("{ca_name} has {CSR_MAX} certificates from CSRs still valid: that's the most one CA keeps")));
+        }
         let params = leaf(&ca_pem, &names, minutes, crl_url(&self.public_api, id))?;
         let not_after = (params.not_after.unix_timestamp_nanos() / 1_000_000) as i64;
         let serial = hex(&serial_of(&params));
@@ -474,7 +519,7 @@ impl Secrets {
     }
 
     fn pki(&self) -> Result<Provider> {
-        Ok(Provider { db: self.db.clone(), keys: self.keys()?.clone(), public_api: self.public_api.clone() })
+        Ok(Provider { db: self.db.clone(), keys: self.keys()?.clone(), public_api: self.public_api.clone(), crls: self.crls.clone() })
     }
 
     /// Where clients reach rolld's API (`ROLL_CODE_PUBLIC_URL`), for certificates' CRL distribution
@@ -504,7 +549,11 @@ impl Secrets {
     pub fn revoke_certificate(&self, project: &str, id: &str, serial: &str, caller: &Caller) -> Result<()> {
         caller.need(Action::Write, &Scope::project(project))?;
         self.project(project)?;
-        let serial = serial.trim().to_ascii_lowercase().replace(':', "");
+        let mut serial = serial.trim().to_ascii_lowercase().replace(':', "");
+        // As a client shows it (DER has no leading zero byte) or as roll keeps it.
+        while serial.len() > 2 && serial.starts_with("00") {
+            serial.drain(..2);
+        }
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             let ca: String = c.query_row("SELECT name FROM cas WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?.ok_or_else(|| Error::NotFound(format!("no CA {id}")))?;
@@ -516,13 +565,30 @@ impl Secrets {
             c.execute("UPDATE ca_certs SET revoked_at = ?, revoked_by = ? WHERE ca_id = ? AND serial = ?", params![now, caller.principal, id, serial])?;
             let names: Vec<String> = serde_json::from_str(&names).unwrap_or_default();
             audit::record(c, project, caller, "ca.revoke", None, None, &[], &format!("{ca} revoked {serial} ({})", names.join(", ")), now)
-        })
+        })?;
+        // This node's next CRL has it at once; another node's within a minute.
+        self.crls.lock().expect("crls").remove(id);
+        Ok(())
     }
 
-    /// The CA's CRL (DER): the revoked certificates that haven't expired, signed now and good for
-    /// an hour. Public: a CRL is what anyone checking a certificate fetches.
-    pub fn crl(&self, id: &str) -> Result<Vec<u8>> {
+    /// The CA's CRL (DER): the revoked certificates that haven't expired, good for an hour.
+    /// Public: a CRL is what anyone checking a certificate fetches, so a signed one is kept for a
+    /// minute rather than signed per request.
+    pub fn crl(&self, id: &str) -> Result<Arc<Vec<u8>>> {
         let now_ms = self.db.now_ms()?;
+        if let Some((at, der)) = self.crls.lock().expect("crls").get(id)
+            && now_ms - at < 60_000
+        {
+            return Ok(der.clone());
+        }
+        let der = Arc::new(self.sign_crl(id, now_ms)?);
+        let mut cache = self.crls.lock().expect("crls");
+        cache.retain(|_, (at, _)| now_ms - *at < 60_000);
+        cache.insert(id.to_string(), (now_ms, der.clone()));
+        Ok(der)
+    }
+
+    fn sign_crl(&self, id: &str, now_ms: i64) -> Result<Vec<u8>> {
         let revoked: Vec<(String, i64)> = self.db.read(|c| Ok::<_, Error>(c.query("SELECT serial, revoked_at FROM ca_certs WHERE ca_id = ? AND revoked_at IS NOT NULL AND not_after >= ? ORDER BY serial", params![id, now_ms], |r| Ok((r.get(0)?, r.get(1)?)))?))?;
         let (ca_pem, ca_key, _) = self.pki()?.open(id).map_err(|_| Error::NotFound(format!("no CA {id}")))?;
         let ca_key = rcgen::KeyPair::from_pem(ca_key.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
@@ -547,4 +613,9 @@ impl Secrets {
     pub(crate) fn ca_refs(&self, project: &str) -> Result<Vec<(String, String)>> {
         self.db.read(|c| Ok(c.query("SELECT id, name FROM cas WHERE project_id = ? ORDER BY name", [project], |r| Ok((r.get(0)?, r.get(1)?)))?))
     }
+}
+
+/// 2027-03-31 from unix ms.
+fn chrono_day(ms: i64) -> String {
+    time::OffsetDateTime::from_unix_timestamp(ms / 1000).map(|t| format!("{}-{:02}-{:02}", t.year(), u8::from(t.month()), t.day())).unwrap_or_default()
 }
