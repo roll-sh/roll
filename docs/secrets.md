@@ -1711,10 +1711,9 @@ user's call).
 
 1. **A tenth independent review** of ESO (#55), renewing identity logins (#56), pinned issuer keys
    (#57) and the ninth review's fixes, and its fixes.
-2. **Approving change requests from Slack**: roll code's chat ops already installs a Slack app
-   and maps its members; a request's notice gets Approve and Reject buttons that review it as the
-   member who pressed (their own roll permissions and the request's gates, never the app's), the
-   platform's request verified and recorded before it's acknowledged, as chat ops does.
+2. **Shell completions and direnv**: `roll completions bash|zsh|fish|powershell` (every product's
+   commands, from clap), and a documented `.envrc` (`eval "$(roll secrets export --format shell)"`
+   with `watch_file` on the setup) so a directory's environment loads as you `cd` into it.
 3. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
    #49 and #54 meet, `watch` keeps both (answered digests, streams and signals).
 4. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
@@ -1729,9 +1728,12 @@ user's call).
    token; the trust policy pins `sub`, as GCP's and Azure's do).
 8. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
    notice.
-9. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
+9. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
+   installs list Slack user ids and act as the owner's automation; a review must count as the
+   person who pressed the button (their permissions, the request's gates), never as the app.
+10. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
    project can link their own databases, buckets and streams.
-10. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+11. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
    environment).
 
 Open pull requests after this one:
