@@ -1687,6 +1687,7 @@ sort, BP over text fields only would save about 28% of indexing CPU on logs (ECS
 µs/doc). On `so`, text fields only also scored text queries better than every field did (above).
 But a second session's "today" runs gave `match` 1.49 and title 1.98 ms, so that difference is
 within the drift between sessions and is no reason by itself.
+Built and measured on 2026-11-14: "Sorts against the doc order" below.
 
 Measured and not adopted (2026-11-14): refreshed segments' stored fields at zstd level 1 (merges
 keep level 3 and rewrite them). Stored-field compression at flush is about 11% of indexing CPU on
@@ -1721,6 +1722,151 @@ hits and scores compared byte for byte):
 | (not adopted) Lucene's visited marking and exploration cap in the filtered search | `vectors/hnsw.rs` | 10% filter 35 ms, recall 0.995; 1% 37.5 ms, 0.874 | 19.5 ms, 0.970; 30.5 ms, 0.803 |
 | (not adopted) `MADV_RANDOM` on mapped segments | `search-store` `cache.rs` | cold wake, first `knn` 296–326 ms, cold `match` 85–137 ms | 274–359 ms, 157–197 ms |
 | (not adopted) rescore only the best `k · oversample` per segment | `vectors/mod.rs` | 1 segment: 4.2 ms, recall 0.856 | 2.1 ms, 0.427 |
+
+### Sorts against the doc order (2026-11-14): adopted; BP over text fields only: not adopted
+
+Logs arrive oldest first, and their most common query sorts `@timestamp` descending (Kibana's
+Discover also asks for `track_total_hits: true`). Docs in ascending order are the competitive
+pruning's worst case, Lucene's `NumericComparator`'s too: every doc beats the queue's worst
+entry, so the competitive docs are all those still to come and nothing is skipped. Until now BP
+saved that sort by scattering recent docs among the first hits (above).
+
+What changed (`search-index` `collector/top_field.rs` `Band`, `search/mod.rs`
+`LeafCollector::next_pass`, `search-codec` `points.rs` `rank_bound`):
+
+- The collector takes a numeric first key's values in bands. A band starts in a segment once it
+  counted 256 hits while the queue still changes (four queues' worth of the hits since the last
+  power of two entered it; in random order about `n ln 2` do whatever the count), or when the hit
+  count passes its threshold and the pruner found no competitive set. The points tree's split
+  values name an edge with about twice the queue's expected hits past it, at the hits per doc
+  since the segment's first hit, and past `search_after` and any range the query requires
+  (`required_range`: the range of Kibana's time picker). Only docs inside the band compare
+  against the queue; the pruner skips the others once the count passes its threshold. A
+  single-valued field's pruner is also bounded by the required range.
+- When the pass ends with the queue not full of hits inside the band, the docs outside it that
+  were counted before the threshold passed (buffered, up to 65,536) are offered to the queue,
+  and the segment runs again (`search_partitions` makes a new bulk scorer) from the doc where the
+  pruner began to skip, for the next band; the fifth is unbounded. Later passes count nothing,
+  so totals, hits and tie order are a single pass's. Only collectors that are run alone get
+  passes: aggregations, `terminate_after`, post filters, profiles and concurrent partitions keep
+  one pass.
+- With exact totals the first pass still counts every hit, but only the band's compare.
+- Exactness: `tests/sort_pruning.rs` (`sorts_against_doc_order_equal_exhaustive_sorts`: rising
+  and falling values, ties, missing first and last, long, int, float and double, filters of every
+  density, ranges on the sort field, `search_after`, a second key, deletes, several segments,
+  every threshold up to exact totals; `ranges_on_multi_valued_sort_fields_equal_exhaustive_sorts`)
+  against one-pass collection. They fail if the rescans, the deferred docs or the multi-valued
+  guard are taken out. Every query below returned the same totals, hits (`_id`), sort values,
+  scores and aggregations on both binaries.
+
+Method: 1M docs per corpus, force-merged to one segment, for each BP mode (a local switch, as in
+the section above). Base (d5328596d) and new ran at once on two copies of the same data
+directory (servers on CPUs 10,11,28,29; clients on 12,13,30,31), with requests alternating
+between them. Each cell is server CPU per request, the median of 100, then the median of 2
+rounds with the servers restarted. Caches were off. An A/A run (one binary on both copies) agreed
+within 2–6%. Queries: `sort_*` (size 10 on the time field), `_tth` (`track_total_hits: true`),
+`range_sort` (the middle 10% of the time span, then sorted), `after_*` (`search_after` the middle
+of the span, `track_total_hits: false`), `term_sort` and friends (a term or two, then sorted by
+time), plus controls without sorts. Scripts and raw results (every iteration's, `iter-*.jsonl`)
+are in `~/.cache/rsearch/sort-2026-11-14/` on the machine that ran them.
+
+| ECS log, ms: base → new | BP on | BP off | text fields only |
+|---|---:|---:|---:|
+| `sort_desc` | 1.44 → 1.44 | 84.88 → 1.39 | 45.54 → 1.14 |
+| `sort_asc` | 1.28 → 1.29 | 3.35 → 1.21 | 1.90 → 0.79 |
+| `sort_desc_tth` | 39.24 → 37.98 | 84.81 → 36.02 | 46.89 → 20.36 |
+| `range_sort` | 9.87 → 10.10 | 10.54 → 1.27 | 7.42 → 1.16 |
+| `after_desc` | 2.71 → 0.80 | 29.12 → 0.66 | 27.22 → 0.56 |
+| `term_sort` | 1.46 → 1.49 | 4.30 → 1.66 | 3.20 → 1.30 |
+| `term_sort_rare` | 1.81 → 1.82 | 5.61 → 1.93 | 5.89 → 1.94 |
+| `bool_sort` | 2.20 → 2.26 | 7.20 → 3.57 | 6.82 → 3.64 |
+| `sort_bytes_desc` | 1.48 → 1.49 | 1.43 → 1.49 | 1.88 → 1.97 |
+| `match` | 1.02 → 1.04 | 1.11 → 1.19 | 1.31 → 1.31 |
+
+| nyc_taxis, ms: base → new | BP on | BP off | text fields only |
+|---|---:|---:|---:|
+| `sort_desc` | 9.72 → 1.23 | 13.84 → 0.90 | 19.52 → 1.07 |
+| `sort_asc` | 4.09 → 1.03 | 8.07 → 1.12 | 1.44 → 1.60 |
+| `sort_desc_tth` | 26.44 → 28.24 | 29.11 → 21.35 | 24.34 → 27.33 |
+| `range_sort` | 5.55 → 5.76 | 7.69 → 2.24 | 6.47 → 1.89 |
+| `range_sort_asc` | 5.40 → 1.73 | 5.79 → 1.61 | 5.29 → 5.28 |
+| `after_desc` | 4.63 → 0.81 | 1.94 → 0.91 | 10.23 → 0.76 |
+| `term_sort` | 14.72 → 1.44 | 9.95 → 1.00 | 14.06 → 1.02 |
+| `desc_sort_tip_amount` | 10.33 → 1.15 | 1.91 → 1.99 | 1.89 → 1.96 |
+| `asc_sort_passenger_count` | 0.94 → 0.94 | 1.05 → 1.06 | 1.08 → 1.11 |
+| `term` | 1.08 → 1.16 | 0.76 → 0.77 | 1.08 → 1.10 |
+
+| http_logs, ms: base → new | BP on | BP off | text fields only |
+|---|---:|---:|---:|
+| `sort_desc` | 2.54 → 1.45 | 22.27 → 1.46 | 24.36 → 1.08 |
+| `sort_asc` | 1.13 → 1.19 | 18.17 → 1.02 | 1.96 → 2.14 |
+| `sort_desc_tth` | 26.20 → 25.94 | 29.86 → 30.56 | 28.25 → 21.12 |
+| `range_sort` | 6.22 → 1.90 | 9.03 → 1.93 | 7.35 → 1.81 |
+| `after_desc` | 2.50 → 0.69 | 3.57 → 1.38 | 7.96 → 0.66 |
+| `term_sort` | 2.92 → 1.97 | 23.16 → 1.85 | 27.03 → 1.69 |
+| `term_sort_rare` | 1.01 → 1.03 | 0.94 → 0.95 | 1.04 → 1.06 |
+| `sort_size_desc` | 1.44 → 1.55 | 1.48 → 1.54 | 1.20 → 1.25 |
+| `match` | 1.07 → 1.12 | 1.08 → 1.12 | 0.99 → 1.03 |
+
+| `so`, ms: base → new | BP on | BP off | text fields only |
+|---|---:|---:|---:|
+| `sort_desc` | 1.43 → 1.46 | 7.08 → 2.43 | 1.49 → 1.57 |
+| `sort_asc` | 1.57 → 1.70 | 22.73 → 1.07 | 1.04 → 1.07 |
+| `sort_desc_tth` | 22.21 → 24.18 | 27.23 → 28.97 | 31.74 → 33.74 |
+| `range_sort` | 8.07 → 9.16 | 5.91 → 1.66 | 7.33 → 7.58 |
+| `after_desc` | 1.61 → 0.66 | 14.28 → 0.71 | 2.29 → 0.79 |
+| `term_sort` | 2.23 → 2.35 | 2.78 → 2.26 | 1.66 → 1.76 |
+| `match_sort` | 5.32 → 5.50 | 5.65 → 5.39 | 4.88 → 5.35 |
+| `match` | 2.34 → 2.34 | 2.54 → 2.44 | 1.86 → 1.93 |
+| `match_title` | 2.42 → 2.43 | 1.67 → 1.67 | 1.88 → 1.93 |
+| `bool_text_term` | 0.94 → 0.96 | 1.30 → 1.36 | 1.20 → 1.21 |
+
+Most of the gain is on time-ordered data, and BP-reordered indices gain too: `search_after`,
+`term_sort` on nyc_taxis and http_logs, a range on http_logs. Not neutral: in BP-reordered
+indices (random time order, where no band starts), `range_sort` on `so` (+13%), and exact totals
+on nyc_taxis and `so` (+7–9%; their spread across rounds is about as large). Every other
+difference is within the spread across rounds.
+
+Tried and not kept (each measured the same way):
+
+- Starting the band when the count passes its threshold: the first 10,000 hits still each enter
+  the queue (ECS BP off, `sort_desc` 2.9 against 1.3 ms).
+- Starting at the segment's first doc with sixteen queues' worth of points: a wider band inserts
+  more hits, and every insert re-derives the pruner's set from a leaf of the points tree
+  (`after_desc` 0.61 → 0.94 ms); rare queries rescanned (http_logs `status: 404` + sort 0.95 →
+  1.76).
+- Starting when the queue fills: a range's hits lie together, so hits per doc from doc 0 sized
+  its band too wide (ECS `range_sort` +11%).
+- Gating on the share of all hits that entered the queue (half), then on the last 128 hits:
+  force-merged segments are runs of merged segments, not one rising sequence, and the gates
+  turned bands off where they won (nyc_taxis `sort_desc` 8.85 against 1.25 ms).
+- Keeping a pruner set of up to 1,024 docs instead of deriving it again on every bottom: the
+  pruner then never reached the empty set when the bottom hit the smallest value
+  (`asc_sort_passenger_count` 1.07 → 1.28). Kept as sampling (every 32nd bottom) inside a band
+  only.
+- Rescanning instead of buffering the docs counted before the threshold: rare matches were
+  scored twice (http_logs `term_sort_rare` with BP on 0.89 → 1.49).
+- Visiting doc windows newest first: not built. It needs a scorer per window, and a range query
+  builds its points bitset for each one.
+
+BP over text fields only (`BpOptions::fields`), with the new sort: indexing gets cheaper on the
+logs (settled CPU, medians of 12 ingests per mode; `so` 4–6):
+
+| | BP on | text fields only |
+|---|---:|---:|
+| ECS µs/doc, `_forcemerge` CPU | 61.0, 9.6 s | 41.5, 3.6 s |
+| nyc_taxis | 51.0, 8.6 s | 45.3, 3.9 s |
+| http_logs | 32.3, 4.3 s | 28.7, 3.2 s |
+| `so` | 152.6, 46.0 s | 148.8, 45.5 s |
+
+Some sorts and keyword filters lose BP's clustering, beyond the spread across ingests (ms, new
+sort, BP on → text fields only): ECS `bool_sort` (two keyword filters, sorted) 2.26 → 3.64,
+`sort_bytes_desc` 1.49 → 1.97, `match` 1.04 → 1.31; nyc_taxis `sort_asc` 1.03 → 1.60,
+`desc_sort_tip_amount` 1.15 → 1.96; http_logs `sort_asc` 1.19 → 2.14. The time sorts themselves
+gain (ECS `range_sort` 10.1 → 1.2, exact totals 38.0 → 20.4). `so`'s text queries come out about
+even across sessions (`match` 2.34 → 1.93, title 2.43 → 1.93 here; the reverse in another
+session). A third less indexing CPU on ECS costs those queries, and `so` saves nothing: not
+adopted. Applying it to log indices only (an index setting) would be the next thing to measure.
 
 ## Fetch phase (round 6, perf-fetch lane)
 

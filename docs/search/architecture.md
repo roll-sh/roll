@@ -122,6 +122,14 @@ branch instantly and keep their data on object storage.
   and orderings match Elasticsearch to the float. Top-k disjunctions use block-max MaxScore and
   WAND; conjunctions use block-max skipping; `track_total_hits` defaults to 10 000 as in
   Elasticsearch, which lets the pruning work.
+- Field sorts prune with the first key's points tree or terms (Lucene's competitive iterators).
+  Docs that arrive against the sort (logs indexed oldest first, sorted `@timestamp` desc) would
+  each beat the queue's worst entry, so a numeric first key is collected in bands of its values:
+  the points tree names an edge with about twice the queue's expected matches past it, only docs
+  inside it compare against the queue, the pruner skips the rest once the count passes its
+  threshold, and the segment runs again for the next band if this one came up short. Later
+  passes count nothing, so hits, ties and totals are a single pass's (`search-index`
+  `collector/top_field.rs`, `Band`).
 
 ## Idle cost
 
