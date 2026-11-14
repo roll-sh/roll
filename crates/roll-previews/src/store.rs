@@ -1967,7 +1967,7 @@ impl Store {
             phone_percent: b.phone_bp.map(|p| p as f64 / 100.0),
             head: b.head,
             load_ms: b.speed.as_ref().map(|s| s.load_ms),
-            lcp_ms: b.speed.and_then(|s| s.lcp_ms),
+            lcp_ms: b.speed.as_ref().and_then(|s| s.lcp_ms),
             a11y_added: page_a11y.as_ref().zip(b.a11y.as_ref()).map(|(ours, main)| ours.added_since(main)),
             errors_added: page_health.as_ref().zip(b.health.as_ref()).map(|(ours, main)| ours.added_since(main)),
             text: b.text,
@@ -1975,6 +1975,10 @@ impl Store {
             links_added: page_links.as_ref().zip(b.links.as_ref()).map(|(ours, main)| ours.added_since(main)),
             api: b.api,
             api_breaking: b.api_breaking,
+            endpoints: f.speed.as_ref().map(|now| {
+                let main = b.speed.as_ref().map(|s| s.endpoints.as_slice()).unwrap_or_default();
+                now.endpoints.iter().map(|e| crate::EndpointAgainst { path: e.path.clone(), ms: e.ms, status: e.status, main_ms: main.iter().find(|m| m.path == e.path).map(|m| m.ms) }).collect()
+            }).unwrap_or_default(),
         });
         let first_unstable = page_health.as_ref().is_some_and(|h| h.unstable);
         let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, first_unstable, f.head)?;
@@ -2135,7 +2139,7 @@ mod tests {
         let (_dir, store) = store();
         let (row, _) = store.create(&new("chg_visual")).unwrap();
         let id = row.id.as_str();
-        let speed = |load_ms| crate::PageSpeed { ttfb_ms: 20, fcp_ms: Some(100), load_ms, bytes: 1000, lcp_ms: None, cls: None };
+        let speed = |load_ms| crate::PageSpeed { ttfb_ms: 20, fcp_ms: Some(100), load_ms, bytes: 1000, lcp_ms: None, cls: None, endpoints: Vec::new() };
         store.set_screenshot(id, "cs_1", &png(0), Some(&speed(900)), Some(&png(0))).unwrap();
         assert_eq!(store.visual_change(id).unwrap(), None, "a first one: nothing to compare");
         assert_eq!(store.page_speed(id).unwrap(), Some(crate::PageSpeedView { now: speed(900), before: None }));

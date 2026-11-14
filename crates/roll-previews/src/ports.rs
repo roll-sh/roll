@@ -179,6 +179,8 @@ pub struct ShotOptions {
     pub hide: Vec<String>,
     /// The first service's OpenAPI document's path (`github.openapi`), read in the same session.
     pub openapi: Option<String>,
+    /// The first service's GET paths to time (`github.endpoints`).
+    pub endpoints: Vec<String>,
 }
 
 /// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.

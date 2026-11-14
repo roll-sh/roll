@@ -597,6 +597,13 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
             summary.push(format!("text +{} −{} against {branch}", t.added_n, t.removed_n));
             details.push_str(&text_block(t, &branch));
         }
+        if !b.endpoints.is_empty() {
+            let slower = b.endpoints.iter().filter(|x| x.slower).count();
+            if slower > 0 {
+                summary.push(format!("{} slower than {branch}", plural(slower as u64, "endpoint", "endpoints")));
+            }
+            details.push_str(&endpoints_line(&b.endpoints, &branch));
+        }
         // roll's own signed link (a public preview's); nothing in it can end the image's markdown.
         if let Some(url) = e.diff_url.as_ref().filter(|u| (u.starts_with("https://") || u.starts_with("http://")) && !u.contains([')', ' ', '\n'])) {
             details.push_str(&format!("![Where it differs from {}]({url})\n\n", branch_name(&b.branch)));
@@ -843,6 +850,21 @@ fn preview_comment(c: &Change, teardown: Option<&str>) -> String {
     out
 }
 
+/// The endpoints' times against the branch's (`github.endpoints`): each path the project named,
+/// timed on the preview's data, the slower ones said so.
+fn endpoints_line(endpoints: &[crate::model::PreviewEndpoint], branch: &str) -> String {
+    let each: Vec<String> = endpoints
+        .iter()
+        .map(|x| {
+            let path = x.path.replace('`', "'");
+            let main = x.main_ms.map(|m| format!(" ({branch} {m} ms)")).unwrap_or_default();
+            let status = if x.status == 0 { ", no answer".to_string() } else if x.status >= 400 { format!(", {}", x.status) } else { String::new() };
+            format!("`GET {path}` {} ms{main}{status}{}", x.ms, if x.slower { ", slower" } else { "" })
+        })
+        .collect();
+    format!("Its endpoints against `{branch}`: {}.\n\n", each.join("; "))
+}
+
 /// The API's operations against the branch's (Optic's API diff), unfolded: a removed one breaks
 /// whoever calls it. The operations come from the change's own document: each in a code span
 /// nothing in it can close, at most 10 each way.
@@ -979,12 +1001,18 @@ mod preview_tests {
         (contrast.impact, contrast.help) = (Some("serious".into()), Some("[click](javascript:x)".into()));
         let ax = crate::model::PreviewPageA11y { issues: vec![contrast], lang: true, title: true, seo: vec![] };
         assert_eq!(a11y_line(&ax), "**Accessibility:** 4 elements failing `color-contrast`, serious (first: `<p>`).\n\n");
-        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None, api: None, api_breaking: Vec::new() };
+        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None, api: None, api_breaking: Vec::new(), endpoints: Vec::new() };
         assert_eq!(base_line(&b), "Against `mainx`, the page differs by 8.0%, at a phone's width the same.\n\n");
         // Its words against main's: a diff block nothing in the page can close.
         let words = crate::model::PreviewTextDiff { added: vec!["Pay ```now".into()], removed: vec!["Checkout".into()], added_n: 1, removed_n: 1 };
         assert_eq!(text_block(&words, "main"), "**Its words against `main`:**\n\n```diff\n- Checkout\n+ Pay now\n```\n\n");
         let api = crate::model::PreviewTextDiff { added: vec!["POST /orders".into()], removed: vec!["DELETE /users/{id}`x".into()], added_n: 1, removed_n: 1 };
+        let ep = |path: &str, ms, main_ms, slower| crate::model::PreviewEndpoint { path: path.into(), ms, status: 200, main_ms, slower };
+        assert_eq!(
+            endpoints_line(&[ep("/api/users", 140, Some(40), true), ep("/api/`x`", 12, None, false)], "main"),
+            "Its endpoints against `main`: `GET /api/users` 140 ms (main 40 ms), slower; `GET /api/'x'` 12 ms.\n\n",
+            "a path can't end its code span"
+        );
         assert_eq!(api_line(&api, &[], "main"), "**Its API against `main`:** removes `DELETE /users/{id}x` (breaking for callers of `main`'s); adds `POST /orders`.\n\n", "an operation can't end its code span");
         let same = crate::model::PreviewTextDiff { added: vec![], removed: vec![], added_n: 0, removed_n: 0 };
         assert_eq!(
@@ -1036,7 +1064,7 @@ mod preview_tests {
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, over its budget</summary>"));
         // Against main's load where it was compared: only a difference past the noise counts.
         timed.speed_budget = None;
-        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None, api: None, api_breaking: Vec::new() });
+        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None, api: None, api_breaking: Vec::new(), endpoints: Vec::new() });
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, 300 ms slower than main</summary>"));
         // Core Web Vitals: in the line, against main's paint, and in the budget.
         let ps = timed.page_speed.as_mut().unwrap();
