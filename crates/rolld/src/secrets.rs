@@ -915,8 +915,10 @@ impl apps_control::integrations::SecretSource for ForApps {
             }
             // Linked keys are addresses as rolld sees them: apps rewrites them for the container.
             let linked: std::collections::HashSet<String> = v.linked.into_iter().collect();
-            // Sensitive keys (secrets #46) come with the flag apps seals them by; none until then.
-            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: false, value: value.expose().to_string(), name }).collect())
+            // Sensitive keys (and keys holding one through a reference) are flagged: apps seals
+            // them and never shows them, not even to whoever may reveal the environment.
+            let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
+            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: sensitive.contains(&name), value: value.expose().to_string(), name }).collect())
         })
         .await?
     }
@@ -1096,10 +1098,14 @@ mod tests {
             .body(axum::body::Body::from(json!({ "value": "postgres://db/shop" }).to_string()))
             .unwrap();
         assert!(roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap().status().is_success());
+        // A sensitive key reaches the service flagged, so apps seals it and never shows it.
+        let ops = json!({ "ops": [{ "op": "set", "key": "PAYMENTS_KEY", "value": "sk_live_x", "tags": ["sensitive"] }] });
+        let set = axum::http::Request::post(format!("/v1/secrets/projects/{project}/environments/production/changes")).header("content-type", "application/json").body(axum::body::Body::from(ops.to_string())).unwrap();
+        assert!(roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap().status().is_success());
         let apps = super::ForApps::default();
         apps.set(secrets.clone(), ws);
         let got = apps.resolve(&project, "production", "svc_web").await.unwrap();
-        assert_eq!(got.iter().map(|v| (v.name.as_str(), v.value.as_str(), v.linked)).collect::<Vec<_>>(), [("DB_URL", "postgres://db/shop", false)]);
+        assert_eq!(got.iter().map(|v| (v.name.as_str(), v.value.as_str(), v.linked, v.sensitive)).collect::<Vec<_>>(), [("DB_URL", "postgres://db/shop", false, false), ("PAYMENTS_KEY", "sk_live_x", false, true)]);
         assert!(apps.resolve(&project, "pr-9", "svc_web").await.unwrap().is_empty());
         assert!(apps.resolve("prj_gone", "production", "svc_web").await.unwrap().is_empty());
         // Seeing them in the clear in apps is roll secrets' call: the operator may, a stranger's
