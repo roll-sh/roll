@@ -9,7 +9,7 @@
 //! can see it, whole files without reading them (`Store::collect_ranges`), and a marker
 //! nothing older is left under is deleted (retired).
 
-use super::sst::{SstMeta, SstReader, SstWriter, key_ts, user_key};
+use super::sst::{SstMeta, SstReader, key_ts, user_key};
 use super::{Cursor, Frozen, Merge, Store, View, write_manifest};
 use crate::error::Result;
 use std::collections::{HashMap, HashSet};
@@ -304,7 +304,7 @@ impl Store {
         let live = RangeDels::new(live.to_vec());
         let mut merge = Merge::new(vec![Cursor::level_uncached(vec![f.clone()])], Vec::new());
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut w = SstWriter::create(&self.dir, id, self.opts.compress)?;
+        let mut w = self.sst_writer(id, true)?;
         while let Some(i) = merge.min()? {
             let (k, v) = merge.sources[i].head().expect("a head entry");
             if live.covering(user_key(k), key_ts(k), horizon).is_none()
