@@ -1783,14 +1783,13 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A landing branch** (`feature/roll-secrets-landing`): every stacked pull request merged on #20
-   in order, conflicts resolved, the whole suite passing, so the stack can land in one step. A
-   rehearsal (2026-11-14) merged each onto the others in order: twelve merge cleanly; twenty
-   conflict with an earlier sibling, nearly all additively (routes in `api.rs`, rows in
-   `catalog.rs`, types in `types.ts`/`secrets-api.ts`, sections of this doc, `rolld/src/secrets.rs`'s
-   providers), and #30 (#20 with roll MCP's #25) touches the most.
-2. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
-   #49 and #54 meet, `watch` keeps both (answered digests, streams and signals).
+1. **Land the stack through #62** (`feature/roll-secrets-landing`): #20 with #31–#61 merged in
+   order, every suite passing. Landing found a gap no single pull request had (databases outside
+   roll, CAs and SSH CAs couldn't open a key a customer's KMS wraps) and lines three pull requests
+   changed alike; both are fixed on #62, whose `docs/secrets.md` has the full ranking. Merging is
+   the user's call.
+2. **#30 onto #62 once roll MCP's #25 is on `main`**, then a workload identity a person creates
+   asks roll-access's policy (held until an admin approves), as their own tokens do.
 3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
 4. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
