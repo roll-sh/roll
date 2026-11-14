@@ -1586,6 +1586,14 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
+A sixth independent review (2026-11-14, of `roll://` references, check-and-set, OCSP, OpenSearch
+links and the grant fix) found no high-severity issue; it found an OCSP route an anonymous caller
+could make sign and cache per request, references whose leases were renewed at the wrong project,
+check-and-set dropped on protected environments, and smaller ones (a provider asked before the
+project check, a project name two owners share, render --watch, env-file errors, restore names,
+public suffixes): all fixed, OCSP re-checked live. The project's tokens now read rules naming it by
+id and show key-scoped ones (#30).
+
 Later: the grid sends check-and-set too (#50), OCSP for project CAs (#44: checked with `openssl
 ocsp`), search links on OpenSearch clusters (#51, agreed with the search thread), and a fix from roll
 MCP's review on #30 (a grant naming the project by id reaches it inside roll secrets too).
@@ -1653,13 +1661,15 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A sixth independent review** of what came after the fifth (`roll://` references, check-and-set
-   writes and the grid, OCSP, OpenSearch links, the grant id fix on #30), and its fixes.
-2. **Key-scoped tokens shown as such**: the project's tokens page shows a rule's key part
-   (`selector.index`), so a token on `prj_…/payments` reads as one for that key (on #30).
-3. *Waits on #24/#25 meeting #47:* transit keys scoped by name (`.index("name")` on the data-plane
-   rows, `Scope.key` passed as the resource's index); *waits on #29 and #51 in one build:* a live
-   check of OpenSearch links.
+1. **Terraform resources for the newer registries** (on #33): `roll_secrets_ca`,
+   `roll_secrets_ssh_ca`, `roll_secrets_transit_key` and `roll_secrets_outside_database`, so a
+   project's CAs, SSH CAs, encryption keys and outside databases are declared with the rest of
+   it.
+2. **Transit in the Go and Python clients** (on #32), as `@roll/secrets` has it: encrypt, decrypt,
+   sign, verify, HMAC and public keys.
+3. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47), a live check of
+   OpenSearch links (#29 and #51 in one build), and splitting the CLI's `secrets.rs` (2,700 lines)
+   by command once the stacked pull requests that touch it have landed.
 4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
 5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
