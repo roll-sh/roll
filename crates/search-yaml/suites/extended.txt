@@ -38,9 +38,7 @@
 #
 # Suites that share a profile and options run on the same clusters in one runner invocation.
 #
-# Not run: repository-azure / -gcs / -s3 (cloud fixtures), x-pack inference (its tests are in
-# platinum/inference; the inference-service-test plugin isn't in the release), gpu (a GPU),
-# stateless (serverless modules), multi-node and mixed-cluster qa projects, the qa projects that
+# Not run: repository-azure / -gcs / -s3 (cloud fixtures), gpu (a GPU), stateless (serverless modules), multi-node and mixed-cluster qa projects, the qa projects that
 # only rerun platinum directories with other users (graph, ml, text-structure with security),
 # enrich (no tests of its own), discovery-* and store-smb plugins, x-pack/qa (multi-cluster,
 # third-party services).
@@ -107,6 +105,11 @@ wildcard                 plain     x-pack/plugin/wildcard
 # directories it bundles, which run above with their own clusters). platinum runs on
 # XPackRestIT's cluster (ml/single-node-tests' is the same), esql on the ES|QL single-node one.
 platinum                 security  zip:test/platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher  setting=xpack.ml.enabled=true  setting=xpack.watcher.enabled=false  setting=xpack.security.audit.enabled=true  setting=xpack.searchable.snapshot.shared_cache.size=16MB  setting=xpack.searchable.snapshot.shared_cache.region_size=256KB  setting=node.name=yamlRestTest-0  config=service_tokens:suites/es-config/service_tokens  memory=4g  heap=1g
+# x-pack inference: platinum/inference's tests on a cluster with Elasticsearch's
+# inference-service-test plugin, which the release lacks, so there is no Elasticsearch baseline:
+# search-dev's YAML test clusters have the plugin's services (crates/search-es xpack/inference
+# services/test.rs) and the pass count is roll's alone (minimum in docs/search/compatibility.md).
+inference                plain     x-pack/plugin/inference
 esql                     plain     zip:test/platinum:esql  runner=--esql-not-partial  setting=esql.federation.enabled=true  config=ingest-geoip/GeoLite2-City.mmdb:test/fixtures/geoip-fixture/src/main/resources/geoip-fixture/GeoLite2-City.mmdb  config=ingest-geoip/GeoLite2-Country.mmdb:test/fixtures/geoip-fixture/src/main/resources/geoip-fixture/GeoLite2-Country.mmdb  config=ingest-geoip/GeoLite2-ASN.mmdb:test/fixtures/geoip-fixture/src/main/resources/geoip-fixture/GeoLite2-ASN.mmdb
 
 # plugins/* (installed into the image for the plugins profile)
