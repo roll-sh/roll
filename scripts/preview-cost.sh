@@ -175,6 +175,16 @@ BRANCH_SEES=$($S3 ls --recursive "s3://$BRANCH_BUCKET/" | wc -l)
 # copied, and production data as it is everywhere else, which the preview says.
 DATA=$(echo "$P" | jq_ "' '.join(sorted('%s=%s' % (r['kind'], r['data']) for r in d['resources']))")
 [ "$DATA" = "bucket=real nosql=masked postgres=masked queue=none redis=real search=masked stream=real tasks=none" ] || { echo "the preview should say what data each branch hands over: $DATA"; exit 1; }
+# How long the release (migrations) took on the preview's data, at the head it runs; the
+# change carries it too (its page and the pull request comment).
+RELEASE=$(echo "$P" | jq_ "'%s ms at %s' % (d['release']['ms'], d['release']['head'] == d['head']) if d.get('release') else ''")
+case "$RELEASE" in [0-9]*" ms at True") ;; *) echo "the preview should say how long its release took at its head: $RELEASE"; exit 1;; esac
+for _ in $(seq 1 60); do
+  CHG_RELEASE=$(api GET "/v1/code/changes/$CHG" | jq_ "((d.get('preview') or {}).get('environment') or {}).get('release_ms')")
+  case "$CHG_RELEASE" in [0-9]*) break;; esac
+  sleep 0.5
+done
+case "$CHG_RELEASE" in [0-9]*) ;; *) echo "the change should carry the release's time: $CHG_RELEASE"; exit 1;; esac
 # The preview's NoSQL branch reads masked; the parent's policy is untouched.
 BRANCH_NOSQL=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='nosql'][0]")
 MASKED=$(api GET "/v1/nosql/databases/$BRANCH_NOSQL" | jq_ "d['masking'].get('app.users.email')")
@@ -582,6 +592,7 @@ cat <<EOF
 | Core Web Vitals of the first page (the screenshot's load) | $VITALS |
 | Visual review under a 5% visual threshold | $UNDER |
 | X-Robots-Tag on the service's page / on the 401 without the link | $ROBOTS / $ROBOTS_LOCKED |
+| The release's time on the preview's data (at its head) / on the change | $RELEASE / $CHG_RELEASE ms |
 | Postgres users.email in the branch / in the parent | $PG_MASKED / $PG_PARENT |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |

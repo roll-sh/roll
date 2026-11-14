@@ -166,6 +166,12 @@ state. A pass of the reconciler:
        migrations, like Heroku's release phase or Render's `preDeployCommand`. Services deploy
        only after it succeeds; a failure fails the preview and leaves its services on what they
        ran.
+       How long it took is kept (`release`: `{head, ms, before_ms}`) and said on the sheet, the
+       change page and the pull request comment ("Its release (migrations) took 2.4 s on the
+       preview's data, 1.3 s slower than the push before"), since the preview's data is the
+       parent's: a migration that's slow here holds its locks on production as long
+       (PlanetScale's deploy requests show this before a merge). The time is the whole job's,
+       container start included (live: the change carries it).
    4d. Once per head, the Postgres branches' schema is compared with their parents' (see
        "Schema changes").
    5. The secrets environment `pv-<preview id>` is ensured (base, overrides, resource URLs).
@@ -467,7 +473,8 @@ preview wrote a document with a price). With several such resources, each one's 
   - Never indexed: every response through a preview's host, the service's own and roll's 401
     alike, carries `X-Robots-Tag: noindex` (as Vercel's previews do), whatever the service
     sends, so a public preview, a share link or an earlier push's URL isn't what a search
-    lands on (live: both). roll apps' `pv-` environments are asked to do the same.
+    lands on (live: both). roll apps does the same for its preview environments and a deploy's
+    own URL (#26, 3b7cd1ac5; `scripts/preview-apps.sh` checks it on the stack).
   - The token is 120 random bits per preview, compared in constant time.
   - The token never goes where people outside roll can read it. The change, the pull request
     comment, statuses, deployments and repo webhooks get the plain URL (which answers 401 to
@@ -1043,6 +1050,8 @@ Ranked by what a person notices first. Done so far:
   reviewed again;
 - previews kept out of search engines (`X-Robots-Tag: noindex` on every response through a
   preview's host);
+- how long the release (migrations) took on the preview's data, per push, against the push
+  before;
 - screenshot comparisons off the async runtime, and a test for reading a run's pages;
 - the previews waiting for a visual review first in the list, tagged "to review";
 - `roll preview screenshot` (any screenshot or diff to a file);
@@ -1103,28 +1112,31 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **How long the release step took, on production-shaped data** (PlanetScale's deploy requests
-   show what a migration will do before it merges): a migration that takes minutes on a branch of
-   production locks production for as long. Each push's release time on the sheet, the change
-   page and the comment ("its migrations took 2.4 s on a branch of production data"), against
-   the push before.
-2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+1. **Accessibility from axe-core** (what Lighthouse's accessibility audit on Netlify and Vercel
+   runs): previews' own check names images, fields, buttons and links without a name, a
+   missing `lang` and `title`. axe-core (MPL-2.0, run in the screenshot's session) adds about
+   90 WCAG rules: contrast, ARIA, landmarks, headings, duplicate ids. Its violations by rule and
+   impact go where the current ones go (against main's too), bounded like them.
+2. **Open a preview on a phone** (Vercel's toolbar shows a QR code): the sheet and the change
+   page show the preview's link, with its access, as a QR code to scan, so a phone opens it
+   without typing a token. Drawn in the dashboard, nothing sent anywhere.
+3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-5. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+7. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1137,7 +1149,7 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

@@ -102,6 +102,12 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
         </p>
       )}
       {env.visual_review && env.visual_review.state !== "unchanged" && <VisualReview previewId={env.id} review={env.visual_review} />}
+      {env.release_ms != null && (
+        <p className="font-mono text-[11px] text-subtle tabular-nums" title="The project's release (migrations), run on the preview's data">
+          release {env.release_ms < 1000 ? `${env.release_ms} ms` : `${(env.release_ms / 1000).toFixed(1)} s`}
+          {env.release_before_ms != null && thanMain(env.release_ms, env.release_before_ms, "the push before") ? ` · ${thanMain(env.release_ms, env.release_before_ms, "the push before")}` : ""}
+        </p>
+      )}
       {env.expires_at != null && (
         <p className="text-[12px] text-muted">
           It goes {new Date(env.expires_at).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}; keep it from Previews.

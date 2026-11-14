@@ -201,6 +201,10 @@ pub struct Preview {
     /// `release` (or seed) ran at `head`: `+ …` added, `- …` removed (`schema::diff`). `None`:
     /// not known (no Postgres branch, or not read yet).
     pub schema_changes: Option<Vec<String>>,
+    /// The project's `release` (migrations) at its last head: how long it took on this
+    /// preview's data, which is the parent's (PlanetScale's deploy requests show this before a
+    /// merge: what's slow here locks production as long).
+    pub release: Option<ReleaseRun>,
     /// Kept past its TTL until then (`POST …/keep`); a landed or closed change still ends it.
     pub kept_until: Option<i64>,
     /// When it goes unless it's used or kept, said once that's close (a day, or a quarter of a
@@ -557,6 +561,16 @@ pub struct Resource {
     pub bytes: i64,
     /// What of the parent's data the preview's code gets.
     pub data: Data,
+}
+
+/// A run of the project's `release` on a preview's data.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ReleaseRun {
+    /// The head it ran at.
+    pub head: String,
+    pub ms: i64,
+    /// The run before's (the push before, or a reset's).
+    pub before_ms: Option<i64>,
 }
 
 /// What of a parent's data a branch hands the preview's code: said wherever the branch is, so

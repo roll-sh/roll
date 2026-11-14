@@ -222,6 +222,12 @@ export function PreviewSheet({
               <p className="text-[11.5px] text-subtle">No data branches.</p>
             )}
 
+            {p.release && (
+              <p className="mt-1.5 font-mono text-[11px] text-subtle tabular-nums" title="The project's release (migrations), run on this preview's data before its services">
+                release {duration(p.release.ms)}
+                {p.release.before_ms != null ? ` · ${thanMain(p.release.ms, p.release.before_ms, "the push before") ?? "as before"}` : ""}
+              </p>
+            )}
             {p.schema_changes && p.schema_changes.length > 0 && (
               <>
                 <Label>Schema changes</Label>

@@ -429,6 +429,14 @@ fn cls_words(c: f64) -> String {
     format!("{:.2}", c)
 }
 
+/// How long the release (migrations) took on the preview's data, against the run before when
+/// that differs past the noise.
+fn release_line(e: &crate::model::PreviewEnvironment) -> Option<String> {
+    let ms = u32::try_from(e.release_ms?).unwrap_or(u32::MAX);
+    let before = e.release_before_ms.and_then(|b| u32::try_from(b).ok()).and_then(|b| than_main(ms, b, "the push before"));
+    Some(format!("Its release (migrations) took {} on the preview's data{}.\n\n", ms_words(ms), before.map(|w| format!(", {w}")).unwrap_or_default()))
+}
+
 /// The `roll/speed` status, once the first page was timed under a budget.
 fn speed_status(e: &crate::model::PreviewEnvironment) -> Option<(&'static str, String)> {
     let (b, s) = (e.speed_budget.as_ref()?, e.page_speed.as_ref()?);
@@ -709,6 +717,9 @@ fn preview_comment(c: &Change) -> String {
             if let Some(lines) = e.schema_changes.as_ref().filter(|l| !l.is_empty()) {
                 out.push_str(&schema_block(lines));
             }
+            if let Some(line) = release_line(e) {
+                out.push_str(&line);
+            }
             out.push_str(&format!(
                 "Costs about ${:.2} a month asleep and ${:.3} an hour in use. It sleeps when nobody visits; the first request wakes it.\n",
                 e.sleeping_usd_month, e.active_usd_hour
@@ -773,6 +784,8 @@ mod preview_tests {
             github: PreviewGithub::default(),
             head: None,
             schema_changes: None,
+            release_ms: None,
+            release_before_ms: None,
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
@@ -861,6 +874,11 @@ mod preview_tests {
         assert!(checks.contains("first byte 40 ms. Core Web Vitals: LCP 1.3 s, CLS 0.12."), "{checks}");
         timed.speed_budget = Some(crate::model::PreviewSpeedBudget { load_ms: 0, bytes: 0, lcp_ms: 2500, cls: 0.1 });
         assert_eq!(speed_status(&timed), Some(("failure", "Loads in 1.2 s, 305 KB, LCP 1.3 s, CLS 0.12: over its budget (0.10 CLS)".into())));
+        // The release's time on the preview's data, against the run before past the noise.
+        (timed.release_ms, timed.release_before_ms) = (Some(2400), Some(1100));
+        assert_eq!(release_line(&timed).as_deref(), Some("Its release (migrations) took 2.4 s on the preview's data, 1.3 s slower than the push before.\n\n"));
+        timed.release_before_ms = Some(2350);
+        assert_eq!(release_line(&timed).as_deref(), Some("Its release (migrations) took 2.4 s on the preview's data.\n\n"));
         // A public preview's diff against main goes inside, as an image; anything else, not.
         timed.diff_url = Some("https://api.roll.sh/v1/previews/pv_1/screenshot.png?diff=base&exp=1&sig=ab".into());
         assert!(page_checks(&timed).unwrap().contains("![Where it differs from main](https://api.roll.sh/v1/previews/pv_1/screenshot.png?diff=base&exp=1&sig=ab)"));

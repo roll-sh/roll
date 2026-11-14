@@ -346,6 +346,9 @@ export interface PreviewEnvironment {
   head?: string;
   /** What the change did to the Postgres schema (`+ …`, `- …`). */
   schema_changes?: string[];
+  /** How long the release (migrations) took on the preview's data, and at the run before. */
+  release_ms?: number;
+  release_before_ms?: number;
   /** A public preview's screenshot behind a signed, expiring link. */
   screenshot_url?: string;
   /** When it goes (ms: its TTL, or a keep, running out), once that's a day away. */

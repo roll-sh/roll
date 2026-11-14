@@ -314,9 +314,11 @@ impl Engine {
         if let Some(release) = &s.release
             && self.store.released(&r.id)?.as_deref() != Some(r.build())
         {
+            let started = std::time::Instant::now();
             self.run_job(r, &s, &vars, "release", release).await?;
-            self.store.set_released(&r.id, r.build())?;
-            self.store.log(&r.id, "released")?;
+            let ms = started.elapsed().as_millis() as i64;
+            self.store.set_released(&r.id, r.build(), ms)?;
+            self.store.log(&r.id, &format!("released in {:.1} s", ms as f64 / 1000.0))?;
         }
         // 3d. What that did to the schema, once per head (best effort: a reviewer's aid). Only
         // after a seed or release could have changed it: reading the parent's starts its compute.

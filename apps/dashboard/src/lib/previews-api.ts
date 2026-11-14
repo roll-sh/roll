@@ -88,6 +88,8 @@ export interface Preview {
   cost: PreviewCost;
   /** What the change did to the Postgres schema (`+ …`, `- …`), once read at `head`. */
   schema_changes?: string[] | null;
+  /** The project's release (migrations) at its last head: how long it took on this preview's data, and the run before's. */
+  release?: { head: string; ms: number; before_ms: number | null } | null;
   /** Kept past its TTL until then (epoch ms). */
   kept_until?: number | null;
   /** When it goes (its TTL, or a keep, running out), once that's close (a day ahead). */

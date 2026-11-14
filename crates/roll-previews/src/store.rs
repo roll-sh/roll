@@ -467,6 +467,11 @@ impl Store {
                 db.add_column("previews", col, "INTEGER")?;
             }
         }
+        for col in ["release_ms", "prev_release_ms"] {
+            if !db.has_column("previews", col)? {
+                db.add_column("previews", col, "INTEGER")?;
+            }
+        }
         for col in ["released", "schema_head", "schema_changes", "runs"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "TEXT")?;
@@ -990,9 +995,10 @@ impl Store {
         Ok(self.db.read(|c| c.query_row("SELECT released FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
     }
 
-    pub fn set_released(&self, id: &str, head: &str) -> Result<()> {
+    /// The release ran at `head` in `ms`; the run before's time is kept to compare.
+    pub fn set_released(&self, id: &str, head: &str, ms: i64) -> Result<()> {
         self.db.write(|c| {
-            c.execute("UPDATE previews SET released = ? WHERE id = ?", [head, id])?;
+            c.execute("UPDATE previews SET released = ?, prev_release_ms = release_ms, release_ms = ? WHERE id = ?", params![head, ms, id])?;
             Ok::<_, Error>(())
         })
     }
@@ -1516,9 +1522,15 @@ impl Store {
         })
     }
 
-    fn schema_changes(&self, id: &str) -> Result<Option<Vec<String>>> {
-        let raw: Option<String> = self.db.read(|c| c.query_row("SELECT schema_changes FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten();
-        Ok(raw.and_then(|j| serde_json::from_str(&j).ok()))
+    /// What the release last did, in one read: the schema's changes and how long it took.
+    fn release_facts(&self, id: &str) -> Result<(Option<Vec<String>>, Option<crate::ReleaseRun>)> {
+        type Raw = (Option<String>, Option<String>, Option<i64>, Option<i64>);
+        let raw: Option<Raw> = self.db.read(|c| {
+            c.query_row("SELECT schema_changes, released, release_ms, prev_release_ms FROM previews WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()
+        })?;
+        let Some((changes, head, ms, before)) = raw else { return Ok((None, None)) };
+        let run = head.zip(ms).map(|(head, ms)| crate::ReleaseRun { head, ms, before_ms: before });
+        Ok((changes.and_then(|j| serde_json::from_str(&j).ok()), run))
     }
 
     /// A preview's access token, and whether its project requires it.
@@ -1725,7 +1737,7 @@ impl Store {
         };
         let url = services.first().map(|(s, _)| s.url.clone());
         let share_url = url.as_deref().map(share);
-        let schema_changes = self.schema_changes(&r.id)?;
+        let (schema_changes, release) = self.release_facts(&r.id)?;
         let kept_until = self.kept_until(&r.id)?;
         let goes_at = self.goes_at(&r.id)?;
         // The screenshot row in one read, without its images.
@@ -1795,6 +1807,7 @@ impl Store {
                 .collect(),
             cost: cost.rounded(),
             schema_changes,
+            release,
             kept_until,
             goes_at,
             earlier,

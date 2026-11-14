@@ -309,6 +309,7 @@ async fn the_release_runs_at_each_new_head_before_services_and_its_schema_change
     assert_eq!(v.state, State::Ready);
     assert_eq!(v.schema_changes.as_deref(), Some(&["+ column public.users.nick text".to_string()][..]));
     assert_eq!(e.code.last_report("chg_r").schema_changes, v.schema_changes, "the change (and its pull request) get them");
+    assert_eq!(v.release.as_ref().map(|x| (x.head.as_str(), x.before_ms)), Some(("cs_3a", None)), "how long it took is kept");
     // Before the services at that head; not again at the same head; again at a new one.
     e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
     e.engine.pass().await.unwrap();
@@ -317,6 +318,8 @@ async fn the_release_runs_at_each_new_head_before_services_and_its_schema_change
     let runs = e.apps.runs.lock().clone();
     let heads: Vec<_> = runs.iter().map(|(_, rev, deployed)| (rev.as_str(), *deployed)).collect();
     assert_eq!(heads, [("cs_3a", 0), ("cs_3a", 0), ("cs_3b", 0)], "{runs:?}");
+    let v = e.engine.store.view(e.engine.store.row(&p.id).unwrap()).unwrap();
+    assert!(v.release.is_some_and(|x| x.head == "cs_3b" && x.before_ms.is_some()), "a new head's run, with the one before's time");
 }
 
 #[tokio::test]

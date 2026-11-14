@@ -532,6 +532,8 @@ async fn blockers_keep_changes_out_of_the_queue() {
             github: Default::default(),
             head: None,
             schema_changes: None,
+            release_ms: None,
+            release_before_ms: None,
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
