@@ -30,6 +30,7 @@ pub mod links;
 pub mod names;
 mod oidc;
 mod read;
+pub mod reach;
 pub mod refs;
 mod notices;
 mod purge;

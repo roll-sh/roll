@@ -1324,3 +1324,23 @@ async fn a_key_is_found_in_every_project_the_caller_may_read() {
     let (_, mine) = api.req(Method::GET, "/v1/secrets/search?key=STRIPE_KEY", None, t["token"].as_str()).await;
     assert_eq!(mine.as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn reach_names_who_and_what_can_read_a_folder() {
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_live_1").await;
+    let deploy = api.ok(Method::POST, "/tokens", Some(json!({ "name": "deploy", "environments": ["production"], "actions": ["read", "reveal"] }))).await;
+    api.ok(Method::POST, "/tokens", Some(json!({ "name": "staging-ci", "environments": ["staging"], "actions": ["read", "reveal"] }))).await;
+    api.ok(Method::PUT, "/environments/staging/imports?path=/", Some(json!([{ "environment": "production", "path": "/" }]))).await;
+    api.req(Method::GET, "/environments/production/values", None, deploy["token"].as_str()).await;
+    let r = api.ok(Method::GET, "/environments/production/reach?path=/&key=STRIPE_KEY", None).await;
+    let names = |k: &str| r[k].as_array().unwrap().iter().map(|h| h["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    // The production token reaches it (with what it may do), staging's doesn't.
+    assert_eq!(names("tokens"), ["deploy"]);
+    assert_eq!(r["tokens"][0]["actions"], json!(["read", "reveal"]));
+    assert_eq!((r["untrusted"].as_bool(), r["imported_by"].clone()), (Some(true), json!(["staging:/"])));
+    assert_eq!(r["readers"][0]["actor"].as_str().map(|a| a.starts_with("token:")), Some(true), "{r}");
+    // It lists the project's credentials: a project admin's.
+    let (s, _) = api.req(Method::GET, "/environments/production/reach", None, deploy["token"].as_str()).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}

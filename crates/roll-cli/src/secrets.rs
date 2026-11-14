@@ -224,6 +224,9 @@ pub enum Secrets {
         #[arg(long, conflicts_with = "paths")]
         staged: bool,
     },
+    /// Who and what can read this folder's values (or one key's): tokens and identities that reach
+    /// it, untrusted code, syncs, shares and imports, and who read it in 30 days. A project admin's.
+    Reach { key: Option<String> },
     /// Print the resolved values: dotenv, json, shell, yaml, docker (`--env-file`) or kubernetes (a Secret manifest).
     Export {
         #[arg(long, default_value = "dotenv")]
@@ -1042,6 +1045,38 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 bail!("{what} in {files} {}: move {it} out of the code (roll run puts values in the environment)", if files == 1 { "file" } else { "files" });
             }
             eprintln!("No values of this project in {} {}", files.len(), if files.len() == 1 { "file" } else { "files" });
+        }
+        Secrets::Reach { key } => {
+            let mut url = format!("{}/reach?{}", c.env(&c.at.env), c.q());
+            if let Some(k) = &key {
+                url.push_str(&format!("&key={}", enc(k)));
+            }
+            let v = c.call(Method::GET, &url, None).await?;
+            if json_out {
+                return print(&v);
+            }
+            let what = key.as_deref().map(|k| format!("{k} in ")).unwrap_or_default();
+            println!("{what}{}:{}", c.at.env, c.at.path);
+            println!("  {}", if v["untrusted"] == true { "untrusted code (checks, sandboxes, previews) can read it: the environment isn't protected" } else { "protected: untrusted code never reads it" });
+            for (title, list) in [("tokens", &v["tokens"]), ("identities", &v["identities"])] {
+                for h in list.as_array().into_iter().flatten() {
+                    let actions = h["actions"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_default();
+                    let used = h["last_used_at"].as_i64().map(|t| format!("used {}", ago(t))).unwrap_or_else(|| "never used".into());
+                    println!("  {:<10} {:<32} {actions:<22} {used}", &title[..title.len() - 1], s(&h["name"]));
+                }
+            }
+            for sy in v["syncs"].as_array().into_iter().flatten() {
+                println!("  sync       {} {}", s(&sy["kind"]), sy["target"]);
+            }
+            for p in v["projects"].as_array().into_iter().flatten() {
+                println!("  shared     with project {}", s(p));
+            }
+            for f in v["imported_by"].as_array().into_iter().flatten() {
+                println!("  imported   by {}", s(f));
+            }
+            for r in v["readers"].as_array().into_iter().flatten() {
+                println!("  read       by {:<32} {} reads, last {}", s(&r["actor"]), r["reads"], ago(r["last_at"].as_i64().unwrap_or_default()));
+            }
         }
         Secrets::Export { format, name, namespace, change, at } => {
             let at = at.as_deref().map(when).transpose()?;
