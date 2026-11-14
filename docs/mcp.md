@@ -440,16 +440,17 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); open registration stores
-nothing (a client's id is the client, signed; kept once a person consents, else good for a day), so
-a flood has nothing to fill; the twelfth review's contained findings (CSV cells all quoted with
-formulas defused after in-cell separators too; a completion never waits on or uses an open approval;
-registration's rate map swept once a minute and bounded; the token-page list read from the caller's
-address and off the async threads; stored grants honour the idle policy; client names as consent
-shows them, no invisible characters); a person's own token's page tested to show only their reach
-(#25); `secrets_list_ssh_cas` (secrets #45); open client registration bounded (20 a minute a
-network; a flood never pushes out a client a person is connecting); `secrets_list_cas` (secrets
-#44); the prefix check skips public routes (no grant classifies what anyone may call);
+revoked as leaked, about to expire; only their own, never a secret); sensitive secrets explained to
+agents (`secrets_reveal` and `roll://guide`: a 403 and `withheld` are expected; secrets #46); open
+registration stores nothing (a client's id is the client, signed; kept once a person consents, else
+good for a day), so a flood has nothing to fill; the twelfth review's contained findings (CSV cells
+all quoted with formulas defused after in-cell separators too; a completion never waits on or uses
+an open approval; registration's rate map swept once a minute and bounded; the token-page list read
+from the caller's address and off the async threads; stored grants honour the idle policy; client
+names as consent shows them, no invisible characters); a person's own token's page tested to show
+only their reach (#25); `secrets_list_ssh_cas` (secrets #45); open client registration bounded (20 a
+minute a network; a flood never pushes out a client a person is connecting); `secrets_list_cas`
+(secrets #44); the prefix check skips public routes (no grant classifies what anyone may call);
 `secrets_list_cloud_accounts` (secrets #43); the audit log as CSV (the audit page, `roll mcp audit
 --format csv`; formula-safe cells); what an agent sees, on the token page (`GET
 /v1/access/tokens/{id}/tools`: the tools and prompts a token is offered and what the list costs an
