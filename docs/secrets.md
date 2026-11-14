@@ -646,8 +646,12 @@ and a redirect to another server (Azure's gateway) is refused, since roll connec
 address it checked. Rotation is `ALTER LOGIN [name] WITH PASSWORD` on two SQL logins that take
 turns; a dynamic login is `CREATE LOGIN`, then `CREATE USER … FOR LOGIN` and `ALTER ROLE <group> ADD
 MEMBER` in the URL's database (the group is a database role). It has no `VALID UNTIL` either:
-ending a lease kills the login's sessions where the admin may (`ALTER ANY CONNECTION`), then drops
-the user and the login. A conversation reads at most 4 MiB from the server, on top of the
+ending a lease disables the login first (that works while it's connected, so nothing can log in
+with it even if a lingering session makes the drop fail and the sweeper retries), kills its
+sessions, then drops the user and the login. Registering checks the admin login's server
+permissions: `ALTER ANY LOGIN`, and for dynamic logins `VIEW SERVER STATE` and `ALTER ANY
+CONNECTION`. roll's passwords mix upper- and lowercase letters and digits, which SQL Server's
+password policy requires (a lowercase-and-digits one is refused, as checked live). A conversation reads at most 4 MiB from the server, on top of the
 driver's own bounds. Checked against SQL Server 2022 in Docker with a certificate from a private CA:
 rotation (the rotated login signs in), a dynamic login that signs in with the group's rights and
 can't once dropped, and an untrusted certificate refused. With TLS 1.3 enabled on the server as

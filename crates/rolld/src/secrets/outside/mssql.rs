@@ -165,6 +165,18 @@ async fn exists(c: &mut Conn, sql: &str, name: &str) -> Result<bool, String> {
 }
 
 pub(super) async fn check(c: &mut Conn, roles: &[String], group: Option<&str>) -> Result<(), String> {
+    // What the admin login needs: to change passwords and make logins, and, for dynamic logins,
+    // to see and end their sessions when a lease ends (or a dropped login's session lingers).
+    let mut needs = vec!["ALTER ANY LOGIN"];
+    if group.is_some() {
+        needs.extend(["VIEW SERVER STATE", "ALTER ANY CONNECTION"]);
+    }
+    for p in needs {
+        let row = c.query("SELECT HAS_PERMS_BY_NAME(NULL, NULL, @P1)", &[&p]).await.map_err(|e| error(&e))?.into_row().await.map_err(|e| error(&e))?;
+        if row.and_then(|r| r.get::<i32, _>(0)) != Some(1) {
+            return Err(format!("the admin login needs {p} on the server"));
+        }
+    }
     for r in roles {
         if !exists(c, "SELECT 1 FROM sys.sql_logins WHERE name = @P1 AND is_disabled = 0", r).await? {
             return Err(format!("there's no SQL login {r} that can log in"));
@@ -199,7 +211,13 @@ pub(super) async fn create_login(c: &mut Conn, name: &str, password: &str, group
 
 pub(super) async fn drop_login(c: &mut Conn, name: &str) -> Result<(), String> {
     let who = ident(name)?;
-    // Its sessions end where the admin may (ALTER ANY CONNECTION); dropping the login blocks new ones.
+    let exists_login = exists(c, "SELECT 1 FROM sys.server_principals WHERE name = @P1", name).await?;
+    // Disabled first: that works while it's connected and stops new sessions at once, so a drop
+    // that fails (a session that reconnected in between) leaves nothing that can log in.
+    if exists_login {
+        exec(c, &format!("ALTER LOGIN {who} DISABLE")).await?;
+    }
+    // Then its sessions end (VIEW SERVER STATE and ALTER ANY CONNECTION, checked at registration).
     let ids: Vec<i16> = match c.query("SELECT session_id FROM sys.dm_exec_sessions WHERE login_name = @P1", &[&name]).await {
         Ok(s) => s.into_first_result().await.unwrap_or_default().iter().filter_map(|r| r.get::<i16, _>(0)).collect(),
         Err(_) => vec![],
@@ -208,7 +226,7 @@ pub(super) async fn drop_login(c: &mut Conn, name: &str) -> Result<(), String> {
         let _ = exec(c, &format!("KILL {id}")).await;
     }
     exec(c, &format!("DROP USER IF EXISTS {who}")).await?;
-    if exists(c, "SELECT 1 FROM sys.server_principals WHERE name = @P1", name).await? {
+    if exists_login {
         exec(c, &format!("DROP LOGIN {who}")).await?;
     }
     Ok(())
