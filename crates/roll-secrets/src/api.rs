@@ -452,11 +452,12 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
         let (n, v) = blocking(s, move |s| s.values_at(&project, &env, &path_of(&q), seq, at, &c)).await?;
         (v, Some(n), None)
     } else {
-        // The folder's digest (`…/digest`), taken just before the read: a watch compares from
-        // what it read, and a write landing after this is a change to it.
+        // With `digest=1` (a watch): the folder's digest (`…/digest`), taken just before the read,
+        // so a write landing after it is a change. Asked for, since it costs about a read.
+        let want = flag(&q, "digest", false);
         blocking(s, move |s| {
             let path = path_of(&q);
-            let digest = s.digest(&project, &env, &path, &c).ok();
+            let digest = if want { s.digest(&project, &env, &path, &c).ok() } else { None };
             s.values(&project, &env, &path, resolve, None, &c).map(|v| (v, None, digest))
         })
         .await?

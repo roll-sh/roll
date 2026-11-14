@@ -99,7 +99,7 @@ export type Problem = { key: string; problem: string };
 /** `leases`: ids of dynamic credentials issued. */
 /** `dynamic`: the keys holding a dynamic link's short-lived credential. */
 /** `dynamic`: keys holding a dynamic link's short-lived credential; `linked`: keys whose value comes from any link. */
-/** `digest`: the folder's `…/digest`, taken just before this read (a watch compares from it). */
+/** `digest` (with `?digest=1`): the folder's `…/digest`, taken just before this read (a watch compares from it). */
 export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; digest?: string };
 export type CellSource = "own" | "import" | "base";
 /** `misfit`: the typed-key rule the stored value breaks (shown only to whoever may reveal it). */

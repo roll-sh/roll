@@ -969,7 +969,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             } else {
                 std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?
             };
-            let (text, leases, follow) = render_env(&c, &env, &file, &tpl).await?;
+            let (text, leases, follow) = render_env(&c, &env, &file, &tpl, watch && out.is_some()).await?;
             let Some(out) = out else {
                 print!("{text}");
                 return Ok(());
@@ -2050,14 +2050,15 @@ async fn setup_dir(api: &Api, args: &AtArgs, show: bool, clear: bool) -> anyhow:
 }
 
 /// The template filled from the environment, and the leases of the dynamic credentials in it.
-async fn render_env(c: &Client<'_>, env: &str, file: &str, tpl: &str) -> anyhow::Result<(String, Vec<String>, Digests)> {
-    let v = c.call(Method::GET, &format!("{env}/values?{}", c.q()), None).await?;
+/// `watch`: the answers carry their digests (`digest=1`), for a watch to compare from.
+async fn render_env(c: &Client<'_>, env: &str, file: &str, tpl: &str, watch: bool) -> anyhow::Result<(String, Vec<String>, Digests)> {
+    let v = c.call(Method::GET, &format!("{env}/values?{}{}", c.q(), if watch { "&digest=1" } else { "" }), None).await?;
     let unresolved: std::collections::BTreeMap<String, String> = v["problems"].as_array().into_iter().flatten().map(|p| (s(&p["key"]), s(&p["problem"]))).collect();
     // `roll://…` references are resolved where they stand; `${KEY}` is filled only around them,
     // so neither kind of value is read again as a template.
     let spans = crate::secret_refs::find_in_text(tpl);
     let refs: Vec<crate::secret_refs::Ref> = spans.iter().map(|(a, b)| crate::secret_refs::Ref::parse(&tpl[*a..*b])).filter_map(Result::transpose).collect::<anyhow::Result<_>>()?;
-    let (resolved, mut leases, mut follow) = resolve_refs(c, &refs).await?;
+    let (resolved, mut leases, mut follow) = resolve_refs(c, &refs, watch).await?;
     let fill = |part: &str| {
         render(part, |k| v["values"][k].as_str().map(String::from)).map_err(|missing| {
             let why: Vec<String> = missing.iter().map(|k| unresolved.get(k).map_or_else(|| format!("{k} isn't set in {}:{}", c.at.env, c.at.path), |p| format!("{k}: {p}"))).collect();
@@ -2130,7 +2131,7 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
                 }
                 let which = moved(c, &last, &now);
                 last = now.clone();
-                let (next, next_leases, next_follow) = match render_env(c, env, file, tpl).await {
+                let (next, next_leases, next_follow) = match render_env(c, env, file, tpl, true).await {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("roll secrets render: {which} changed, but {e}; {out} stays as it is");
@@ -2386,7 +2387,8 @@ fn render(tpl: &str, get: impl Fn(&str) -> Option<String>) -> Result<String, Vec
 /// The variables `roll run` adds: the environment's resolved values, minus the ones the shell
 /// already sets (unless `--override`). Fails on a problem unless `--allow-unresolved`.
 async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(String, String)>, Vec<String>, Digests)> {
-    let v = c.call(Method::GET, &format!("{}/values?{}", c.env(&at.env), c.q()), None).await?;
+    let digest = if r.watch { "&digest=1" } else { "" };
+    let v = c.call(Method::GET, &format!("{}/values?{}{digest}", c.env(&at.env), c.q()), None).await?;
     let problems: Vec<String> = v["problems"].as_array().into_iter().flatten().map(|p| format!("{}: {}", s(&p["key"]), s(&p["problem"]))).collect();
     if !problems.is_empty() && !r.allow_unresolved {
         bail!("{} of {}:{} didn't resolve (pass --allow-unresolved to run anyway):\n  {}", problems.len(), at.env, at.path, problems.join("\n  "));
@@ -2399,7 +2401,7 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(Strin
         let text = std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
         let entries = crate::secret_refs::parse_env_file(&text, file)?;
         let refs: Vec<crate::secret_refs::Ref> = entries.iter().filter_map(|(_, v)| crate::secret_refs::Ref::parse(v).transpose()).collect::<anyhow::Result<_>>()?;
-        let (resolved, more_leases, more_follow) = resolve_refs(c, &refs).await?;
+        let (resolved, more_leases, more_follow) = resolve_refs(c, &refs, r.watch).await?;
         leases.extend(more_leases);
         follow.extend(more_follow);
         for (k, raw) in entries {
@@ -2418,7 +2420,7 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(Strin
 /// Resolve `roll://` references: one read per project, environment and folder. Their values,
 /// the leases those hold (each as its renew route, at its own project), and the digests to follow
 /// (`--watch`).
-async fn resolve_refs(c: &Client<'_>, refs: &[crate::secret_refs::Ref]) -> anyhow::Result<(std::collections::HashMap<crate::secret_refs::Ref, String>, Vec<String>, Digests)> {
+async fn resolve_refs(c: &Client<'_>, refs: &[crate::secret_refs::Ref], watch: bool) -> anyhow::Result<(std::collections::HashMap<crate::secret_refs::Ref, String>, Vec<String>, Digests)> {
     let mut groups: std::collections::BTreeMap<(Option<String>, String, String), Vec<&crate::secret_refs::Ref>> = Default::default();
     for rf in refs {
         groups.entry((rf.project.clone(), rf.env.clone(), rf.path.clone())).or_default().push(rf);
@@ -2430,7 +2432,7 @@ async fn resolve_refs(c: &Client<'_>, refs: &[crate::secret_refs::Ref]) -> anyho
             Some(p) => project(c.api, Some(p)).await?,
         };
         let base = format!("/v1/secrets/projects/{}/environments/{}", enc(&id), enc(&env));
-        let v = c.call(Method::GET, &format!("{base}/values?path={}", enc(&path)), None).await.with_context(|| format!("reading roll://{}{env}{}", named.as_ref().map(|p| format!("{p}@")).unwrap_or_default(), if path == "/" { String::new() } else { path.clone() }))?;
+        let v = c.call(Method::GET, &format!("{base}/values?path={}{}", enc(&path), if watch { "&digest=1" } else { "" }), None).await.with_context(|| format!("reading roll://{}{env}{}", named.as_ref().map(|p| format!("{p}@")).unwrap_or_default(), if path == "/" { String::new() } else { path.clone() }))?;
         for rf in group {
             let value = v["values"][&rf.key].as_str().ok_or_else(|| {
                 let problem = v["problems"].as_array().into_iter().flatten().find(|p| p["key"] == rf.key.as_str()).map(|p| s(&p["problem"]).to_string());
