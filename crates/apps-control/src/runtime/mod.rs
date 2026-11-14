@@ -168,6 +168,11 @@ pub trait Runtime: Send + Sync {
     /// Forget a service's registry login wherever the runtime keeps a copy (Fargate: its Secrets
     /// Manager secret): its login was removed, or the service deleted.
     async fn drop_registry_login(&self, _service: &str) {}
+    /// Everything the runtime keeps for a service beyond its instances (its registry login, its
+    /// deployments' values), the service being deleted.
+    async fn forget_service(&self, service: &str) {
+        self.drop_registry_login(service).await;
+    }
     /// Clean up what a node that died left behind outside its instances (Fargate: environment
     /// files no task will read). Every ten minutes, on every node (it only deletes).
     async fn sweep(&self) {}

@@ -642,7 +642,7 @@ impl Apps {
         for name in self.deps.runtime.list(Some(id)).await {
             self.deps.runtime.remove(&name).await;
         }
-        self.deps.runtime.drop_registry_login(id).await;
+        self.deps.runtime.forget_service(id).await;
         // Links to it from the project's other services go (their next deploy drops the URLs).
         let sid = id.to_string();
         if self.db(move |s| s.delete_links_to(LinkKind::Service, &sid)).await? > 0 {

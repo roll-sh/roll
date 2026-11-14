@@ -214,11 +214,20 @@ async fn aws(State(f): State<Fake>, method: Method, uri: axum::http::Uri, header
             f.aws.lock().secrets.insert(s("Name"), s("SecretString"));
             ok(json!({ "ARN": format!("arn:aws:secretsmanager:us-east-1:1:secret:{}-AbCdEf", s("Name")), "Name": s("Name") }))
         }
-        // One left by a node that stopped mid-build three days ago, one of a build going now.
-        "ListSecrets" => ok(json!({ "SecretList": [
-            { "Name": "roll-apps/builds/left-by-a-crash", "CreatedDate": 1_000_000_000.0 },
-            { "Name": "roll-apps/builds/going-now", "CreatedDate": (code_sql::now_ms() / 1000) as f64 },
-        ] })),
+        // One left by a node that stopped mid-build three days ago, one of a build going now,
+        // and those made here.
+        "ListSecrets" => {
+            let mut list = vec![
+                json!({ "Name": "roll-apps/builds/left-by-a-crash", "CreatedDate": 1_000_000_000.0 }),
+                json!({ "Name": "roll-apps/builds/going-now", "CreatedDate": (code_sql::now_ms() / 1000) as f64 }),
+            ];
+            list.extend(f.aws.lock().secrets.keys().filter(|k| !k.starts_with("roll-apps/builds/")).map(|k| json!({ "Name": k, "CreatedDate": (code_sql::now_ms() / 1000) as f64 })));
+            ok(json!({ "SecretList": list }))
+        }
+        "PutSecretValue" => {
+            f.aws.lock().secrets.insert(s("SecretId"), s("SecretString"));
+            ok(json!({ "ARN": format!("arn:aws:secretsmanager:us-east-1:1:secret:{}-AbCdEf", s("SecretId")), "Name": s("SecretId") }))
+        }
         "DeleteSecret" => {
             f.aws.lock().secrets.remove(&s("SecretId"));
             ok(json!({ "Name": s("SecretId"), "DeletionDate": 1.0 }))
@@ -287,6 +296,19 @@ async fn execute(f: Fake, arn: String, n: u32, req: Value) {
             let (k, v) = line.split_once('=').unwrap();
             env.insert(k.to_string(), v.to_string());
         }
+    }
+    // `secrets` (a deployment's multi-line values): `<secret arn>:<key>::`, read as ECS does.
+    for s in def["containerDefinitions"][0]["secrets"].as_array().cloned().unwrap_or_default() {
+        let from = s["valueFrom"].as_str().unwrap().strip_suffix("::").unwrap();
+        let (secret, key) = from.rsplit_once(':').unwrap();
+        let name = secret.strip_prefix("arn:aws:secretsmanager:us-east-1:1:secret:").unwrap().strip_suffix("-AbCdEf").unwrap();
+        let held = f.aws.lock().secrets.get(name).cloned();
+        let Some(json) = held else {
+            set(&f, &arn, |t| stop(t, "TaskFailedToStart", "ResourceInitializationError: unable to pull secrets"));
+            return;
+        };
+        let v: Value = serde_json::from_str(&json).unwrap();
+        env.insert(s["name"].as_str().unwrap().to_string(), v[key].as_str().unwrap().to_string());
     }
     f.aws.lock().envs.insert(arn.clone(), env.clone());
     let id = arn.rsplit('/').next().unwrap().to_string();
@@ -744,4 +766,33 @@ async fn an_environment_file_a_dead_node_left_is_swept() {
     w.apps.deps.runtime.sweep().await;
     assert_eq!(w.fake.keys("apps/env/"), Vec::<String>::new());
     assert_eq!(w.fake.keys("apps/other/"), vec!["apps/other/keep.txt".to_string()], "only environment files");
+}
+
+/// A value over several lines (a PEM key) reaches the task through its deployment's secret (an
+/// ECS environment file holds one line each), never in a request; the secret goes with the
+/// service.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_multi_line_value_reaches_the_task_through_its_deployments_secret() {
+    let w = world().await;
+    let pem = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY-----";
+    let (st, svc) = call(
+        &w.api,
+        "POST",
+        "/v1/apps/services",
+        Some(json!({ "project": w.project, "name": "signer", "source": {"kind": "image", "image": "public/api:1"}, "run": {"port": 8080, "min_instances": 1}, "variables": {"SIGNING_KEY": pem, "MODE": "live"} })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d = settled(&w, &id, svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let envs: Vec<BTreeMap<String, String>> = w.fake.aws.lock().envs.values().cloned().collect();
+    assert!(envs.iter().any(|e| e.get("SIGNING_KEY").map(String::as_str) == Some(pem) && e.get("MODE").map(String::as_str) == Some("live")), "{envs:?}");
+    for op in ["RegisterTaskDefinition", "RunTask"] {
+        assert!(!w.fake.calls(op).iter().any(|c| c.to_string().contains("MIIEvQIBADANBg")), "the value is in {op}");
+    }
+    let short = id.trim_start_matches("svc_");
+    assert!(w.fake.aws.lock().secrets.keys().any(|k| k.starts_with(&format!("roll-apps/vars/{short}-"))));
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
+    assert!(!w.fake.aws.lock().secrets.keys().any(|k| k.starts_with(&format!("roll-apps/vars/{short}-"))), "it goes with the service");
 }

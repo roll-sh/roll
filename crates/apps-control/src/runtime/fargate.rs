@@ -40,7 +40,7 @@ use async_trait::async_trait;
 use aws_sdk_ecs::types::{
     AssignPublicIp, AwsVpcConfiguration, CapacityProviderStrategyItem, Compatibility, Container, ContainerDefinition, ContainerOverride, CpuArchitecture,
     DesiredStatus, EnvironmentFile, EnvironmentFileType, LinuxParameters, LogConfiguration, LogDriver, NetworkConfiguration, NetworkMode, OsFamily,
-    PortMapping, RuntimePlatform, Tag, Task, TaskDefinitionStatus, TaskField, TaskOverride, TransportProtocol,
+    PortMapping, RuntimePlatform, Secret, Tag, Task, TaskDefinitionStatus, TaskField, TaskOverride, TransportProtocol,
 };
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
@@ -86,17 +86,35 @@ pub fn fargate_size(cpus: f64, memory_mb: u32) -> (u32, u32) {
 }
 
 /// The variables as an ECS environment file: `NAME=value` lines, values verbatim.
+/// The one-line values as an ECS environment file (one line per variable); those over several
+/// lines come from the deployment's secret instead ([`multi_line`]).
 fn env_file(vars: &[(String, String)]) -> anyhow::Result<String> {
     let mut out = String::new();
     for (k, v) in vars {
         anyhow::ensure!(roll_fetch::valid_name(k), "variable {k:?} isn't a name an environment can hold");
-        if v.contains(['\n', '\r', '\0']) {
-            bail!("variable {k} has a line break, and on Fargate a value is one line (an ECS environment file)");
+        anyhow::ensure!(!v.contains('\0'), "variable {k} holds a NUL");
+        if !v.contains(['\n', '\r']) {
+            out.push_str(&format!("{k}={v}\n"));
         }
-        out.push_str(&format!("{k}={v}\n"));
     }
     Ok(out)
 }
+
+/// The values over several lines (a PEM key, a JSON credential), sorted by name.
+fn multi_line(vars: &[(String, String)]) -> Vec<(String, String)> {
+    let mut m: Vec<(String, String)> = vars.iter().filter(|(_, v)| v.contains(['\n', '\r'])).cloned().collect();
+    m.sort();
+    m.dedup_by(|a, b| a.0 == b.0);
+    m
+}
+
+/// The Secrets Manager secret that holds a deployment's multi-line values (JSON).
+fn vars_secret_name(service: &str, deployment: &str) -> String {
+    format!("{VARS_PREFIX}{}-{}", short(service), deployment.strip_prefix("dep_").unwrap_or(deployment))
+}
+
+/// Where deployments' multi-line values are kept.
+const VARS_PREFIX: &str = "roll-apps/vars/";
 
 fn short(service: &str) -> &str {
     service.strip_prefix("svc_").unwrap_or(service)
@@ -200,6 +218,38 @@ impl Fargate {
         }))
     }
 
+    /// A deployment's multi-line values as its Secrets Manager secret (`roll-apps/vars/<service>-
+    /// <deployment>`, JSON), made or brought up to date: its ARN.
+    async fn vars_secret(&self, spec: &InstanceSpec, multi: &[(String, String)]) -> anyhow::Result<String> {
+        let name = vars_secret_name(&spec.service, &spec.deployment);
+        let value = serde_json::Value::Object(multi.iter().map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone()))).collect()).to_string();
+        let made = self
+            .secrets
+            .create_secret()
+            .name(&name)
+            .description("roll apps: a deployment's values over several lines")
+            .secret_string(&value)
+            .tags(aws_sdk_secretsmanager::types::Tag::builder().key(LABEL).value(&spec.service).build())
+            .send()
+            .await;
+        match made {
+            Ok(out) => out.arn.context("CreateSecret returned no ARN"),
+            Err(e) if e.as_service_error().is_some_and(|s| s.is_resource_exists_exception()) => {
+                let out = self.secrets.put_secret_value().secret_id(&name).secret_string(&value).send().await.context("PutSecretValue")?;
+                out.arn.context("PutSecretValue returned no ARN")
+            }
+            Err(e) => Err(anyhow::anyhow!("{}", aws_sdk_secretsmanager::error::DisplayErrorContext(e))).context("CreateSecret"),
+        }
+    }
+
+    async fn delete_secret(&self, name: &str) {
+        match self.secrets.delete_secret().secret_id(name).force_delete_without_recovery(true).send().await {
+            Ok(_) => {}
+            Err(e) if e.as_service_error().is_some_and(|s| s.is_resource_not_found_exception()) => {}
+            Err(e) => warn!(secret = %name, error = %aws_sdk_secretsmanager::error::DisplayErrorContext(e), "apps: deleting a secret"),
+        }
+    }
+
     /// The service's registry login as a Secrets Manager secret
     /// (`roll-apps/registry/<service>`, `{"username", "password"}` as ECS reads it), made or
     /// brought up to date: its ARN.
@@ -236,7 +286,15 @@ impl Fargate {
             Some(login) => Some(self.registry_secret(&spec.service, login).await?),
             None => None,
         };
-        let key = format!("{}\n{cpu}\n{memory}\n{:?}\n{shell}\n{}\n{:?}\n{}\n{}\n{}\n{}\n{:?}\n{:?}", spec.image, spec.port, c.execution_role, c.task_role, c.log_group, c.arch, c.guard_image, c.port, spec.idle_stop_s, credentials);
+        // Values over several lines (an environment file holds one line each): the deployment's
+        // secret, each named in the task definition (ECS reads them with the execution role).
+        let multi = multi_line(&spec.vars);
+        let vars_secret = match multi.is_empty() {
+            true => None,
+            false => Some(self.vars_secret(spec, &multi).await?),
+        };
+        let names: Vec<&str> = multi.iter().map(|(k, _)| k.as_str()).collect();
+        let key = format!("{}\n{cpu}\n{memory}\n{:?}\n{shell}\n{}\n{:?}\n{}\n{}\n{}\n{}\n{:?}\n{:?}\n{vars_secret:?}\n{names:?}", spec.image, spec.port, c.execution_role, c.task_role, c.log_group, c.arch, c.guard_image, c.port, spec.idle_stop_s, credentials);
         let hash = hex::encode(Sha256::digest(key));
         let family = format!("{PREFIX}{}-{}", short(&spec.service), &hash[..16]);
         let mut defs = self.defs.lock().await;
@@ -273,6 +331,11 @@ impl Fargate {
                 }
                 if let Some(arn) = &credentials {
                     app = app.repository_credentials(aws_sdk_ecs::types::RepositoryCredentials::builder().credentials_parameter(arn).build()?);
+                }
+                if let Some(arn) = &vars_secret {
+                    for n in &names {
+                        app = app.secrets(Secret::builder().name(*n).value_from(format!("{arn}:{n}::")).build()?);
+                    }
                 }
                 // Nodes reach a web task only on the one port the isolated subnets admit: roll's
                 // guard proxy forwards it to the app's own port (containers of a task share
@@ -609,7 +672,15 @@ impl Runtime for Fargate {
 
     async fn remove(&self, name: &str) {
         let _ = self.stop(name, Duration::ZERO).await;
-        self.instances.lock().remove(name);
+        let gone = self.instances.lock().remove(name);
+        // Its deployment's multi-line values, once no instance of it is left here (a rollback
+        // writes them again).
+        if let Some(i) = gone
+            && !multi_line(&i.spec.vars).is_empty()
+            && !self.instances.lock().values().any(|o| o.spec.service == i.spec.service && o.spec.deployment == i.spec.deployment)
+        {
+            self.delete_secret(&vars_secret_name(&i.spec.service, &i.spec.deployment)).await;
+        }
         let found = self.found.lock().remove(name).unwrap_or_default();
         for arn in found {
             self.stop_task(&arn, "roll: not one of this node's instances").await;
@@ -679,11 +750,21 @@ impl Runtime for Fargate {
     }
 
     async fn drop_registry_login(&self, service: &str) {
-        let name = format!("roll-apps/registry/{}", short(service));
-        match self.secrets.delete_secret().secret_id(&name).force_delete_without_recovery(true).send().await {
-            Ok(_) => {}
-            Err(e) if e.as_service_error().is_some_and(|s| s.is_resource_not_found_exception()) => {}
-            Err(e) => warn!(secret = %name, error = %aws_sdk_secretsmanager::error::DisplayErrorContext(e), "apps: deleting a service's registry login"),
+        self.delete_secret(&format!("roll-apps/registry/{}", short(service))).await;
+    }
+
+    /// Its registry login and every deployment's multi-line values.
+    async fn forget_service(&self, service: &str) {
+        self.drop_registry_login(service).await;
+        let prefix = format!("{VARS_PREFIX}{}-", short(service));
+        let filter = aws_sdk_secretsmanager::types::Filter::builder().key(aws_sdk_secretsmanager::types::FilterNameStringType::Name).values(&prefix).build();
+        let mut pages = self.secrets.list_secrets().filters(filter).into_paginator().send();
+        let mut names = Vec::new();
+        while let Some(Ok(page)) = pages.next().await {
+            names.extend(page.secret_list().iter().filter_map(|s| s.name()).filter(|n| n.starts_with(&prefix)).map(str::to_string));
+        }
+        for n in names {
+            self.delete_secret(&n).await;
         }
     }
 
@@ -779,8 +860,12 @@ mod tests {
         assert_eq!(fargate_size(1.0, 3000), (1024, 3072));
         assert_eq!(fargate_size(8.0, 16384), (8192, 16384));
         assert_eq!(env_file(&[("A".into(), "x=y z".into())]).unwrap(), "A=x=y z\n");
-        let err = env_file(&[("KEY".into(), "-----BEGIN-----\nabc".into())]).unwrap_err().to_string();
-        assert!(err.contains("KEY") && !err.contains("abc"), "{err}");
+        // A value over several lines isn't in the file: it's the deployment's secret's.
+        let vars = [("KEY".to_string(), "-----BEGIN-----\nabc".to_string()), ("A".to_string(), "b".to_string())];
+        assert_eq!(env_file(&vars).unwrap(), "A=b\n");
+        assert_eq!(multi_line(&vars), [("KEY".to_string(), "-----BEGIN-----\nabc".to_string())]);
+        let err = env_file(&[("K".into(), "a\0b".into())]).unwrap_err().to_string();
+        assert!(err.contains("K") && !err.contains("a\0b"), "{err}");
         assert!(env_file(&[("1X".into(), "y".into())]).is_err());
         assert_eq!(started_by("svc_abcdefghijkl"), "roll-apps-abcdefghijkl");
     }
