@@ -200,6 +200,7 @@ async fn world_full(setup: impl FnOnce(&mut AppsConfig), objects: bool, deps_set
     cfg.live.worker_grace = Duration::from_millis(20);
     cfg.live.probe_every = Duration::from_millis(2);
     cfg.live.drain = Duration::from_millis(50);
+    cfg.supersede_every = Duration::from_millis(50);
     cfg.allow_private = true;
     setup(&mut cfg);
     let mut deps = Deps {
@@ -402,6 +403,43 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     }
     assert!(seen.iter().any(|r| r == "d4d4d4d4d4d4") && !seen.iter().any(|r| r == "c3c3c3c3c3c3"), "{seen:?}");
     assert_eq!(count().await, before + 1);
+}
+
+/// A newer push stops a push's build that's still running (superseded, its minutes saved); the
+/// newer one goes live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_newer_push_stops_the_build_of_an_older_one() {
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let pkg = ("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#);
+    w.code.push("b2b2b2b2b2b2", "slow", &[pkg, ("SLOW_BUILD", "30000")]);
+    let deploys = |w: &World| {
+        let (api, id) = (w.api.clone(), id.clone());
+        async move { call(&api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys"), None).await.1 }
+    };
+    let by_rev = |all: &Value, rev: &str| all.as_array().unwrap().iter().find(|d| d["revision"] == rev).cloned();
+    for _ in 0..500 {
+        if by_rev(&deploys(&w).await, "b2b2b2b2b2b2").is_some_and(|d| d["status"] == "building") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let began = std::time::Instant::now();
+    w.code.push("c3c3c3c3c3c3", "fast", &[pkg, ("SLOW_BUILD", "0")]);
+    let mut all = Value::Null;
+    for _ in 0..1000 {
+        all = deploys(&w).await;
+        if by_rev(&all, "c3c3c3c3c3c3").is_some_and(|d| d["status"] == "active") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (slow, fast) = (by_rev(&all, "b2b2b2b2b2b2").unwrap(), by_rev(&all, "c3c3c3c3c3c3").unwrap());
+    assert_eq!((slow["status"].as_str(), slow["error"].as_str(), fast["status"].as_str()), (Some("superseded"), Some("a newer push replaced it"), Some("active")), "{all}");
+    assert!(began.elapsed() < Duration::from_secs(10), "the slow build didn't run to its end");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -1144,6 +1144,20 @@ impl Store {
         Ok(self.db.query_row("SELECT size FROM apps_sites WHERE key = ?", [key], |r| r.get::<_, i64>(0)).optional()?.map(|n| n as u64))
     }
 
+    /// Whether a push made after `after` (unix ms) waits in the environment's queue (a try-out
+    /// with no traffic doesn't count).
+    pub fn newer_push_queued(&self, service: &str, env: &str, after: i64) -> Result<bool> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT 1 FROM deployments WHERE service = ? AND env = ? AND status = 'queued' AND cause = 'push' AND created_at > ? AND id NOT IN (SELECT deployment FROM deploy_no_traffic) LIMIT 1",
+                params![service, env, after],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     pub fn no_cache(&self, id: &str) -> Result<bool> {
         Ok(self.db.query_row("SELECT 1 FROM deploy_no_cache WHERE deployment = ?", [id], |_| Ok(())).optional()?.is_some())
     }

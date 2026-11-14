@@ -168,8 +168,11 @@ every deployment is immutable with instant rollback.
 ### Deploys
 
 - **One queue per service and environment.** A new deploy waits for the one in flight; a newer
-  push supersedes queued ones that haven't started (`superseded`), as on Railway. Different
-  environments deploy in parallel.
+  push supersedes queued ones that haven't started (`superseded`), as on Railway, and stops a
+  push's build that's still running (`superseded`, "a newer push replaced it": its build minutes
+  saved, the newer one next). The build's owner looks for one every 3 s, whichever node queued
+  it; a deploy already rolling out finishes, and a deploy someone asked for (not a push) is
+  never stopped. Different environments deploy in parallel.
 - **States**: `queued → building → deploying → active`, or `failed`, `canceled`, `superseded`;
   an active deployment becomes `inactive` when another replaces it. The dashboard maps them onto
   the shared mark states through `MarkStateProvider` (`deploying` while building or rolling out,

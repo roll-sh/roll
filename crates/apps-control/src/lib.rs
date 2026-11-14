@@ -112,6 +112,8 @@ pub struct AppsConfig {
     /// What custom domains point a CNAME at (default: the environment's own hostname).
     pub cname_target: Option<String>,
     pub build_timeout: Duration,
+    /// How often a push's build looks for a newer push that replaces it.
+    pub supersede_every: Duration,
     pub live: LiveConfig,
     pub prices: Prices,
     /// The biggest `roll up` upload.
@@ -139,6 +141,7 @@ impl AppsConfig {
             reserved: Vec::new(),
             cname_target: None,
             build_timeout: Duration::from_secs(30 * 60),
+            supersede_every: Duration::from_secs(3),
             live: LiveConfig::default(),
             prices: Prices::default(),
             upload_max: 512 << 20,

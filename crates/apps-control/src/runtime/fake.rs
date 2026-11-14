@@ -467,11 +467,14 @@ impl Builder for Fake {
         "fake"
     }
 
-    async fn build(&self, job: &BuildJob, log: &LogSink, _cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String> {
+    async fn build(&self, job: &BuildJob, log: &LogSink, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String> {
         self.counts.builds.fetch_add(1, Ordering::SeqCst);
         log.line(format!("#1 building {}", job.tag));
         if let Some(ms) = std::fs::read_to_string(job.context.join("SLOW_BUILD")).ok().and_then(|t| t.trim().parse().ok()) {
-            tokio::time::sleep(Duration::from_millis(ms)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(ms)) => {}
+                _ = cancel.cancelled() => anyhow::bail!("canceled"),
+            }
         }
         if job.context.join("FAIL_BUILD").exists() {
             log.line("#2 ERROR: the build failed on purpose");

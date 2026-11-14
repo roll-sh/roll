@@ -455,6 +455,41 @@ impl Apps {
         }
     }
 
+    /// While a push's build runs, a newer push queued for the environment (on any node: the queue
+    /// is the store) stops it: superseded, its build minutes saved, the newer one next. A deploy
+    /// that's rolling out finishes. Stops watching when dropped.
+    fn supersede_on_newer_push(self: &Arc<Self>, d: &Deployment, cancel: CancellationToken) -> Option<tokio_util::sync::DropGuard> {
+        if d.trigger != Trigger::Push {
+            return None;
+        }
+        let (this, d, done) = (self.clone(), d.clone(), CancellationToken::new());
+        let guard = done.clone().drop_guard();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(this.cfg.supersede_every) => {}
+                    _ = done.cancelled() => return,
+                }
+                let (sid, e, after) = (d.service.clone(), d.environment.clone(), d.created_at);
+                match this.db(move |s| s.newer_push_queued(&sid, &e, after)).await {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(err) => {
+                        warn!(deployment = %d.id, error = %err, "apps: looking for a newer push failed");
+                        continue;
+                    }
+                }
+                let id = d.id.clone();
+                if this.db(move |s| s.set_status(&id, &[DeployStatus::Building], DeployStatus::Superseded, Some("a newer push replaced it"))).await.unwrap_or(false) {
+                    this.deploy_log(&d.id).stream(Stream::System).line("stopped: a newer push replaced it");
+                    cancel.cancel();
+                }
+                return;
+            }
+        });
+        Some(guard)
+    }
+
     async fn run_inner(self: &Arc<Self>, d: &Deployment, log: &LogSink, cancel: CancellationToken) -> anyhow::Result<()> {
         // Queued before its project reached its spend limit: it doesn't build or start now.
         anyhow::ensure!(!self.capped(&d.service), "the project reached its spending limit for the month");
@@ -500,6 +535,7 @@ impl Apps {
                 if !self.db(move |s| s.set_status(&id, &[DeployStatus::Queued], DeployStatus::Building, None)).await? {
                     anyhow::bail!("the deployment was canceled");
                 }
+                let _watch = self.supersede_on_newer_push(d, cancel.clone());
                 self.build(&svc, d, log, cancel.clone()).await?
             }
         };
