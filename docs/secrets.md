@@ -2722,10 +2722,10 @@ user's call).
 3. **Conditional reads and caching in the SDKs** (#65, on #62): `ETag` and `If-None-Match` on
    `…/values` (a 304 reads, issues and audits nothing; never for dynamic credentials), and a TTL
    cache in the TypeScript, Go and Python clients that revalidates with it.
-4. **Terraform without values in state**: an `ephemeral "roll_secrets_values"` resource and a
-   write-only `value_wo` (Vault's, AWS', Infisical's providers have both); resources for CAs, SSH
-   CAs, encryption keys and outside databases; transit in the Go and Python clients (the
-   TypeScript one has it).
+4. **Terraform without values in state** (#66, on #62): an `ephemeral "roll_secrets_values"`
+   resource (dynamic credentials revoked when the run closes) and a write-only `value_wo`. Next:
+   resources for CAs, SSH CAs, encryption keys and outside databases; transit in the Go and Python
+   clients (the TypeScript one has it).
 5. **AWS through roll's own issuer** (`AssumeRoleWithWebIdentity` with roll's token, the trust
    policy pinning `sub`, as GCP and Azure already work): no roll credential in AWS at all.
 6. **The operator restarts what reads a Secret** when it changes (`spec.rolloutRestart`, as
