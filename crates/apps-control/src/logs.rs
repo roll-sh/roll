@@ -161,12 +161,19 @@ impl LogHub {
         l.ring.iter().rev().take_while(|ln| ln.t >= since).filter(|ln| matches!(ln.stream, Stream::Stdout | Stream::Stderr) && ln.text.to_lowercase().contains(&q)).count()
     }
 
-    /// Lines that contain `q` (any case), newest last, at most `limit`: the lines in memory, then
-    /// the stored chunks newest first (those older than `since` skipped by name), until `limit`
-    /// matches or [`SEARCH_BYTES`] read. The flag says whether it stopped before reading all.
+    /// Lines that contain `q` (any case), newest last, at most `limit` ([`Self::read`]).
     pub async fn search(&self, key: &str, q: &str, since: Option<i64>, limit: usize) -> (Vec<LogLine>, bool) {
         let q = q.to_lowercase();
-        let hit = |l: &LogLine| l.text.to_lowercase().contains(&q) && since.is_none_or(|s| l.t >= s);
+        self.read(key, move |l| l.text.to_lowercase().contains(&q), since, None, limit).await
+    }
+
+    /// Lines `keep` keeps, made at `since` or later and before `before`, newest last, at most
+    /// `limit`: the lines in memory, then the stored chunks newest first (a chunk that starts
+    /// at `before` or later skipped by its name, and none read past one that starts before
+    /// `since`), until `limit` lines or [`SEARCH_BYTES`] read. The flag says whether it stopped
+    /// before reading all.
+    pub async fn read(&self, key: &str, keep: impl Fn(&LogLine) -> bool, since: Option<i64>, before: Option<i64>, limit: usize) -> (Vec<LogLine>, bool) {
+        let hit = |l: &LogLine| since.is_none_or(|s| l.t >= s) && before.is_none_or(|b| l.t < b) && keep(l);
         let mem: Vec<LogLine> = self.logs.lock().get(key).map(|l| l.ring.iter().cloned().collect()).unwrap_or_default();
         let first_mem = mem.first().map(|l| l.t);
         let mut found: Vec<LogLine> = mem.into_iter().rev().filter(|l| hit(l)).take(limit).collect();
@@ -177,18 +184,23 @@ impl LogHub {
             let mut chunks = objects.list(&prefix(key)).await.unwrap_or_default();
             chunks.sort();
             let mut read = 0usize;
+            let starts = |chunk: &str| chunk.rsplit('/').next().and_then(|n| n.split('-').next()).and_then(|n| n.parse::<i64>().ok());
             for (chunk, _) in chunks.iter().rev() {
-                // `<first ms>-<seq>.ndjson`: a chunk that starts before `since` may still end after it.
                 if found.len() >= limit || read > SEARCH_BYTES {
                     cut = true;
                     break;
+                }
+                // `<first ms>-<seq>.ndjson`: every line of one that starts at `before` is later.
+                if before.is_some_and(|b| starts(chunk).is_some_and(|t| t >= b)) {
+                    continue;
                 }
                 let Ok(Some(b)) = objects.get(chunk).await else { continue };
                 read += b.len();
                 let mut part: Vec<LogLine> = b.split(|c| *c == b'\n').filter_map(|l| serde_json::from_slice(l).ok()).collect();
                 part.retain(|l: &LogLine| first_mem.is_none_or(|f| l.t < f) && hit(l));
                 found.extend(part.into_iter().rev().take(limit - found.len()));
-                if since.is_some_and(|s| chunk.rsplit('/').next().and_then(|n| n.split('-').next()).and_then(|n| n.parse::<i64>().ok()).is_some_and(|t| t < s)) {
+                // One that starts before `since` may still end after it; none older can.
+                if since.is_some_and(|s| starts(chunk).is_some_and(|t| t < s)) {
                     break;
                 }
             }
@@ -406,6 +418,10 @@ mod tests {
         let (found, cut) = hub.search("env:svc_x/production", "Error", None, 100).await;
         assert_eq!(found.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["ERROR db timeout", "error: retry"]);
         assert!(!cut);
+        // A window back in time (`before` the newer lines: only the stored ones), filtered.
+        let newer = hub.tail("env:svc_x/production", 2, None).await[0].t;
+        let (old, _) = hub.read("env:svc_x/production", |l| l.text.starts_with("GET"), None, Some(newer), 100).await;
+        assert_eq!(old.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["GET / 200", "GET /a 200"]);
     }
 
     #[tokio::test]

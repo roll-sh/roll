@@ -57,6 +57,9 @@ serde_yaml_ng.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+# `tests/apps.rs`: roll apps in process on its fake runtime.
+apps-control.workspace = true
+roll-cluster.workspace = true
 # `tests/token.rs`: scoped tokens behind the real gate in process.
 roll-access.workspace = true
 roll-auth.workspace = true

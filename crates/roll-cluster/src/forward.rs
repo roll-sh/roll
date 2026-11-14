@@ -202,6 +202,9 @@ impl Cluster {
     {
         let hops = hops(&req);
         let carry = Carry::of(req.extensions());
+        // Who sent it here, if a node did: sending it straight back means one of us has a stale
+        // idea of the owner (a handoff in progress).
+        let from = req.extensions().get::<Forwarded>().map(|f| f.node.clone());
         let (parts, body) = req.into_parts();
         let pq = path_and_query(&parts.uri, &parts.extensions);
         let mut body = Body2::Fresh(body);
@@ -209,13 +212,26 @@ impl Cluster {
         let mut local = Some(local);
         for attempt in 0..2 {
             let last = attempt == 1;
-            let route = match self.route_async(key).await {
+            let mut route = match self.route_async(key).await {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(key, error = %e, "routing failed");
                     return unavailable(Duration::from_secs(1));
                 }
             };
+            // Back to the node that sent it: what this node remembered is stale. Ask the backend
+            // instead (the lease free mid-handoff is taken by its preferred node, maybe this one),
+            // rather than bounce it until the hop limit.
+            if let (Route::Forward(n), Some(f)) = (&route, &from)
+                && n.id == *f
+            {
+                self.forget(key);
+                let (inner, k) = (self.inner.clone(), key.to_string());
+                route = match tokio::task::spawn_blocking(move || inner.route(&k)).await {
+                    Ok(Ok(r)) => r,
+                    _ => return unavailable(Duration::from_secs(1)),
+                };
+            }
             let wait = match route {
                 Route::Local(guard) => {
                     let b = match std::mem::replace(&mut body, Body2::Spent) {

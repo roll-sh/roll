@@ -36,6 +36,8 @@ struct FakeInstance {
     exited: watch::Sender<Option<i32>>,
     /// Stopped: its requests in flight fail, as a killed process's do.
     killed: tokio_util::sync::CancellationToken,
+    /// Where it answers while running.
+    addr: Option<SocketAddr>,
 }
 
 #[derive(Default)]
@@ -51,6 +53,8 @@ pub struct Counts {
 
 #[derive(Default)]
 pub struct Fake {
+    /// One runtime for several nodes (as Fargate is): `shares_instances`.
+    pub shared: std::sync::atomic::AtomicBool,
     instances: Mutex<HashMap<String, FakeInstance>>,
     networks: Mutex<Vec<String>>,
     pub counts: Counts,
@@ -58,6 +62,8 @@ pub struct Fake {
     pub pulled_as: Mutex<Option<String>>,
     /// Each build's `no_cache` and its Dockerfile, in order.
     pub built: Mutex<Vec<(bool, String)>>,
+    /// Images removed ([`Builder::remove_image`]).
+    pub removed: Mutex<Vec<String>>,
     /// Instances that answer 500 from now on (a running app that broke: [`Fake::sicken`]).
     sick: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Instances the kernel killed for their memory ([`Fake::oom`]).
@@ -155,6 +161,17 @@ impl Fake {
         }
     }
 
+    /// Its port stops answering and roll isn't told (no exit to wait on, still running to the
+    /// runtime's eye): what a request finds before the runtime notices a kill.
+    pub fn vanish(&self, name: &str) {
+        if let Some(i) = self.instances.lock().get_mut(name) {
+            if let Some(s) = i.server.take() {
+                s.abort();
+            }
+            i.killed.cancel();
+        }
+    }
+
     pub fn networks(&self) -> Vec<String> {
         self.networks.lock().clone()
     }
@@ -180,9 +197,9 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
         tokio::time::sleep(b).await;
     }
     log.line(format!("listening on {}", spec.port.unwrap_or(0)));
-    let (name, dep) = (spec.name.clone(), spec.deployment.clone());
+    let (name, dep, kill) = (spec.name.clone(), spec.deployment.clone(), killed.clone());
     let app = axum::Router::new().fallback(move |req: Request| {
-        let (name, dep, echo, sick, missing, killed) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), killed.clone());
+        let (name, dep, echo, sick, missing, killed) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), kill.clone());
         async move {
             use axum::response::IntoResponse;
             if missing.as_deref().is_some_and(|m| req.uri().path().starts_with(m)) {
@@ -215,7 +232,30 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te }))).into_response()
         }
     });
-    let _ = axum::serve(listener, app).await;
+    // Served by hand so a kill ends every connection too, kept-alive ones included, as the
+    // kernel closes a killed process's sockets (axum::serve's connections outlive its loop).
+    loop {
+        let sock = tokio::select! {
+            r = listener.accept() => match r {
+                Ok((s, _)) => s,
+                Err(_) => continue,
+            },
+            _ = killed.cancelled() => return,
+        };
+        let (app, killed) = (app.clone(), killed.clone());
+        tokio::spawn(async move {
+            let svc = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
+                use tower::ServiceExt;
+                app.clone().oneshot(req.map(axum::body::Body::new))
+            });
+            let builder = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+            let conn = builder.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(sock), svc);
+            tokio::select! {
+                _ = conn => {}
+                _ = killed.cancelled() => {}
+            }
+        });
+    }
 }
 
 #[async_trait]
@@ -251,7 +291,7 @@ impl Runtime for Fake {
         self.counts.creates.fetch_add(1, Ordering::SeqCst);
         let mut m = self.instances.lock();
         anyhow::ensure!(!m.contains_key(&spec.name), "{} exists", spec.name);
-        m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, exited: watch::channel(None).0, killed: Default::default() });
+        m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, addr: None, exited: watch::channel(None).0, killed: Default::default() });
         Ok(())
     }
 
@@ -280,6 +320,11 @@ impl Runtime for Fake {
             return Ok(None);
         }
         let addr = match spec.port {
+            // An app that binds elsewhere (`FAKE_LISTEN=127.0.0.1:3000`): nothing on its port.
+            Some(_) if var(&spec, "FAKE_LISTEN").is_some() => {
+                let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+                Some(l.local_addr()?)
+            }
             Some(_) => {
                 let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
                 let addr = l.local_addr()?;
@@ -296,6 +341,7 @@ impl Runtime for Fake {
         let mut m = self.instances.lock();
         let i = m.get_mut(name).expect("exists");
         i.state = FakeState::Running;
+        i.addr = addr;
         i.exited.send_replace(None);
         Ok(addr)
     }
@@ -342,6 +388,12 @@ impl Runtime for Fake {
                 s.abort();
             }
         }
+    }
+
+    async fn listeners(&self, name: &str) -> Option<Vec<SocketAddr>> {
+        let m = self.instances.lock();
+        let at = var(&m.get(name)?.spec, "FAKE_LISTEN")?.to_string();
+        Some(at.split(',').filter_map(|a| a.trim().parse().ok()).collect())
     }
 
     async fn wait(&self, name: &str) -> anyhow::Result<i32> {
@@ -405,6 +457,20 @@ impl Runtime for Fake {
 
     async fn running(&self, name: &str) -> bool {
         matches!(self.state(name), Some(FakeState::Running | FakeState::Paused))
+    }
+
+    async fn adopt(&self, spec: &InstanceSpec, _log: LogSink) -> Option<super::Adopted> {
+        let m = self.instances.lock();
+        let i = m.get(&spec.name).filter(|i| i.spec.deployment == spec.deployment)?;
+        match i.state {
+            FakeState::Running => Some(super::Adopted { addr: i.addr, paused: false }),
+            FakeState::Paused => Some(super::Adopted { addr: i.addr, paused: true }),
+            _ => None,
+        }
+    }
+
+    fn shares_instances(&self) -> bool {
+        self.shared.load(Ordering::SeqCst)
     }
 
     async fn exited(&self, name: &str) -> Option<super::Exit> {
@@ -490,7 +556,9 @@ impl Builder for Fake {
         Ok(job.tag.clone())
     }
 
-    async fn remove_image(&self, _image: &str) {}
+    async fn remove_image(&self, image: &str) {
+        self.removed.lock().push(image.to_string());
+    }
 
     fn shares_caches(&self) -> bool {
         true

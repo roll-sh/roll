@@ -1,4 +1,5 @@
 import { Bot, Eye, Lock, Moon, Plus, Search, Settings } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import type { ResourceKind, WorkspaceProject } from "@/lib/workspace-api";
@@ -56,6 +57,7 @@ export function ProjectPage({ id, tab = "canvas", children }: { id: string; tab?
 }
 
 function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: WorkspaceProject; tab: ProjectTab; children?: ReactNode }) {
+  const navigate = useNavigate();
   const [selected, setSelected] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -238,8 +240,10 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
               onCreated={(s) => {
                 workspace.added(project.id, serviceView(s), newService.x, newService.y);
                 setNewService(null);
-                setSelected(resourceKey({ kind: "service", ref: s.id }));
                 live.refresh();
+                // Its first build, as it happens: the service page's Deployments tab streams it,
+                // then says it's live (or why it isn't).
+                void navigate({ to: "/dashboard/apps/$id", params: { id: s.id } });
               }}
             />
           ) : current?.type === "placed" ? (

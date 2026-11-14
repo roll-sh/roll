@@ -33,6 +33,7 @@ impl IntoResponse for Error {
             Error::Conflict(_) => StatusCode::CONFLICT,
             Error::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Error::Forbidden(_) => StatusCode::FORBIDDEN,
+            Error::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Error::Db(_) | Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status == StatusCode::INTERNAL_SERVER_ERROR {
@@ -75,6 +76,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys"), get(deploys).post(create_deploy).layer(DefaultBodyLimit::max(apps.cfg.upload_max)))
         .route(&format!("{env}/deploys/{{dep}}"), get(get_deploy))
         .route(&format!("{env}/deploys/{{dep}}/logs"), get(deploy_logs))
+        .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
         .route(&format!("{env}/rollback"), post(rollback_previous))
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
@@ -84,6 +86,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/volume/backups"), get(backups).post(backup_volume))
         .route(&format!("{env}/volume/backups/{{bid}}/restore"), post(restore_volume))
         .route(&format!("{env}/restart"), post(restart))
+        .route(&format!("{env}/instances/{{name}}/restart"), post(restart_instance))
         .route(&format!("{env}/sleep"), post(sleep))
         .route(&format!("{env}/wake"), post(wake))
         .route(&format!("{env}/variables"), get(variables).patch(change_variables))
@@ -93,6 +96,9 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/metrics"), get(metrics))
         .route(&format!("{env}/usage"), get(usage))
         .route(&format!("{env}/runs"), get(runs).post(run_now))
+        .route(&format!("{env}/runs/{{run}}"), get(get_run))
+        .route(&format!("{env}/runs/{{run}}/logs"), get(run_logs))
+        .route(&format!("{env}/runs/{{run}}/cancel"), post(cancel_run))
         .route(&format!("{env}/shell"), get(shell))
         .route(&format!("{env}/tunnel"), get(tunnel))
         .route(&format!("{env}/shell/sessions"), post(open_session))
@@ -425,8 +431,14 @@ async fn delete_env(State(apps): S, Path((id, env)): Path<(String, String)>, ext
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-async fn deploys(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
-    ok(apps.deployments(&id, &env).await?)
+#[derive(serde::Deserialize)]
+struct DeploysQuery {
+    /// Made before then (unix ms; the last one's `created_at`): the next page.
+    before: Option<i64>,
+}
+
+async fn deploys(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<DeploysQuery>) -> R {
+    ok(apps.deployments(&id, &env, q.before).await?)
 }
 
 /// JSON (`NewDeploy`), or a gzipped tar of the tree (`roll up`).
@@ -449,6 +461,10 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
+async fn deploy_commits(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
+    ok(apps.deploy_commits(&id, &env, &dep).await?)
+}
+
 async fn get_deploy(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
     ok(apps.deployment(&id, &env, &dep).await?)
 }
@@ -466,13 +482,23 @@ struct LogQuery {
     status: Option<String>,
     /// Access lines that took at least this long.
     min_ms: Option<u64>,
+    /// Access lines of answers roll gave itself, and why (`firewall`, `rate_limit`, `wake`…; `any`:
+    /// every one of them).
+    by: Option<String>,
+    /// Lines made before then (unix ms): reading back through the stored chunks.
+    before: Option<i64>,
+    /// One instance's lines, or one deployment's, or one stream's (`stdout`, `stderr`, `system`).
+    instance: Option<String>,
+    deployment: Option<String>,
+    stream: Option<String>,
 }
 
 /// Which access lines `status` and `min_ms` keep (`None`: all of them).
 fn http_filter(q: &LogQuery) -> crate::Result<Option<impl Fn(&crate::logs::LogLine) -> bool + Send + Sync + 'static>> {
-    if q.status.is_none() && q.min_ms.is_none() {
+    if q.status.is_none() && q.min_ms.is_none() && q.by.is_none() {
         return Ok(None);
     }
+    let want_by = q.by.clone().filter(|b| !b.trim().is_empty());
     let range = match q.status.as_deref().map(str::trim) {
         None | Some("") => (0, 999),
         Some(s) if s.len() == 3 && s.ends_with("xx") => {
@@ -491,7 +517,9 @@ fn http_filter(q: &LogQuery) -> crate::Result<Option<impl Fn(&crate::logs::LogLi
     Ok(Some(move |l: &crate::logs::LogLine| {
         let v: Value = serde_json::from_str(&l.text).unwrap_or(Value::Null);
         let status = v["status"].as_u64().unwrap_or(0) as u16;
-        (range.0..=range.1).contains(&status) && v["ms"].as_u64().unwrap_or(0) >= min
+        (range.0..=range.1).contains(&status)
+            && v["ms"].as_u64().unwrap_or(0) >= min
+            && want_by.as_deref().is_none_or(|b| v["by"].as_str().is_some_and(|got| b == "any" || got == b))
     }))
 }
 
@@ -505,11 +533,29 @@ type Keep = Option<Box<dyn Fn(&LogLine) -> bool + Send + Sync>>;
 
 async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tokio::sync::watch::Receiver<bool>>, keep: Keep) -> R {
     let tail = q.tail.unwrap_or(500).min(crate::logs::RING);
-    if let Some(text) = q.q.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-        if text.len() > 200 {
-            return Err(Error::BadRequest("q is at most 200 characters".into()));
-        }
-        let (lines, cut) = apps.logs.search(&key, text, q.since, tail).await;
+    let text = q.q.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_lowercase);
+    if text.as_ref().is_some_and(|t| t.len() > 200) {
+        return Err(Error::BadRequest("q is at most 200 characters".into()));
+    }
+    let stream = match q.stream.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => None,
+        Some(s) => Some(serde_json::from_value::<crate::logs::Stream>(json!(s)).map_err(|_| Error::BadRequest("stream is stdout, stderr, system, http or build".into()))?),
+    };
+    // Every filter in one: the route's own (`keep`), then the asker's.
+    let (instance, deployment) = (q.instance.clone().filter(|s| !s.is_empty()), q.deployment.clone().filter(|s| !s.is_empty()));
+    let narrowed = keep.is_some() || instance.is_some() || deployment.is_some() || stream.is_some();
+    let keep: Keep = narrowed.then(|| {
+        let k = keep;
+        Box::new(move |l: &LogLine| {
+            k.as_ref().is_none_or(|k| k(l))
+                && instance.as_deref().is_none_or(|i| l.instance.as_deref() == Some(i))
+                && deployment.as_deref().is_none_or(|d| l.deployment.as_deref() == Some(d))
+                && stream.is_none_or(|s| l.stream == s)
+        }) as Box<dyn Fn(&LogLine) -> bool + Send + Sync>
+    });
+    // Read back (a search, a time window, or filtered): memory, then the stored chunks.
+    if text.is_some() || q.before.is_some() || (keep.is_some() && !truthy(&q.follow)) {
+        let (lines, cut) = apps.logs.read(&key, |l| keep.as_ref().is_none_or(|k| k(l)) && text.as_ref().is_none_or(|t| l.text.to_lowercase().contains(t)), q.since, q.before, tail).await;
         let mut r = Json(lines).into_response();
         if cut {
             r.headers_mut().insert("x-roll-search-truncated", axum::http::HeaderValue::from_static("1"));
@@ -517,12 +563,7 @@ async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tok
         return Ok(r);
     }
     if !truthy(&q.follow) {
-        let Some(k) = &keep else { return ok(apps.logs.tail(&key, tail, q.since).await) };
-        // Filtered: read back as far as memory holds, then the newest `tail` matches.
-        let mut lines = apps.logs.tail(&key, crate::logs::RING, q.since).await;
-        lines.retain(|l| k(l));
-        let cut = lines.len().saturating_sub(tail);
-        return ok(lines.split_off(cut));
+        return ok(apps.logs.tail(&key, tail, q.since).await);
     }
     // A finished build's log is read, not followed: nothing more comes, and following would
     // bring a retired log back into memory.
@@ -651,8 +692,12 @@ fn actor(ext: &Extensions) -> Option<String> {
     roll_auth::Operator::on(ext).then(|| "operator".to_string())
 }
 
-async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
-    let d = apps.redeploy(&id, &env, if b.is_empty() { Value::Null } else { body(&b)? }, actor(&ext)).await?;
+async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
+    let key = match headers.get("idempotency-key") {
+        Some(v) => Some(v.to_str().map_err(|_| Error::BadRequest("Idempotency-Key is printable ASCII".into()))?),
+        None => None,
+    };
+    let d = apps.redeploy(&id, &env, if b.is_empty() { Value::Null } else { body(&b)? }, actor(&ext), key).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
@@ -744,6 +789,12 @@ async fn cancel(State(apps): S, Path((id, env, dep)): Path<(String, String, Stri
 async fn restart(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     let e = apps.restart(&id, &env).await?;
     Ok((StatusCode::ACCEPTED, Json(e)).into_response())
+}
+
+async fn restart_instance(State(apps): S, Path((id, env, name)): Path<(String, String, String)>, ext: Extensions) -> R {
+    let e = apps.restart_instance(&id, &env, &name).await?;
+    apps.audit("instance.restarted", &id, &env, actor(&ext), json!({ "instance": name })).await;
+    ok(e)
 }
 
 async fn sleep(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
@@ -948,6 +999,40 @@ async fn runs(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     apps.environment(&id, &env).await?;
     let (s, e) = (id.clone(), env.clone());
     ok(apps.db(move |st| st.runs(&s, &e, 50)).await?)
+}
+
+async fn get_run(State(apps): S, Path((id, env, run)): Path<(String, String, String)>) -> R {
+    ok(apps.cron_run(&id, &env, &run).await?)
+}
+
+async fn cancel_run(State(apps): S, Path((id, env, run)): Path<(String, String, String)>) -> R {
+    ok(apps.cancel_run(&id, &env, &run).await?)
+}
+
+/// A cron run's output: its container's lines in the environment's log (read as that log is:
+/// they're there for anyone who reads it); `follow` streams them until the run ends.
+async fn run_logs(State(apps): S, Path((id, env, run)): Path<(String, String, String)>, Query(q): Query<LogQuery>) -> R {
+    let r = apps.cron_run(&id, &env, &run).await?;
+    let instance = crate::live::run_name(&id, &env, &r.deployment, &r.id);
+    let (tx, rx) = tokio::sync::watch::channel(r.status != crate::model::RunStatus::Running);
+    if r.status == crate::model::RunStatus::Running {
+        let (apps2, id2, env2, run2) = (apps.clone(), id.clone(), env.clone(), run.clone());
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                match apps2.cron_run(&id2, &env2, &run2).await {
+                    Ok(r) if r.status == crate::model::RunStatus::Running => {}
+                    _ => break,
+                }
+                if tx.is_closed() {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _ = tx.send(true);
+        });
+    }
+    stream_log(&apps, format!("env:{id}/{env}"), q, Some(rx), Some(Box::new(move |l: &LogLine| l.instance.as_deref() == Some(instance.as_str())))).await
 }
 
 async fn run_now(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {

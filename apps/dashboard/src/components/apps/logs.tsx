@@ -14,21 +14,26 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
   const [instance, setInstance] = useState("");
   // The app's output, or the requests it served (the proxy's access log).
   const [requests, setRequests] = useState(false);
-  // A search back through the stored days, shown instead of the live tail until left.
-  const [found, setFound] = useState<{ q: string; lines: LogLine[]; truncated: boolean; error?: string } | null>(null);
+  // A search back through the stored days, or the lines before a time, shown instead of the
+  // live tail until left.
+  const [found, setFound] = useState<{ q?: string; before?: number; by?: string; lines: LogLine[]; truncated: boolean; error?: string } | null>(null);
   const [searching, setSearching] = useState(false);
-  const search = async () => {
-    const q = filter.trim();
-    if (!q) return;
+  const read = async (q: { q?: string; before?: number; by?: string }) => {
     setSearching(true);
     try {
-      setFound({ q, ...(await appsApi.searchLogs(service, env, q, Date.now() - 7 * 86_400_000)) });
+      const got = await appsApi.readLogs(service, env, { ...q, since: Date.now() - 7 * 86_400_000, instance: instance || undefined, http: requests, tail: q.q ? 2000 : 500 });
+      setFound({ ...q, ...got });
     } catch (e) {
-      setFound({ q, lines: [], truncated: false, error: e instanceof Error ? e.message : String(e) });
+      setFound({ ...q, lines: [], truncated: false, error: e instanceof Error ? e.message : String(e) });
     } finally {
       setSearching(false);
     }
   };
+  const search = () => {
+    const q = filter.trim();
+    if (q) void read({ q });
+  };
+  const at = (t: number) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   // Lines keep arriving while paused; the view shows them on resume.
   const buffer = useRef<LogLine[]>([]);
   const pausedRef = useRef(paused);
@@ -102,11 +107,26 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
               </button>
             ))}
           </div>
+          {requests && (
+            <button type="button" className={btn} disabled={searching} onClick={() => void read({ by: "any" })} title="Only the requests roll answered itself: an allow list, a firewall rule, a rate limit, a private environment, maintenance, a wake that failed">
+              Turned away
+            </button>
+          )}
           {filter.trim() && !requests && (
-            <button type="button" className={btn} disabled={searching} onClick={() => void search()} title="Search the stored logs of the last 7 days, not just what's here">
+            <button type="button" className={btn} disabled={searching} onClick={() => search()} title="Search the stored logs of the last 7 days, not just what's here">
               {searching ? "Searching…" : "Search 7 days"}
             </button>
           )}
+          <input
+            type="datetime-local"
+            aria-label="Read back to"
+            title="The lines before this time, from the stored logs of the last 7 days"
+            className="h-8 rounded-lg border border-line bg-panel px-2 font-mono text-[12px] text-muted outline-none"
+            onChange={(e) => {
+              const t = new Date(e.target.value).getTime();
+              if (Number.isFinite(t)) void read({ before: t });
+            }}
+          />
           {instances.length > 1 && (
             <select value={instance} onChange={(e) => setInstance(e.target.value)} className="h-8 rounded-lg border border-line bg-panel px-2 font-mono text-[12px] outline-none" aria-label="Instance">
               <option value="">every instance</option>
@@ -125,10 +145,26 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
           {found.error ? (
             <span className="text-danger">The search failed: {found.error}</span>
           ) : (
-            <>
-              {found.truncated ? `The newest ${found.lines.length}` : found.lines.length} {found.lines.length === 1 ? "line" : "lines"} with “{found.q}” in the last 7 days
-              {found.truncated && " (more matched: narrow the search)"}
-            </>
+            found.by ? (
+              <>
+                {found.lines.length} {found.lines.length === 1 ? "request" : "requests"} roll answered itself in the last 7 days
+                {found.truncated && " (the newest)"}
+              </>
+            ) : found.q ? (
+              <>
+                {found.truncated ? `The newest ${found.lines.length}` : found.lines.length} {found.lines.length === 1 ? "line" : "lines"} with “{found.q}” in the last 7 days
+                {found.truncated && " (more matched: narrow the search)"}
+              </>
+            ) : (
+              <>
+                {found.lines.length ? `${at(found.lines[0].t)} to ${at(found.lines[found.lines.length - 1].t)}` : `Nothing before ${at(found.before ?? Date.now())}`}
+                {found.lines.length > 0 && (
+                  <button type="button" className="text-accent hover:underline" disabled={searching} onClick={() => void read({ before: found.lines[0].t + 1 })}>
+                    Earlier
+                  </button>
+                )}
+              </>
+            )
           )}
           <button type="button" className="text-accent hover:underline" onClick={() => setFound(null)}>
             Back to live

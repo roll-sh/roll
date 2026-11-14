@@ -131,6 +131,9 @@ impl Apps {
 
     /// Read the capped services and tell every environment loaded here.
     pub(crate) async fn refresh_capped(self: &Arc<Self>) {
+        // One at a time, read to apply: a pass that read before a raised limit cleared the cap
+        // can't apply its stale list after the raise applied the fresh one.
+        let _one = self.capped_refresh.lock().await;
         let (month, _) = month_of(code_sql::now_ms());
         let Ok(ids) = self.db(move |s| s.capped_services(month)).await else { return };
         let ids: HashSet<String> = ids.into_iter().collect();

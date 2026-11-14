@@ -39,6 +39,8 @@ export interface Build {
   watch?: string[];
   /** A single-page app (a page path with no file answers index.html); unset: detected. */
   spa?: boolean;
+  /** The Dockerfile's stage to build (a multi-stage one whose last stage isn't what runs). */
+  target?: string;
 }
 
 export type ServiceType = "web" | "worker" | "cron";
@@ -248,6 +250,48 @@ export function formatFirewall(rules: FirewallRule[]): string {
     .join("\n");
 }
 
+/** Headers an environment's answers carry, on a path (or every path); the app's own of the same name wins unless `replace`. */
+export interface HeaderRule {
+  path?: string;
+  set: Record<string, string>;
+  replace?: boolean;
+}
+
+/**
+ * Header rules as typed, one header a line: `[!][/path] Name: value` (`!`: replace the app's own;
+ * no path: every answer). Lines with the same path and `!` are one rule.
+ */
+export function parseHeaders(text: string): HeaderRule[] {
+  const rules: HeaderRule[] = [];
+  for (const raw of text.split("\n")) {
+    let l = raw.trim();
+    if (!l || l.startsWith("#")) continue;
+    const replace = l.startsWith("!");
+    if (replace) l = l.slice(1).trim();
+    let path: string | undefined;
+    if (l.startsWith("/")) {
+      const at = l.search(/\s/);
+      path = at < 0 ? l : l.slice(0, at);
+      l = at < 0 ? "" : l.slice(at).trim();
+    }
+    const colon = l.indexOf(":");
+    if (colon <= 0) continue;
+    const [name, value] = [l.slice(0, colon).trim(), l.slice(colon + 1).trim()];
+    let rule = rules.find((r) => r.path === path && !!r.replace === replace);
+    if (!rule) {
+      rule = { ...(path ? { path } : {}), set: {}, ...(replace ? { replace } : {}) };
+      rules.push(rule);
+    }
+    rule.set[name] = value;
+  }
+  return rules;
+}
+
+/** The rules as one header a line, as `parseHeaders` reads them. */
+export function formatHeaders(rules: HeaderRule[]): string {
+  return rules.flatMap((r) => Object.entries(r.set).map(([k, v]) => `${r.replace ? "!" : ""}${r.path ? `${r.path} ` : ""}${k}: ${v}`)).join("\n");
+}
+
 /** An allow list as typed, one network per line with an optional description after it. */
 export function parseAllowList(text: string): IpRule[] {
   return text
@@ -283,6 +327,7 @@ export interface EnvironmentPut {
   rate_limit?: { per_minute: number; burst?: number } | null;
   /** Its firewall rules, in order (the first match decides); null or [] for none. */
   firewall?: FirewallRule[] | null;
+  headers?: HeaderRule[] | null;
   /** Its own size and scale over the service's; a null field goes back to the service's. */
   run?: Partial<Record<EnvRunField, number | null>>;
 }
@@ -360,7 +405,16 @@ export interface Environment extends EnvironmentSummary {
   rate_limit?: { per_minute: number; burst?: number | null } | null;
   /** Its firewall rules, in order. */
   firewall?: FirewallRule[];
+  /** Headers its answers carry. */
+  headers?: HeaderRule[];
   created_at: number;
+}
+
+/** `…/deploys/{dep}/commits`: newest first, at most 50; `complete`: the one it's measured against was reached. Null: nothing to compare. */
+export interface DeployCommits {
+  since: { id: string; revision: string } | null;
+  commits: { sha: string; summary: string; author: string }[] | null;
+  complete: boolean;
 }
 
 export interface NewDeploy {
@@ -369,6 +423,8 @@ export interface NewDeploy {
   message?: string;
   /** Build from scratch: no cached layer, base images pulled again, the cache mounts empty from then on. */
   no_cache?: boolean;
+  /** Built and health-checked, never put live: tried at its own URL first, then put live from the list. */
+  no_traffic?: boolean;
 }
 
 export type DeployTrigger = "push" | "manual" | "rollback" | "upload" | "api" | "settings" | "promote";
@@ -409,6 +465,10 @@ export interface Deployment {
   started_at: number | null;
   finished_at: number | null;
   ready_ms: number | null;
+  /** What the app or the build printed when it failed (the step, its last line): only shown here, never sent in a commit status or a notification. */
+  error_detail?: string;
+  /** Pruned (older than its environment keeps): history only, its image gone, so it can't be rolled back to. */
+  pruned_at?: number;
   /** When each step began (`build`, `pre_deploy`, `rollout`, then `live` or `failed`): on a single deployment's GET. */
   steps?: { step: string; at: number }[];
 }
@@ -471,12 +531,33 @@ export interface NotifyTarget {
   /** The URL's host (the URL itself isn't returned). */
   host: string;
   events: NotifyEvent[];
+  /** Only these environments' events; empty: every environment's. */
+  environments: string[];
+  /** Only these services' events (ids); empty: every service's. */
+  services: string[];
+  /** Preview (ephemeral) environments' events too. */
+  previews: boolean;
   created_at: number;
   /** Only in the answer to its creation, for a webhook: what its requests are signed with. */
   secret?: string;
 }
 
-export type NotifyEvent = "deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed";
+export type NotifyEvent =
+  | "deploy.failed"
+  | "crash_loop"
+  | "deploy.active"
+  | "spend.alert"
+  | "spend.limit"
+  | "alert.memory"
+  | "alert.errors"
+  | "alert.latency"
+  | "alert.log"
+  | "cron.failed"
+  | "job.failed"
+  | "domain.active"
+  | "domain.expiring"
+  | "domain.expired"
+  | "domain.tls_failed";
 
 /** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
 export interface AppEvent {
@@ -595,7 +676,7 @@ export const appsApi = {
   removeDrain: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`),
   limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
   setLimits: (project: string, body: { alert_usd: number | null; hard_usd: number | null }) => call<SpendLimits>("PUT", `/v1/apps/projects/${enc(project)}/limits`, body),
-  addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url: string; events?: NotifyEvent[] }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),
+  addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url: string; events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),
   removeNotifyTarget: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}`),
   testNotifyTarget: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/test`),
   notifyDeliveries: (project: string, id: string) => call<NotifyDelivery[]>("GET", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/deliveries`),
@@ -607,8 +688,11 @@ export const appsApi = {
   deploy: (id: string, e: string, body: NewDeploy = {}) => call<Deployment>("POST", `${env(id, e)}/deploys`, body),
   deploys: (id: string, e: string) => call<Deployment[]>("GET", `${env(id, e)}/deploys`),
   deployment: (id: string, e: string, d: string) => call<Deployment>("GET", dep(id, e, d)),
+  /** What a repo deployment brings over the live one (for the live one, the one before it). */
+  commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
-  rollback: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`),
+  /** `keepVariables`: its image with the variables as they are now (after a rotated secret), not as they were then. */
+  rollback: (id: string, e: string, d: string, keepVariables = false) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`, keepVariables ? { keep_variables: true } : undefined),
   /** Back to the one live before what runs (the server walks back through rollbacks). */
   rollbackPrevious: (id: string, e: string) => call<Deployment>("POST", `${env(id, e)}/rollback`),
   /** The live image again with the current variables and settings: no build, same revision. */
@@ -623,6 +707,8 @@ export const appsApi = {
   cancel: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/cancel`),
 
   restart: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/restart`),
+  /** Just this one: a fresh instance answers before it leaves (a web service's), the others stay. */
+  restartInstance: (id: string, e: string, name: string) => call<Environment>("POST", `${env(id, e)}/instances/${encodeURIComponent(name)}/restart`),
   sleep: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/sleep`),
   wake: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/wake`),
 
@@ -638,8 +724,18 @@ export const appsApi = {
   logs: (id: string, e: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${env(id, e)}/logs${qs({ tail: q.tail, since: q.since })}`),
   /** Lines that contain `q` (any case), back through the stored logs (7 days), newest last. */
   /** `truncated`: more matched than came back (the newest are shown). */
-  searchLogs: async (id: string, e: string, q: string, since?: number): Promise<{ lines: LogLine[]; truncated: boolean }> => {
-    const res = await fetch(`${ROLL_API}${env(id, e)}/logs${qs({ q, since, tail: 2000 })}`, { headers: apiHeaders(), cache: "no-store" });
+  searchLogs: (id: string, e: string, q: string, since?: number) => appsApi.readLogs(id, e, { q, since, tail: 2000 }),
+  /**
+   * Lines read back through the stored logs (7 days), newest last: `before` (unix ms) a time
+   * window's end, `instance`, `deployment`, `stream` narrowing it, `q` a search. `truncated`: the
+   * read stopped before it reached them all.
+   */
+  readLogs: async (
+    id: string,
+    e: string,
+    q: { q?: string; since?: number; before?: number; instance?: string; deployment?: string; stream?: string; http?: boolean; by?: string; tail?: number },
+  ): Promise<{ lines: LogLine[]; truncated: boolean }> => {
+    const res = await fetch(`${ROLL_API}${env(id, e)}/logs${qs({ ...q, http: q.http || undefined, tail: q.tail ?? 500 })}`, { headers: apiHeaders(), cache: "no-store" });
     onApiStatus(res.status);
     const data = await res.json().catch(() => null);
     if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
@@ -650,6 +746,8 @@ export const appsApi = {
 
   runs: (id: string, e: string) => call<CronRun[]>("GET", `${env(id, e)}/runs`),
   runNow: (id: string, e: string) => call<CronRun>("POST", `${env(id, e)}/runs`),
+  run: (id: string, e: string, r: string) => call<CronRun>("GET", `${env(id, e)}/runs/${encodeURIComponent(r)}`),
+  cancelRun: (id: string, e: string, r: string) => call<CronRun>("POST", `${env(id, e)}/runs/${encodeURIComponent(r)}/cancel`),
   jobs: (id: string, e: string) => call<Job[]>("GET", `${env(id, e)}/jobs`),
   startJob: (id: string, e: string, body: { command: string; timeout_s?: number; tasks?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
   job: (id: string, e: string, j: string) => call<Job>("GET", `${env(id, e)}/jobs/${encodeURIComponent(j)}`),
@@ -709,10 +807,16 @@ export interface AccessLine {
   status: number;
   ms: number;
   bytes: number;
-  instance: string;
-  request_id: string;
-  cold: boolean;
-  waited_ms: number;
+  /** Who asked: the address the fleet vouches for, the user agent, the host. */
+  ip?: string | null;
+  ua?: string;
+  host?: string;
+  instance?: string;
+  request_id?: string;
+  cold?: boolean;
+  waited_ms?: number;
+  /** An answer roll gave itself, before any instance, and why. */
+  by?: "allow_list" | "firewall" | "rate_limit" | "private" | "maintenance" | "wake" | "capped" | "not_deployed" | "moving" | "unavailable";
 }
 
 /** Follows a service's changes (`…/changes`): `onChange` for each tick, `onOpen` as the stream comes and goes. */
@@ -727,7 +831,11 @@ export function followChanges(service: string, opts: { onChange: () => void; onO
 }
 
 export function followLog(
-  kind: { runtime: { service: string; env: string; http?: boolean } } | { build: { service: string; env: string; deployment: string } } | { job: { service: string; env: string; job: string } },
+  kind:
+    | { runtime: { service: string; env: string; http?: boolean } }
+    | { build: { service: string; env: string; deployment: string } }
+    | { job: { service: string; env: string; job: string } }
+    | { run: { service: string; env: string; run: string } },
   opts: { tail?: number; onLine: (l: LogLine) => void; onReset: () => void; onOpen?: (open: boolean) => void },
 ): () => void {
   const path =
@@ -735,7 +843,9 @@ export function followLog(
       ? `${env(kind.runtime.service, kind.runtime.env)}/logs`
       : "job" in kind
         ? `${env(kind.job.service, kind.job.env)}/jobs/${encodeURIComponent(kind.job.job)}/logs`
-        : `${dep(kind.build.service, kind.build.env, kind.build.deployment)}/logs`;
+        : "run" in kind
+          ? `${env(kind.run.service, kind.run.env)}/runs/${encodeURIComponent(kind.run.run)}/logs`
+          : `${dep(kind.build.service, kind.build.env, kind.build.deployment)}/logs`;
   const http = "runtime" in kind && kind.runtime.http ? true : undefined;
   return streamSse(`${ROLL_API}${path}${qs({ follow: true, tail: opts.tail ?? 500, http })}`, {
     headers: operatorHeaders,

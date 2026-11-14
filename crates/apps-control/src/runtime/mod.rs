@@ -157,6 +157,39 @@ pub trait Runtime: Send + Sync {
     /// Wait for a started instance to exit: its exit code.
     async fn wait(&self, name: &str) -> anyhow::Result<i32>;
     async fn running(&self, name: &str) -> bool;
+    /// Take on `spec.name`, still running from another process (a node that died, rolld before
+    /// a restart) and of `spec.deployment` (its label or tag says so), as this process's own,
+    /// its output followed into `log` from now. None: not running here, another deployment's,
+    /// or a runtime that can't (it's removed, and a fresh one made). For
+    /// [`crate::live::EnvLive::adopt`].
+    async fn adopt(&self, _spec: &InstanceSpec, _log: LogSink) -> Option<Adopted> {
+        None
+    }
+    /// A service's registry login changed (`login`), or went (None: removed, its registry
+    /// changed, or the service deleted), wherever the runtime keeps a copy (Fargate: its Secrets
+    /// Manager secret, and the instances made with it).
+    async fn registry_login_changed(&self, _service: &str, _login: Option<&RegistryLogin>) {}
+    /// Everything the runtime keeps for a service beyond its instances (its registry login, its
+    /// deployments' values), the service being deleted.
+    async fn forget_service(&self, service: &str) {
+        self.registry_login_changed(service, None).await;
+    }
+    /// Clean up what a node that died left behind outside its instances (Fargate: environment
+    /// files no task will read), and what's kept for deployments outside `in_use` (the ids of
+    /// those that may still run). Every ten minutes, on every node (it only deletes).
+    async fn sweep(&self, _in_use: &std::collections::HashSet<String>) {}
+    /// Where `name`'s app listens, when the runtime can see (Docker: its sandbox's sockets):
+    /// what to tell a user whose app doesn't answer on its port.
+    async fn listeners(&self, _name: &str) -> Option<Vec<SocketAddr>> {
+        None
+    }
+    /// Forget `name` without stopping it: another node keeps it now ([`Self::shares_instances`]).
+    async fn release(&self, _name: &str) {}
+    /// Whether what one node made, another can see and run (Fargate; not one host's Docker per
+    /// node): a node giving a service up then leaves its instances for the next to keep.
+    fn shares_instances(&self) -> bool {
+        false
+    }
     /// How a stopped instance ended, when the runtime can say: its exit code, and whether it
     /// was killed for running out of memory.
     async fn exited(&self, _name: &str) -> Option<Exit> {
@@ -168,6 +201,9 @@ pub trait Runtime: Send + Sync {
     async fn list(&self, service: Option<&str>) -> Vec<String>;
     /// Make the project's private network if it's missing.
     async fn ensure_network(&self, name: &str, service: &str) -> anyhow::Result<()>;
+    /// A project environment's network nothing uses any more (its last service there went):
+    /// best effort, left if anything is still attached.
+    async fn remove_network(&self, _name: &str) {}
     /// Remove a volume (an environment's teardown).
     async fn remove_volume(&self, name: &str);
     /// The files under `dir` in `image`, as a tar stream (a static site's, to serve without an
@@ -230,6 +266,8 @@ pub struct BuildJob {
     pub own_dockerfile: bool,
     /// Use no cached layer and pull base images again (`--no-cache --pull`).
     pub no_cache: bool,
+    /// The Dockerfile's stage to build (`--target`; checked to be a stage's name).
+    pub target: Option<String>,
     /// [`apps_build::LAYERS_ARG`]'s value on a builder that shares caches: a secret per service
     /// that keeps its `RUN` steps' cached layers its own. Never in argv or a log.
     pub layers: Option<String>,
@@ -286,6 +324,14 @@ pub fn declared_args(dockerfile: &str) -> std::collections::HashSet<&str> {
         .collect()
 }
 
+/// An instance [`Runtime::adopt`] took on: where it answers (None for a worker), and whether
+/// it's frozen (suspended, asleep).
+#[derive(Clone, Copy, Debug)]
+pub struct Adopted {
+    pub addr: Option<SocketAddr>,
+    pub paused: bool,
+}
+
 #[async_trait]
 pub trait Builder: Send + Sync {
     fn name(&self) -> &'static str;
@@ -328,6 +374,7 @@ mod tests {
             env_hash: String::new(),
             own_dockerfile: true,
             no_cache: false,
+            target: None,
             layers: None,
         };
         assert_eq!(build_args(&job), ["NPM_TOKEN", "A"]);

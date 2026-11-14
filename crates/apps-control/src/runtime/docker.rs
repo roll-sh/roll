@@ -147,17 +147,32 @@ impl Docker {
         if let Some(k) = self.known.lock().containers.get(name).cloned() {
             return Ok(k);
         }
-        // Made by an earlier process of this node: ask docker.
+        // Made by an earlier process of this node: ask docker. An instance in a sandbox
+        // publishes nothing itself; its port is the sandbox's.
+        let (id, mut port, cpu) = self.inspect_known(name).await?;
+        let mut sure = true;
+        if port.is_none() {
+            match self.inspect_known(&sandbox_name(name)).await {
+                Ok((_, p, _)) => port = p,
+                // No sandbox (a worker, or networks of its own) is an answer; a failed look isn't.
+                Err(e) => sure = e.to_string().to_ascii_lowercase().contains("no such"),
+            }
+        }
+        if sure {
+            self.known.lock().containers.insert(name.to_string(), (id.clone(), port, cpu));
+        }
+        Ok((id, port, cpu))
+    }
+
+    async fn inspect_known(&self, name: &str) -> anyhow::Result<(String, Option<u16>, Option<i64>)> {
         if let Some(e) = &self.engine {
             let i = e.inspect(name).await?;
-            self.known.lock().containers.insert(name.to_string(), (i.id.clone(), i.host_port, i.cpu_nanos));
             return Ok((i.id, i.host_port, i.cpu_nanos));
         }
         let id = docker(&["inspect", "-f", "{{.Id}}", name]).await?;
         let ports = docker(&["inspect", "-f", "{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}} {{end}}{{end}}", name]).await?;
         let port = ports.split_whitespace().next().and_then(|p| p.parse().ok());
         let cpu = docker(&["inspect", "-f", "{{index .Config.Labels \"sh.roll.apps.cpu\"}}", name]).await.ok().and_then(|c| c.parse().ok());
-        self.known.lock().containers.insert(name.to_string(), (id.clone(), port, cpu));
         Ok((id, port, cpu))
     }
 
@@ -277,6 +292,40 @@ pub fn for_container(url: &str) -> String {
         }
     }
     out
+}
+
+impl Docker {
+    /// Follow a container's output from `since` until it stops (the logs request ends with it).
+    fn follow_logs(&self, name: &str, since: chrono::DateTime<chrono::Utc>, o: LogSink, e: LogSink) {
+        if let Some(engine) = &self.engine {
+            let (engine, name) = (engine.clone(), name.to_string());
+            tokio::spawn(async move {
+                let since = (since.timestamp(), since.timestamp_subsec_nanos());
+                if let Err(err) = engine.follow(&name, since, o.writer(), e.writer()).await {
+                    tracing::debug!(%name, "following logs: {err:#}");
+                }
+            });
+            return;
+        }
+        let since = since.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        if let Ok(mut child) = Command::new("docker")
+            .args(["logs", "-f", "--since", &since, name])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            let out = child.stdout.take().expect("piped");
+            let err = child.stderr.take().expect("piped");
+            tokio::spawn(async move {
+                let a = tokio::spawn(pump(out, o));
+                let b = tokio::spawn(pump(err, e));
+                let _ = (a.await, b.await);
+                let _ = child.wait().await;
+            });
+        }
+    }
 }
 
 #[async_trait]
@@ -452,38 +501,27 @@ impl Runtime for Docker {
             self.known.lock().marks.remove(name);
             engine.start(name).await?;
             let (_, port) = self.id_and_port(name).await?;
-            // Follow its output until it stops (the logs request ends with the container).
-            let (engine, name) = (engine.clone(), name.to_string());
-            tokio::spawn(async move {
-                let since = (now.timestamp(), now.timestamp_subsec_nanos());
-                if let Err(err) = engine.follow(&name, since, o.writer(), e.writer()).await {
-                    tracing::debug!(%name, "following logs: {err:#}");
-                }
-            });
+            self.follow_logs(name, now, o, e);
             return Ok(port.map(|p| SocketAddr::from(([127, 0, 0, 1], p))));
         }
-        let since = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         docker(&["start", name]).await?;
         let (_, port) = self.id_and_port(name).await?;
-        // Follow its output until it stops (`docker logs -f` ends with the container).
-        if let Ok(mut child) = Command::new("docker")
-            .args(["logs", "-f", "--since", &since, name])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-        {
-            let out = child.stdout.take().expect("piped");
-            let err = child.stderr.take().expect("piped");
-            tokio::spawn(async move {
-                let a = tokio::spawn(pump(out, o));
-                let b = tokio::spawn(pump(err, e));
-                let _ = (a.await, b.await);
-                let _ = child.wait().await;
-            });
-        }
+        self.follow_logs(name, now, o, e);
         Ok(port.map(|p| SocketAddr::from(([127, 0, 0, 1], p))))
+    }
+
+    async fn adopt(&self, spec: &InstanceSpec, log: LogSink) -> Option<super::Adopted> {
+        // Running (or frozen), and of the deployment its name says.
+        let fmt = format!("{{{{.State.Running}}}} {{{{.State.Paused}}}} {{{{index .Config.Labels \"{LABEL}.deployment\"}}}}");
+        let out = docker(&["inspect", "-f", &fmt, &spec.name]).await.ok()?;
+        let mut f = out.split_whitespace();
+        let (running, paused, deployment) = (f.next()? == "true", f.next()? == "true", f.next().unwrap_or(""));
+        if !running || deployment != spec.deployment {
+            return None;
+        }
+        let (_, port) = self.id_and_port(&spec.name).await.ok()?;
+        self.follow_logs(&spec.name, chrono::Utc::now(), log.stream(Stream::Stdout), log.stream(Stream::Stderr));
+        Some(super::Adopted { addr: port.map(|p| SocketAddr::from(([127, 0, 0, 1], p))), paused })
     }
 
     async fn settle(&self, name: &str) {
@@ -572,6 +610,12 @@ impl Runtime for Docker {
         (!tcp.is_empty() || !tcp6.is_empty()).then(|| super::netns::private_peers(&tcp, &tcp6, sb.port, &sb.host))
     }
 
+    async fn listeners(&self, name: &str) -> Option<Vec<SocketAddr>> {
+        let sb = self.sandbox(name).await?;
+        let (tcp, tcp6) = sb.tables();
+        (!tcp.is_empty() || !tcp6.is_empty()).then(|| super::netns::listeners(&tcp, &tcp6))
+    }
+
     async fn wait(&self, name: &str) -> anyhow::Result<i32> {
         if let Some(e) = &self.engine {
             return e.wait(name).await;
@@ -623,6 +667,12 @@ impl Runtime for Docker {
 
     async fn remove_volume(&self, name: &str) {
         let _ = docker(&["volume", "rm", "-f", name]).await;
+    }
+
+    async fn remove_network(&self, name: &str) {
+        if name.starts_with(super::PREFIX) {
+            let _ = docker(&["network", "rm", name]).await;
+        }
     }
 
     async fn read_volume(&self, name: &str) -> anyhow::Result<super::VolumeStream> {
@@ -946,6 +996,9 @@ impl Builder for DockerBuilder {
             .args(["--tag", &job.tag, "--label", &format!("{LABEL}={}", job.service), "--label", &format!("{LABEL}.deployment={}", job.deployment)])
             // Links (a database) are reached the way instances reach them.
             .args(["--add-host", "host.docker.internal:host-gateway"]);
+        if let Some(t) = &job.target {
+            cmd.args(["--target", t]);
+        }
         for (i, (k, v)) in job.env.iter().enumerate() {
             let file = secrets.path().join(i.to_string());
             write_private(&file, v.as_bytes()).await?;

@@ -199,7 +199,26 @@ pub struct NotifyTarget {
     /// The URL's host, for recognising it (the URL itself is a secret).
     pub host: String,
     pub events: Vec<String>,
+    /// Only these environments' events (names); empty: every environment's.
+    pub environments: Vec<String>,
+    /// Only these services' events (ids); empty: every service's.
+    pub services: Vec<String>,
+    /// Whether preview (ephemeral) environments' events come too.
+    pub previews: bool,
     pub created_at: i64,
+}
+
+impl NotifyTarget {
+    /// Whether an event of `service` in `env` (empty: the project's own, as spend) is this
+    /// target's to send; `ephemeral`: the environment is a preview's.
+    pub fn follows(&self, service: &str, env: &str, ephemeral: bool) -> bool {
+        if service.is_empty() {
+            return true;
+        }
+        (self.services.is_empty() || self.services.iter().any(|s| s == service))
+            && (self.environments.is_empty() || self.environments.iter().any(|e| e == env))
+            && (self.previews || !ephemeral || self.environments.iter().any(|e| e == env))
+    }
 }
 
 /// One try of sending one event to one target.
@@ -281,6 +300,10 @@ pub struct Build {
     /// detected; unset: detected (a static build with a client-side router).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spa: Option<bool>,
+    /// The tree's own Dockerfile's stage to build (`--target`), for a multi-stage one whose last
+    /// stage isn't what runs (Fly's and Render's).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +328,12 @@ impl Build {
             && (w.len() > 50 || w.iter().any(|p| p.trim().is_empty() || p.len() > 200 || p.contains('\0')))
         {
             return Err(Error::BadRequest("build.watch is at most 50 path patterns of at most 200 characters".into()));
+        }
+        // A stage's name, as a Dockerfile's `FROM … AS <name>` has it (one argv word).
+        if let Some(t) = &self.target
+            && (t.is_empty() || t.len() > 64 || !t.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')) || t.starts_with('-'))
+        {
+            return Err(Error::BadRequest("build.target is a Dockerfile stage's name: letters, digits, _, - and . (at most 64)".into()));
         }
         Ok(())
     }
@@ -846,6 +875,9 @@ pub struct Environment {
     pub rate_limit: Option<RateLimit>,
     /// Its firewall rules, in order ([]: none).
     pub firewall: Vec<FirewallRule>,
+    /// Headers its answers carry ([]: none).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<HeaderRule>,
     /// A worker that follows its work: the backlog it last read (null before the first read)
     /// and the instances that wants.
     pub scaling: Option<Scaling>,
@@ -943,19 +975,79 @@ impl FirewallRule {
     /// `path` as [`normal_path`] gives it. Paths compare in any case and without a trailing
     /// slash (`/admin/*` takes `/admin` too); HEAD is a GET.
     pub fn matches(&self, method: &str, path: &str, user_agent: &str) -> bool {
-        let trim = |p: &str| if p.len() > 1 { p.trim_end_matches('/').to_ascii_lowercase() } else { p.to_ascii_lowercase() };
-        let path = trim(path);
-        let path_ok = self.path.as_deref().is_none_or(|p| match p.strip_suffix('*') {
-            Some(prefix) => {
-                let prefix = prefix.to_ascii_lowercase();
-                path.starts_with(&prefix) || path == trim(&prefix)
-            }
-            None => path == trim(p),
-        });
+        let path_ok = self.path.as_deref().is_none_or(|p| path_matches(p, path));
         let method = if method.eq_ignore_ascii_case("HEAD") { "GET" } else { method };
         let method_ok = self.methods.is_empty() || self.methods.iter().any(|m| m.eq_ignore_ascii_case(method));
         let ua_ok = self.user_agent.as_deref().is_none_or(|u| user_agent.to_ascii_lowercase().contains(u));
         path_ok && method_ok && ua_ok
+    }
+}
+
+/// Whether `path` ([`normal_path`]'s) is `pattern`: a path, or a prefix ending in `*` (which
+/// takes the prefix itself too); any case, no trailing slash.
+pub fn path_matches(pattern: &str, path: &str) -> bool {
+    let trim = |p: &str| if p.len() > 1 { p.trim_end_matches('/').to_ascii_lowercase() } else { p.to_ascii_lowercase() };
+    let path = trim(path);
+    match pattern.strip_suffix('*') {
+        Some(prefix) => {
+            let prefix = prefix.to_ascii_lowercase();
+            path.starts_with(&prefix) || path == trim(&prefix)
+        }
+        None => path == trim(pattern),
+    }
+}
+
+/// Headers an environment's answers carry (HSTS, a CSP, `X-Frame-Options`), on the paths a rule
+/// names: Vercel's and Netlify's `headers`. The app's own header of the same name wins unless
+/// the rule `replace`s it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeaderRule {
+    /// A path, or a prefix ending in `*` (`/assets/*`); none: every path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub set: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replace: bool,
+}
+
+/// The most header rules an environment has.
+pub const MAX_HEADER_RULES: usize = 20;
+
+impl HeaderRule {
+    /// Checked as given, names kept lower case. Never one that frames the answer or is roll's
+    /// own (`content-length`, `set-cookie`, `x-roll-*`…).
+    pub fn check(mut self) -> Result<HeaderRule> {
+        let bad = |m: String| Err(Error::BadRequest(format!("headers: {m}")));
+        if let Some(p) = &self.path
+            && (!p.starts_with('/') || p.len() > 512 || p.strip_suffix('*').unwrap_or(p).contains('*'))
+        {
+            return bad("a path starts with / (at most 512 characters, `*` only at its end)".into());
+        }
+        if self.set.is_empty() || self.set.len() > 20 {
+            return bad("a rule sets 1–20 headers".into());
+        }
+        const FORBIDDEN: [&str; 12] = ["content-length", "transfer-encoding", "connection", "keep-alive", "upgrade", "host", "te", "trailer", "set-cookie", "content-encoding", "proxy-authenticate", "proxy-connection"];
+        let mut set = std::collections::BTreeMap::new();
+        for (k, v) in &self.set {
+            let name = k.trim().to_ascii_lowercase();
+            if name.is_empty() || name.len() > 64 || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) {
+                return bad(format!("{k:?} isn't a header name"));
+            }
+            if FORBIDDEN.contains(&name.as_str()) || name.starts_with("x-roll-") || name.starts_with("proxy-") {
+                return bad(format!("{name} is the connection's or roll's to set"));
+            }
+            if v.len() > 1024 || !v.bytes().all(|b| b == b'\t' || (b' '..=b'~').contains(&b)) {
+                return bad(format!("{name}'s value is at most 1024 printable characters"));
+            }
+            set.insert(name, v.trim().to_string());
+        }
+        self.set = set;
+        Ok(self)
+    }
+
+    pub fn matches(&self, path: &str) -> bool {
+        self.path.as_deref().is_none_or(|p| path_matches(p, path))
     }
 }
 
@@ -1137,6 +1229,13 @@ pub struct Deployment {
     /// Who asked for it: a push's commit author, the token or connection that called the API
     /// (`operator` for the operator's token), none when roll did it on its own or nothing said.
     pub actor: Option<String>,
+    /// What the app or the build printed when it failed (the step, its last line): shown to its
+    /// owner, never in a commit status or a notification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<String>,
+    /// When it was pruned (unix ms): out of what's kept, its image gone; history only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pruned_at: Option<i64>,
     /// The settings this deployment runs with (frozen when it was made).
     #[serde(skip)]
     pub run: Run,
@@ -1504,3 +1603,73 @@ mod tests {
         assert!(check_var_name("DATABASE_URL").is_ok() && check_var_name("1X").is_err());
     }
 }
+
+/// What DNS answered for a custom domain that doesn't verify ([`domain_diagnosis`]).
+pub struct DnsSeen {
+    pub cnames: Vec<String>,
+    /// At the challenge name.
+    pub txts: Vec<String>,
+    /// At the hostname itself (a TXT put on the wrong name).
+    pub host_txts: Vec<String>,
+    pub addresses: Vec<String>,
+}
+
+/// Why `host` isn't verified, from what DNS answered: what's missing and the likely mistake
+/// (another target, a proxy answering with addresses, the TXT on the wrong name or with more
+/// around the token), as Vercel's "Invalid configuration" says.
+pub fn domain_diagnosis(host: &str, target: &str, challenge: &str, token: &str, seen: &DnsSeen, shared: bool) -> String {
+    let list = |v: &[String]| v.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    let route = if seen.cnames.iter().any(|c| c == target) {
+        None
+    } else if !seen.cnames.is_empty() {
+        Some(format!("{host} points at {} instead of {target}", list(&seen.cnames)))
+    } else if !seen.addresses.is_empty() {
+        Some(format!(
+            "{host} answers with addresses ({}) instead of a CNAME to {target}: if its DNS is on Cloudflare, turn the proxy off for it (DNS only); an apex domain needs its provider's CNAME flattening or ALIAS",
+            list(&seen.addresses)
+        ))
+    } else {
+        Some(format!("{host} has no CNAME to {target} yet (a new record can take a few minutes to show)"))
+    };
+    let proof = if seen.txts.iter().any(|t| t == token) {
+        None
+    } else if seen.txts.iter().any(|t| t.contains(token)) {
+        Some(format!("the TXT {challenge} holds the token with more around it (quotes?): it must be exactly {token}"))
+    } else if !seen.txts.is_empty() {
+        Some(format!("the TXT {challenge} holds something else ({})", list(&seen.txts)))
+    } else if seen.host_txts.iter().any(|t| t.contains(token)) {
+        Some(format!("the TXT with the token is on {host}; it goes on {challenge}"))
+    } else {
+        Some(format!("no TXT {challenge} with the token yet"))
+    };
+    match (shared, route, proof) {
+        // Behind a shared target the CNAME routes it and only the TXT proves it's yours.
+        (true, None, Some(p)) => format!("{p} (the CNAME to {target} routes it; the TXT record proves it's yours)"),
+        (true, Some(r), Some(p)) => format!("{p}; and {r}"),
+        (false, Some(r), Some(p)) => format!("{r}; or prove it with a TXT: {p}"),
+        (_, Some(r), None) | (_, None, Some(r)) => r,
+        (_, None, None) => format!("{host} is set up; it's checked again in a minute"),
+    }
+}
+
+#[cfg(test)]
+mod domain_diagnosis_tests {
+    use super::*;
+
+    fn seen(cnames: &[&str], txts: &[&str], host_txts: &[&str], addresses: &[&str]) -> DnsSeen {
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect();
+        DnsSeen { cnames: v(cnames), txts: v(txts), host_txts: v(host_txts), addresses: v(addresses) }
+    }
+
+    #[test]
+    fn says_what_dns_answered_and_the_likely_mistake() {
+        let d = |s: &DnsSeen, shared| domain_diagnosis("www.shop.com", "edge.roll.site", "_roll-challenge.www.shop.com", "tok123", s, shared);
+        assert!(d(&seen(&["old.herokudns.com"], &[], &[], &[]), false).starts_with("www.shop.com points at old.herokudns.com instead of edge.roll.site"));
+        assert!(d(&seen(&[], &[], &[], &["104.21.4.1"]), false).contains("turn the proxy off"));
+        assert!(d(&seen(&[], &[], &["tok123"], &[]), true).starts_with("the TXT with the token is on www.shop.com; it goes on _roll-challenge.www.shop.com"));
+        assert!(d(&seen(&["edge.roll.site"], &["\"tok123\""], &[], &[]), true).contains("more around it (quotes?)"));
+        assert!(d(&seen(&["edge.roll.site"], &["other"], &[], &[]), true).contains("holds something else (other)"));
+        assert!(d(&seen(&[], &[], &[], &[]), false).contains("no CNAME to edge.roll.site yet"));
+    }
+}
+

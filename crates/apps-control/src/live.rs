@@ -10,6 +10,7 @@
 use crate::logs::{LogSink, Stream};
 use crate::metrics::Meter;
 use crate::model::{InstanceState, Restart, Run, RunType};
+use crate::runtime::Adopted;
 use crate::runtime::{InstanceSpec, Runtime};
 use parking_lot::Mutex;
 use std::net::SocketAddr;
@@ -17,6 +18,20 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+/// The names of a deployment's instances in an environment, but their number:
+/// `roll-apps-<service>-<env>-<deployment, 6>-`.
+/// A cron run's container: its own id in its name, so its lines in the environment's log are its
+/// alone (a counter would start again with the next process).
+pub fn run_name(service: &str, env: &str, deployment: &str, run: &str) -> String {
+    format!("{}run-{}", instance_prefix(service, env, deployment), run.strip_prefix("run_").unwrap_or(run))
+}
+
+pub fn instance_prefix(service: &str, env: &str, deployment: &str) -> String {
+    let short = deployment.strip_prefix("dep_").unwrap_or(deployment);
+    let svc = service.strip_prefix("svc_").unwrap_or(service);
+    format!("roll-apps-{svc}-{env}-{}-", &short[..short.len().min(6)])
+}
 
 /// How far back crashes count toward a crash loop.
 const CRASH_WINDOW: Duration = Duration::from_secs(600);
@@ -209,6 +224,10 @@ pub struct Gate {
     pub firewall: Vec<crate::model::FirewallRule>,
     /// Its own error and maintenance pages.
     pub pages: crate::model::Pages,
+    /// A preview's (ephemeral): never indexed.
+    pub preview: bool,
+    /// Headers its answers carry.
+    pub headers: Vec<crate::model::HeaderRule>,
 }
 
 /// Clients a rate limit remembers at most (a full bucket is the same as none, so those go first).
@@ -306,6 +325,9 @@ pub struct EnvLive {
     /// Torn down: nothing is made or adopted any more (a request or a tick that held this
     /// environment from before can't bring it back).
     closed: AtomicBool,
+    /// Let go to another node ([`Self::let_go`]): stops and removes spawned before don't run (on
+    /// a shared runtime the next owner may have kept the instance; it removes what it didn't).
+    released: Arc<AtomicBool>,
     /// Its project reached its spend limit: nothing starts, and the tick stops what runs.
     capped: AtomicBool,
     /// Its volume is being restored: nothing starts until it's done.
@@ -337,6 +359,9 @@ pub struct EnvLive {
     /// Recent crashes: when, unix ms, why, and the deployment the instance ran.
     crashes: Mutex<std::collections::VecDeque<(Instant, i64, String, String)>>,
     seq: AtomicU64,
+    /// Every instance this process made here (a deploy's being checked isn't in `insts` until
+    /// its commit): [`Self::adopt`] never takes one for a previous owner's.
+    mine: Mutex<std::collections::HashSet<String>>,
     pub log: LogSink,
     pub meter: Mutex<Meter>,
     over_since: Mutex<Option<Instant>>,
@@ -378,6 +403,7 @@ impl EnvLive {
             insts: Mutex::new(Vec::new()),
             wake: Arc::new(tokio::sync::Mutex::new(())),
             closed: AtomicBool::new(false),
+            released: Arc::default(),
             capped: AtomicBool::new(false),
             held: AtomicBool::new(false),
             wanted: AtomicU32::new(0),
@@ -392,6 +418,7 @@ impl EnvLive {
             failed: Mutex::new(None),
             crashes: Mutex::new(std::collections::VecDeque::new()),
             seq: AtomicU64::new(0),
+            mine: Mutex::default(),
             log,
             meter: Mutex::new(Meter::default()),
             over_since: Mutex::new(None),
@@ -498,15 +525,30 @@ impl EnvLive {
 
     fn name_for(&self, tpl: &Template) -> String {
         let n = self.seq.fetch_add(1, Ordering::SeqCst);
-        let short = tpl.deployment.strip_prefix("dep_").unwrap_or(&tpl.deployment);
-        let svc = self.service.strip_prefix("svc_").unwrap_or(&self.service);
-        format!("roll-apps-{svc}-{}-{}-{n}", self.env, &short[..short.len().min(6)])
+        format!("{}{n}", instance_prefix(&self.service, &self.env, &tpl.deployment))
+    }
+
+    /// A cron run's or a job's container: `…-run<n>`, never one of the service's instances (a
+    /// takeover never keeps it as one).
+    async fn make_run(&self, tpl: &Template, name: Option<String>) -> anyhow::Result<Arc<Inst>> {
+        anyhow::ensure!(!self.closed.load(Ordering::SeqCst), "this environment was torn down");
+        let mut spec = tpl.spec.clone();
+        spec.name = match name {
+            Some(n) => n,
+            None => {
+                let n = self.seq.fetch_add(1, Ordering::SeqCst);
+                format!("{}run{n}", instance_prefix(&self.service, &self.env, &tpl.deployment))
+            }
+        };
+        self.runtime.create(&spec).await?;
+        Ok(Inst::new(spec.name, tpl.deployment.clone()))
     }
 
     async fn make(&self, tpl: &Template) -> anyhow::Result<Arc<Inst>> {
         anyhow::ensure!(!self.closed.load(Ordering::SeqCst), "this environment was torn down");
         let mut spec = tpl.spec.clone();
         spec.name = self.name_for(tpl);
+        self.mine.lock().insert(spec.name.clone());
         self.runtime.create(&spec).await?;
         Ok(Inst::new(spec.name, tpl.deployment.clone()))
     }
@@ -542,6 +584,7 @@ impl EnvLive {
         *inst.started_at.lock() = Some(now_ms());
         inst.health_fails.store(0, Ordering::SeqCst);
         *inst.cpu_seen.lock() = None;
+        let (mut looked, mut hint) = (Instant::now(), None);
         match (run.kind, addr) {
             (RunType::Web, Some(a)) => loop {
                 // A TCP service is up when its port accepts; anything else answers HTTP.
@@ -553,9 +596,25 @@ impl EnvLive {
                 if up {
                     break;
                 }
+                // Not answering for a while: where it listens instead, if anywhere (the most common
+                // first-deploy mistake). On its port but only on loopback can never be reached.
+                if looked.elapsed() >= Duration::from_secs(2) {
+                    looked = Instant::now();
+                    match self.port_hint(&inst.name, run).await {
+                        Some((why, true)) => {
+                            self.crashed(inst, &why);
+                            return Err(WakeError::Failed(why));
+                        }
+                        Some((why, false)) => hint = Some(why),
+                        None => {}
+                    }
+                }
                 if Instant::now() >= deadline {
                     self.crashed(inst, "it didn't answer in time");
-                    return Err(WakeError::Timeout(self.cfg.wake_timeout));
+                    return Err(match hint {
+                        Some(h) => WakeError::Failed(format!("it didn't answer in time: {h}")),
+                        None => WakeError::Timeout(self.cfg.wake_timeout),
+                    });
                 }
                 if !self.runtime.running(&inst.name).await {
                     let why = format!("the process exited before it answered: {}", self.exit_reason(&inst.name, run).await);
@@ -579,6 +638,21 @@ impl EnvLive {
         let (rt, name) = (self.runtime.clone(), inst.name.clone());
         tokio::spawn(async move { rt.settle(&name).await });
         Ok(addr)
+    }
+
+    /// Why `name` may not answer, from where it listens: (what to tell, whether it never can).
+    async fn port_hint(&self, name: &str, run: &Run) -> Option<(String, bool)> {
+        let port = run.port.unwrap_or(8080);
+        // Docker's embedded DNS listens in every user-defined network: never the app's.
+        let at: Vec<SocketAddr> = self.runtime.listeners(name).await?.into_iter().filter(|a| a.ip() != std::net::IpAddr::from([127, 0, 0, 11])).collect();
+        if at.is_empty() || at.iter().any(|a| a.port() == port && !a.ip().is_loopback()) {
+            return None;
+        }
+        if at.iter().any(|a| a.port() == port) {
+            return Some((format!("the app listens on {} only, which nothing outside its container reaches: listen on 0.0.0.0:{port} (or [::]:{port})", at.iter().filter(|a| a.port() == port).map(|a| a.to_string()).collect::<Vec<_>>().join(", ")), true));
+        }
+        let list = at.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
+        Some((format!("the app listens on {list}, not on port {port}: listen on $PORT ({port}), or set the service's port"), false))
     }
 
     /// A running instance of `deployment` with room under `concurrency` (the least busy), leased.
@@ -989,9 +1063,11 @@ impl EnvLive {
     fn crashed_with(&self, inst: &Inst, why: &str, grace: Duration) {
         *inst.phase.lock() = Phase::Crashed;
         self.count(&inst.deployment, |s| s.crashes += 1);
-        let (runtime, name) = (self.runtime.clone(), inst.name.clone());
+        let (runtime, name, released) = (self.runtime.clone(), inst.name.clone(), self.released.clone());
         *inst.stopping.lock() = Some(tokio::spawn(async move {
-            let _ = runtime.stop(&name, grace).await;
+            if !released.load(Ordering::SeqCst) {
+                let _ = runtime.stop(&name, grace).await;
+            }
         }));
         let entered = {
             let mut c = self.crashes.lock();
@@ -1187,11 +1263,16 @@ impl EnvLive {
     /// doesn't use up another's time.
     fn drain(&self, old: Vec<Arc<Inst>>, window: Duration) {
         for i in old {
-            let runtime = self.runtime.clone();
+            let (runtime, released) = (self.runtime.clone(), self.released.clone());
             tokio::spawn(async move {
                 let until = Instant::now() + window;
                 while i.in_flight() > 0 && Instant::now() < until {
                     tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                if released.load(Ordering::SeqCst) {
+                    // The next owner's to stop: this node only forgets it.
+                    runtime.release(&i.name).await;
+                    return;
                 }
                 let grace = until.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
                 let _ = runtime.stop(&i.name, grace).await;
@@ -1258,13 +1339,72 @@ impl EnvLive {
             return;
         }
         *self.template.lock() = Some(tpl.clone());
-        if tpl.run.kind == RunType::Web
-            && tpl.site.is_none()
+        if tpl.site.is_some() {
+            return;
+        }
+        // The live deployment's instances the previous owner ran, still running on the shared
+        // runtime (a node died, its containers or tasks didn't): kept, so its death costs
+        // visitors no cold start; one that can't be kept goes.
+        let kept = self.keep_running(&tpl).await;
+        if kept == 0
+            && tpl.run.kind == RunType::Web
             && self.insts.lock().is_empty()
             && let Ok(i) = self.make(&tpl).await
         {
             self.insts.lock().push(i);
         }
+    }
+
+    /// [`Self::adopt`]'s instances still running: how many it kept. Only a web service's or a
+    /// worker's (a cron run or a job is named `…-run<n>` and never kept); those already here
+    /// stay as they are; the rest of the deployment's go.
+    async fn keep_running(&self, tpl: &Template) -> usize {
+        let prefix = instance_prefix(&self.service, &self.env, &tpl.deployment);
+        let here: Vec<String> = self.insts.lock().iter().map(|i| i.name.clone()).collect();
+        let mut kept = 0;
+        let listed = self.runtime.list(Some(&self.service)).await;
+        // Only names that still exist need remembering.
+        self.mine.lock().retain(|n| listed.contains(n));
+        for name in listed {
+            let Some(n) = name.strip_prefix(&prefix).and_then(|n| n.parse::<u64>().ok()) else { continue };
+            // New names after every one seen, kept or not (the old owner may still be removing it).
+            self.seq.fetch_max(n + 1, Ordering::SeqCst);
+            if here.contains(&name) || self.mine.lock().contains(&name) {
+                continue;
+            }
+            if !matches!(tpl.run.kind, RunType::Web | RunType::Worker) {
+                self.runtime.remove(&name).await;
+                continue;
+            }
+            let mut spec = tpl.spec.clone();
+            spec.name = name.clone();
+            let found = self.runtime.adopt(&spec, self.log.instance(&name, &tpl.deployment)).await;
+            let phase = match (tpl.run.kind, found) {
+                (_, None) => None,
+                // Asleep and frozen: kept so, nothing asked of it (a frozen process answers nothing).
+                (_, Some(a)) if a.paused => Some(Phase::Suspended(a.addr)),
+                (RunType::Web, Some(Adopted { addr: Some(a), .. })) => {
+                    let up = if tpl.run.tcp { tcp_answers(a).await } else { self.answers(a, None, tpl.run.h2c).await };
+                    up.then_some(Phase::Running(Some(a)))
+                }
+                (RunType::Web, Some(_)) => None,
+                (_, Some(a)) => Some(Phase::Running(a.addr)),
+            };
+            let Some(phase) = phase else {
+                // Not one to keep (stopped, or it doesn't answer): it goes, as the rest did.
+                self.runtime.remove(&name).await;
+                continue;
+            };
+            let i = Inst::new(name.clone(), tpl.deployment.clone());
+            *i.phase.lock() = phase;
+            *i.started_at.lock() = Some(now_ms());
+            self.insts.lock().push(i);
+            kept += 1;
+        }
+        if kept > 0 {
+            self.log.stream(Stream::System).line(format!("kept {kept} instance{} the previous owner ran", if kept == 1 { "" } else { "s" }));
+        }
+        kept
     }
 
     pub fn set_capped(&self, on: bool) {
@@ -1336,6 +1476,40 @@ impl EnvLive {
         self.tick().await;
     }
 
+    /// Replace one instance (a stuck one, its pool leaked): on a web service a fresh one is
+    /// started and answering first, then this one leaves rotation and drains; a worker's stops
+    /// and the reaper starts what's wanted. If the fresh one doesn't start, this one stays.
+    pub async fn restart_instance(self: &Arc<Self>, name: &str) -> Result<(), String> {
+        let tpl = self.template().ok_or("nothing is deployed here")?;
+        let inst = self.instances().into_iter().find(|i| i.name == name).ok_or_else(|| format!("no instance {name} here"))?;
+        let replace = tpl.run.kind == RunType::Web && inst.awake() && inst.deployment == tpl.deployment;
+        {
+            let _g = self.wake.lock().await;
+            if self.closed.load(Ordering::SeqCst) {
+                return Err("this environment was torn down".into());
+            }
+            if replace {
+                let fresh = self.make(&tpl).await.map_err(|e| format!("a fresh instance couldn't be made: {e:#}"))?;
+                self.insts.lock().push(fresh.clone());
+                let deadline = Instant::now() + Duration::from_secs(tpl.run.health_timeout_s as u64);
+                if let Err(e) = self.start(&fresh, &tpl.run, tpl.run.health_path.as_deref(), deadline).await {
+                    return Err(format!("the fresh instance didn't start ({e}); {name} keeps serving"));
+                }
+            }
+            if !self.insts.lock().iter().any(|i| Arc::ptr_eq(i, &inst)) {
+                return Err(format!("{name} went meanwhile"));
+            }
+            self.insts.lock().retain(|i| !Arc::ptr_eq(i, &inst));
+            *inst.phase.lock() = Phase::Stopping;
+        }
+        self.log.stream(Stream::System).line(format!("restarting {name}{}", if replace { ": a fresh instance answers in its place" } else { "" }));
+        self.drain(vec![inst], self.drain_of(&tpl.run));
+        if !replace {
+            self.tick().await;
+        }
+        Ok(())
+    }
+
     /// Make every instance look idle for `d` longer than it is (tests drive the reaper with
     /// this instead of waiting).
     pub fn backdate(&self, d: Duration) {
@@ -1349,6 +1523,38 @@ impl EnvLive {
     }
 
     /// Remove every instance (an environment's teardown, or the service leaving this node).
+    /// Give the environment up without touching what runs (a runtime the nodes share: the next
+    /// owner keeps the live deployment's instances, [`Self::adopt`], and removes the rest):
+    /// nothing here sends to, wakes or stops them any more.
+    pub async fn let_go(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        let _g = self.wake.lock().await;
+        self.closed.store(true, Ordering::SeqCst);
+        *self.canary.lock() = None;
+        self.viewed.lock().clear();
+        let all: Vec<Arc<Inst>> = self.insts.lock().drain(..).collect();
+        for i in all {
+            self.runtime.release(&i.name).await;
+        }
+        *self.template.lock() = None;
+    }
+
+    /// The service's registry login changed (None: it went): instances made from now on use it.
+    pub fn set_registry(&self, login: Option<&crate::runtime::RegistryLogin>) {
+        let strip = |t: &Arc<Template>| {
+            let mut t = (**t).clone();
+            t.spec.registry = login.cloned();
+            Arc::new(t)
+        };
+        let mut tpl = self.template.lock();
+        if let Some(t) = tpl.as_ref() {
+            *tpl = Some(strip(t));
+        }
+        if let Some((t, _)) = self.canary.lock().as_mut() {
+            *t = strip(t);
+        }
+    }
+
     pub async fn shutdown(&self) {
         let _g = self.wake.lock().await;
         self.closed.store(true, Ordering::SeqCst);
@@ -1729,6 +1935,23 @@ impl EnvLive {
             up += 1;
             self.log.stream(Stream::System).line(format!("scaled out: {up} instances for the backlog"));
         }
+        // Crashed ones past what's wanted (its backlog fell while they waited): they go, their
+        // crash kept in the crash list; none is started again to be scaled in.
+        if up + finished >= target {
+            let extra: Vec<Arc<Inst>> = self.instances().into_iter().filter(|i| i.phase() == Phase::Crashed && !i.done.load(Ordering::SeqCst)).collect();
+            for i in extra {
+                self.insts.lock().retain(|x| !Arc::ptr_eq(x, &i));
+                let (runtime, name, stopping, released) = (self.runtime.clone(), i.name.clone(), i.stopping.lock().take(), self.released.clone());
+                tokio::spawn(async move {
+                    if let Some(s) = stopping {
+                        let _ = s.await;
+                    }
+                    if !released.load(Ordering::SeqCst) {
+                        runtime.remove(&name).await;
+                    }
+                });
+            }
+        }
         // Fewer wanted for `scale_down_after`: one goes (the newest), its work given the drain
         // to finish; the rest follow on later ticks.
         let fewer = up > target;
@@ -1755,8 +1978,11 @@ impl EnvLive {
             self.insts.lock().retain(|x| !Arc::ptr_eq(x, &i));
             *self.fewer_since.lock() = None;
             self.log.stream(Stream::System).line(format!("scaled in: {} instances for the backlog", up - 1));
-            let (runtime, name, grace) = (self.runtime.clone(), i.name.clone(), self.drain_of(run));
+            let (runtime, name, grace, released) = (self.runtime.clone(), i.name.clone(), self.drain_of(run), self.released.clone());
             tokio::spawn(async move {
+                if released.load(Ordering::SeqCst) {
+                    return;
+                }
                 let _ = runtime.stop(&name, grace).await;
                 runtime.remove(&name).await;
             });
@@ -1765,7 +1991,7 @@ impl EnvLive {
 
     /// One cron run: a fresh instance of the active deployment, to its exit or `timeout`.
     pub async fn run_once(self: &Arc<Self>, timeout: Duration) -> anyhow::Result<(String, Option<i32>, bool)> {
-        let e = self.run_to_exit(None, &[], timeout, None, tokio_util::sync::CancellationToken::new(), |_| {}).await?;
+        let e = self.run_to_exit(None, &[], timeout, None, tokio_util::sync::CancellationToken::new(), None).await?;
         Ok((e.deployment, e.code, e.timed_out))
     }
 
@@ -1780,7 +2006,7 @@ impl EnvLive {
         timeout: Duration,
         log: Option<LogSink>,
         cancel: tokio_util::sync::CancellationToken,
-        made: impl FnOnce(&str),
+        name: Option<String>,
     ) -> anyhow::Result<Exit> {
         let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
         anyhow::ensure!(command.is_some() || tpl.spec.volume.is_none() || !self.held.load(Ordering::SeqCst), "its volume is being restored");
@@ -1791,8 +2017,7 @@ impl EnvLive {
             tpl.spec.aliases.clear();
         }
         tpl.spec.vars.extend(vars.iter().cloned());
-        let inst = self.make(&tpl).await?;
-        made(&inst.name);
+        let inst = self.make_run(&tpl, name).await?;
         let log = log.unwrap_or_else(|| self.log.instance(&inst.name, &inst.deployment));
         let began = Instant::now();
         let ran = async {

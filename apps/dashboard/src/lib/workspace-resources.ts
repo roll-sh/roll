@@ -253,6 +253,8 @@ export function service(s: Service): ResourceView {
   const st = env?.state ?? "none";
   const latest = env?.latest ? deployStatus(env.latest.status) : null;
   const pending = latest?.tone === "busy";
+  // A first deploy that failed: nothing serves, and why is in its deploy log.
+  const failedFirst = !pending && latest?.tone === "error" && !env?.active;
   const instances = s.run.min_instances === s.run.max_instances ? `${s.run.min_instances}` : `${s.run.min_instances}–${s.run.max_instances}`;
   return {
     kind: "service",
@@ -260,8 +262,8 @@ export function service(s: Service): ResourceView {
     name: s.name,
     sub: hostOf(env?.url) || sourceLabel(s.source),
     // A deploy on its way is busy whatever the instances are doing.
-    state: pending ? "starting" : instanceTone(st),
-    stateLabel: pending ? `${latest.label}…` : instanceStateLabel(st),
+    state: pending ? "starting" : failedFirst ? "failed" : instanceTone(st),
+    stateLabel: pending ? `${latest.label}…` : failedFirst ? "Deploy failed" : instanceStateLabel(st),
     // Asleep or frozen meters nothing: say so where the state is.
     note: !pending && (st === "stopped" || st === "suspended") ? "$0.00/h" : undefined,
     meta: latest && !pending ? latest.label : `${instances} ${instances === "1" ? "instance" : "instances"}`,

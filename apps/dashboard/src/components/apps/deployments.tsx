@@ -1,7 +1,7 @@
 import { HorizonMark } from "@roll/brand";
 import { ExternalLink, Rocket, RotateCcw, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { appsApi, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type Environment, type LogLine } from "@/lib/apps-api";
+import { appsApi, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type DeployCommits, type Environment, type LogLine } from "@/lib/apps-api";
 import { btn, panel } from "../ui";
 import { PlanDetails } from "./new-service";
 import { usePageVisible } from "./live";
@@ -54,6 +54,9 @@ export function Deployments({
   runner: Runner;
 }) {
   const [open, setOpen] = useState<string | null>(null);
+  // A rollback brings its variables back as they were (Heroku's, Railway's), unless they're kept
+  // as they are now: after a leaked secret's rotation, the old value must not come back.
+  const [keepVars, setKeepVars] = useState(false);
   // The newest opens by itself, so a deploy that just started shows its build.
   const shown = deploys?.find((d) => d.id === open) ?? deploys?.[0] ?? null;
   const activeId = env.active?.id ?? null;
@@ -72,6 +75,10 @@ export function Deployments({
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
       <section className={`${panel} overflow-hidden`}>
+        <label className="flex items-center gap-1.5 border-b border-line px-4 py-2 text-[12px] text-muted" title="Off: a rollback brings the variables back as they were when it was live">
+          <input type="checkbox" checked={keepVars} onChange={(e) => setKeepVars(e.target.checked)} />
+          Rollbacks keep today's variables
+        </label>
         <ul className="divide-y divide-line">
           {deploys.map((d) => {
             const active = d.id === activeId;
@@ -102,6 +109,7 @@ export function Deployments({
                       <span className="truncate">{d.id}</span>
                     </p>
                     {d.error && <p className="mt-1 line-clamp-2 text-[12px] text-danger">{d.error}</p>}
+                    {d.error_detail && <p className="mt-1 line-clamp-3 break-words font-mono text-[11.5px] text-muted">{d.error_detail}</p>}
                   </div>
                   <div className="flex shrink-0 gap-1" onClick={(e) => e.stopPropagation()}>
                     {isPending(d.status) && (
@@ -125,13 +133,13 @@ export function Deployments({
                         <ExternalLink className="size-3.5" /> Open
                       </a>
                     )}
-                    {!active && !isPending(d.status) && d.image && d.status !== "removed" && (
+                    {!active && !isPending(d.status) && d.image && !d.pruned_at && d.status !== "removed" && (
                       <SureButton
                         className={`${btn} ${d.status === "ready" ? "" : "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 max-md:opacity-100"}`}
                         disabled={runner.busy !== null}
                         sure={d.status === "ready" ? `Sure? Put it live in ${env.name}` : `Sure? Roll ${env.name} back`}
-                        onSure={() => runner.run(`rollback:${d.id}`, () => appsApi.rollback(service, env.name, d.id))}
-                        title={d.status === "ready" ? "Run this deployment's image, without a build" : "Run this deployment's image again, without a build, with its variables as they were then"}
+                        onSure={() => runner.run(`rollback:${d.id}`, () => appsApi.rollback(service, env.name, d.id, keepVars))}
+                        title={d.status === "ready" ? "Run this deployment's image, without a build" : keepVars ? "Run this deployment's image again, without a build, with today's variables" : "Run this deployment's image again, without a build, with its variables as they were then"}
                       >
                         {d.status === "ready" ? (
                           <>
@@ -177,9 +185,47 @@ function useSteps(service: string, env: string, d: Deployment) {
   return full ? stepDurations(full) : [];
 }
 
+/** A repo deployment's commits over the live one (Render's deploy view), read once it's opened. */
+function useCommits(service: string, env: string, d: Deployment) {
+  const [c, setC] = useState<DeployCommits | null>(null);
+  useEffect(() => {
+    if (!d.revision) return setC(null);
+    let live = true;
+    appsApi.commits(service, env, d.id).then((x) => live && setC(x), () => live && setC(null));
+    return () => {
+      live = false;
+    };
+  }, [service, env, d.id, d.revision, d.status]);
+  return c;
+}
+
+function Commits({ c }: { c: DeployCommits }) {
+  if (!c.commits || !c.since) return null;
+  if (!c.commits.length) return <p className="mb-2 text-[12px] text-subtle">The same commit as {shortSha(c.since.revision)}.</p>;
+  return (
+    <details className="mb-2 text-[12px]">
+      <summary className="cursor-pointer text-muted">
+        {c.commits.length}
+        {c.complete ? "" : "+"} {c.commits.length === 1 ? "commit" : "commits"} since {shortSha(c.since.revision)}
+        {!c.complete && " (it isn't in this one's history: a rollback, or another branch)"}
+      </summary>
+      <ul className="mt-1.5 space-y-1">
+        {c.commits.map((x) => (
+          <li key={x.sha} className="flex min-w-0 gap-2">
+            <span className="shrink-0 font-mono text-[11.5px] text-subtle">{shortSha(x.sha)}</span>
+            <span className="min-w-0 flex-1 truncate">{x.summary}</span>
+            <span className="shrink-0 text-subtle">{x.author}</span>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
 function BuildLog({ service, env, d }: { service: string; env: string; d: Deployment }) {
   const { lines, error } = useBuildLog(service, env, d);
   const steps = useSteps(service, env, d);
+  const commits = useCommits(service, env, d);
   return (
     <section className="min-w-0">
       <div className="mb-2 flex items-center gap-2">
@@ -189,6 +235,7 @@ function BuildLog({ service, env, d }: { service: string; env: string; d: Deploy
           {d.image ?? ""}
         </span>
       </div>
+      {commits && <Commits c={commits} />}
       {steps.length > 0 && (
         <ol className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px]" aria-label="Steps">
           {steps.map((s, i) => (

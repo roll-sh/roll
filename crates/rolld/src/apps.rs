@@ -248,6 +248,35 @@ impl Sources for CodeSources {
         .await
     }
 
+    async fn commits(&self, repo: &str, from: &str, to: &str, limit: usize) -> anyhow::Result<Option<(Vec<apps_control::integrations::CommitInfo>, bool)>> {
+        let (this, repo, from, to) = (self.clone(), repo.to_string(), from.to_string(), to.to_string());
+        blocking(move || {
+            let r = this.repo(&repo)?;
+            let at = |rev: &str| this.0.store.resolve(&r.id, rev)?.ok_or_else(|| anyhow::anyhow!("no revision {rev}"));
+            let (a, b) = (at(&from)?, at(&to)?);
+            // One past the limit: whether there are more than it shows.
+            let log = this.0.store.log(&r.id, &b, &code_store::LogQuery { limit: limit + 1, ..Default::default() })?;
+            let mut out = Vec::new();
+            let mut reached = false;
+            for c in log {
+                if c.id == a {
+                    reached = true;
+                    break;
+                }
+                if out.len() == limit {
+                    break;
+                }
+                let sha = match c.git_commit {
+                    Some(o) => o.to_string(),
+                    None => this.0.store.derive_git(&r.id, &c.id)?.0.to_string(),
+                };
+                out.push(apps_control::integrations::CommitInfo { sha, summary: c.summary, author: c.author.name() });
+            }
+            Ok(Some((out, reached)))
+        })
+        .await
+    }
+
     async fn set_status(&self, repo: &str, sha: &str, st: &apps_control::integrations::CommitStatus) -> anyhow::Result<()> {
         let (this, repo, sha) = (self.clone(), repo.to_string(), sha.to_string());
         let body = serde_json::json!({ "state": st.state, "context": st.context, "description": st.description, "target_url": st.target_url });
@@ -399,6 +428,10 @@ pub async fn start(
     cfg.web_url = Some(args.web_url.trim_end_matches('/').to_string()).filter(|u| !u.is_empty());
     // Local development only: notification targets on this machine or a private network.
     cfg.allow_private = std::env::var("ROLL_APPS_ALLOW_PRIVATE").is_ok_and(|v| v == "1" || v == "true");
+    // Built deployments each environment keeps to roll back to (older ones' images go).
+    if let Some(n) = std::env::var("ROLL_APPS_KEEP_DEPLOYMENTS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0) {
+        cfg.keep_deployments = n;
+    }
     let edge = crate::edge::Public::of(args);
     cfg.domain = a.domain.clone().unwrap_or_else(|| if edge.is_some() { format!("up.{}", args.edge.site_domain) } else { "apps.localhost".into() });
     if edge.is_some() {

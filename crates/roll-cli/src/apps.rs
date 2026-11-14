@@ -91,6 +91,19 @@ pub struct Logs {
     /// Only lines from this long ago on: `30m`, `2h`, `7d`.
     #[arg(long)]
     pub since: Option<String>,
+    /// Only lines from before this long ago (`2h`: what happened until two hours ago), read
+    /// back through the stored logs.
+    #[arg(long, conflicts_with = "follow")]
+    pub before: Option<String>,
+    /// Only this instance's lines (its name, or the number it ends with).
+    #[arg(long)]
+    pub instance: Option<String>,
+    /// Only this deployment's instances' lines.
+    #[arg(long)]
+    pub deployment: Option<String>,
+    /// Only this stream: `stdout`, `stderr` or `system`.
+    #[arg(long)]
+    pub stream: Option<String>,
     /// The requests instead (the proxy's access log): method, path, status, time.
     #[arg(long, conflicts_with = "build")]
     pub http: bool,
@@ -100,6 +113,10 @@ pub struct Logs {
     /// With `--http`: only requests that took at least this many milliseconds.
     #[arg(long, requires = "http")]
     pub min_ms: Option<u64>,
+    /// With `--http`: only answers roll gave itself, for this reason (`firewall`, `rate_limit`,
+    /// `wake`…; `any`: all of them).
+    #[arg(long, requires = "http")]
+    pub by: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -285,6 +302,20 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// A cron service's runs, newest first; `--now` starts one, `--logs RUN` prints one's output
+    /// (`--follow` until it ends), `--cancel RUN` stops one.
+    Runs {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, conflicts_with_all = ["logs", "cancel"])]
+        now: bool,
+        #[arg(long, value_name = "RUN", conflicts_with = "cancel")]
+        logs: Option<String>,
+        #[arg(long, requires = "logs")]
+        follow: bool,
+        #[arg(long, value_name = "RUN")]
+        cancel: Option<String>,
+    },
     /// Reach the service's port from this machine, a private one too (Fly's `fly proxy`):
     /// connections to `127.0.0.1:<local port>` go to it through roll, a tunnel each, waking it
     /// and keeping it up while they're open. Ctrl-C ends it.
@@ -415,6 +446,10 @@ pub enum AppsCmd {
     Restart {
         #[command(flatten)]
         target: Target,
+        /// Just this instance (its name, or the number it ends with): a fresh one answers before
+        /// it leaves, the others stay.
+        #[arg(long)]
+        instance: Option<String>,
     },
     /// Requests, latency, CPU, memory and cold starts over the last hour.
     Metrics {
@@ -480,6 +515,15 @@ pub enum AppsCmd {
         add: Option<String>,
         #[arg(long, default_value = "webhook")]
         kind: String,
+        /// With `--add`: only this environment's events (repeat it for more).
+        #[arg(long = "only-env", requires = "add")]
+        only_env: Vec<String>,
+        /// With `--add`: only this service's events (a name or id; repeat it for more).
+        #[arg(long = "only-service", requires = "add")]
+        only_service: Vec<String>,
+        /// With `--add`: preview environments' events too (left out by default).
+        #[arg(long, requires = "add")]
+        previews: bool,
         #[arg(long)]
         remove: Option<String>,
     },
@@ -505,6 +549,10 @@ pub enum AppsCmd {
     Env {
         #[command(flatten)]
         target: Target,
+        /// Every service of the project gets it (each through its own call, each answered):
+        /// one environment for the whole project, as Railway's are.
+        #[arg(long, conflicts_with = "private")]
+        all_services: bool,
         #[arg(long)]
         branch: Option<String>,
         /// Stop deploying on pushes.
@@ -561,6 +609,13 @@ pub enum AppsCmd {
         /// No firewall rules.
         #[arg(long)]
         no_firewall: bool,
+        /// A header its answers carry, `[!][/path] Name: value` (`!`: over the app's own; no
+        /// path: every answer), repeatable; the list replaces the environment's.
+        #[arg(long = "header", value_name = "[!][/PATH] NAME: VALUE", conflicts_with = "no_headers")]
+        header: Vec<String>,
+        /// Its answers carry no headers of the environment's own again.
+        #[arg(long)]
+        no_headers: bool,
         /// Its own page (an HTML file, at most 64 KiB) for the 502, 503 and 504 visitors get
         /// while the app can't answer or wake (Heroku's error page).
         #[arg(long, value_name = "HTML_FILE")]
@@ -1064,8 +1119,10 @@ fn print_line(l: &Value) {
         && let Ok(r) = serde_json::from_str::<Value>(&s(&l["text"]))
     {
         let cold = if r["cold"] == true { format!("  cold +{}ms", r["waited_ms"]) } else { String::new() };
-        let inst = r["instance"].as_str().map(|i| i.rsplit('-').next().unwrap_or(i).to_string()).unwrap_or_default();
-        println!("{t} {inst:>5} │ {} {} {} {}ms{cold}", s(&r["method"]), s(&r["path"]), r["status"], r["ms"]);
+        let inst = r["instance"].as_str().map(|i| i.rsplit('-').next().unwrap_or(i).to_string()).or_else(|| r["by"].as_str().map(|_| "roll".to_string())).unwrap_or_default();
+        let by = r["by"].as_str().map(|b| format!("  ({b})")).unwrap_or_default();
+        let ip = r["ip"].as_str().map(|i| format!("  {i}")).unwrap_or_default();
+        println!("{t} {inst:>5} │ {} {} {} {}ms{cold}{by}{ip}", s(&r["method"]), s(&r["path"]), r["status"], r["ms"]);
         return;
     }
     let who = match l["stream"].as_str() {
@@ -1635,10 +1692,29 @@ pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
         }
         None => format!("{base}/logs"),
     };
-    let since = match &l.since {
+    let mut since = match &l.since {
         Some(d) => format!("&since={}", chrono::Utc::now().timestamp_millis() - ago_ms(d)?),
         None => String::new(),
     };
+    if let Some(d) = &l.before {
+        since.push_str(&format!("&before={}", chrono::Utc::now().timestamp_millis() - ago_ms(d)?));
+    }
+    // An instance by the number its name ends with: the environment's own prefix is the API's.
+    if let Some(i) = &l.instance {
+        let name = match i.parse::<u64>() {
+            Ok(n) => {
+                let now = api.get(&base).await?;
+                now["instances"].as_array().into_iter().flatten().filter_map(|x| x["id"].as_str()).find(|x| x.rsplit('-').next() == Some(&n.to_string())).map(str::to_string).unwrap_or_else(|| i.clone())
+            }
+            Err(_) => i.clone(),
+        };
+        since.push_str(&format!("&instance={}", enc(&name)));
+    }
+    for (k, v) in [("deployment", &l.deployment), ("stream", &l.stream)] {
+        if let Some(v) = v {
+            since.push_str(&format!("&{k}={}", enc(v)));
+        }
+    }
     let mut http = String::new();
     if l.http {
         http.push_str("&http=1");
@@ -1647,6 +1723,9 @@ pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
         }
         if let Some(ms) = l.min_ms {
             http.push_str(&format!("&min_ms={ms}"));
+        }
+        if let Some(b) = &l.by {
+            http.push_str(&format!("&by={}", enc(b)));
         }
     }
     if l.follow {
@@ -1930,11 +2009,50 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 for d in v.as_array().into_iter().flatten() {
                     let rev = d["revision"].as_str().map(|r| &r[..r.len().min(8)]).unwrap_or("-").to_string();
                     let by = d["actor"].as_str().map(|a| format!("  ({})", a.strip_prefix("git:").unwrap_or(a))).unwrap_or_default();
-                    println!("{}  {:<10} {:<8} {rev:<8} {}{by}", s(&d["id"]), s(&d["status"]), s(&d["trigger"]), s(&d["message"]));
+                    // A pruned one is history only (its image is gone): nothing to roll back to.
+                    let status = if d["pruned_at"].is_i64() { "pruned".to_string() } else { s(&d["status"]) };
+                    println!("{}  {status:<10} {:<8} {rev:<8} {}{by}", s(&d["id"]), s(&d["trigger"]), s(&d["message"]));
                 }
                 return Ok(());
             }
             v
+        }
+        AppsCmd::Runs { target, now, logs, follow, cancel } => {
+            let svc = service(api, &target).await?;
+            let base = format!("{}/runs", env_path(&svc, &target.env));
+            if now {
+                api.post(&base, json!({})).await?
+            } else if let Some(run) = cancel {
+                api.post(&format!("{base}/{}/cancel", enc(&run)), json!({})).await?
+            } else if let Some(run) = logs {
+                let path = format!("{base}/{}/logs", enc(&run));
+                if follow {
+                    return follow_matching(api, &format!("{path}?follow=1&tail=2000"), None).await;
+                }
+                let lines = api.get(&format!("{path}?tail=2000")).await?;
+                if !json_out {
+                    for l in lines.as_array().into_iter().flatten() {
+                        print_line(l);
+                    }
+                    return Ok(());
+                }
+                lines
+            } else {
+                let v = api.get(&base).await?;
+                if !json_out {
+                    for r in v.as_array().into_iter().flatten() {
+                        let at = r["started_at"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
+                        let took = match (r["started_at"].as_i64(), r["finished_at"].as_i64()) {
+                            (Some(a), Some(b)) => format!("{} s", ((b - a) / 1000).max(1)),
+                            _ => "-".into(),
+                        };
+                        let code = r["exit_code"].as_i64().map(|c| format!("exit {c}")).unwrap_or_default();
+                        println!("{}  {:<10} {at}  {took:<6} {code}", s(&r["id"]), s(&r["status"]));
+                    }
+                    return Ok(());
+                }
+                v
+            }
         }
         AppsCmd::Ssh { target, instance } => {
             let svc = service(api, &target).await?;
@@ -2068,9 +2186,22 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let svc = service(api, &target).await?;
             api.post(&format!("{}/wake", env_path(&svc, &target.env)), json!({})).await?
         }
-        AppsCmd::Restart { target } => {
+        AppsCmd::Restart { target, instance } => {
             let svc = service(api, &target).await?;
-            api.post(&format!("{}/restart", env_path(&svc, &target.env)), json!({})).await?
+            let base = env_path(&svc, &target.env);
+            match instance {
+                Some(i) => {
+                    let name = match i.parse::<u64>() {
+                        Ok(n) => {
+                            let now = api.get(&base).await?;
+                            now["instances"].as_array().into_iter().flatten().filter_map(|x| x["id"].as_str()).find(|x| x.rsplit('-').next() == Some(&n.to_string())).map(str::to_string).ok_or_else(|| anyhow::anyhow!("no instance {n} in {}", target.env))?
+                        }
+                        Err(_) => i,
+                    };
+                    api.post(&format!("{base}/instances/{}/restart", enc(&name)), json!({})).await?
+                }
+                None => api.post(&format!("{base}/restart"), json!({})).await?,
+            }
         }
         AppsCmd::Metrics { target, minutes, range } => {
             let minutes = match range.as_deref() {
@@ -2226,11 +2357,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::Notifications { target, add, kind, remove } => {
+        AppsCmd::Notifications { target, add, kind, only_env, only_service, previews, remove } => {
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/projects/{}/notifications", enc(&s(&svc["project"])));
             if let Some(url) = add {
-                let t = api.post(&path, json!({ "kind": kind, "url": url })).await?;
+                let t = api.post(&path, json!({ "kind": kind, "url": url, "environments": only_env, "services": only_service, "previews": previews })).await?;
                 if !json_out {
                     println!("{}  {} {}  events {}", s(&t["id"]), s(&t["kind"]), s(&t["host"]), t["events"]);
                     if let Some(secret) = t["secret"].as_str() {
@@ -2292,7 +2423,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, private, open, maintenance, serve, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, error_page, maintenance_page, roll_pages } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, private, open, maintenance, serve, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, error_page, maintenance_page, roll_pages } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -2339,6 +2470,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             } else if no_firewall {
                 body.insert("firewall".into(), Value::Null);
             }
+            if !header.is_empty() {
+                body.insert("headers".into(), header_rules(&header)?);
+            } else if no_headers {
+                body.insert("headers".into(), Value::Null);
+            }
             let mut pages = serde_json::Map::new();
             for (k, f) in [("error", &error_page), ("maintenance", &maintenance_page)] {
                 if let Some(f) = f {
@@ -2369,6 +2505,37 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     r.insert(k.trim().to_string(), v);
                 }
                 body.insert("run".into(), Value::Object(r));
+            }
+            if all_services {
+                // Each service's own call (each is authorized for that service, as one at a time):
+                // what worked and what didn't, never a half-done project reported as done.
+                let all = api.get(&format!("/v1/apps/projects/{}/services", enc(&s(&svc["project"])))).await?;
+                let mut out = Vec::new();
+                let mut failed = 0;
+                for one in all.as_array().into_iter().flatten() {
+                    let r = api.call(reqwest::Method::PUT, &env_path(one, &target.env), Some(Value::Object(body.clone()))).await;
+                    if !json_out {
+                        match &r {
+                            Ok(e) => println!("{:<24} {}", s(&one["name"]), e["url"].as_str().unwrap_or("")),
+                            Err(err) => println!("{:<24} failed: {err:#}", s(&one["name"])),
+                        }
+                    }
+                    failed += r.is_err() as usize;
+                    out.push(match r {
+                        Ok(e) => json!({ "service": one["id"], "environment": e }),
+                        Err(err) => json!({ "service": one["id"], "error": format!("{err:#}") }),
+                    });
+                }
+                if failed > 0 {
+                    if json_out {
+                        println!("{}", serde_json::to_string_pretty(&out)?);
+                    }
+                    bail!("{failed} of {} services didn't get {}", out.len(), target.env);
+                }
+                if json_out {
+                    println!("{}", serde_json::to_string_pretty(&out)?);
+                }
+                return Ok(());
             }
             let e = api.call(reqwest::Method::PUT, &env_path(&svc, &target.env), Some(Value::Object(body))).await?;
             if let (Some(t), Some(url)) = (&token, e["url"].as_str()) {
@@ -2423,6 +2590,47 @@ fn firewall_rule(line: &str) -> anyhow::Result<Value> {
     Ok(rule)
 }
 
+
+/// `--header` lines (`[!][/path] Name: value`) as the API's rules: those of one path and `!` are
+/// one rule, as the dashboard's editor groups them.
+fn header_rules(lines: &[String]) -> anyhow::Result<Value> {
+    let mut rules: Vec<(Option<String>, bool, serde_json::Map<String, Value>)> = Vec::new();
+    for raw in lines {
+        let mut l = raw.trim();
+        let replace = l.starts_with('!');
+        if replace {
+            l = l[1..].trim_start();
+        }
+        let mut path = None;
+        if l.starts_with('/') {
+            let (p, rest) = l.split_once(char::is_whitespace).unwrap_or((l, ""));
+            path = Some(p.to_string());
+            l = rest.trim();
+        }
+        let (name, value) = l.split_once(':').filter(|(n, _)| !n.trim().is_empty()).ok_or_else(|| anyhow::anyhow!("--header is [!][/path] Name: value, not {raw:?}"))?;
+        match rules.iter_mut().find(|(p, r, _)| *p == path && *r == replace) {
+            Some((_, _, set)) => {
+                set.insert(name.trim().to_string(), json!(value.trim()));
+            }
+            None => rules.push((path, replace, serde_json::Map::from_iter([(name.trim().to_string(), json!(value.trim()))]))),
+        }
+    }
+    Ok(Value::Array(
+        rules
+            .into_iter()
+            .map(|(path, replace, set)| {
+                let mut r = json!({ "set": set });
+                if let Some(p) = path {
+                    r["path"] = json!(p);
+                }
+                if replace {
+                    r["replace"] = json!(true);
+                }
+                r
+            })
+            .collect(),
+    ))
+}
 
 #[cfg(test)]
 mod tests {

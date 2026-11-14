@@ -180,8 +180,22 @@ impl Apps {
     /// settings and variables (variables are read when its instances are made), without a build
     /// and without moving to another revision. What a change of variables or settings needs,
     /// for every source (an upload service has no source to deploy again).
-    pub async fn redeploy(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>) -> Result<Deployment> {
+    /// With `key` (an `Idempotency-Key`), a retry answers the redeploy the first call queued, as a
+    /// deploy's does (one table of keys per environment for both).
+    pub async fn redeploy(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>, key: Option<&str>) -> Result<Deployment> {
         self.refuse_capped(service)?;
+        if let Some(k) = key {
+            if k.is_empty() || k.len() > 200 || !k.bytes().all(|b| b.is_ascii_graphic()) {
+                return Err(Error::BadRequest("Idempotency-Key is 1–200 printable ASCII characters".into()));
+            }
+            let (sid, e, kk) = (service.to_string(), env.to_string(), k.to_string());
+            if let Some(d) = self.db(move |s| s.keyed_deployment(&sid, &e, &kk)).await? {
+                if d.trigger != Trigger::Settings {
+                    return Err(Error::Conflict(format!("Idempotency-Key {k} was used for another deploy ({})", d.id)));
+                }
+                return Ok(d);
+            }
+        }
         let o = body.as_object().cloned().unwrap_or_default();
         if let Some(k) = o.keys().find(|k| k.as_str() != "message") {
             return Err(Error::BadRequest(format!("unknown field {k}")));
@@ -215,7 +229,8 @@ impl Apps {
             no_cache: false,
         };
         let (sid, e) = (service.to_string(), env.to_string());
-        let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
+        let k = key.map(str::to_string);
+        let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", k.as_deref())).await?;
         self.deploy_log(&dep.id).line("queued (redeploy)");
         self.kick(service, env);
         Ok(dep)
@@ -274,6 +289,9 @@ impl Apps {
         self.refuse_capped(service)?;
         let old = self.deployment(service, env, dep).await?;
         let Some(image) = old.image.clone() else { return Err(Error::Conflict(format!("{dep} never built an image, so there's nothing to roll back to"))) };
+        if old.pruned_at.is_some() {
+            return Err(Error::Conflict(format!("{dep} is older than what's kept to roll back to and its image was cleaned up; deploy its revision again")));
+        }
         let did = old.id.clone();
         if !keep_variables && let Some(then) = self.db(move |s| s.snapshot(&did)).await? {
             let (sid, e) = (service.to_string(), env.to_string());
@@ -312,7 +330,7 @@ impl Apps {
     /// through rollbacks (after B → A, the next goes to what came before A, never forward to B).
     pub async fn rollback_previous(self: &Arc<Self>, service: &str, env: &str, actor: Option<String>, keep_variables: bool) -> Result<Deployment> {
         let (sid, e) = (service.to_string(), env.to_string());
-        let (row, all) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.deployments(&sid, &e, 100)?))).await?;
+        let (row, all) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.deployments(&sid, &e, 100, None)?))).await?;
         let Some(active) = row.active.and_then(|a| all.iter().find(|d| d.id == a).cloned()) else {
             return Err(Error::Conflict(format!("{env} has nothing live to roll back from")));
         };
@@ -343,13 +361,39 @@ impl Apps {
         self.deployment(service, env, dep).await
     }
 
-    pub async fn deployments(self: &Arc<Self>, service: &str, env: &str) -> Result<Vec<Deployment>> {
+    pub async fn deployments(self: &Arc<Self>, service: &str, env: &str, before: Option<i64>) -> Result<Vec<Deployment>> {
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| {
             s.environment(&sid, &e)?;
-            s.deployments(&sid, &e, 100)
+            s.deployments(&sid, &e, 100, before)
         })
         .await
+    }
+
+    /// Old deployments of the services this node owns, past what each environment keeps
+    /// (`keep_deployments`): pruned in the store, then their images (once no deployment names
+    /// them), static sites and build logs go. Every ten minutes.
+    pub async fn prune(self: &Arc<Self>) {
+        let Ok(services) = self.db(|s| s.services(None)).await else { return };
+        let (keep, day_ago) = (self.cfg.keep_deployments.max(1), code_sql::now_ms() - self.cfg.keep_recent.as_millis() as i64);
+        for svc in services.into_iter().filter(|s| self.owns(&s.id)) {
+            let sid = svc.id.clone();
+            let Ok(pruned) = self.db(move |s| s.prune_deployments(&sid, keep, day_ago)).await else { continue };
+            for p in pruned {
+                if let Some(img) = &p.image {
+                    self.deps.builder.remove_image(img).await;
+                    // A site is keyed by its digest: another service's image with the same one
+                    // (a byte-identical build) still serves it.
+                    if let Some(k) = crate::sites::key(img) {
+                        let kk = k.clone();
+                        if !self.db(move |s| s.digest_in_use(&kk)).await.unwrap_or(true) {
+                            self.drop_site(&k).await;
+                        }
+                    }
+                }
+                self.logs.delete(&format!("build:{}", p.id)).await;
+            }
+        }
     }
 
     pub async fn deployment(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<Deployment> {
@@ -361,6 +405,30 @@ impl Apps {
         let id = dep.to_string();
         d.steps = self.db(move |s| s.steps(&id)).await?;
         Ok(d)
+    }
+
+    /// `GET …/deploys/{dep}/commits`: what a repo deployment brings over the one it's measured
+    /// against (Render's deploy view): the live one, or for the live one, the one live before
+    /// it. Up to 50 commits, newest first, and whether that's all; null when there's nothing to
+    /// compare (not a repo deployment, the first one, a source that can't tell).
+    pub async fn deploy_commits(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<Value> {
+        let d = self.deployment(service, env, dep).await?;
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (svc, row, all) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?, s.deployments(&sid, &e, 100, None)?))).await?;
+        let none = json!({ "since": null, "commits": null, "complete": false });
+        let (Source::Repo { repo, .. }, Some(to), Some(sources)) = (&svc.source, d.revision.as_deref(), self.deps.sources.clone()) else { return Ok(none) };
+        let since = if row.active.as_deref() == Some(dep) {
+            all.iter().filter(|x| x.created_at < d.created_at && x.revision.is_some() && x.image.is_some() && x.status == DeployStatus::Inactive).max_by_key(|x| x.created_at)
+        } else {
+            all.iter().find(|x| row.active.as_deref() == Some(x.id.as_str()))
+        };
+        let Some(since) = since.filter(|s| s.revision.is_some()) else { return Ok(none) };
+        let from = since.revision.clone().unwrap_or_default();
+        match sources.commits(repo, &from, to, 50).await {
+            Ok(Some((commits, complete))) => Ok(json!({ "since": { "id": since.id, "revision": from }, "commits": commits, "complete": complete })),
+            Ok(None) => Ok(none),
+            Err(e) => Err(Error::BadRequest(format!("{repo}: {e}"))),
+        }
     }
 
     pub fn deploy_log(self: &Arc<Self>, dep: &str) -> LogSink {
@@ -422,11 +490,17 @@ impl Apps {
                 self.report(&d, "failure", "canceled").await;
             }
             Err(e) => {
+                // roll's words go out (the commit status, notifications); what the app or the
+                // build printed stays roll's to show its owner (it can hold anything).
+                let detail = e.downcast_ref::<DeployFailure>().map(|f| f.detail.clone());
                 self.report(&d, "failure", &e.to_string()).await;
                 self.step(&d.service, &d.id, "failed").await;
                 let msg = e.to_string();
                 log.stream(Stream::System).line(format!("failed: {msg}"));
-                let _ = self.db(move |s| s.fail_deployment(&id, &msg)).await;
+                if let Some(x) = &detail {
+                    log.stream(Stream::System).line(x.clone());
+                }
+                let _ = self.db(move |s| s.fail_deployment(&id, &msg, detail.as_deref())).await;
                 warn!(service = %d.service, env = %d.environment, deployment = %d.id, error = %e, "apps: a deploy failed");
             }
         }
@@ -568,6 +642,17 @@ impl Apps {
                 Err(e) => log.stream(Stream::System).line(format!("static site: its files couldn't be exported ({e:#}); a container serves it")),
             }
         }
+        // Read before the instances' values are (a change in between then says "changed", the
+        // safe side, never that nothing did): the secrets' digest, the environment's own
+        // variables (what a rollback to it restores, kept with its switch to live) and the hash
+        // of everything it reads.
+        let secrets_digest = self.deps.secrets.digest(&svc.project, &env.name).await.ok().flatten();
+        let (sid, e, did) = (svc.id.clone(), env.name.clone(), d.id.clone());
+        let snapshot = self.db(move |s| s.seal_snapshot(&did, &sid, &e)).await?;
+        let vars_hash = {
+            let r = self.resolve_vars(&svc, &env, &dep.id).await?;
+            fingerprint(&r.vars_for_hash(), &svc)
+        };
         let tpl = Arc::new(self.template(&svc, &env, &dep).await?);
         let did = d.id.clone();
         let no_traffic = self.db(move |s| s.no_traffic(&did)).await?;
@@ -580,19 +665,13 @@ impl Apps {
             self.pre_deploy(&tpl, &cmd, log, &cancel).await?;
         }
         self.step(&d.service, &d.id, "rollout").await;
-        // The environment's own variables as this deployment reads them: what a rollback to it
-        // restores, kept with its switch to live.
-        let (sid, e, did) = (svc.id.clone(), env.name.clone(), d.id.clone());
-        let snapshot = self.db(move |s| s.seal_snapshot(&did, &sid, &e)).await?;
-        let vars_hash = {
-            let r = self.resolve_vars(&svc, &env, &dep.id).await?;
-            fingerprint(&r.vars_for_hash(), &svc)
-        };
-        // The project's secrets as it reads them (a digest, no value): what "secrets changed
-        // since" compares with. Best effort: without one, nothing says so.
-        if let Ok(Some(digest)) = self.deps.secrets.digest(&svc.project, &env.name).await {
+        // The project's secrets as the instances read them (a digest, no value): what "secrets
+        // changed since" compares with. Best effort: without one, nothing says so.
+        if let Some(digest) = secrets_digest {
             let did = d.id.clone();
-            let _ = self.db(move |s| s.set_secrets_digest(&did, &digest)).await;
+            if let Err(e) = self.db(move |s| s.set_secrets_digest(&did, &digest)).await {
+                warn!(deployment = %d.id, error = %e, "apps: the secrets' digest wasn't kept");
+            }
         }
         let live = self.live(&svc.id, &env.name);
         // Instances of the old deployment are known here (after a restart: loaded from the store).
@@ -602,7 +681,25 @@ impl Apps {
             RunType::Worker => "rolling out the worker".to_string(),
             RunType::Cron => "the next scheduled run uses this deployment".to_string(),
         });
-        let prepared = live.prepare(&tpl, None).await?;
+        let prepared = match live.prepare(&tpl, None).await {
+            Ok(p) => p,
+            // What the app said before it failed (a stack trace, a missing variable), in the deploy
+            // log and the error: its own lines are otherwise only in the environment's log.
+            Err(e) => {
+                let said: Vec<_> = self.logs.follow(&format!("env:{}/{}", svc.id, env.name), 2000).0.into_iter().filter(|l| l.instance.is_some() && l.deployment.as_deref() == Some(d.id.as_str())).collect();
+                let said = &said[said.len().saturating_sub(40)..];
+                if !said.is_empty() {
+                    log.stream(Stream::System).line("the new instance's output:");
+                    for l in said {
+                        log.stream(l.stream).line(format!("{}: {}", l.instance.as_deref().unwrap_or(""), l.text));
+                    }
+                }
+                return Err(match said.iter().rev().find(|l| !l.text.trim().is_empty()) {
+                    Some(l) => anyhow::Error::new(DeployFailure { what: e.to_string(), detail: format!("its last output: {}", l.text.trim().chars().take(200).collect::<String>()) }),
+                    None => e,
+                });
+            }
+        };
         let (made, took) = (prepared.made.clone(), prepared.took);
         // Canceled meanwhile, or the service moved to another node (its lease lost): nothing
         // of this rollout may stay.
@@ -988,10 +1085,23 @@ impl Apps {
             env: build_env,
             env_hash,
             no_cache,
+            // A stage of the tree's own Dockerfile; a generated one's are roll's.
+            target: svc.build.target.clone().filter(|_| plan.provider == apps_build::Provider::Dockerfile),
             layers,
         };
         log.line(format!("building with {}", self.deps.builder.name()));
-        let image = self.deps.builder.build(&job, log, cancel).await?;
+        let image = match self.deps.builder.build(&job, log, cancel.clone()).await {
+            Ok(i) => i,
+            // What failed, as BuildKit said it (the step, its last words), not only its exit code.
+            Err(e) if !cancel.is_cancelled() => {
+                let lines: Vec<String> = self.logs.follow(&format!("build:{}", d.id), 400).0.into_iter().map(|l| l.text).collect();
+                return Err(match build_failure(&lines) {
+                    Some(why) if !e.to_string().contains(&why) => anyhow::Error::new(DeployFailure { what: e.to_string(), detail: why }),
+                    _ => e,
+                });
+            }
+            Err(e) => return Err(e),
+        };
         let (id, img, r) = (d.id.clone(), image.clone(), run.clone());
         self.db(move |s| s.set_built(&id, &img, Some(&plan_json), Some(&r))).await?;
         Ok((image, run))
@@ -1111,22 +1221,75 @@ impl Apps {
     /// A service this node just got: clear what an earlier process left, load its
     /// environments' active deployments, resume its queued deploys.
     pub async fn resume_service(self: &Arc<Self>, service: &str) {
+        // Lost again before this ran (a lease that changed hands twice): what runs is the next
+        // owner's now, on a runtime the nodes share.
+        if !self.owns(service) {
+            return;
+        }
+        // The database's now: what started before is a previous owner's (or nobody's).
+        let Ok(took) = self.db(|s| s.now()).await else { return };
         let known: Vec<String> = self.lives().iter().filter(|l| l.service == service).flat_map(|l| l.instances().into_iter().map(|i| i.name.clone())).collect();
+        // The live deployments' instances still running (the previous owner died, they didn't)
+        // stay, for `EnvLive::adopt` to keep; the rest (jobs, older deployments') go.
+        let sid = service.to_string();
+        let live_prefixes: Vec<String> = self
+            .db(move |s| s.environments(&sid))
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| e.active.map(|a| crate::live::instance_prefix(service, &e.name, &a)))
+            .collect();
         for name in self.deps.runtime.list(Some(service)).await {
             // A known instance's network sandbox (`<instance>-net`) and waker (`-wake`) are its own.
             let owner = name.strip_suffix("-net").or_else(|| name.strip_suffix("-wake")).unwrap_or(&name).to_string();
-            if !known.contains(&name) && !known.contains(&owner) {
-                self.deps.runtime.remove(&name).await;
+            if known.contains(&name) || known.contains(&owner) {
+                continue;
             }
+            // (Not asked whether it runs: that's the adopt's to find, and a runtime may not know
+            // a task another process started until it looks.)
+            if live_prefixes.iter().any(|p| owner.strip_prefix(p.as_str()).is_some_and(|n| n.parse::<u64>().is_ok())) {
+                continue;
+            }
+            self.deps.runtime.remove(&name).await;
         }
-        // Jobs an earlier process ran had their containers removed just above.
+        // Cron runs and jobs an earlier process ran had their containers removed just above: they
+        // failed (and say so), and a run left `running` no longer holds the schedule back.
+        let spare: Vec<String> = self.running_jobs.lock().keys().cloned().chain(self.running_runs.lock().keys().cloned()).collect();
         let sid = service.to_string();
-        let _ = self.db(move |s| s.fail_running_jobs(&sid)).await;
+        if self.db(move |s| s.fail_orphans(&sid, &spare, took)).await.is_ok_and(|n| n > 0) {
+            self.changed(service);
+        }
         let sid = service.to_string();
         let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { return };
         for e in envs {
-            if let Err(err) = self.load_live(service, &e.name).await {
+            // A passing failure (the database, a secret's provider) is tried again before what
+            // the previous owner ran is given up.
+            let mut loaded = Err(Error::Internal(String::new()));
+            for attempt in 0..3u64 {
+                if attempt > 0 {
+                    tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
+                }
+                loaded = self.load_live(service, &e.name).await;
+                if loaded.is_ok() {
+                    break;
+                }
+            }
+            if let Err(err) = loaded {
                 warn!(service, env = %e.name, error = %err, "apps: loading an environment failed");
+                // Nothing will keep what the previous owner ran of it: it goes, as before; unless
+                // the service moved on meanwhile (the next owner keeps it).
+                if !self.owns(service) {
+                    return;
+                }
+                if let Some(a) = &e.active {
+                    let prefix = crate::live::instance_prefix(service, &e.name, a);
+                    for name in self.deps.runtime.list(Some(service)).await {
+                        let owner = name.strip_suffix("-net").or_else(|| name.strip_suffix("-wake")).unwrap_or(&name);
+                        if owner.strip_prefix(prefix.as_str()).is_some_and(|n| n.parse::<u64>().is_ok()) {
+                            self.deps.runtime.remove(&name).await;
+                        }
+                    }
+                }
             }
             // A deploy a lost node had started runs again from the start.
             let (sid, en) = (service.to_string(), e.name.clone());
@@ -1152,6 +1315,15 @@ impl Apps {
             cache.retain(|k, _| !k.starts_with(&format!("{service}/")));
         }
         self.close_sessions_of(service);
+        // Its jobs and cron runs stop here too (with their variables): the new owner fails what
+        // they left running.
+        self.cancel_service_jobs(service);
+        let runs: Vec<String> = self.running_runs.lock().iter().filter(|(_, s)| *s == service).map(|(id, _)| id.clone()).collect();
+        for id in runs {
+            if let Some(t) = self.cancels.lock().get(&id) {
+                t.cancel();
+            }
+        }
         // Deploys in flight stop here; the new owner resumes them from the store.
         let sid = service.to_string();
         if let Ok(pending) = self.db(move |s| s.pending_deployments(&sid)).await {
@@ -1161,10 +1333,18 @@ impl Apps {
                 }
             }
         }
+        // On a runtime the nodes share, what runs stays for the next owner to keep (stopping it
+        // here could stop what it just kept: a handoff's release can come after its take);
+        // otherwise it stops, as nobody else can reach it.
         let lives: Vec<_> = self.lives().into_iter().filter(|l| l.service == service).collect();
+        let shared = self.deps.runtime.shares_instances();
         for l in lives {
             self.lives.lock().remove(&crate::env_key(&l.service, &l.env));
-            l.shutdown().await;
+            if shared {
+                l.let_go().await;
+            } else {
+                l.shutdown().await;
+            }
         }
     }
 
@@ -1343,6 +1523,16 @@ impl Apps {
             if n.is_multiple_of(10) {
                 self.flush_meters(false).await;
                 self.cron_pass(code_sql::now_ms()).await;
+            }
+            if n.is_multiple_of(600) {
+                let day_ago = code_sql::now_ms() - 86_400_000;
+                // Only with the store's answer: none would read as "nothing in use".
+                if let Ok(in_use) = self.db(move |s| s.deployments_in_use(day_ago)).await {
+                    let runtime = self.deps.runtime.clone();
+                    tokio::spawn(async move { runtime.sweep(&in_use.into_iter().collect()).await });
+                }
+                let this = self.clone();
+                tokio::spawn(async move { this.prune().await });
             }
             if n.is_multiple_of(60) {
                 self.sweep_uploads().await;
@@ -1661,30 +1851,76 @@ impl Apps {
         let Some(active) = row.active.clone() else { return Err(Error::Conflict("this environment has no deployment yet".into())) };
         let timeout = Duration::from_secs(svc.run.timeout_s.unwrap_or(3600) as u64);
         let (sid, e, a, t) = (service.to_string(), env.to_string(), active.clone(), timeout.as_millis() as i64 + 60_000);
-        let run = self.db(move |s| s.start_run(&sid, &e, &a, t)).await?;
-        if run.status == RunStatus::Skipped {
-            return Ok(run);
-        }
-        let live = self.load_live(service, env).await?;
-        let (this, id, sid, e, dep) = (self.clone(), run.id.clone(), service.to_string(), env.to_string(), active.clone());
+        // Known here as running before its row says so: a takeover's cleanup never fails it.
+        let rid = crate::model::new_id("run");
+        self.running_runs.lock().insert(rid.clone(), service.to_string());
+        let r2 = rid.clone();
+        let run = match self.db(move |s| s.start_run(&r2, &sid, &e, &a, t)).await {
+            Ok(r) if r.status != RunStatus::Skipped => r,
+            other => {
+                self.running_runs.lock().remove(&rid);
+                return other;
+            }
+        };
+        let live = match self.load_live(service, env).await {
+            Ok(l) => l,
+            Err(err) => {
+                let r2 = rid.clone();
+                let _ = self.db(move |s| s.finish_run(&r2, RunStatus::Failed, None)).await;
+                self.running_runs.lock().remove(&rid);
+                return Err(err);
+            }
+        };
+        let (this, id, sid, run_dep) = (self.clone(), run.id.clone(), service.to_string(), run.deployment.clone());
+        let cancel = CancellationToken::new();
+        self.cancels.lock().insert(id.clone(), cancel.clone());
         tokio::spawn(async move {
-            let (status, code) = match live.run_once(timeout).await {
-                Ok((_, _, true)) => (RunStatus::TimedOut, None),
-                Ok((_, Some(0), _)) => (RunStatus::Succeeded, Some(0)),
-                Ok((_, code, _)) => (RunStatus::Failed, code),
+            // Its output stays in the environment's log (drains read it there); its container's
+            // name, its own id in it, is what picks its own lines out.
+            let name = crate::live::run_name(&sid, &live.env, &run_dep, &id);
+            let (status, code) = match live.run_to_exit(None, &[], timeout, None, cancel, Some(name)).await {
+                Ok(x) if x.canceled => (RunStatus::Canceled, None),
+                Ok(x) if x.timed_out => (RunStatus::TimedOut, None),
+                Ok(x) if x.code == Some(0) => (RunStatus::Succeeded, Some(0)),
+                Ok(x) => (RunStatus::Failed, x.code),
                 Err(e) => {
                     live.log.stream(Stream::System).line(format!("the run didn't start: {e}"));
                     (RunStatus::Failed, None)
                 }
             };
-            let failed = matches!(status, RunStatus::Failed | RunStatus::TimedOut);
-            let data = serde_json::json!({ "run": id, "status": status.as_str(), "exit_code": code });
-            let _ = this.db(move |s| s.finish_run(&id, status, code)).await;
-            // A failed or timed-out run is an incident's start: an event (notified by default).
-            if failed {
-                let _ = this.db(move |s| s.add_event("cron.failed", &sid, &e, Some(&dep), &data)).await;
-            }
+            this.cancels.lock().remove(&id);
+            // A failed or timed-out run is an incident's start: its event (notified by default)
+            // in the same transaction, and only if it was still running (a takeover may have
+            // failed it already).
+            let id2 = id.clone();
+            let _ = this.db(move |s| s.finish_run(&id2, status, code)).await;
+            this.running_runs.lock().remove(&id);
+            this.changed(&sid);
         });
+        Ok(run)
+    }
+
+    pub async fn cron_run(self: &Arc<Self>, service: &str, env: &str, id: &str) -> Result<CronRun> {
+        let (sid, e, i) = (service.to_string(), env.to_string(), id.to_string());
+        self.db(move |s| s.run(&sid, &e, &i)).await
+    }
+
+    /// `POST …/runs/{run}/cancel`: a hung run stops (and the schedule's next one isn't held back).
+    pub async fn cancel_run(self: &Arc<Self>, service: &str, env: &str, id: &str) -> Result<CronRun> {
+        let run = self.cron_run(service, env, id).await?;
+        if run.status != RunStatus::Running {
+            return Err(Error::Conflict(format!("{id} is {}: only a running run can be canceled", run.status.as_str())));
+        }
+        let token = self.cancels.lock().get(id).cloned();
+        match token {
+            Some(t) => t.cancel(),
+            // Running in the store, not here (its node stopped, or it never started): it ends now
+            // instead of holding the schedule back until its timeout.
+            None => {
+                let i = id.to_string();
+                self.db(move |s| s.finish_run(&i, RunStatus::Canceled, None)).await?;
+            }
+        }
         Ok(run)
     }
 
@@ -1700,6 +1936,9 @@ impl Apps {
                 continue;
             }
             let _ = self.expire_domain_claims(PENDING_CLAIM_TTL).await;
+            // A day before: the owner hears it's going (and what DNS says), not only after.
+            let cutoff = code_sql::now_ms() - (PENDING_CLAIM_TTL.as_millis() as i64 - 86_400_000);
+            let _ = self.db(move |s| s.warn_domain_claims(cutoff)).await;
             let Ok(due) = self.db(|s| s.domains_to_check()).await else { continue };
             for (svc, env, d) in due {
                 if d.status == DomainStatus::Active {
@@ -1735,5 +1974,84 @@ fn judge(new: crate::live::Served, old: crate::live::Served, error_pct: u8) -> O
         new.error_pct(),
         old.error_pct()
     ))
+}
+
+/// A deploy that failed with what the app or the build printed (`detail`): only roll's own
+/// words (`what`) leave roll, in commit statuses and notifications; the detail is the owner's
+/// (`Deployment.error_detail`, the deploy log).
+#[derive(Debug)]
+pub(crate) struct DeployFailure {
+    what: String,
+    detail: String,
+}
+
+impl std::fmt::Display for DeployFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.what)
+    }
+}
+
+impl std::error::Error for DeployFailure {}
+
+/// Why a build failed, from BuildKit's plain output (Docker's and CodeBuild's alike): its last
+/// `ERROR:` (the step and how it ended), and that step's last line of output before it.
+fn build_failure(lines: &[String]) -> Option<String> {
+    let err = lines.iter().rev().find(|l| l.contains("ERROR:"))?;
+    let what = err.split_once("ERROR:").map_or(err.as_str(), |(_, w)| w).trim();
+    let what = what.strip_prefix("failed to solve:").unwrap_or(what).trim();
+    // The failing step (the last `#12 ERROR: …`; BuildKit's summary has no number), and its own
+    // output before it: `#12 0.531 npm ERR! …` (its number, then seconds).
+    let step = lines.iter().enumerate().rev().find_map(|(i, l)| {
+        let (n, rest) = l.strip_prefix('#')?.split_once(' ')?;
+        (n.bytes().all(|b| b.is_ascii_digit()) && rest.starts_with("ERROR:")).then(|| (i, format!("#{n} ")))
+    });
+    let said = step.and_then(|(at, p)| {
+        lines[..at].iter().rev().filter_map(|l| l.strip_prefix(p.as_str())).find_map(|r| {
+            let (secs, text) = r.split_once(' ')?;
+            (secs.parse::<f64>().is_ok() && !text.trim().is_empty()).then(|| text.trim().to_string())
+        })
+    });
+    let what: String = what.chars().take(300).collect();
+    Some(match said {
+        Some(s) => format!("{what} (its last output: {})", s.chars().take(200).collect::<String>()),
+        None => what,
+    })
+}
+
+#[cfg(test)]
+mod build_failure_tests {
+    use super::build_failure;
+
+    fn lines(s: &str) -> Vec<String> {
+        s.lines().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn names_the_failing_step_and_what_it_said() {
+        let log = lines(
+            "#11 [build 4/6] RUN npm ci
+#11 0.412 npm ERR! code ENOTFOUND
+#11 0.413 npm ERR! network request to https://registry.npmjs.org/left-pad failed
+#11 ERROR: process \"/bin/sh -c npm ci\" did not complete successfully: exit code: 1
+------
+ > [build 4/6] RUN npm ci:
+------
+ERROR: failed to solve: process \"/bin/sh -c npm ci\" did not complete successfully: exit code: 1",
+        );
+        // The last ERROR is the summary (no step number): the step's own output is still found.
+        let why = build_failure(&log).unwrap();
+        assert!(why.starts_with("process \"/bin/sh -c npm ci\" did not complete successfully: exit code: 1") && why.ends_with("left-pad failed)"), "{why}");
+        let log2 = lines(
+            "#11 [build 4/6] RUN npm ci
+#11 0.413 npm ERR! network request to https://registry.npmjs.org/left-pad failed
+#11 ERROR: process \"/bin/sh -c npm ci\" did not complete successfully: exit code: 1",
+        );
+        assert_eq!(
+            build_failure(&log2).unwrap(),
+            "process \"/bin/sh -c npm ci\" did not complete successfully: exit code: 1 (its last output: npm ERR! network request to https://registry.npmjs.org/left-pad failed)"
+        );
+        assert_eq!(build_failure(&lines("#2 DONE")), None);
+        assert_eq!(build_failure(&lines("ERROR: failed to read dockerfile: open Dockerfile: no such file or directory")).unwrap(), "failed to read dockerfile: open Dockerfile: no such file or directory");
+    }
 }
 

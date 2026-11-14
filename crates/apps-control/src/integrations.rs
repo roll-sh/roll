@@ -14,6 +14,15 @@ pub struct Revision {
     pub message: String,
 }
 
+/// One commit of a range ([`Sources::commits`]).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct CommitInfo {
+    pub sha: String,
+    /// Its message's first line.
+    pub summary: String,
+    pub author: String,
+}
+
 /// A landing on a branch (roll code's durable land log).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Landing {
@@ -49,6 +58,12 @@ pub trait Sources: Send + Sync {
     /// (gitignore-style, from the repo's root). A source that can't tell says yes.
     async fn touches(&self, _repo: &str, _from: &str, _to: &str, _patterns: &[String]) -> anyhow::Result<bool> {
         Ok(true)
+    }
+    /// The commits `to` has that `from` doesn't, newest first, along `to`'s first parents: at
+    /// most `limit`, and whether that's all of them (`from` reached). None: a source that can't
+    /// tell.
+    async fn commits(&self, _repo: &str, _from: &str, _to: &str, _limit: usize) -> anyhow::Result<Option<(Vec<CommitInfo>, bool)>> {
+        Ok(None)
     }
     /// Report a deploy on its commit (roll code's commit statuses; mirrored to GitHub):
     /// `state` is `pending`, `success` or `failure`.
@@ -250,6 +265,11 @@ impl DomainTls for EdgeTls {}
 pub trait Resolver: Send + Sync {
     async fn cname(&self, host: &str) -> Vec<String>;
     async fn txt(&self, host: &str) -> Vec<String>;
+    /// Its A and AAAA records: what a name answers with instead of a CNAME (a proxy in front of
+    /// it, an apex), to say so. None known: empty.
+    async fn addresses(&self, _host: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// DNS over HTTPS (RFC 8484's JSON form, as Cloudflare and Google serve it): no resolver
@@ -270,7 +290,12 @@ impl Doh {
         let resp = self.client.get(url).header("accept", "application/dns-json").send().await;
         let Ok(resp) = resp else { return Vec::new() };
         let Ok(v) = resp.json::<serde_json::Value>().await else { return Vec::new() };
-        let code = if kind == "CNAME" { 5 } else { 16 };
+        let code = match kind {
+            "CNAME" => 5,
+            "A" => 1,
+            "AAAA" => 28,
+            _ => 16,
+        };
         v["Answer"]
             .as_array()
             .map(|a| {
@@ -292,6 +317,12 @@ impl Resolver for Doh {
 
     async fn txt(&self, host: &str) -> Vec<String> {
         self.query(host, "TXT").await
+    }
+
+    async fn addresses(&self, host: &str) -> Vec<String> {
+        let mut v = self.query(host, "A").await;
+        v.extend(self.query(host, "AAAA").await);
+        v
     }
 }
 
@@ -317,5 +348,11 @@ impl Resolver for StaticDns {
 
     async fn txt(&self, host: &str) -> Vec<String> {
         self.find(host, "TXT")
+    }
+
+    async fn addresses(&self, host: &str) -> Vec<String> {
+        let mut v = self.find(host, "A");
+        v.extend(self.find(host, "AAAA"));
+        v
     }
 }

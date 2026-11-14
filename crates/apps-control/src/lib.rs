@@ -54,7 +54,10 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How long a host's answer is kept on a node that didn't change it ([`Apps::env_for_host`]).
+const HOST_TTL: Duration = Duration::from_secs(1);
 use store::{EnvRow, ServiceRow, Store};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -74,6 +77,9 @@ pub enum Error {
     /// Allowed into the route, but not to what it would show (another product's rule).
     #[error("{0}")]
     Forbidden(String),
+    /// For a moment only (the service is moving between nodes): a 503, worth a retry.
+    #[error("{0}")]
+    Unavailable(String),
     #[error("apps database: {0}")]
     Db(#[from] code_sql::Error),
     #[error("{0}")]
@@ -126,6 +132,11 @@ pub struct AppsConfig {
     pub allow_private: bool,
     /// Between two passes over spend limits (`spend`).
     pub spend_every: Duration,
+    /// Built deployments each environment keeps to roll back to; older ones' images go
+    /// ([`Apps::prune`]).
+    pub keep_deployments: usize,
+    /// And every one that ended within this (draining, skew protection, a quick rollback).
+    pub keep_recent: Duration,
 }
 
 impl AppsConfig {
@@ -148,6 +159,8 @@ impl AppsConfig {
             web_url: None,
             allow_private: false,
             spend_every: Duration::from_secs(30),
+            keep_deployments: 10,
+            keep_recent: Duration::from_secs(24 * 3600),
         }
     }
 }
@@ -178,10 +191,18 @@ pub struct Apps {
     /// Jobs running on this node: id → its environment (`env_key`). Bounded per environment and
     /// per node, and canceled when the environment goes from this node.
     running_jobs: Mutex<HashMap<String, String>>,
+    /// Cron runs this process runs now (a takeover's cleanup spares them).
+    pub(crate) running_runs: Mutex<HashMap<String, String>>,
+    /// What each public host named lately ([`Apps::env_for_host`]): when, at which
+    /// `hosts_gen`, and the answer.
+    hosts: Mutex<HashMap<String, HostAnswer>>,
+    hosts_gen: std::sync::atomic::AtomicU64,
     /// Job containers this node runs at once, whatever jobs they belong to ([`jobs`]).
     job_slots: Arc<tokio::sync::Semaphore>,
     /// Services whose project reached its spend limit this month (`spend`), as last read.
     capped: Mutex<std::collections::HashSet<String>>,
+    /// Held while the capped services are read and applied ([`Apps::refresh_capped`]).
+    capped_refresh: tokio::sync::Mutex<()>,
     /// roll previews' notes for a preview's feedback button ([`Apps::set_feedback_notes`]).
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
     /// Log drains whose batch came back (the drainer sends the next).
@@ -277,6 +298,8 @@ type NeedsDeploy = (std::time::Instant, u64, String, Option<String>, bool);
 
 /// A service id looked up by name, as of when (none: no such web service).
 type NameLookup = (std::time::Instant, Option<String>);
+/// A host's kept answer: when, at which generation, and the service, environment and deployment.
+type HostAnswer = (Instant, u64, Option<(String, String, Option<String>)>);
 
 /// Another service's values a reference may read, and which of them are sealed.
 type ServiceValues = (HashMap<String, String>, BTreeSet<String>);
@@ -304,8 +327,12 @@ impl Apps {
             queues: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
             running_jobs: Mutex::new(HashMap::new()),
+            running_runs: Mutex::default(),
+            hosts: Mutex::default(),
+            hosts_gen: Default::default(),
             job_slots: Arc::new(tokio::sync::Semaphore::new(jobs::MAX_CONTAINERS)),
             capped: Mutex::new(Default::default()),
+            capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             access: Mutex::new(HashMap::new()),
@@ -545,14 +572,27 @@ impl Apps {
             None => registry_host(image).map(str::to_string).unwrap_or_else(|| "https://index.docker.io/v1/".into()),
         };
         let sid = service.to_string();
+        let login = crate::runtime::RegistryLogin { server: server.clone(), username: username.clone(), password: password.clone() };
         self.db(move |s| s.set_registry(&sid, &server, &username, &password)).await?;
+        // Wakes and new instances pull with it from now on, not at the next deploy.
+        self.registry_changed(service, Some(&login)).await;
         self.service(service).await
     }
 
     pub async fn delete_registry(self: &Arc<Self>, service: &str) -> Result<Service> {
         let sid = service.to_string();
         self.db(move |s| s.delete_registry(&sid)).await?;
+        self.registry_changed(service, None).await;
         self.service(service).await
+    }
+
+    /// A service's registry login changed (None: removed, or its registry changed): wherever
+    /// the runtime keeps a copy, and in what its environments make instances of.
+    async fn registry_changed(&self, service: &str, login: Option<&crate::runtime::RegistryLogin>) {
+        for l in self.lives().into_iter().filter(|l| l.service == service) {
+            l.set_registry(login);
+        }
+        self.deps.runtime.registry_login_changed(service, login).await;
     }
 
     pub fn url(&self, slug: &str) -> String {
@@ -567,7 +607,7 @@ impl Apps {
         let sid = e.service.clone();
         let public = self.db(move |s| s.service(&sid)).await.map(|s| s.run.public).unwrap_or(true);
         let (svc, env) = (e.service.clone(), e.name.clone());
-        let recent = self.db(move |s| s.deployments(&svc, &env, 1)).await?;
+        let recent = self.db(move |s| s.deployments(&svc, &env, 1, None)).await?;
         let active = match &e.active {
             Some(a) => {
                 let a = a.clone();
@@ -629,18 +669,24 @@ impl Apps {
             Ok(())
         })
         .await?;
+        if forget_login {
+            self.registry_changed(id, None).await;
+        }
         self.service(id).await
     }
 
     pub async fn delete_service(self: &Arc<Self>, id: &str) -> Result<()> {
         let sid = id.to_string();
         let envs = self.db(move |s| s.environments(&sid)).await?;
+        let sid = id.to_string();
+        let project = self.db(move |s| s.service(&sid)).await?.project;
         for e in &envs {
             self.teardown_live(id, &e.name).await;
         }
         for name in self.deps.runtime.list(Some(id)).await {
             self.deps.runtime.remove(&name).await;
         }
+        self.deps.runtime.forget_service(id).await;
         // Links to it from the project's other services go (their next deploy drops the URLs).
         let sid = id.to_string();
         if self.db(move |s| s.delete_links_to(LinkKind::Service, &sid)).await? > 0 {
@@ -672,6 +718,12 @@ impl Apps {
         let domains = self.db(move |s| s.custom_domains_of(&sid, None)).await?;
         let sid = id.to_string();
         self.db(move |s| s.delete_service(&sid)).await?;
+        // Its hostnames name nothing now.
+        self.hosts_changed();
+        // Its environments' networks, where no other service of the project has that environment.
+        for e in &envs {
+            self.drop_network_if_unused(&project, &e.name, id).await;
+        }
         self.release_domains(&domains).await;
         if let Some(ws) = self.deps.workspace.clone() {
             let sid = id.to_string();
@@ -771,6 +823,8 @@ impl Apps {
 
     /// `service` changed: whoever follows it reads it again.
     pub fn changed(&self, service: &str) {
+        // What a host names may have changed with it (made private, a domain, an environment).
+        self.hosts_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _ = self.changes.send(service.to_string());
     }
 
@@ -794,8 +848,14 @@ impl Apps {
     }
 
     /// Something a deployment's fingerprint reads changed: every cached `needs_deploy` is stale.
+    /// Forget every host's kept answer ([`Apps::env_for_host`]).
+    pub(crate) fn hosts_changed(&self) {
+        self.hosts_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn settings_changed(&self) {
         self.settings_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.hosts_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     async fn environment_view(self: &Arc<Self>, r: EnvRow) -> Result<Environment> {
@@ -848,6 +908,7 @@ impl Apps {
             allow_ips: r.allow_ips.clone(),
             rate_limit: r.rate_limit,
             firewall: r.firewall.clone(),
+            headers: r.headers.clone(),
             scaling,
             wait_for_ci: r.wait_for_ci,
             waiting_for_ci,
@@ -860,7 +921,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -926,6 +987,16 @@ impl Apps {
                     .collect::<Result<Vec<_>>>()?,
             ),
             Some(_) => return Err(Error::BadRequest(format!("firewall is at most {} rules, or null", crate::model::MAX_FIREWALL_RULES))),
+        };
+        let headers = match o.get("headers") {
+            None => None,
+            Some(Value::Null) => Some(Vec::new()),
+            Some(Value::Array(a)) if a.len() <= crate::model::MAX_HEADER_RULES => Some(
+                a.iter()
+                    .map(|r| serde_json::from_value::<crate::model::HeaderRule>(r.clone()).map_err(|e| Error::BadRequest(format!("headers: {e}"))).and_then(crate::model::HeaderRule::check))
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            Some(_) => return Err(Error::BadRequest(format!("headers is at most {} rules, or null", crate::model::MAX_HEADER_RULES))),
         };
         let branch = match o.get("branch") {
             None => None,
@@ -1081,6 +1152,12 @@ impl Apps {
             self.live(service, env).forget_gate();
             self.changed(service);
         }
+        if let Some(rules) = headers {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_headers(&sid, &e, &rules)).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
         if let Some(limit) = rate_limit {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_rate_limit(&sid, &e, limit.as_ref())).await?;
@@ -1136,8 +1213,20 @@ impl Apps {
         self.teardown_live(service, env).await;
         self.set_access_cache(service, env, None);
         self.deps.runtime.remove_volume(&volume_name(service, env)).await;
+        let sid = service.to_string();
+        if let Ok(svc) = self.db(move |s| s.service(&sid)).await {
+            self.drop_network_if_unused(&svc.project, env, service).await;
+        }
         self.logs.forget(&format!("env:{service}/{env}"));
         Ok(())
+    }
+
+    /// The project environment's network, once `leaving` was its last service there.
+    async fn drop_network_if_unused(self: &Arc<Self>, project: &str, env: &str, leaving: &str) {
+        let (p, e, l) = (project.to_string(), env.to_string(), leaving.to_string());
+        if let Ok(false) = self.db(move |s| s.env_in_use(&p, &e, &l)).await {
+            self.deps.runtime.remove_network(&network_name(project, env)).await;
+        }
     }
 
     /// A private environment's gate (none: public), cached on its owner.
@@ -1204,6 +1293,14 @@ impl Apps {
         self.environment(service, env).await
     }
 
+    /// `POST …/instances/{name}/restart`: just that one, replaced ([`EnvLive::restart_instance`]).
+    pub async fn restart_instance(self: &Arc<Self>, service: &str, env: &str, name: &str) -> Result<Environment> {
+        self.environment(service, env).await?;
+        let live = self.load_live(service, env).await?;
+        live.restart_instance(name).await.map_err(|e| if e.starts_with("no instance") { Error::NotFound(e) } else { Error::Conflict(e) })?;
+        self.environment(service, env).await
+    }
+
     pub async fn restart(self: &Arc<Self>, service: &str, env: &str) -> Result<Environment> {
         self.environment(service, env).await?;
         self.load_live(service, env).await?;
@@ -1222,6 +1319,12 @@ impl Apps {
         // Only an environment that exists gets live state.
         let (sid, e) = (service.to_string(), env.to_string());
         let row = self.db(move |s| s.environment(&sid, &e)).await?;
+        // Adopting keeps what runs on a runtime the nodes share: only the service's owner does
+        // (a request that reached this node as the service moved away mustn't take what the
+        // next owner kept, nor leave live state behind here).
+        if self.deps.runtime.shares_instances() && !self.owns(service) {
+            return Err(Error::Unavailable("the service is moving to another node; try again in a moment".into()));
+        }
         let live = self.live(service, env);
         let Some(active) = row.active.clone() else { return Ok(live) };
         let dep = self.db(move |s| s.deployment(&active)).await?;
@@ -1679,6 +1782,8 @@ impl Apps {
     }
 
     pub async fn add_domain(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Domain> {
+        // What a hostname names is about to change: no host answer kept from before.
+        self.hosts_changed();
         let host = body.get("hostname").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("hostname is required".into()))?;
         let mut reserved: Vec<&str> = self.cfg.reserved.iter().map(String::as_str).collect();
         reserved.push(&self.cfg.domain);
@@ -1731,6 +1836,8 @@ impl Apps {
     /// Check a custom domain's DNS now (a CNAME to its target, or the TXT challenge), and where
     /// its certificate is.
     pub async fn verify_domain(self: &Arc<Self>, service: &str, env: &str, host: &str) -> Result<Domain> {
+        // What a hostname names is about to change: no host answer kept from before.
+        self.hosts_changed();
         let h = host.to_ascii_lowercase();
         let (sid, e) = (service.to_string(), env.to_string());
         let row = self.db(move |s| s.environment(&sid, &e)).await?;
@@ -1742,19 +1849,28 @@ impl Apps {
             return Err(Error::NotFound(format!("{h} isn't a domain of {service} in {env}")));
         };
         let target = self.target(&row.slug);
-        let cname_ok = self.deps.resolver.cname(&h).await.contains(&target);
+        let cnames = self.deps.resolver.cname(&h).await;
+        let cname_ok = cnames.contains(&target);
         let challenge = crate::model::challenge_name(&h);
-        let txt_ok = self.deps.resolver.txt(&challenge).await.contains(&d.token);
+        let txts = self.deps.resolver.txt(&challenge).await;
+        let txt_ok = txts.contains(&d.token);
         let shared = self.cfg.cname_target.is_some();
         let (status, error) = if txt_ok || (cname_ok && !shared) {
             (DomainStatus::Active, None)
-        } else if shared {
-            (DomainStatus::Pending, Some(format!("no TXT {challenge} with the token yet (the CNAME to {target} routes it; the TXT record proves it's yours)")))
         } else {
-            (DomainStatus::Pending, Some(format!("no CNAME to {target} and no TXT {challenge} with the token yet")))
+            // What DNS answered instead, and the likely mistake in it.
+            let seen = crate::model::DnsSeen {
+                cnames,
+                txts,
+                host_txts: self.deps.resolver.txt(&h).await,
+                addresses: if cname_ok { Vec::new() } else { self.deps.resolver.addresses(&h).await },
+            };
+            (DomainStatus::Pending, Some(crate::model::domain_diagnosis(&h, &target, &challenge, &d.token, &seen, shared)))
         };
+
         let (hh, err) = (h.clone(), error.clone());
         self.db(move |s| s.set_domain_status(&hh, status, err.as_deref())).await?;
+
         if let Some((tls, tls_error)) = self.refresh_tls(&h).await {
             (d.tls, d.tls_error) = (tls, tls_error);
         }
@@ -1766,6 +1882,8 @@ impl Apps {
     }
 
     pub async fn delete_domain(self: &Arc<Self>, service: &str, env: &str, host: &str) -> Result<()> {
+        // What a hostname names is about to change: no host answer kept from before.
+        self.hosts_changed();
         let (sid, e, h) = (service.to_string(), env.to_string(), host.to_ascii_lowercase());
         self.db(move |s| s.delete_domain(&sid, &e, &h)).await?;
         self.release_domains(&[host.to_ascii_lowercase()]).await;
@@ -1785,6 +1903,8 @@ impl Apps {
     /// Remove the custom domains still unverified `older_than` after they were added: the
     /// hostname is free for its real owner. Returns them.
     pub async fn expire_domain_claims(self: &Arc<Self>, older_than: Duration) -> Result<Vec<String>> {
+        // What a hostname names is about to change: no host answer kept from before.
+        self.hosts_changed();
         let age = older_than.as_millis() as i64;
         // The database's clock, which stamped them.
         let expired = self.db(move |s| s.expire_domain_claims(s.now()? - age)).await?;
@@ -1800,6 +1920,8 @@ impl Apps {
     /// environment's hostnames (its own, or another custom domain that doesn't redirect), or
     /// (`null`) serve them again.
     pub async fn set_domain_redirect(self: &Arc<Self>, service: &str, env: &str, host: &str, body: Value) -> Result<Domain> {
+        // What a hostname names is about to change: no host answer kept from before.
+        self.hosts_changed();
         let o = body.as_object().cloned().unwrap_or_default();
         if let Some(k) = o.keys().find(|k| k.as_str() != "redirect_to") {
             return Err(Error::BadRequest(format!("unknown field {k}")));
@@ -1876,6 +1998,26 @@ impl Apps {
     /// The service and environment a hostname is, and the deployment when it's one's own
     /// (`<deployment>--<slug>`: the id without `dep_`).
     pub async fn env_for_host(self: &Arc<Self>, host: &str) -> Option<(String, String, Option<String>)> {
+        // Every request asks: kept a second (another node's change shows within it), and
+        // forgotten at once on any change here. It was two queries a request, about 150 µs of the
+        // proxy's 260 (`docker.rs::the_proxys_own_cost_is_measured`, release).
+        let generation = self.hosts_gen.load(std::sync::atomic::Ordering::SeqCst);
+        if let Some((at, g, v)) = self.hosts.lock().get(host).cloned()
+            && g == generation
+            && at.elapsed() < HOST_TTL
+        {
+            return v;
+        }
+        let v = self.env_for_host_now(host).await;
+        let mut cache = self.hosts.lock();
+        if cache.len() >= 10_000 {
+            cache.clear();
+        }
+        cache.insert(host.to_string(), (Instant::now(), generation, v.clone()));
+        v
+    }
+
+    async fn env_for_host_now(self: &Arc<Self>, host: &str) -> Option<(String, String, Option<String>)> {
         let found = self.host_target(host).await?;
         // A private service has no public names: the same 404 as an address nobody has, read
         // from its settings now (making it private takes effect at once, not with a deploy).
@@ -1909,7 +2051,7 @@ impl Apps {
         let (sid, e) = (live.service.clone(), live.env.clone());
         let row = self.db(move |s| s.environment(&sid, &e)).await?;
         let allow = row.allow_ips.iter().filter_map(|r| r.cidr.parse::<ipnet::IpNet>().ok()).collect();
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages });
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }
