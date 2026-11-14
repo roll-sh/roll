@@ -280,7 +280,10 @@ impl Grants for GrantGrants {
         // limited to some of them takes part in it, as roll-access's `filters_itself` routes do.
         // One about the project as a whole (`Scope::whole`) needs a rule over all of it.
         let filtered = at.env.is_none() && action == scope::Action::Read && !at.whole;
-        let r = scope::Resource { product: "secrets".into(), project: Some(at.project.into()), environment: at.env.map(Into::into), path: at.path.map(Into::into), filters_itself: filtered, ..Default::default() };
+        // The resource as rolld's gate saw it: the project is also its id, so a rule naming it by
+        // id (`{id: "prj_…"}`, as the builder and Tighten write it) reaches it as one naming the
+        // project does.
+        let r = scope::Resource { product: "secrets".into(), id: Some(at.project.into()), project: Some(at.project.into()), environment: at.env.map(Into::into), path: at.path.map(Into::into), filters_itself: filtered, ..Default::default() };
         // `ask` pauses a whole request at the gate; inside the product it's a no.
         self.0.allows(&r, action) == scope::Outcome::Allow
     }

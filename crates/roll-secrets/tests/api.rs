@@ -1124,6 +1124,13 @@ async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
     assert_eq!(call("/environments/production/values".into()).await.0, StatusCode::FORBIDDEN);
     let audit = api.ok(Method::GET, "/audit?actor=token:tok_ci", None).await;
     assert_eq!(audit[0]["action"], "secrets.export");
+    // A rule naming the project by id (as the dashboard's builder writes it) reaches it the same.
+    let by_id = Rule { resources: Resources::Some(vec![Selector::Id { id: api.project.clone(), index: None }]), environments: Some(vec!["development".into()]), paths: None, product: "secrets".into(), actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]) };
+    let grant = roll_auth::Grant { scope: Arc::new(Scope(vec![by_id])), ..grant.clone() };
+    let mut req = Request::builder().uri(format!("/v1/secrets/projects/{}/environments/development/values", api.project)).body(Body::empty()).unwrap();
+    req.extensions_mut().insert(roll_auth::Operator);
+    req.extensions_mut().insert(grant);
+    assert_eq!(api.router.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
 }
 
 #[tokio::test]
