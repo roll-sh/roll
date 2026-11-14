@@ -738,7 +738,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
     let scoped;
     let api = match accounts::current() {
         Some(a) if !matches!(cmd, Storage::Accounts { .. }) => {
-            scoped = Api { base: api.base.clone(), http: api.http.clone(), key: api.key.clone(), headers: vec![("x-roll-account".into(), a)] };
+            scoped = Api { base: api.base.clone(), http: api.http.clone(), key: api.key.clone(), headers: vec![("x-roll-account".into(), a)], login: api.login.clone() };
             &scoped
         }
         _ => api,

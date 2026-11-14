@@ -1052,7 +1052,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
             }
             let mut req = c.api.http.get(url);
-            if let Some(k) = &c.api.key {
+            if let Some(k) = &c.api.bearer().await? {
                 req = req.bearer_auth(k);
             }
             let res = req.send().await?;
@@ -1868,8 +1868,8 @@ fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
 /// A workload identity's login (`ROLL_IDENTITY`): the workload's own OIDC token, from
 /// `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes projected token) or GitHub Actions
 /// (`permissions: id-token: write`; audience `ROLL_OIDC_AUDIENCE`, default `roll`), for a
-/// short-lived secrets token.
-pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<String> {
+/// short-lived secrets token and when it ends (ms).
+pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
     let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
     let oidc = if let Some(t) = env("ROLL_OIDC_TOKEN") {
         t
@@ -1886,9 +1886,49 @@ pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<String>
     } else {
         anyhow::bail!("ROLL_IDENTITY is set but there's no OIDC token: set ROLL_OIDC_TOKEN or ROLL_OIDC_TOKEN_FILE, or run in GitHub Actions with `permissions: id-token: write`");
     };
-    let anon = Api { base: api.base.clone(), http: api.http.clone(), key: None, headers: api.headers.clone() };
+    let anon = Api { base: api.base.clone(), http: api.http.clone(), key: None, headers: api.headers.clone(), login: None };
     let v = anon.post("/v1/secrets/login", json!({ "identity": identity, "token": oidc.trim() })).await.context("logging in with the workload identity")?;
-    v["token"].as_str().map(str::to_string).context("the login answered no token")
+    let token = v["token"].as_str().map(str::to_string).context("the login answered no token")?;
+    Ok((token, v["expires_at"].as_i64().unwrap_or(0)))
+}
+
+/// A workload identity's login that renews itself: a login lasts minutes, and `roll run --watch`
+/// in a pod runs for days. A quarter of the way before it ends (at least 30 s), the next request
+/// logs in again, reading the OIDC token again (Kubernetes rotates a projected token's file).
+pub struct Relogin {
+    identity: String,
+    /// The first login's token.
+    pub first: String,
+    /// The token, and when (this machine's clock, ms) to log in again.
+    held: tokio::sync::Mutex<(String, i64)>,
+}
+
+/// When to log in again: a quarter of the login's life before it ends, at least 30 s before.
+fn renew_at(now: i64, expires_at: i64) -> i64 {
+    let life = (expires_at - now).max(0);
+    expires_at - (life / 4).max(30_000)
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+impl Relogin {
+    pub async fn new(api: &Api, identity: &str) -> anyhow::Result<Relogin> {
+        let (token, expires_at) = identity_login(api, identity).await?;
+        let at = renew_at(now_ms(), expires_at);
+        Ok(Relogin { identity: identity.to_string(), first: token.clone(), held: tokio::sync::Mutex::new((token, at)) })
+    }
+
+    pub async fn token(&self, api: &Api) -> anyhow::Result<String> {
+        let mut held = self.held.lock().await;
+        if now_ms() >= held.1 {
+            // Boxed: the login is itself a request (an anonymous one, so this doesn't recurse).
+            let (token, expires_at) = Box::pin(identity_login(api, &self.identity)).await?;
+            *held = (token, renew_at(now_ms(), expires_at));
+        }
+        Ok(held.0.clone())
+    }
 }
 
 /// `roll secrets edit`: the folder's own keys as a `.env` in `$EDITOR` (a 0600 file under
@@ -2464,4 +2504,49 @@ async fn stop(child: &mut tokio::process::Child) {
         }
     }
     let _ = child.kill().await;
+}
+
+#[cfg(test)]
+mod relogin_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// A long-running workload's login renews itself before it ends, with the OIDC token as the
+    /// file holds it then (Kubernetes rotates it).
+    #[tokio::test]
+    async fn an_identity_login_renews_itself_with_the_rotated_token() {
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let s = seen.clone();
+        let router = axum::Router::new()
+            .route(
+                "/v1/secrets/login",
+                axum::routing::post(move |axum::Json(b): axum::Json<Value>| async move {
+                    let mut s = s.lock().unwrap();
+                    s.push(b["token"].as_str().unwrap_or_default().to_string());
+                    axum::Json(json!({ "token": format!("rlst_{}", s.len()), "expires_at": now_ms() + 3_600_000 }))
+                }),
+            )
+            .route("/v1/echo", axum::routing::get(|h: axum::http::HeaderMap| async move { axum::Json(json!({ "auth": h["authorization"].to_str().unwrap() })) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("token");
+        std::fs::write(&file, "jwt-1\n").unwrap();
+        // SAFETY: only this test reads ROLL_OIDC_TOKEN_FILE.
+        unsafe { std::env::set_var("ROLL_OIDC_TOKEN_FILE", &file) };
+        let anon = Api { base, http: reqwest::Client::new(), key: None, headers: vec![], login: None };
+        let login = Arc::new(Relogin::new(&anon, "idn_1").await.unwrap());
+        let api = Api { key: Some(login.first.clone()), login: Some(login.clone()), ..anon };
+        let auth = |v: Value| v["auth"].as_str().unwrap().to_string();
+
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_1");
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_1", "not yet");
+        std::fs::write(&file, "jwt-2\n").unwrap();
+        login.held.lock().await.1 = 0; // its time to renew has come
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_2");
+        assert_eq!(*seen.lock().unwrap(), ["jwt-1", "jwt-2"]);
+        assert!(renew_at(0, 3_600_000) == 2_700_000 && renew_at(0, 60_000) == 30_000);
+    }
 }

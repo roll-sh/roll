@@ -229,6 +229,8 @@ struct Api {
     key: Option<String>,
     /// Sent with every request (`roll storage` sends the account it acts in).
     headers: Vec<(String, String)>,
+    /// A workload identity's login, renewed before it ends (then `key` is only its first token).
+    login: Option<std::sync::Arc<secrets::Relogin>>,
 }
 
 impl Api {
@@ -236,7 +238,7 @@ impl Api {
     /// status is a success.
     async fn open_stream(&self, path: &str) -> anyhow::Result<reqwest::Response> {
         let mut req = self.http.get(format!("{}{path}", self.base));
-        if let Some(k) = &self.key {
+        if let Some(k) = &self.bearer().await? {
             req = req.bearer_auth(k);
         }
         for (k, v) in &self.headers {
@@ -257,7 +259,7 @@ impl Api {
 
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
         let mut req = self.http.request(method, format!("{}{path}", self.base));
-        if let Some(k) = &self.key {
+        if let Some(k) = &self.bearer().await? {
             req = req.bearer_auth(k);
         }
         for (k, v) in &self.headers {
@@ -285,6 +287,13 @@ impl Api {
         }
         serde_json::from_str(&text).with_context(|| format!("{} didn't answer with JSON: {}", self.base, text.chars().take(200).collect::<String>()))
     }
+    /// The token to send: a workload identity's login, logging in again when it's near its end.
+    async fn bearer(&self) -> anyhow::Result<Option<String>> {
+        match &self.login {
+            Some(l) => Ok(Some(l.token(self).await?)),
+            None => Ok(self.key.clone()),
+        }
+    }
     /// The cell's root (for `/_roll/…`), from a tasks URL that may name a tenant
     /// (`…/t/<tenant>/v1/tasks`).
     fn cell(&self) -> Api {
@@ -294,7 +303,7 @@ impl Api {
         {
             base = root;
         }
-        Api { base: base.to_string(), http: self.http.clone(), key: self.key.clone(), headers: self.headers.clone() }
+        Api { base: base.to_string(), http: self.http.clone(), key: self.key.clone(), headers: self.headers.clone(), login: self.login.clone() }
     }
     async fn get(&self, p: &str) -> anyhow::Result<Value> {
         self.call(reqwest::Method::GET, p, None).await
@@ -308,12 +317,15 @@ impl Api {
 /// else a workload identity's login (`ROLL_IDENTITY`), else the operator token.
 async fn secrets_api(api: &Api) -> anyhow::Result<Api> {
     let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
-    let token = match (env("ROLL_TOKEN"), env("ROLL_IDENTITY")) {
-        (Some(t), _) => Some(t),
-        (None, Some(identity)) => Some(secrets::identity_login(api, identity.trim()).await?),
-        (None, None) => api.key.clone(),
+    let (token, login) = match (env("ROLL_TOKEN"), env("ROLL_IDENTITY")) {
+        (Some(t), _) => (Some(t), None),
+        (None, Some(identity)) => {
+            let l = secrets::Relogin::new(api, identity.trim()).await?;
+            (Some(l.first.clone()), Some(std::sync::Arc::new(l)))
+        }
+        (None, None) => (api.key.clone(), None),
     };
-    Ok(Api { base: api.base.clone(), http: api.http.clone(), key: token, headers: api.headers.clone() })
+    Ok(Api { base: api.base.clone(), http: api.http.clone(), key: token, headers: api.headers.clone(), login })
 }
 
 fn s(v: &Value) -> String {
@@ -437,7 +449,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::from_arg_matches(&matches)?;
     // A scoped token, when set, is what everything uses: the narrower credential wins.
     let admin = cli.roll_token.filter(|t| !t.trim().is_empty()).or(cli.admin_token.filter(|t| !t.trim().is_empty()));
-    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: admin.clone().or(cli.api_key), headers: Vec::new() };
+    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: admin.clone().or(cli.api_key), headers: Vec::new(), login: None };
     let cmd = match cli.cmd {
         Cmd::Db(cmd) => cmd,
         Cmd::Agent(cmd) => return agent::run(&api.base, cli.json, cmd).await,
@@ -445,7 +457,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Code(cmd) => {
             // `--token` on the command line wins; otherwise ROLL_CODE_TOKEN (not the tasks token).
             let token = if token_flag { cli.token } else { std::env::var("ROLL_CODE_TOKEN").ok() };
-            let code_api = Api { base: api.base.clone(), http: api.http.clone(), key: token.filter(|t| !t.is_empty()).or(admin), headers: api.headers.clone() };
+            let code_api = Api { base: api.base.clone(), http: api.http.clone(), key: token.filter(|t| !t.is_empty()).or(admin), headers: api.headers.clone(), login: None };
             return code::run(&code_api, cli.json, cmd).await;
         }
         Cmd::Redis(cmd) => return redis::run(&api, cli.json, cmd).await,
@@ -462,7 +474,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Tasks(cmd) => {
             let base = cli.tasks_url.map(|u| u.trim_end_matches('/').to_string()).unwrap_or(format!("{}/v1/tasks", api.base));
-            let tasks_api = Api { base, http: api.http.clone(), key: cli.token.filter(|t| !t.is_empty()).or(admin), headers: Vec::new() };
+            let tasks_api = Api { base, http: api.http.clone(), key: cli.token.filter(|t| !t.is_empty()).or(admin), headers: Vec::new(), login: None };
             return tasks::run(&tasks_api, *cmd, cli.json).await;
         }
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
