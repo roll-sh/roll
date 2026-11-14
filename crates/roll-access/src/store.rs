@@ -254,7 +254,9 @@ pub struct Issuer<'a> {
 }
 
 /// What a new grant is.
-#[derive(Clone, Debug, Deserialize)]
+/// What a token is made from. Code outside this crate builds it with `..Default::default()`, so
+/// a field added here (a start, an approval) doesn't break it.
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewGrant {
     pub name: String,
