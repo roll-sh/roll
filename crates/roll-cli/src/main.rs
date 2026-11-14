@@ -114,6 +114,10 @@ enum Cmd {
     /// Run a command with an environment's secrets in its environment, without writing files:
     /// `roll run -p shop -e production -- npm start`.
     Run(secrets::Run),
+    /// Print a completion script for your shell: `roll completions zsh > "${fpath[1]}/_roll"`,
+    /// `roll completions bash > ~/.local/share/bash-completion/completions/roll`,
+    /// `roll completions fish > ~/.config/fish/completions/roll.fish`.
+    Completions { shell: clap_complete::Shell },
     /// SSH with an environment's short-lived certificate (an SSH CA's `ssh` link): the key and
     /// certificate go to a private temporary directory for the session, then are deleted:
     /// `roll ssh -e production -- deploy@db1.example.com`.
@@ -542,6 +546,10 @@ async fn main() -> anyhow::Result<()> {
             return secrets::run_command(&api, r).await;
         }
         Cmd::Ssh(a) => return secrets::ssh_command(&secrets_api(&api).await?, a).await,
+        Cmd::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "roll", &mut std::io::stdout());
+            return Ok(());
+        }
         Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
         Cmd::Token(cmd) => return access::token(&api, cli.json, cmd).await,
         Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,

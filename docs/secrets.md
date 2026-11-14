@@ -1108,6 +1108,7 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
 roll ssh [-p project] [-e production] [--cert SSH_CERT] [--identity SSH_KEY] -- <ssh arguments…>
 roll run [-p project] [-e production] [--path /] [--env-file .env]… [--allow-unresolved] [--watch] -- <command…>
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] [--mask | --no-mask] -- <command…>
+roll completions bash|zsh|fish|powershell
 ```
 
 - The project is `-p`/`ROLL_PROJECT` (a name or id), the environment `-e`/`ROLL_ENV`, the path
@@ -1225,6 +1226,24 @@ exist) never falls back, and neither does a file older than `--fallback-max-age`
 - When the project can only be found by asking rolld (a name, or the token's own), the file's own
   project is used, and checked again when it's opened. `--watch` started from a fallback reloads
   the command once rolld answers.
+
+### The shell
+
+- `roll completions bash|zsh|fish|powershell` prints a completion script for every `roll` command
+  (clap's): `roll completions zsh > "${fpath[1]}/_roll"`,
+  `roll completions bash > ~/.local/share/bash-completion/completions/roll`,
+  `roll completions fish > ~/.config/fish/completions/roll.fish`.
+- With [direnv](https://direnv.net), a directory's environment loads as you `cd` into it. After
+  `roll secrets setup` has picked the project and environment for the directory, its `.envrc`:
+
+  ```sh
+  eval "$(roll secrets export --format shell)"   # single-quoted, so $, ` and quotes stay as they are
+  watch_file ~/.config/roll/secrets.json          # a new setup reloads it
+  ```
+
+  `direnv allow` once. Every process the shell starts then sees the values, and they change only
+  on `direnv reload`: for a server, `roll run [--watch]` keeps them to the one command and follows
+  changes. Each load is one audited read.
 
 ### Runtime resolve for services (roll apps)
 
