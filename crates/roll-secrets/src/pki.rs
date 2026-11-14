@@ -242,7 +242,7 @@ impl LinkProvider for Provider {
         if let Some(serial) = handle["serial"].as_str() {
             let now = self.db.now_ms()?;
             self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE ca_certs SET revoked_at = ?, revoked_by = 'roll' WHERE ca_id = ? AND serial = ? AND revoked_at IS NULL", params![now, r#ref, serial])?))?;
-            self.crls.lock().expect("crls").remove(r#ref);
+            self.crls.lock().expect("crls").revoked(r#ref);
         }
         Ok(())
     }
@@ -284,14 +284,17 @@ fn crl_url(public_api: &std::sync::OnceLock<String>, ca: &str) -> Option<String>
 #[allow(clippy::too_many_arguments)]
 fn record(db: &Db, ca: &str, project: &str, serial: &str, names: &[String], source: &str, not_after: i64, by: &str) -> Result<()> {
     let now = db.now_ms()?;
-    db.write(|c| {
-        c.execute("DELETE FROM ca_certs WHERE ca_id = ? AND not_after < ?", params![ca, now])?;
-        c.execute(
-            "INSERT INTO ca_certs (ca_id, serial, project_id, names, source, not_after, issued_at, issued_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            params![ca, serial, project, serde_json::to_string(names).expect("JSON"), source, not_after, now, by],
-        )?;
-        Ok::<_, Error>(())
-    })
+    db.write(|c| record_in(c, ca, project, serial, names, source, not_after, by, now))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_in(c: &code_sql::Conn<'_>, ca: &str, project: &str, serial: &str, names: &[String], source: &str, not_after: i64, by: &str, now: i64) -> Result<()> {
+    c.execute("DELETE FROM ca_certs WHERE ca_id = ? AND not_after < ?", params![ca, now])?;
+    c.execute(
+        "INSERT INTO ca_certs (ca_id, serial, project_id, names, source, not_after, issued_at, issued_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        params![ca, serial, project, serde_json::to_string(names).expect("JSON"), source, not_after, now, by],
+    )?;
+    Ok(())
 }
 
 /// A certificate a CA signed and that hasn't expired.
@@ -347,8 +350,22 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// Signed CRLs (DER) by CA, with when each was made; a revocation drops its CA's.
-pub(crate) type Crls = Arc<std::sync::Mutex<std::collections::HashMap<String, (i64, Arc<Vec<u8>>)>>>;
+/// Signed CRLs (DER) by CA, with when each was made, and each CA's revocation count on this node:
+/// a CRL read before a revocation is never kept after it.
+#[derive(Default)]
+pub(crate) struct CrlCache {
+    signed: std::collections::HashMap<String, (i64, Arc<Vec<u8>>)>,
+    revoked: std::collections::HashMap<String, u64>,
+}
+
+impl CrlCache {
+    fn revoked(&mut self, ca: &str) {
+        *self.revoked.entry(ca.to_string()).or_default() += 1;
+        self.signed.remove(ca);
+    }
+}
+
+pub(crate) type Crls = Arc<std::sync::Mutex<CrlCache>>;
 
 /// The most certificates from CSRs one CA keeps valid at once (each is on its list, and a revoked
 /// one on its CRL, until it expires).
@@ -513,8 +530,13 @@ impl Secrets {
         let not_after = (params.not_after.unix_timestamp_nanos() / 1_000_000) as i64;
         let serial = hex(&serial_of(&params));
         let cert = rcgen::CertificateSigningRequestParams { params, public_key: csr.public_key }.signed_by(&issuer).map_err(|e| Error::BadRequest(format!("signing the CSR: {e}")))?;
-        record(&self.db, id, project, &serial, &names, "csr", not_after, &caller.principal)?;
-        self.audit_now(project, caller, "ca.sign", None, None, &[], &format!("{ca_name} signed a CSR for {} (serial {serial})", names.join(", ")));
+        // Recorded and audited in one write before the certificate is handed out: no audit, no certificate.
+        let now = self.db.now_ms()?;
+        let summary = format!("{ca_name} signed a CSR for {} (serial {serial})", names.join(", "));
+        self.db.write(|c| {
+            record_in(c, id, project, &serial, &names, "csr", not_after, &caller.principal, now)?;
+            audit::record(c, project, caller, "ca.sign", None, None, &[], &summary, now)
+        })?;
         Ok(Signed { certificate: cert.pem(), ca: ca_pem, serial, names, not_after })
     }
 
@@ -567,7 +589,7 @@ impl Secrets {
             audit::record(c, project, caller, "ca.revoke", None, None, &[], &format!("{ca} revoked {serial} ({})", names.join(", ")), now)
         })?;
         // This node's next CRL has it at once; another node's within a minute.
-        self.crls.lock().expect("crls").remove(id);
+        self.crls.lock().expect("crls").revoked(id);
         Ok(())
     }
 
@@ -576,15 +598,22 @@ impl Secrets {
     /// minute rather than signed per request.
     pub fn crl(&self, id: &str) -> Result<Arc<Vec<u8>>> {
         let now_ms = self.db.now_ms()?;
-        if let Some((at, der)) = self.crls.lock().expect("crls").get(id)
-            && now_ms - at < 60_000
-        {
-            return Ok(der.clone());
-        }
+        let generation = {
+            let cache = self.crls.lock().expect("crls");
+            if let Some((at, der)) = cache.signed.get(id)
+                && now_ms - at < 60_000
+            {
+                return Ok(der.clone());
+            }
+            cache.revoked.get(id).copied().unwrap_or_default()
+        };
         let der = Arc::new(self.sign_crl(id, now_ms)?);
         let mut cache = self.crls.lock().expect("crls");
-        cache.retain(|_, (at, _)| now_ms - *at < 60_000);
-        cache.insert(id.to_string(), (now_ms, der.clone()));
+        cache.signed.retain(|_, (at, _)| now_ms - *at < 60_000);
+        // A revocation landed while this one was read: serve it once, keep none.
+        if cache.revoked.get(id).copied().unwrap_or_default() == generation {
+            cache.signed.insert(id.to_string(), (now_ms, der.clone()));
+        }
         Ok(der)
     }
 
