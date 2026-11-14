@@ -94,6 +94,40 @@ const KNOWN: &[(&str, &str, &str, &str, &str, u32)] = &[
     ("42601", "subquery must return only one column", "", "transformSubLink", "parse_expr.c", 1922),
     ("22P02", "invalid input syntax for type json", "", "json_errsave_error", "jsonfuncs.c", 659),
     ("22P02", "invalid input value for enum ", "", "enum_in", "enum.c", 129),
+    ("25001", "there is already a transaction in progress", "", "BeginTransactionBlock", "xact.c", 3954),
+    ("42601", "wrong number of parameters for prepared statement \"", "", "EvaluateParams", "prepare.c", 293),
+    ("42809", "", " is not a procedure", "ParseFuncOrColumn", "parse_func.c", 285),
+    ("42809", "", " is a procedure", "ParseFuncOrColumn", "parse_func.c", 295),
+    ("2200H", "nextval: reached maximum value of sequence \"", "", "nextval_internal", "sequence.c", 746),
+    ("2200H", "nextval: reached minimum value of sequence \"", "", "nextval_internal", "sequence.c", 727),
+    ("55000", "currval of sequence \"", "\" is not yet defined in this session", "currval_oid", "sequence.c", 884),
+    ("42601", "INSERT has more expressions than target columns", "", "transformInsertRow", "analyze.c", 1077),
+    ("42701", "column \"", "\" specified more than once", "checkInsertTargets", "parse_target.c", 1084),
+    ("22023", "", " is outside the valid range for parameter \"", "parse_and_validate_value", "guc.c", 3180),
+    ("42701", "column \"", "\" already exists", "check_for_column_name_collision", "tablecmds.c", 7695),
+    ("42704", "index \"", "\" does not exist", "DropErrorMsgNonExistent", "tablecmds.c", 1500),
+    ("42723", "function \"", "\" already exists with same argument types", "ProcedureCreate", "pg_proc.c", 400),
+    ("42P13", "return type mismatch in function declared to return ", "", "check_sql_stmt_retval", "functions.c", 2274),
+    ("2F005", "control reached end of function without RETURN", "", "plpgsql_exec_function", "pl_exec.c", 639),
+    ("P0002", "query returned no rows", "", "exec_stmt_execsql", "pl_exec.c", 4384),
+    ("P0003", "query returned more than one row", "", "exec_stmt_execsql", "pl_exec.c", 4406),
+    ("42601", "\"", "\" is not a known variable", "word_is_not_variable", "pl_gram.y", 2631),
+    ("25P01", "DECLARE CURSOR can only be used in transaction blocks", "", "CheckTransactionBlock", "xact.c", 3745),
+    ("55000", "cursor can only scan forward", "", "PortalRunSelect", "pquery.c", 938),
+    ("22023", "payload string too long", "", "Async_Notify", "async.c", 620),
+    ("25006", "cannot execute ", " in a read-only transaction", "PreventCommandIfReadOnly", "utility.c", 407),
+    ("0A000", "cannot truncate a table referenced in a foreign key constraint", "", "heap_truncate_check_FKs", "heap.c", 3777),
+    ("42704", "type \"", "\" does not exist", "typenameType", "parse_type.c", 270),
+    ("42601", "unequal number of entries in row expressions", "", "make_row_comparison_op", "parse_expr.c", 2855),
+    ("42803", "aggregate function calls cannot be nested", "", "check_agg_arguments", "parse_agg.c", 690),
+    ("42803", "aggregate functions are not allowed in ", "", "check_agglevels_and_constraints", "parse_agg.c", 611),
+    ("42P20", "window functions are not allowed in ", "", "transformWindowFuncCall", "parse_agg.c", 1041),
+    ("0A000", "set-returning functions are not allowed in ", "", "check_srf_call_placement", "parse_func.c", 2729),
+    ("2201W", "LIMIT must not be negative", "", "recompute_limits", "nodeLimit.c", 397),
+    ("2201X", "OFFSET must not be negative", "", "recompute_limits", "nodeLimit.c", 371),
+    ("42601", "each ", " query must have the same number of columns", "transformSetOperationTree", "analyze.c", 2229),
+    ("42804", "", " cannot be matched", "select_common_type", "parse_coerce.c", 1417),
+    ("42601", "VALUES lists must all be the same length", "", "transformValuesClause", "analyze.c", 1600),
     ("42P01", "relation \"", "\" does not exist", "regclassin", "regproc.c", 911),
     ("23505", "duplicate key value violates unique constraint", "", "_bt_check_unique", "nbtinsert.c", 666),
     ("23502", "null value in column", "violates not-null constraint", "ReportNotNullViolationError", "execMain.c", 2213),
@@ -334,6 +368,9 @@ pub fn location(e: &Error) -> (&'static str, String, &'static str) {
 /// The line of a routine that raises one message at two places, told apart by what else
 /// the error says.
 fn special_line(k: &(&str, &str, &str, &str, &str, u32), e: &Error) -> String {
+    if let Some(l) = e.objects.as_ref().and_then(|o| o.line) {
+        return l.to_string();
+    }
     match k.3 {
         // DTERR_MD_FIELD_OVERFLOW's hint about DateStyle.
         "DateTimeParseError" if k.0 == "22008" && e.hint.is_some() => "4228".into(),

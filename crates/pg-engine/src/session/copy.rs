@@ -1324,9 +1324,9 @@ impl CopyReader<'_> {
             let before = self.st.rows.len();
             let mut notices = Vec::new();
             let chunk = (self.read)().map_err(|e| {
-                // (CopyFail: the line being read when it came, CopyGetData under
-                // CopyFromErrorCallback.)
-                if e.code == code::QUERY_CANCELED && e.context.is_none() {
+                // (CopyFail, a message COPY doesn't take: the line being read when it came,
+                // CopyGetData under CopyFromErrorCallback.)
+                if e.context.is_none() {
                     let line = self.st.phys_lines + self.pending.iter().filter(|b| **b == b'\n').count() + 1;
                     e.context(format!("COPY {}, line {line}", self.c.table.name))
                 } else {

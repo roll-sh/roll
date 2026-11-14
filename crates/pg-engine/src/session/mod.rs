@@ -3461,12 +3461,14 @@ impl Session {
                     return self.chain(true);
                 }
                 let failed = self.status == TxnStatus::Failed;
-                // (An implicit transaction, of a multi-statement query too, isn't one.)
+                // (An implicit transaction, of a multi-statement query too, isn't one:
+                // EndTransactionBlock's TBLOCK_IMPLICIT_INPROGRESS or TBLOCK_STARTED.)
                 if self.status == TxnStatus::Idle {
-                    self.raise_notice(warning(
-                        code::NO_ACTIVE_SQL_TRANSACTION,
-                        "there is no transaction in progress",
-                    ));
+                    let line = if self.multi_stmt || self.pipelining { 4073 } else { 4152 };
+                    self.raise_notice(
+                        warning(code::NO_ACTIVE_SQL_TRANSACTION, "there is no transaction in progress")
+                            .routine_at("EndTransactionBlock", line),
+                    );
                 }
                 self.finish_txn_untimed(!failed)?;
                 Ok(QueryResult::command(if failed {

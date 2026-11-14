@@ -1191,14 +1191,31 @@ impl Binder<'_, '_> {
         let (lp, lcols) = leaf(self, s.larg.as_deref().unwrap())?;
         let (rp, rcols) = leaf(self, s.rarg.as_deref().unwrap())?;
         if lcols.len() != rcols.len() {
-            return Err(Error::new(
-                code::SYNTAX_ERROR,
-                format!("each {what} query must have the same number of columns"),
+            // (At the right query's first target, as written.)
+            let r = s.rarg.as_deref().unwrap();
+            let at = if r.op == pb::SetOperation::SetopNone as i32 {
+                target_locations(&r.target_list, 1).first().copied().unwrap_or(-1)
+            } else {
+                -1
+            };
+            return Err(with_pos(
+                Error::new(code::SYNTAX_ERROR, format!("each {what} query must have the same number of columns")),
+                at,
             ));
         }
         let mut types = Vec::new();
-        for (l, r) in lcols.iter().zip(&rcols) {
-            types.push(super::unify_types(&[l.ty.clone(), r.ty.clone()], what)?);
+        // (select_common_type points at the right query's column it can't match.)
+        let r = s.rarg.as_deref().unwrap();
+        let rlocs = if r.op == pb::SetOperation::SetopNone as i32 {
+            target_locations(&r.target_list, rcols.len())
+        } else {
+            Vec::new()
+        };
+        for (i, (l, r)) in lcols.iter().zip(&rcols).enumerate() {
+            types.push(
+                super::unify_types(&[l.ty.clone(), r.ty.clone()], what)
+                    .map_err(|e| with_pos(e, rlocs.get(i).copied().unwrap_or(-1)))?,
+            );
         }
         // All but UNION ALL compare rows; errors point at the leftmost query's column.
         if kind != SetOpKind::Union || !s.all {
@@ -1480,9 +1497,9 @@ impl Binder<'_, '_> {
             if let Some(first) = rows.first()
                 && first.len() != row.len()
             {
-                return Err(Error::new(
-                    code::SYNTAX_ERROR,
-                    "VALUES lists must all be the same length",
+                return Err(with_pos(
+                    Error::new(code::SYNTAX_ERROR, "VALUES lists must all be the same length"),
+                    items.items.first().map_or(-1, ast::location),
                 ));
             }
             rows.push(row);

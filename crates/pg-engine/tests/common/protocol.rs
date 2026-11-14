@@ -126,7 +126,8 @@ fn compact(t: u8, b: &[u8]) -> String {
             let mut f = Vec::new();
             for &k in b"SCMDHPWFLR" {
                 if let Some(p) = b.split(|c| *c == 0).find(|p| p.first() == Some(&k)) {
-                    f.push(format!("{}={}", k as char, str_at(&p[1..])));
+                    // (A CONTEXT of several lines stays on the case's line.)
+                    f.push(format!("{}={}", k as char, str_at(&p[1..]).replace('\n', "\\n")));
                 }
             }
             format!("{}{{{}}}", t as char, f.join("|"))
