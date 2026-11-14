@@ -204,6 +204,15 @@ pub enum Secrets {
         #[arg(long)]
         code: bool,
     },
+    /// Every managed credential roll issues and rotates: its environment, keys, resource,
+    /// schedule, next due date, and why its last scheduled rotation failed. Fails when one is
+    /// failing.
+    Rotations {
+        /// Rotate, in this run, every one due within this many days or failing (an operator's
+        /// maintenance window); reports each, and fails if one does.
+        #[arg(long, value_name = "DAYS")]
+        rotate_due: Option<u64>,
+    },
     /// Check this machine's setup: the token and who it is, this directory's project and
     /// environment, the folder's keys against `.env.example`, staged files for values. Fails if a
     /// check does.
@@ -979,6 +988,73 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 return print(&v);
             }
             report_health(&v.as_array().cloned().unwrap_or_default(), false)?;
+        }
+        Secrets::Rotations { rotate_due } => {
+            let v = c.call(Method::GET, &format!("{}/rotations", c.base()), None).await?;
+            if json_out && rotate_due.is_none() {
+                return print(&v);
+            }
+            let list = v.as_array().cloned().unwrap_or_default();
+            if list.is_empty() && !json_out {
+                eprintln!("no managed credentials in this project");
+            }
+            let mut failing = 0;
+            for r in list.iter().filter(|_| !json_out) {
+                let keys: Vec<&str> = r["keys"].as_array().into_iter().flatten().filter_map(|k| k.as_str()).collect();
+                let path = r["path"].as_str().unwrap_or("/");
+                let at = if path == "/" { String::new() } else { format!(" {path}") };
+                let when = match (r["rotate_days"].as_u64(), r["next_due"].as_i64()) {
+                    (Some(d), Some(n)) => format!("every {d} days, next {}", day(n)),
+                    _ => "by hand".into(),
+                };
+                println!("{:<12} {}{at}  {} ({})  {when}", r["environment"].as_str().unwrap_or(""), keys.join(","), r["name"].as_str().unwrap_or(""), r["kind"].as_str().unwrap_or(""));
+                if let Some(e) = r["last_error"].as_str() {
+                    failing += 1;
+                    println!("             failing since {}: {e}", r["failed_at"].as_i64().map(day).unwrap_or_default());
+                }
+            }
+            if let Some(days) = rotate_due {
+                let horizon = chrono::Utc::now().timestamp_millis() + days as i64 * 86_400_000;
+                let (mut done, mut failed) = (0, 0);
+                let mut results = vec![];
+                for r in &list {
+                    let due = r["next_due"].as_i64().is_some_and(|n| n <= horizon) || r["last_error"].is_string();
+                    let Some(key) = r["keys"].get(0).and_then(Value::as_str) else { continue };
+                    if !due {
+                        continue;
+                    }
+                    let (env, path) = (s(&r["environment"]).to_string(), r["path"].as_str().unwrap_or("/").to_string());
+                    // One key rotates its credential: every key it fills changes in one change.
+                    match c.call(Method::POST, &format!("{}/secrets/{}/rotate?path={}", c.env(&env), enc(key), enc(&path)), None).await {
+                        Ok(_) => {
+                            done += 1;
+                            results.push(json!({ "environment": env, "path": path, "key": key, "rotated": true }));
+                            if !json_out {
+                                eprintln!("rotated  {env} {key}");
+                            }
+                        }
+                        Err(e) => {
+                            failed += 1;
+                            results.push(json!({ "environment": env, "path": path, "key": key, "rotated": false, "error": e.to_string() }));
+                            if !json_out {
+                                eprintln!("failed   {env} {key}: {e}");
+                            }
+                        }
+                    }
+                }
+                if json_out {
+                    print(&json!(results))?;
+                } else {
+                    eprintln!("{done} rotated, {failed} failed (due within {days} days, or failing)");
+                }
+                if failed > 0 {
+                    bail!("{failed} rotations failed");
+                }
+                return Ok(());
+            }
+            if failing > 0 {
+                bail!("{failing} scheduled {} failing", if failing == 1 { "rotation is" } else { "rotations are" });
+            }
         }
         Secrets::Check { template, strict } => {
             let text = std::fs::read_to_string(&template).with_context(|| format!("reading {template}"))?;
