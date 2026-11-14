@@ -425,6 +425,7 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
             {g.ip_allow.length > 0 ? ` · only ${g.ip_allow.join(", ")}` : ""}
             {g.rate_per_minute ? ` · ${g.rate_per_minute.toLocaleString("en")}/min` : ""}
             {g.ask_otherwise ? " · asks for anything else" : ""}
+            {g.approved_at ? ` · approved ${relative(g.approved_at)}${g.decided_by && g.decided_by !== "operator" ? ` by ${g.decided_by}` : ""}` : ""}
           </p>
           {g.revoked_why && <p className="mt-0.5 text-[12px] text-danger">Revoked by roll: its secret was {g.revoked_why}.</p>}
           {g.activity && g.activity.allowed + g.activity.denied + g.activity.asked > 0 && (

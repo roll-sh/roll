@@ -898,6 +898,11 @@ async fn a_persons_token_past_the_policy_waits_for_an_admin() {
     assert_eq!(d.call(plain["token"].as_str().unwrap(), Method::POST, &format!("/v1/access/tokens/{id}/approve"), None).await.0, StatusCode::FORBIDDEN);
     assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{id}/approve"), None).await.0, StatusCode::OK);
     assert_eq!(d.call(&token, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::OK, "approved, it works");
+    // Who decided is kept, and the audit log has it (GitHub's request_approved).
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert_eq!(g["decided_by"].as_str(), Some("operator"), "{g}");
+    let log = d.audit_until(&format!("/v1/access/audit?grant={id}"), |l| l.as_array().is_some_and(|a| a.iter().any(|e| e["decision"] == "approve"))).await;
+    assert!(log.as_array().unwrap().iter().any(|e| e["decision"] == "approve" && e["source"] == "access"), "{log}");
     // Widening the approved one past the policy waits again.
     let admin = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "admin": "allow" } }]);
     let plain_id = plain["grant"]["id"].as_str().unwrap();

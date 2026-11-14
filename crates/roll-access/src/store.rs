@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS grants (
     ask_otherwise INTEGER,
     not_before INTEGER,
     pending INTEGER,
-    approved_at INTEGER
+    approved_at INTEGER,
+    decided_by TEXT
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS grant_secrets (
     hash TEXT PRIMARY KEY,
@@ -189,6 +190,9 @@ pub struct Grant {
     /// When an admin approved it (none: never asked, e.g. made before the policy asked).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approved_at: Option<i64>,
+    /// Who approved or denied it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<String>,
 }
 
 /// Why a live token isn't honoured yet.
@@ -521,9 +525,9 @@ fn write_audit(db: &Db, events: &[AuditEvent]) {
 /// The longest an old secret keeps working after a rotation (Stripe's limit too).
 pub const MAX_KEEP_OLD_MS: i64 = 7 * 86_400_000;
 
-/// A grant's columns, as `grant_row` reads them (25 of them: a query may add its own after).
+/// A grant's columns, as `grant_row` reads them (26 of them: a query may add its own after).
 const GRANT_COLUMNS: &str = "g.id, g.name, g.kind, g.rules, g.expires_at, g.ip_allow, g.created_by, g.created_at, g.last_used_at, g.last_used_ip, g.revoked_at, \
-     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.user_id, g.revoked_why, g.temp_rules, g.ask_otherwise, g.not_before, g.pending, g.approved_at";
+     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.user_id, g.revoked_why, g.temp_rules, g.ask_otherwise, g.not_before, g.pending, g.approved_at, g.decided_by";
 const GRANT_FROM: &str = "grants g LEFT JOIN oauth_clients c ON c.id = g.client_id";
 
 /// The position of the `n`th column a query selects after [`GRANT_COLUMNS`]: counted from the list,
@@ -559,6 +563,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         not_before: r.get(22)?,
         pending: r.get::<_, Option<bool>>(23)?.unwrap_or(false),
         approved_at: r.get(24)?,
+        decided_by: r.get(25)?,
         ip_allow: serde_json::from_str(&ip).unwrap_or_default(),
         created_by: r.get(6)?,
         created_at: r.get(7)?,
@@ -716,6 +721,10 @@ impl Store {
         // When an admin approved a person's token (a token made before the policy has none).
         if !db.has_column("grants", "approved_at")? {
             db.add_column("grants", "approved_at", "INTEGER")?;
+        }
+        // Who approved or denied a person's token (an admin's id, or "operator").
+        if !db.has_column("grants", "decided_by")? {
+            db.add_column("grants", "decided_by", "TEXT")?;
         }
         let (audit_tx, rx) = std::sync::mpsc::sync_channel(AUDIT_QUEUE);
         let (writer, audit_pending) = (db.clone(), Arc::new(std::sync::atomic::AtomicUsize::new(0)));
@@ -911,15 +920,15 @@ impl Store {
 
     /// An admin's decision on a pending token: approved, it works (from its start); denied, it's
     /// revoked, saying so.
-    pub fn decide_pending(&self, id: &str, approve: bool) -> Result<Grant> {
+    pub fn decide_pending(&self, id: &str, approve: bool, by: &str) -> Result<Grant> {
         let now = code_sql::now_ms();
         let changed = self.db.write(|c| {
             // Waiting, or a person's that was never asked (made before the policy asked).
             let waits = "(pending = 1 OR (user_id IS NOT NULL AND approved_at IS NULL)) AND revoked_at IS NULL";
             if approve {
-                c.execute(&format!("UPDATE grants SET pending = 0, approved_at = ? WHERE id = ? AND {waits}"), params![now, id])
+                c.execute(&format!("UPDATE grants SET pending = 0, approved_at = ?, decided_by = ? WHERE id = ? AND {waits}"), params![now, by, id])
             } else {
-                c.execute(&format!("UPDATE grants SET pending = 0, revoked_at = ?, revoked_why = 'an admin denied it' WHERE id = ? AND {waits}"), params![now, id])
+                c.execute(&format!("UPDATE grants SET pending = 0, revoked_at = ?, revoked_why = 'an admin denied it', decided_by = ? WHERE id = ? AND {waits}"), params![now, by, id])
             }
         })?;
         if changed == 0 {

@@ -610,7 +610,31 @@ async fn decide_token(a: Arc<Access>, ext: &Extensions, id: String, approve: boo
     if !matches!(who(&a, ext)?, Who::Operator) {
         return Err(Error::Forbidden("only an admin approves people's tokens".into()));
     }
-    let g = blocking(a.clone(), move |a| a.store.decide_pending(&id, approve)).await?;
+    let by = actor(ext);
+    let (by2, id2) = (by.clone(), id.clone());
+    let g = blocking(a.clone(), move |a| a.store.decide_pending(&id2, approve, &by2)).await?;
+    // In the audit log, as GitHub's organizations log a token request approved or denied: who,
+    // which token, from where.
+    a.store.audit(&crate::store::AuditEvent {
+        id: crate::new_id("aud"),
+        at: code_sql::now_ms(),
+        grant_id: Some(g.id.clone()),
+        grant_name: Some(g.name.clone()),
+        source: "access".into(),
+        tool: None,
+        method: "POST".into(),
+        route: format!("/v1/access/tokens/{{id}}/{}", if approve { "approve" } else { "deny" }),
+        product: Some("access".into()),
+        action: Some("admin".into()),
+        resource: Some(id),
+        decision: if approve { "approve" } else { "deny" }.into(),
+        approval: None,
+        status: 200,
+        args: Some(json!({ "by": by })),
+        ip: ext.get::<roll_auth::ClientIp>().map(|c| c.0.to_string()),
+        duration_ms: 0,
+        client: None,
+    });
     if let Some(user) = g.user.as_deref() {
         let name = crate::mail_name(&g.name);
         let (subject, text) = if approve {

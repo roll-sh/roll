@@ -564,6 +564,8 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   Admins are mailed when one waits (who asked, what it may do, where to decide; never a secret).
   A person is told first: `GET /v1/access` lists `approve_people`, and the new-token page and the
   consent screen say "an admin approves this first" as soon as the rules reach one of them.
+  Each decision is kept (`approved_at`, `decided_by`) and audited (source `access`, decision
+  `approve` or `deny`, as GitHub's organizations log a token request approved or denied).
   Only an admin decides, never the person or a token, and the person is mailed either way
   (`roll token list --pending`, `roll token approve|deny <id>` from the CLI).
   Widening an approved token's rules past the policy makes it wait again, in the same

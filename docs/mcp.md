@@ -537,7 +537,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: a waiting token answers 403 `pending_approval`, not 401 (a 401 sent an OAuth MCP client
+Done lately: approving or denying a person's token is audited and keeps who decided (`decided_by`; GitHub's `personal_access_token.request_approved`), and the token row says "approved … by …" (#25); a waiting token answers 403 `pending_approval`, not 401 (a 401 sent an OAuth MCP client
 back through sign-in and consent for a connection that was only waiting) (#25); a person is told
 before making a token or connecting a client that it will wait for an admin (GitHub's "this token
 will require approval"; `approve_people` in `GET /v1/access`) (#25); the sixteenth review's #25
