@@ -524,9 +524,10 @@ impl LinkProvider for Nosql {
     }
 }
 
-/// Search clusters (roll search): where clients reach one (live), and API keys of their own
-/// (managed or dynamic) from `POST /v1/search/clusters/{id}/keys`; never the cluster's own
-/// password, which rotating would take from everyone else.
+/// Search clusters (roll search): where clients reach one (live), and credentials of their own
+/// (managed or dynamic) from `POST /v1/search/clusters/{id}/keys`: an API key on an Elasticsearch
+/// cluster, an internal user (`user`, `password`) on an OpenSearch one, which has no API keys.
+/// Never the cluster's own password, which rotating would take from everyone else.
 struct Search(Api);
 
 impl LinkProvider for Search {
@@ -540,6 +541,9 @@ impl LinkProvider for Search {
             live("port", "Port", false, "ELASTICSEARCH_PORT"),
             live("username", "Cluster name", false, "ELASTICSEARCH_USERNAME"),
             issued("api_key", "API key (Authorization: ApiKey …)", true, "ELASTICSEARCH_API_KEY", "key"),
+            // OpenSearch's: a user of its own (`<user>@<cluster>`, which the node routes).
+            issued("user", "User (OpenSearch)", false, "OPENSEARCH_USERNAME", "key"),
+            issued("password", "Password (OpenSearch)", true, "OPENSEARCH_PASSWORD", "key"),
         ];
         F
     }
@@ -566,7 +570,18 @@ impl LinkProvider for Search {
         }
         let k = self.0.call(Method::POST, &format!("/v1/search/clusters/{}/keys", enc(r#ref)), Some(body))?;
         let id = text(&k, "/id")?;
-        Ok(Issued { parts: BTreeMap::from([("api_key".to_string(), text(&k, "/api_key")?)]), handle: json!({ "id": id.expose() }) })
+        Ok(Issued { parts: search_parts(&k)?, handle: json!({ "id": id.expose() }) })
+    }
+    /// A field the cluster's flavor doesn't issue (an API key from OpenSearch, a user from
+    /// Elasticsearch) is refused when the link is written. A build of roll search that doesn't
+    /// say its flavor is taken at its word later, at the first issue.
+    fn check(&self, link: &Link) -> roll_secrets::Result<()> {
+        let c = self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(&link.r#ref)), None)?;
+        match (c["flavor"].as_str(), link.field.as_str()) {
+            (Some("opensearch"), "api_key") => Err(Error::BadRequest("an OpenSearch cluster has no API keys: link user and password (OPENSEARCH_USERNAME, OPENSEARCH_PASSWORD)".into())),
+            (Some("elasticsearch"), "user" | "password") => Err(Error::BadRequest("an Elasticsearch cluster issues API keys: link api_key (ELASTICSEARCH_API_KEY)".into())),
+            _ => Ok(()),
+        }
     }
     /// A key's expiry is set when it's made (roll search has no way to move it), so a renewal
     /// would leave a lease that outlives its key.
@@ -577,6 +592,15 @@ impl LinkProvider for Search {
         let Some(id) = h["id"].as_str() else { return Ok(()) };
         self.0.delete_gone(&format!("/v1/search/clusters/{}/keys/{}", enc(r#ref), enc(id)))
     }
+}
+
+/// What `…/keys` answered, by field: an API key (Elasticsearch), or a user and its password
+/// (OpenSearch).
+fn search_parts(k: &Json) -> roll_secrets::Result<BTreeMap<String, Value>> {
+    if k["api_key"].is_string() {
+        return Ok(BTreeMap::from([("api_key".to_string(), text(k, "/api_key")?)]));
+    }
+    Ok(BTreeMap::from([("user".to_string(), text(k, "/username")?), ("password".to_string(), text(k, "/password")?)]))
 }
 
 /// roll code's search for roll secrets' health (`code` check): whether a repository's default
@@ -740,6 +764,16 @@ mod tests {
     use axum::http::HeaderMap;
     use serde_json::{Value as Json, json};
     use std::sync::{Arc, Mutex};
+
+    /// A search link takes whichever credential the cluster's flavor issues.
+    #[test]
+    fn a_search_key_is_an_api_key_or_an_opensearch_user() {
+        let es = super::search_parts(&json!({ "id": "k1", "api_key": "abc" })).unwrap();
+        assert_eq!(es.keys().collect::<Vec<_>>(), ["api_key"]);
+        let os = super::search_parts(&json!({ "id": "roll-key-x", "username": "roll-key-x@logs", "password": "pw" })).unwrap();
+        assert_eq!((os["user"].expose(), os["password"].expose()), ("roll-key-x@logs", "pw"));
+        assert!(super::search_parts(&json!({ "id": "x" })).is_err());
+    }
 
     /// A KMS that decrypts one ciphertext, and only with roll secrets' encryption context.
     #[tokio::test(flavor = "multi_thread")]
