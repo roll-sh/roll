@@ -1586,6 +1586,10 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
+Then (2026-11-14, latest): certificates ending as health findings (#44: `certificate_expiring`)
+and ClickHouse outside roll (#39, merged up into #41 and #42: its HTTPS interface, `sha256_hash`
+passwords, checked live against ClickHouse 25.8).
+
 A fourth independent review (2026-11-14, of the rotations overview, transit signing, HMAC and
 brought keys, CSR signing, revocation and the CRL, SQL Server) found no high-severity issue; it
 found an ended SQL Server lease whose login could stay usable, generated passwords SQL Server's
@@ -1631,13 +1635,15 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **ClickHouse outside roll** (on #39): two users take turns, or a user per lease with a role, over
-   its native TLS port, through the same guards.
-2. **A certificate's own page of what's coming due**: certificates from CSRs and SSH host
-   certificates that end within two weeks as health findings (`expiring`), so a device's
-   certificate isn't found expired by an outage.
-3. **Transit keys scoped by name**: a grant's resources include one encryption key
-   (`secrets:transit/<name>`), so signing with one key doesn't need write on the project.
+1. **Transit keys scoped by name**: a grant's resources include one encryption key
+   (`secrets:transit/<name>`), so signing with one key doesn't need write on the project. Needs a
+   resource kind in roll-access's catalogue (the MCP thread's), so agree it there first.
+2. **Certificates for keys that stay put on SSH too**: `roll ssh` signs a key the user already has
+   (`…/ssh-cas/{id}/sign-user {public_key}`), for people who keep their key in an agent or a
+   hardware token.
+3. **Rotation for roll's own resources from outside**: `roll secrets rotate --all-due`, for an
+   operator's maintenance window, rotating every managed credential due within a week in one run
+   and reporting what failed.
 4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
 5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
