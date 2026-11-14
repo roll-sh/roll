@@ -128,8 +128,11 @@ const SEO = `JSON.stringify({
   noindex: [...document.querySelectorAll('meta[name="robots" i], meta[name="googlebot" i]')].some((m) => /noindex/i.test(m.getAttribute("content") || "")),
 })`;
 // The service's API, when the project names its OpenAPI document ($OPENAPI, a path on the page's
-// own origin, JSON): every `METHOD /path` it declares (Optic's and Bump's API diff), at most 1000,
-// from a document of at most 4 MB.
+// own origin, JSON, at most 4 MB): every `METHOD /path` it declares (Optic's and Bump's API diff),
+// and a line per fact of each (oasdiff's breaking changes): a parameter's or request body field's
+// type, whether it's required and its allowed values, and each 2xx response field's type, with
+// `$ref`s inside the document followed (fields to a depth of 4). At most 5000 lines; roll checks
+// each line's shape (`roll_previews::openapi`).
 const OPENAPI = /^\/[^\s#"'`]{0,199}$/.test(process.env.OPENAPI || "") ? process.env.OPENAPI : null;
 const API = OPENAPI && `(async () => {
   const c = new AbortController();
@@ -140,14 +143,72 @@ const API = OPENAPI && `(async () => {
     const body = await r.text();
     if (body.length > 4e6) return null;
     const doc = JSON.parse(body);
-    const ops = [];
-    for (const [path, item] of Object.entries(doc && typeof doc.paths === "object" ? doc.paths : {})) {
-      for (const m of ["get", "put", "post", "delete", "patch", "options", "head", "trace"]) {
-        if (item && typeof item === "object" && item[m]) ops.push(m.toUpperCase() + " " + path);
+    const out = [];
+    const MAX = 5000;
+    const word = (s) => typeof s === "string" && s.length > 0 && s.length <= 100 && !/\\s/.test(s);
+    const deref = (s) => {
+      for (let n = 0; s && typeof s === "object" && typeof s.$ref === "string" && n < 10; n++) {
+        if (!s.$ref.startsWith("#/")) return null;
+        s = s.$ref.slice(2).split("/").reduce((o, k) => (o && typeof o === "object" ? o[k.replace(/~1/g, "/").replace(/~0/g, "~")] : undefined), doc);
       }
-      if (ops.length >= 1000) break;
+      return s && typeof s === "object" ? s : null;
+    };
+    const typeOf = (s, depth = 0) => {
+      s = deref(s);
+      if (!s || depth > 3) return "any";
+      if (Array.isArray(s.type)) return s.type.filter((x) => typeof x === "string").join("|") || "any";
+      if (s.type === "array") return "array<" + typeOf(s.items, depth + 1) + ">";
+      return typeof s.type === "string" ? s.type : s.properties ? "object" : "any";
+    };
+    const values = (s) => (Array.isArray(deref(s)?.enum) ? deref(s).enum.slice(0, 20).map((v) => JSON.stringify(v)).filter((v) => v.length <= 80 && !/\\s/.test(v)) : []);
+    // Each field of a schema, by path (\`a.b\`, \`items[].sku\`), with whether its object requires it.
+    const fields = (s, prefix, emit, depth) => {
+      s = deref(s);
+      if (!s || depth > 4 || out.length >= MAX) return;
+      for (const part of Array.isArray(s.allOf) ? s.allOf : []) fields(part, prefix, emit, depth + 1);
+      const required = new Set(Array.isArray(s.required) ? s.required : []);
+      for (const [k, v] of Object.entries(s.properties && typeof s.properties === "object" ? s.properties : {})) {
+        if (!word(k)) continue;
+        const name = prefix ? prefix + "." + k : k;
+        emit(name, v, required.has(k));
+        fields(v, name, emit, depth + 1);
+      }
+      if (s.type === "array" && s.items) fields(s.items, prefix + "[]", emit, depth + 1);
+    };
+    const json = (content) => (content && typeof content === "object" ? content["application/json"] || Object.values(content)[0] : null);
+    for (const [path, item0] of Object.entries(doc && typeof doc.paths === "object" ? doc.paths : {})) {
+      const item = deref(item0);
+      if (!item || !path.startsWith("/") || /\\s/.test(path)) continue;
+      for (const m of ["get", "put", "post", "delete", "patch", "options", "head", "trace"]) {
+        const o = deref(item[m]);
+        if (!o || out.length >= MAX) continue;
+        const op = m.toUpperCase() + " " + path;
+        out.push(op);
+        for (const p0 of [...(Array.isArray(item.parameters) ? item.parameters : []), ...(Array.isArray(o.parameters) ? o.parameters : [])]) {
+          const p = deref(p0);
+          if (!p || !word(p.name) || !word(p.in)) continue;
+          const id = p.in + ":" + p.name;
+          out.push(op + " param " + id + " type " + typeOf(p.schema));
+          if (p.required) out.push(op + " param " + id + " required");
+          for (const v of values(p.schema)) out.push(op + " param " + id + " enum " + v);
+        }
+        const req = json(deref(o.requestBody)?.content);
+        if (req) {
+          fields(req.schema, "", (name, v, required) => {
+            out.push(op + " body " + name + " type " + typeOf(v));
+            if (required) out.push(op + " body " + name + " required");
+            for (const x of values(v)) out.push(op + " body " + name + " enum " + x);
+          }, 0);
+        }
+        for (const [code, r0] of Object.entries(o.responses && typeof o.responses === "object" ? o.responses : {})) {
+          if (!/^2(\\d\\d|XX)$/.test(code)) continue;
+          const res = json(deref(r0)?.content);
+          if (res) fields(res.schema, "", (name, v) => out.push(op + " response " + code + " " + name + " type " + typeOf(v)), 0);
+        }
+      }
+      if (out.length >= MAX) break;
     }
-    return JSON.stringify(ops.slice(0, 1000));
+    return JSON.stringify(out.slice(0, MAX));
   } catch {
     return null;
   } finally {

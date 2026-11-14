@@ -279,6 +279,7 @@ export function PreviewSheet({
             {p.screenshot_at ? <Screenshot id={p.id} at={p.screenshot_at} change={p.visual_change} phone={p.phone_screenshot} base={p.base_change} pages={p.pages} /> : null}
             {p.base_change?.text && <TextAgainst diff={p.base_change.text} branch={p.base_change.branch} />}
             {p.base_change?.api && <TextAgainst diff={p.base_change.api} branch={p.base_change.branch} what="api" />}
+            {p.base_change?.api_breaking && <ApiBreaking items={p.base_change.api_breaking} />}
             {p.visual_review && p.visual_review.state !== "unchanged" && (
               <div className="mt-1.5 flex items-center gap-2 text-[11.5px]">
                 {p.visual_review.state === "accepted" ? (
@@ -885,6 +886,22 @@ export function TextAgainst({ diff, branch, what = "words" }: { diff: TextDiff; 
         ))}
       </ul>
       {more > 0 && <p className="mt-0.5 text-subtle">and {more} more lines</p>}
+    </div>
+  );
+}
+
+/** What a change breaks inside the API operations main's and its own both have (a parameter
+ * that becomes required, a response field that goes): the change's own document's words. */
+export function ApiBreaking({ items }: { items: string[] }) {
+  if (!items.length) return null;
+  return (
+    <div className="mt-1.5 text-[11.5px]" aria-label="What it breaks in the operations it keeps">
+      <p className="text-danger">It breaks callers of the operations it keeps:</p>
+      <ul className="mt-0.5 space-y-0.5 font-mono text-[11px] text-fg [overflow-wrap:anywhere]">
+        {items.map((b, i) => (
+          <li key={i}>{b}</li>
+        ))}
+      </ul>
     </div>
   );
 }

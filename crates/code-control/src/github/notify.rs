@@ -789,8 +789,8 @@ fn preview_comment(c: &Change, teardown: Option<&str>) -> String {
                     out.push_str(&format!("![The preview's first page]({url})\n\n"));
                 }
             }
-            if let Some((api, branch)) = e.base_change.as_ref().and_then(|b| Some((b.api.as_ref()?, branch_name(&b.branch)))) {
-                out.push_str(&api_line(api, &branch));
+            if let Some((b, api)) = e.base_change.as_ref().and_then(|b| Some((b, b.api.as_ref()?))) {
+                out.push_str(&api_line(api, &b.api_breaking, &branch_name(&b.branch)));
             }
             if let Some(lines) = e.schema_changes.as_ref().filter(|l| !l.is_empty()) {
                 out.push_str(&risks_line(&e.schema_risks));
@@ -835,8 +835,8 @@ fn preview_comment(c: &Change, teardown: Option<&str>) -> String {
 /// The API's operations against the branch's (Optic's API diff), unfolded: a removed one breaks
 /// whoever calls it. The operations come from the change's own document: each in a code span
 /// nothing in it can close, at most 10 each way.
-fn api_line(api: &crate::model::PreviewTextDiff, branch: &str) -> String {
-    if api.added_n + api.removed_n == 0 {
+fn api_line(api: &crate::model::PreviewTextDiff, breaking: &[String], branch: &str) -> String {
+    if api.added_n + api.removed_n == 0 && breaking.is_empty() {
         return String::new();
     }
     let op = |o: &String| format!("`{}`", o.chars().filter(|c| !c.is_control() && *c != '`').take(200).collect::<String>());
@@ -854,7 +854,22 @@ fn api_line(api: &crate::model::PreviewTextDiff, branch: &str) -> String {
     if api.added_n > 0 {
         parts.push(format!("adds {}", list(&api.added, api.added_n)));
     }
-    format!("**Its API against `{branch}`:** {}.\n\n", parts.join("; "))
+    let mut out = format!("**Its API against `{branch}`:**");
+    if !parts.is_empty() {
+        out.push_str(&format!(" {}.", parts.join("; ")));
+    }
+    // What breaks inside the operations both keep, a line each (oasdiff's breaking changes).
+    if !breaking.is_empty() {
+        out.push_str(" It breaks callers of the operations it keeps:\n");
+        for b in breaking.iter().take(10) {
+            out.push_str(&format!("- {}\n", op(b)));
+        }
+        if breaking.len() > 10 {
+            out.push_str(&format!("- and {} more (the sheet lists them)\n", breaking.len() - 10));
+        }
+    }
+    out.push_str(if breaking.is_empty() { "\n\n" } else { "\n" });
+    out
 }
 
 /// What in the schema changes would hurt production, unfolded above them (PlanetScale's deploy
@@ -953,13 +968,18 @@ mod preview_tests {
         (contrast.impact, contrast.help) = (Some("serious".into()), Some("[click](javascript:x)".into()));
         let ax = crate::model::PreviewPageA11y { issues: vec![contrast], lang: true, title: true, seo: vec![] };
         assert_eq!(a11y_line(&ax), "**Accessibility:** 4 elements failing `color-contrast`, serious (first: `<p>`).\n\n");
-        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None, api: None };
+        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None, api: None, api_breaking: Vec::new() };
         assert_eq!(base_line(&b), "Against `mainx`, the page differs by 8.0%, at a phone's width the same.\n\n");
         // Its words against main's: a diff block nothing in the page can close.
         let words = crate::model::PreviewTextDiff { added: vec!["Pay ```now".into()], removed: vec!["Checkout".into()], added_n: 1, removed_n: 1 };
         assert_eq!(text_block(&words, "main"), "**Its words against `main`:**\n\n```diff\n- Checkout\n+ Pay now\n```\n\n");
         let api = crate::model::PreviewTextDiff { added: vec!["POST /orders".into()], removed: vec!["DELETE /users/{id}`x".into()], added_n: 1, removed_n: 1 };
-        assert_eq!(api_line(&api, "main"), "**Its API against `main`:** removes `DELETE /users/{id}x` (breaking for callers of `main`'s); adds `POST /orders`.\n\n", "an operation can't end its code span");
+        assert_eq!(api_line(&api, &[], "main"), "**Its API against `main`:** removes `DELETE /users/{id}x` (breaking for callers of `main`'s); adds `POST /orders`.\n\n", "an operation can't end its code span");
+        let same = crate::model::PreviewTextDiff { added: vec![], removed: vec![], added_n: 0, removed_n: 0 };
+        assert_eq!(
+            api_line(&same, &["GET /users: the parameter query:limit becomes required".into()], "main"),
+            "**Its API against `main`:** It breaks callers of the operations it keeps:\n- `GET /users: the parameter query:limit becomes required`\n\n"
+        );
         let links = crate::model::PreviewPageLinks { checked: 4, broken: vec![crate::model::PreviewBrokenLink { path: "/gone`)".into(), status: 404 }, crate::model::PreviewBrokenLink { path: "/slow".into(), status: 0 }] };
         assert_eq!(links_line(&links), "**Broken links** (of 4 checked on its first page): `/gone` 404, `/slow` no answer.\n\n");
         // In the comment, one folded block whose summary is counts only.
@@ -1004,7 +1024,7 @@ mod preview_tests {
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, over its budget</summary>"));
         // Against main's load where it was compared: only a difference past the noise counts.
         timed.speed_budget = None;
-        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None, api: None });
+        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None, api: None, api_breaking: Vec::new() });
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, 300 ms slower than main</summary>"));
         // Core Web Vitals: in the line, against main's paint, and in the budget.
         let ps = timed.page_speed.as_mut().unwrap();

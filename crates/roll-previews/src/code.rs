@@ -132,6 +132,7 @@ impl CodeSource {
                     text: b.text.as_ref().map(|t| code_control::model::PreviewTextDiff { added: t.added.clone(), removed: t.removed.clone(), added_n: t.added_n, removed_n: t.removed_n }),
                     links_added: b.links_added,
                     api: b.api.as_ref().map(|t| code_control::model::PreviewTextDiff { added: t.added.clone(), removed: t.removed.clone(), added_n: t.added_n, removed_n: t.removed_n }),
+                    api_breaking: b.api_breaking.clone(),
                     seo_added: b.seo_added }),
                 speed_budget: Some(code_control::model::PreviewSpeedBudget { load_ms: s.github.budget.load_ms, bytes: s.github.budget.bytes, lcp_ms: s.github.budget.lcp_ms, cls: s.github.budget.cls })
                     .filter(|b| b.load_ms > 0 || b.bytes > 0 || b.lcp_ms > 0 || b.cls > 0.0),

@@ -74,8 +74,8 @@ api POST /v1/code/owners '{"name":"acme","kind":"org"}' >/dev/null
 api POST /v1/code/repos '{"owner":"acme","name":"web","source":"native"}' >/dev/null
 TOML='[preview]\nimage = \"'"$IMAGE"'\"\nrun = \"env > env.txt && python -m http.server $PORT\"\nport = 8000\nhealth = \"/\"\nmemory = 128\ncpus = 0.25\n'
 # The service's API, as an OpenAPI document (github.openapi): the change removes one operation and adds one.
-OPENAPI_MAIN='{\"paths\":{\"/users\":{\"get\":{}},\"/users/{id}\":{\"delete\":{}}}}'
-OPENAPI_CHG='"openapi.json":{"content":"{\"paths\":{\"/users\":{\"get\":{}},\"/orders\":{\"post\":{}}}}"}'
+OPENAPI_MAIN='{\"paths\":{\"/users\":{\"get\":{\"parameters\":[{\"name\":\"limit\",\"in\":\"query\",\"schema\":{\"type\":\"integer\"}}]}},\"/users/{id}\":{\"delete\":{}}}}'
+OPENAPI_CHG='"openapi.json":{"content":"{\"paths\":{\"/users\":{\"get\":{\"parameters\":[{\"name\":\"limit\",\"in\":\"query\",\"required\":true,\"schema\":{\"type\":\"integer\"}}]}},\"/orders\":{\"post\":{}}}}"}'
 api POST /v1/code/repos/acme/web/land "{\"message\":\"init\",\"files\":{\"roll.toml\":{\"content\":\"$TOML\"},\"index.html\":{\"content\":\"main\"},\"openapi.json\":{\"content\":\"$OPENAPI_MAIN\"}}}" >/dev/null
 # A second service, from a second repo (its default branch in every preview): its pages too.
 api POST /v1/code/repos '{"owner":"acme","name":"wiki","source":"native"}' >/dev/null
@@ -462,7 +462,7 @@ RUNS=$(api GET "/v1/previews/$PV" | jq_ "d.get('runs') or ''")
 WAITED2=$(ROLL_API_URL="http://$API" "$ROLL_CLI" preview wait --change "$CHG" --timeout 30) || { echo "roll preview wait should pass for the docs-only head"; exit 1; }
 # This one's page logs an error, which its screenshot's load must catch.
 THIRD='preview of change 1, third<script>console.error(\"boom\")</script> <nav><a href=\"/gone\">a page that went</a></nav>'
-api POST "/v1/code/changes/$CHG/revise" "{\"base\":\"main\",\"message\":\"Code\",\"files\":{\"index.html\":{\"content\":\"$THIRD\"},\"docs/setup.md\":{\"content\":\"how to run it\"}}}" >/dev/null
+api POST "/v1/code/changes/$CHG/revise" "{\"base\":\"main\",\"message\":\"Code\",\"files\":{\"index.html\":{\"content\":\"$THIRD\"},\"docs/setup.md\":{\"content\":\"how to run it\"},$OPENAPI_CHG}}" >/dev/null
 CODE_HEAD=$(api GET "/v1/code/changes/$CHG" | jq_ "d['head']")
 until_head "$CODE_HEAD"
 for _ in $(seq 1 120); do
@@ -560,6 +560,9 @@ WORDS=$(api GET "/v1/previews/$PV" | jq_ "(lambda t: '+%s -%s' % (t['added'], t[
 # Its API against main's, read from each one's OpenAPI document (github.openapi).
 API_DIFF=$(api GET "/v1/previews/$PV" | jq_ "(lambda t: '+%s -%s' % (t['added'], t['removed']))(d['base_change'].get('api') or {'added': [], 'removed': []})")
 [ "$API_DIFF" = "+['POST /orders'] -['DELETE /users/{id}']" ] || { echo "the change's API against main's should name the operation it removes and the one it adds: $API_DIFF"; exit 1; }
+# And what it breaks inside an operation both keep: the limit parameter becomes required.
+API_BREAKING=$(api GET "/v1/previews/$PV" | jq_ "' | '.join(d['base_change'].get('api_breaking') or [])")
+[ "$API_BREAKING" = "GET /users: the parameter query:limit becomes required" ] || { echo "the change's API should name what it breaks in an operation both keep: $API_BREAKING"; exit 1; }
 case "$WORDS" in "+['preview of change 1"*"-['main']") ;; *) echo "the page's words should be compared with main's: $WORDS"; exit 1;; esac
 MAIN_LOAD=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('load_ms')")
 case "$MAIN_LOAD" in [0-9]*) ;; *) echo "the comparison with main should carry main's load time: $MAIN_LOAD"; exit 1;; esac
@@ -672,7 +675,7 @@ cat <<EOF
 | What each branch hands the preview's code | $DATA |
 | Core Web Vitals of the first page (the screenshot's load) | $VITALS |
 | The first page's words against main's | $WORDS |
-| Its API against main's (from each one's OpenAPI document) | $API_DIFF |
+| Its API against main's (from each one's OpenAPI document) / what it breaks in the operations both keep | $API_DIFF / $API_BREAKING |
 | SEO basics of the first page | $SEO |
 | /pricing's own checks (against main's /pricing) | $PRICING |
 | The first page's broken links (HEAD only) / new against main | $LINKS / $LINKS_NEW |

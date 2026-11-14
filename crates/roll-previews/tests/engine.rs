@@ -143,8 +143,8 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     *e.apps.shot.lock() = Some(png);
     // Main's API, and the change's: one operation gone, one new.
     let ops = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    e.apps.api.lock().insert("cs_web0".into(), ops(&["DELETE /users/{id}", "GET /users"]));
-    e.apps.api.lock().insert("cs_1a".into(), ops(&["GET /users", "POST /orders"]));
+    e.apps.api.lock().insert("cs_web0".into(), ops(&["DELETE /users/{id}", "GET /users", "GET /users param query:limit type integer"]));
+    e.apps.api.lock().insert("cs_1a".into(), ops(&["GET /users", "GET /users param query:limit required", "GET /users param query:limit type integer", "POST /orders"]));
     e.code.open(change("chg_1", 1));
     e.engine.pass().await.unwrap();
     e.engine.pass().await.unwrap();
@@ -166,6 +166,7 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     }
     let compared = compared.expect("compared with the baseline");
     assert_eq!((compared.branch.as_str(), compared.percent), ("main", 0.0));
+    assert_eq!(compared.api_breaking, ["GET /users: the parameter query:limit becomes required"], "what breaks inside an operation both keep");
     let api = compared.api.expect("its API against main's");
     assert_eq!((api.removed, api.added), (vec!["DELETE /users/{id}".to_string()], vec!["POST /orders".to_string()]), "what main's callers lose, and what's new");
     assert_eq!(e.engine.store.base_change(&e.engine.store.row_by_change("chg_1").unwrap().unwrap().id).unwrap().and_then(|b| b.head).as_deref(), Some("cs_web0"), "at its merge base");

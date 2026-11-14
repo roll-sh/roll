@@ -443,6 +443,10 @@ pub struct PreviewBaseChange {
     /// gone. Untrusted: the change's own document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api: Option<PreviewTextDiff>,
+    /// What it breaks inside the operations both keep (a parameter that becomes required, a
+    /// response field that goes, …): a sentence each, by operation. Untrusted text too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_breaking: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

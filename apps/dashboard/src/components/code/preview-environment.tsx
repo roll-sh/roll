@@ -2,7 +2,7 @@ import { ArrowUpRight, ExternalLink, Smartphone } from "lucide-react";
 import { useState } from "react";
 import type { PreviewEnvironment } from "@/lib/code-api";
 import type { PreviewKind } from "@/lib/previews-api";
-import { PhoneCode, PREVIEW_KIND_ICON, TextAgainst } from "../workspace/preview-sheet";
+import { ApiBreaking, PhoneCode, PREVIEW_KIND_ICON, TextAgainst } from "../workspace/preview-sheet";
 import { host, money, STATE_LABEL, StateDot } from "../workspace/previews-common";
 import { a11yWords, previewsApi, thanMain } from "@/lib/previews-api";
 import { errorText } from "../workspace/previews-common";
@@ -134,6 +134,7 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
       )}
       {env.base_change?.text && <TextAgainst diff={env.base_change.text} branch={env.base_change.branch} />}
       {env.base_change?.api && <TextAgainst diff={env.base_change.api} branch={env.base_change.branch} what="api" />}
+      {env.base_change?.api_breaking && <ApiBreaking items={env.base_change.api_breaking} />}
       {env.visual_review && env.visual_review.state !== "unchanged" && <VisualReview previewId={env.id} review={env.visual_review} />}
       {env.release_ms != null && (
         <p className="font-mono text-[11px] text-subtle tabular-nums" title="The project's release (migrations), run on the preview's data">

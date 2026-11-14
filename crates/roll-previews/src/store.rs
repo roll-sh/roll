@@ -476,7 +476,7 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
-        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT"), ("base_preview", "TEXT"), ("base_branch", "TEXT"), ("base_change_bp", "INTEGER"), ("base_phone_bp", "INTEGER"), ("base_head", "TEXT"), ("base_speed", "TEXT"), ("base_a11y", "TEXT"), ("base_health", "TEXT"), ("text", "TEXT"), ("base_text", "TEXT"), ("links", "TEXT"), ("base_links", "TEXT"), ("api", "TEXT"), ("base_api", "TEXT")] {
+        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT"), ("base_preview", "TEXT"), ("base_branch", "TEXT"), ("base_change_bp", "INTEGER"), ("base_phone_bp", "INTEGER"), ("base_head", "TEXT"), ("base_speed", "TEXT"), ("base_a11y", "TEXT"), ("base_health", "TEXT"), ("text", "TEXT"), ("base_text", "TEXT"), ("links", "TEXT"), ("base_links", "TEXT"), ("api", "TEXT"), ("base_api", "TEXT"), ("base_api_breaking", "TEXT")] {
             if !db.has_column("screenshots", col)? {
                 db.add_column("screenshots", col, ty)?;
             }
@@ -1259,13 +1259,16 @@ impl Store {
             .collect();
         // The first page's words against the baseline's (Chromatic's DOM snapshots), when both were read.
         let text = ours.text.as_deref().zip(theirs.text.as_deref()).and_then(|(now, then)| serde_json::to_string(&crate::visual::text_diff(then, now)).ok());
-        // Its API's operations against the baseline's (`github.openapi`), when both were read.
-        let api = ours.api.as_deref().zip(theirs.api.as_deref()).and_then(|(now, then)| serde_json::to_string(&crate::visual::text_diff(then, now)).ok());
+        // Its API against the baseline's (`github.openapi`), when both were read: the operations
+        // added and removed, and what breaks inside the ones both keep.
+        let both = ours.api.as_deref().zip(theirs.api.as_deref());
+        let api = both.and_then(|(now, then)| serde_json::to_string(&crate::visual::text_diff(&crate::openapi::operations(then), &crate::openapi::operations(now))).ok());
+        let api_breaking = both.and_then(|(now, then)| serde_json::to_string(&crate::openapi::breaking(then, now)).ok());
         self.db.write(|c| {
             c.execute(
                 "UPDATE screenshots SET base_preview = ?, base_branch = ?, base_change_bp = ?, base_phone_bp = ?, base_head = ?, base_speed = ?, base_a11y = ?, base_health = ?, base_text = ?, \
-                 base_links = ?, base_api = ? WHERE preview_id = ?",
-                params![base, branch, change, phone, theirs.head, theirs.speed, theirs.a11y, theirs.health, text, theirs.links, api, id],
+                 base_links = ?, base_api = ?, base_api_breaking = ? WHERE preview_id = ?",
+                params![base, branch, change, phone, theirs.head, theirs.speed, theirs.a11y, theirs.health, text, theirs.links, api, api_breaking, id],
             )?;
             for (path, bp) in &page_bps {
                 c.execute("UPDATE page_shots SET base_bp = ? WHERE preview_id = ? AND path = ?", params![bp, id, path])?;
@@ -1313,7 +1316,7 @@ impl Store {
         let row = self.db.read(|c| {
             c.query_row(
                 "SELECT CASE WHEN png <> '' THEN at END, head, prev_head, change_bp, phone_change_bp, phone_png IS NOT NULL, speed, prev_speed, health, a11y, \
-                 base_preview, base_branch, base_change_bp, base_phone_bp, base_head, base_speed, base_a11y, base_health, base_text, links, base_links, base_api FROM screenshots WHERE preview_id = ?",
+                 base_preview, base_branch, base_change_bp, base_phone_bp, base_head, base_speed, base_a11y, base_health, base_text, links, base_links, base_api, base_api_breaking FROM screenshots WHERE preview_id = ?",
                 [id],
                 |r| {
                     let base = match (r.get::<_, Option<String>>(10)?, r.get::<_, Option<String>>(11)?, r.get::<_, Option<i64>>(12)?) {
@@ -1329,6 +1332,7 @@ impl Store {
                             text: json(r.get(18)?),
                             links: json(r.get(20)?),
                             api: json(r.get(21)?),
+                            api_breaking: json(r.get(22)?).unwrap_or_default(),
                         }),
                         _ => None,
                     };
@@ -1966,6 +1970,7 @@ impl Store {
             seo_added: page_a11y.as_ref().and_then(|a| a.seo.as_ref()).zip(b.a11y.as_ref().and_then(|a| a.seo.as_ref())).map(|(ours, main)| ours.added_since(main)),
             links_added: page_links.as_ref().zip(b.links.as_ref()).map(|(ours, main)| ours.added_since(main)),
             api: b.api,
+            api_breaking: b.api_breaking,
         });
         let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, f.head)?;
         let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
@@ -2077,6 +2082,8 @@ pub struct BaseRow {
     pub links: Option<crate::PageLinks>,
     /// Its API's operations against the change's (`visual::text_diff`).
     pub api: Option<crate::TextDiff>,
+    /// What the change breaks inside the operations both keep.
+    pub api_breaking: Vec<String>,
 }
 
 /// Live share links a preview may have at once.
@@ -2140,7 +2147,7 @@ mod tests {
         store.set_screenshot(&main.id, "cs_m", &png(1), None, Some(&png(0))).unwrap();
         store.keep_base_history(&main.id, "cs_m").unwrap();
         store.compare_with_base(id, &main.id, "main", None).unwrap();
-        assert_eq!(store.base_change(id).unwrap(), Some(BaseRow { preview: main.id.clone(), branch: "main".into(), change_bp: 2000, phone_bp: Some(5000), head: Some("cs_m".into()), speed: None, a11y: None, health: None, text: None, links: None, api: None }));
+        assert_eq!(store.base_change(id).unwrap(), Some(BaseRow { preview: main.id.clone(), branch: "main".into(), change_bp: 2000, phone_bp: Some(5000), head: Some("cs_m".into()), speed: None, a11y: None, health: None, text: None, links: None, api: None, api_breaking: Vec::new() }));
         // Main moves on (to what the change's page looks like): a change that left it at cs_m is
         // still compared with cs_m's, and shown that one.
         store.set_screenshot(&main.id, "cs_m2", &png(3), Some(&speed(700)), Some(&png(5))).unwrap();
