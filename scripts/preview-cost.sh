@@ -201,6 +201,10 @@ BODY=$(curl -sS -L -c "$JAR" -b "$JAR" -H "Host: $HOST" "http://$API/?$QUERY" --
 T3=$(now_ms)
 echo "$BODY" | grep -q "preview of change 1" || { echo "unexpected body: $BODY"; tail -30 "$HOME_DIR/rolld.log"; exit 1; }
 T4=$(now_ms); curl -sS -o /dev/null -b "$JAR" -H "Host: $HOST" "http://$API/"; T5=$(now_ms)
+# Never indexed: the service's page through roll says so, and so does the 401 without the link.
+ROBOTS=$(curl -sS -o /dev/null -D - -b "$JAR" -H "Host: $HOST" "http://$API/" | tr -d '\r' | sed -n 's/^x-robots-tag: //Ip')
+ROBOTS_LOCKED=$(curl -sS -o /dev/null -D - -H "Host: $HOST" "http://$API/" | tr -d '\r' | sed -n 's/^x-robots-tag: //Ip')
+[ "$ROBOTS" = noindex ] && [ "$ROBOTS_LOCKED" = noindex ] || { echo "a preview's pages should be kept out of search engines: '$ROBOTS' / '$ROBOTS_LOCKED'"; exit 1; }
 # The service's DATABASE_URL is the branch's own role, which can't read the WAL (where the pages
 # from before the mask are) and isn't a superuser.
 APP_DB=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
@@ -577,6 +581,7 @@ cat <<EOF
 | What each branch hands the preview's code | $DATA |
 | Core Web Vitals of the first page (the screenshot's load) | $VITALS |
 | Visual review under a 5% visual threshold | $UNDER |
+| X-Robots-Tag on the service's page / on the 401 without the link | $ROBOTS / $ROBOTS_LOCKED |
 | Postgres users.email in the branch / in the parent | $PG_MASKED / $PG_PARENT |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |

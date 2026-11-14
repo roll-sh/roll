@@ -464,6 +464,10 @@ preview wrote a document with a price). With several such resources, each one's 
     link, so a reviewer who comes from the pull request's plain URL gets in, and the token is
     never public. `access: "public"` opens a project's previews to anyone who
     can reach the domain.
+  - Never indexed: every response through a preview's host, the service's own and roll's 401
+    alike, carries `X-Robots-Tag: noindex` (as Vercel's previews do), whatever the service
+    sends, so a public preview, a share link or an earlier push's URL isn't what a search
+    lands on (live: both). roll apps' `pv-` environments are asked to do the same.
   - The token is 120 random bits per preview, compared in constant time.
   - The token never goes where people outside roll can read it. The change, the pull request
     comment, statuses, deployments and repo webhooks get the plain URL (which answers 401 to
@@ -1037,6 +1041,8 @@ Ranked by what a person notices first. Done so far:
   the budget);
 - a visual threshold per project (`github.visual_threshold`): a page that moved less isn't
   reviewed again;
+- previews kept out of search engines (`X-Robots-Tag: noindex` on every response through a
+  preview's host);
 - screenshot comparisons off the async runtime, and a test for reading a run's pages;
 - the previews waiting for a visual review first in the list, tagged "to review";
 - `roll preview screenshot` (any screenshot or diff to a file);
@@ -1097,32 +1103,28 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Previews kept out of search engines** (Vercel sends `X-Robots-Tag: noindex` on every
-   preview deployment): a public preview, a share link or an earlier push's URL can be found and
-   indexed, and then a search for the product lands on a branch of it. Every response through
-   roll's preview proxy, and roll apps' `pv-` environments, should carry `X-Robots-Tag: noindex`.
-2. **How long the release step took, on production-shaped data** (PlanetScale's deploy requests
+1. **How long the release step took, on production-shaped data** (PlanetScale's deploy requests
    show what a migration will do before it merges): a migration that takes minutes on a branch of
    production locks production for as long. Each push's release time on the sheet, the change
    page and the comment ("its migrations took 2.4 s on a branch of production data"), against
    the push before.
-3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+5. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-7. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1135,7 +1137,7 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

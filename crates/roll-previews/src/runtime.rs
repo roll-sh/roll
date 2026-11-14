@@ -1004,6 +1004,15 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
 pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> Response {
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().host().map(str::to_string));
     let Some((preview, service)) = host.and_then(|h| rt.service_for_host(&h)) else { return next.run(req).await };
+    let mut resp = serve(rt, preview, service, req).await;
+    // Kept out of search engines, whatever the service says (as Vercel's previews are): a public
+    // preview, a share link or an earlier push's URL is never what a search should land on.
+    resp.headers_mut().insert(header::HeaderName::from_static("x-robots-tag"), header::HeaderValue::from_static("noindex"));
+    resp
+}
+
+/// A request for a preview's service: through its gate, then to the service.
+async fn serve(rt: Arc<Runtime>, preview: String, service: String, req: Request) -> Response {
     if let Some(r) = rt.gate(&preview, &service, &req) {
         return r;
     }
@@ -1122,7 +1131,8 @@ mod tests {
             out
         };
         // Link access (the default): no token, no preview; the link's token turns into a cookie.
-        assert!(get("web-pr1-shop.preview.test:7070").await.starts_with("HTTP/1.1 401"));
+        let locked = get("web-pr1-shop.preview.test:7070").await;
+        assert!(locked.starts_with("HTTP/1.1 401") && locked.contains("x-robots-tag: noindex"), "{locked}");
         let token = rt.store.access(&row.id).unwrap().unwrap().token;
         let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
         s.write_all(format!("GET /hello?roll_access={token}&x=1 HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
@@ -1134,6 +1144,7 @@ mod tests {
         let mut out = String::new();
         s.read_to_string(&mut out).await.unwrap();
         assert!(out.ends_with("service saw /hello"), "{out}");
+        assert!(out.contains("x-robots-tag: noindex"), "never indexed, whatever the service says: {out}");
         // Automation: the project's bypass secret in a header, which the service never sees.
         let raw = |head: String| async move {
             let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
