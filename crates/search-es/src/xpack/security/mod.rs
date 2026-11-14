@@ -64,7 +64,8 @@ pub enum AuthKind {
     Realm,
     ApiKey(Box<ApiKeyAuth>),
     Token,
-    ServiceAccount { token: String },
+    /// `file`: the token is one of `config/service_tokens`'s, not the security index's.
+    ServiceAccount { token: String, file: bool },
     /// An OpenSearch Security user (the opensearch dialect): its backend roles and attributes.
     OpenSearch(Box<opensearch::Identity>),
 }
@@ -180,8 +181,8 @@ impl Principal {
             AuthKind::ApiKey(a) => {
                 m.insert("api_key".into(), obj! { "managed_by" => "elasticsearch", "name" => a.name.clone(), "id" => a.id.clone() });
             }
-            AuthKind::ServiceAccount { token } => {
-                m.insert("token".into(), obj! { "name" => token.clone(), "type" => "_service_account_index" });
+            AuthKind::ServiceAccount { token, file } => {
+                m.insert("token".into(), obj! { "name" => token.clone(), "type" => if *file { "_service_account_file" } else { "_service_account_index" } });
             }
             _ => {}
         }
@@ -1283,6 +1284,12 @@ pub fn hash_password(password: &str) -> String {
 /// Checks a password against [`hash_password`]'s output, in constant time.
 pub fn verify_password(password: &str, stored: &str) -> bool {
     use base64::Engine;
+    // `{PBKDF2_STRETCH}`: PBKDF2 over the hex SHA-512 of the password (Elasticsearch's
+    // `Hasher.PBKDF2_STRETCH`, the format `elasticsearch-service-tokens` writes).
+    if let Some(rest) = stored.strip_prefix("{PBKDF2_STRETCH}") {
+        let stretched: String = sha2::Sha512::digest(password.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+        return verify_password(&stretched, &format!("{{PBKDF2}}{rest}"));
+    }
     let Some(rest) = stored.strip_prefix("{PBKDF2}") else { return false };
     let mut parts = rest.split('$');
     let (Some(rounds), Some(salt), Some(hash)) = (parts.next(), parts.next(), parts.next()) else { return false };
@@ -1394,4 +1401,14 @@ mod tests {
             "action [indices:data/read/search] is unauthorized for user [u] with effective roles [a,b] on indices [i], this action is granted by the index privileges [read,all]"
         );
     }
+
+    #[test]
+    fn stretched_pbkdf2_hashes_verify() {
+        // Written by Elasticsearch 9.5.5's `elasticsearch-service-tokens create` for a throwaway
+        // token (its secret, then the line's hash).
+        let hash = "{PBKDF2_STRETCH}10000$pYweGDxXLFcgVUhzYP0n9rGPq5egVtLKX/fmaJSVizA=$EZRawrdH5+cv0zjyNSVWzsE+XrQa2bzeW2Pp7G5Wl0k=";
+        assert!(verify_password("weWE6egxQm6d0os3l6Ce6A", hash));
+        assert!(!verify_password("weWE6egxQm6d0os3l6Ce6B", hash));
+    }
+
 }

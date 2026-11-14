@@ -80,6 +80,15 @@ pub struct Src<'a> {
 /// A union type: each mapping type of a field and the indices that map it.
 type UnionTypes = Vec<(String, Vec<String>)>;
 
+/// A time series source's metrics as the client's field caps show them: (name, metric type,
+/// field type, unit), sorted by name, and the data streams of its indices (`None`: an index
+/// outside one).
+#[derive(Clone, Debug, Default)]
+pub struct TsMeta {
+    metrics: Vec<(String, String, String, Option<String>)>,
+    data_streams: Vec<Option<String>>,
+}
+
 /// What `ENRICH` and `LOOKUP JOIN` read, loaded (asynchronously) before the pipeline is built.
 #[derive(Default)]
 pub struct Resources {
@@ -95,6 +104,8 @@ pub struct Resources {
     enrich_ranges: HashMap<String, String>,
     /// The source's time series dimensions (`TS` groups by them per series).
     dimensions: std::sync::OnceLock<std::collections::HashSet<String>>,
+    /// The source's metric fields and data streams (`METRICS_INFO`, `TS_INFO`).
+    ts_meta: std::sync::OnceLock<TsMeta>,
     /// By index: its columns and every row.
     lookup: HashMap<String, Table>,
     /// The source fields Elasticsearch would resolve (`needed_columns`) and every source field:
@@ -2629,6 +2640,7 @@ struct Source {
     flattened: Vec<String>,
     /// Time series dimensions (in some target index).
     dimensions: std::collections::HashSet<String>,
+    ts_meta: TsMeta,
     /// The same, with the indices mapping each as `flattened` (`None`: every index). Below such
     /// a field, in those indices, there is no column: its keys read as null.
     flattened_in: Vec<(String, Option<Vec<String>>)>,
@@ -2661,7 +2673,7 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
     if caps.get("indices").and_then(Value::as_array).is_none_or(|a| a.is_empty()) {
         // Patterns that match nothing are an empty result with no columns.
         if sources.iter().all(|s| s.contains('*')) {
-            return Ok(Source { index, cols: vec![Col { name: "<no-fields>".into(), ty: DataType::Null }], fields: Vec::new(), metadata: Vec::new(), needed: None, ft: Vec::new(), load: Vec::new(), source_order: Default::default(), floats: Default::default(), constants: Default::default(), indices: Vec::new(), original_types: Vec::new(), unions: HashMap::new(), unsupported: HashMap::new(), flattened: Vec::new(), flattened_in: Vec::new(), dimensions: Default::default() });
+            return Ok(Source { index, cols: vec![Col { name: "<no-fields>".into(), ty: DataType::Null }], fields: Vec::new(), metadata: Vec::new(), needed: None, ft: Vec::new(), load: Vec::new(), source_order: Default::default(), floats: Default::default(), constants: Default::default(), indices: Vec::new(), original_types: Vec::new(), unions: HashMap::new(), unsupported: HashMap::new(), flattened: Vec::new(), flattened_in: Vec::new(), dimensions: Default::default(), ts_meta: TsMeta::default() });
         }
         return Err(verification_plain(&format!("Unknown index [{index}]")));
     }
@@ -2805,10 +2817,27 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
         Some(Value::Obj(f)) => f.iter().filter(|(_, c)| c.as_object().is_some_and(|m| m.values().any(|t| t.get("time_series_dimension").and_then(Value::as_bool) == Some(true)))).map(|(k, _)| k.clone()).collect(),
         _ => Default::default(),
     };
+    let mut metrics: Vec<(String, String, String, Option<String>)> = match caps.get("fields") {
+        Some(Value::Obj(f)) => f
+            .iter()
+            .filter_map(|(name, c)| {
+                let (ty, cap) = c.as_object()?.iter().find(|(_, t)| t.get("time_series_metric").is_some())?;
+                let unit = cap.pointer(&["meta", "unit"]).and_then(|u| u.as_array().and_then(|a| a.first()).or(Some(u))).map(Value::to_es_string);
+                Some((name.clone(), cap.get("time_series_metric").map(Value::to_es_string).unwrap_or_default(), ty.clone(), unit))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    metrics.sort();
+    let st = cluster.state();
+    let mut data_streams: Vec<Option<String>> = indices.iter().map(|i| st.metadata.data_streams.values().find(|d| d.indices.contains(i)).map(|d| d.name.clone())).collect();
+    data_streams.sort();
+    data_streams.dedup();
+    let ts_meta = TsMeta { metrics, data_streams };
     // A client that may read only some indices reads the ones its field caps resolved to (its
     // wildcards expanded to authorized indices only), never the expression again.
     let index = if internal::caller().is_some() { indices.join(",") } else { index };
-    Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported, flattened, flattened_in, dimensions })
+    Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported, flattened, flattened_in, dimensions, ts_meta })
 }
 
 /// Whether `s` may be read straight from the shards ([`super::columnar`]): not when the client
@@ -4094,6 +4123,7 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
             let _ = src.res.unions.set(source.unions.clone());
             let _ = src.res.unsupported.set(source.unsupported.clone());
             let _ = src.res.dimensions.set(source.dimensions.clone());
+            let _ = src.res.ts_meta.set(source.ts_meta.clone());
             stats.fields = source.fields.iter().filter(|f| source.needed.as_ref().is_none_or(|n| n.contains(*f))).cloned().collect();
             let _ = src.res.suggest.set((source.needed.clone(), source.cols.iter().map(|c| c.name.clone()).collect()));
             let (pipe, out_cols) = build_pipeline(&src, prefix, source.cols.clone())?;
@@ -4276,6 +4306,58 @@ async fn finish(_cluster: &Cluster, src: &Src<'_>, t: Table, rest: &[Cmd], w: &m
 }
 
 /// The commands after the first blocking one, over a materialized table.
+/// `METRICS_INFO` (`ts`: `TS_INFO`) over the rows of a `TS` source: per data stream and metric
+/// the client can read, its unit, metric and field type, and the dimension fields; `TS_INFO`
+/// per time series holding the metric too, its `dimensions` as a JSON object.
+fn ts_info(src: &Src<'_>, t: &Table, ts: bool) -> Table {
+    let meta = src.res.ts_meta.get().cloned().unwrap_or_default();
+    let mut dims: Vec<String> = src.res.dimensions.get().map(|d| d.iter().cloned().collect()).unwrap_or_default();
+    dims.sort();
+    let col = |n: &str| t.cols.iter().position(|c| c.name == n);
+    let dim_cols: Vec<(String, usize)> = dims.iter().filter_map(|d| col(d).map(|i| (d.clone(), i))).collect();
+    let dim_fields = match dims.len() {
+        0 => V::Null,
+        1 => V::Str(dims[0].clone()),
+        _ => V::Multi(dims.iter().cloned().map(V::Str).collect()),
+    };
+    let streams = if meta.data_streams.is_empty() { vec![None] } else { meta.data_streams.clone() };
+    let mut cols: Vec<Col> = ["metric_name", "data_stream", "unit", "metric_type", "field_type", "dimension_fields"].iter().map(|n| Col { name: n.to_string(), ty: DataType::Keyword }).collect();
+    if ts {
+        cols.push(Col { name: "dimensions".into(), ty: DataType::Keyword });
+    }
+    let mut rows = Vec::new();
+    for (name, metric, ty, unit) in meta.metrics.iter() {
+        let Some(mi) = col(name) else { continue };
+        let base = |ds: &Option<String>| vec![V::Str(name.clone()), ds.clone().map_or(V::Null, V::Str), unit.clone().map_or(V::Null, V::Str), V::Str(metric.clone()), V::Str(ty.clone()), dim_fields.clone()];
+        if !ts {
+            rows.extend(streams.iter().map(base));
+            continue;
+        }
+        let mut series: Vec<String> = t
+            .rows
+            .iter()
+            .filter(|r| r.get(mi).is_some_and(|v| !v.is_null()))
+            .map(|r| {
+                let mut m = crate::json::Map::new();
+                for (d, i) in &dim_cols {
+                    if let Some(v) = r.get(*i).filter(|v| !v.is_null()) {
+                        m.insert(d.clone(), v.to_json(v.type_of()));
+                    }
+                }
+                Value::Obj(m).to_json()
+            })
+            .collect();
+        series.sort();
+        series.dedup();
+        for s in series {
+            let mut r = base(streams.first().unwrap_or(&None));
+            r.push(V::Str(s));
+            rows.push(r);
+        }
+    }
+    Table { cols, rows }
+}
+
 fn run_rest(src: &Src<'_>, mut t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsResult<Table> {
     for cmd in cmds {
         match cmd {
@@ -4337,6 +4419,7 @@ fn run_rest(src: &Src<'_>, mut t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsRe
             }
             Cmd::Sort(keys) => sort_rows(src, keys, &mut t, w)?,
             Cmd::Limit(n) => t.rows.truncate((*n).min(MAX_LIMIT)),
+            Cmd::MetricsInfo | Cmd::TsInfo => t = ts_info(src, &t, matches!(cmd, Cmd::TsInfo)),
             Cmd::LimitBy(n, by) => {
                 let keys = by.iter().map(|e| Compiler { src, cols: &t.cols, aggs: None }.compile(e).map(|(c, _)| c)).collect::<EsResult<Vec<CE>>>()?;
                 let mut seen: HashMap<Vec<GroupKey>, usize> = HashMap::default();

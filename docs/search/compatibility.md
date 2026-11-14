@@ -254,7 +254,7 @@ the discovery/store plugins.
 | `watcher` | `x-pack/plugin/watcher:mustache,painless,watcher` | plain | 92 | 89 | 89 | 89 | 0 |
 | `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 9 | 9 | 0 |
 | `wildcard` | `x-pack/plugin/wildcard` | plain | 9 | 9 | 9 | 9 | 0 |
-| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 1059 | 1059 | 353 |
+| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 1064 | 1064 | 348 |
 | `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 549 | 549 | 0 |
 | `analysis-icu` | `plugins/analysis-icu` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `analysis-kuromoji` | `plugins/analysis-kuromoji` | plugins | 7 | 7 | 0 | 0 | 7 |
@@ -309,19 +309,19 @@ the discovery/store plugins.
 <!-- test-search: watcher >= 89 -->
 <!-- test-search: watcher-security >= 9 -->
 <!-- test-search: wildcard >= 9 -->
-<!-- test-search: platinum >= 1059 -->
+<!-- test-search: platinum >= 1064 -->
 <!-- test-search: inference >= 117 -->
 <!-- test-search: esql >= 549 -->
 
 `platinum` by directory (roll / Elasticsearch passes): `ml` 349/618, `analytics` 113/114, `spatial`
-92/105, `security` 96/101, `rollup` 52/52, `exponential_histogram` 44/44, `vector-tile` 34/34,
+92/105, `security` 100/101, `rollup` 52/52, `exponential_histogram` 44/44, `vector-tile` 34/34,
 `api_key` 32/32, `aggregate-metrics` 26/28, `inference` 22/23, `search.vectors` 22/23, `wildcard`
 22/22, `terms_enum` 20/20, `rank_vectors` 0/15, `users` 15/15, `constant_keyword` 13/13,
 `counted_keyword` 8/11, `data_streams` 11/11, `migrate` 0/11, `change_password` 8/8, `roles` 8/8,
 `text_structure` 5/8, `enrich` 6/7, `privileges` 7/7, `profiling` 0/7, `token` 6/6, `versionfield`
 6/6, `async_search` 4/5, `redact` 5/5, `sql` 5/5, `user_profile` 5/5, `authenticate` 4/4, `logsdb`
 2/4, `role_mapping` 4/4, `search-business-rules` 4/4, `dlm` 0/3, `monitoring` 0/3,
-`searchable_snapshots` 1/3, `snapshot` 1/3, `logging` 0/2, `migration` 2/2, `service_accounts` 1/2,
+`searchable_snapshots` 1/3, `snapshot` 1/3, `logging` 0/2, `migration` 2/2, `service_accounts` 2/2,
 `set_security_user` 2/2, `xpack` 0/2, `deprecation` 0/1, `graph` 1/1, `health` 0/1,
 `vectordb_document` 0/1, `voting_only_node` 1/1.
 
@@ -334,14 +334,16 @@ CCR, Fleet APIs, SLM, the `normalize_for_stream` processor (`ingest-otel`),
 (its license is always `enterprise`), so `rank-rrf-license`'s licence errors are missing; the
 privileges of `manage_autoscaling`, `manage_search_application`, `watcher_manager` and other
 x-pack cluster privileges don't map to their actions (`autoscaling`, `ent-search` run as such
-users). `platinum`'s `security` misses ES|QL's `METRICS_INFO` and `TS_INFO` commands (4 tests
-that check them under field level security), and `service_accounts` the file-based service
-tokens (`config/service_tokens`).
+users). `platinum`'s `security` misses one downsampling test (its task fails on roll).
 
 Run-as (`es-security-runas-user`) is checked against the authenticating user's `run_as`
 privilege, then the request is authorized as the run-as user; `_authenticate` shows the
 authenticating realm as `authentication_realm` and the run-as user's as `lookup_realm`. API keys
-and service accounts ignore the header, as in Elasticsearch. An API key whose role descriptors
+and service accounts ignore the header, as in Elasticsearch. Service account tokens come from the
+security index and from `config/service_tokens` (`namespace/service/name:hash` lines, the
+`{PBKDF2_STRETCH}` hashes `elasticsearch-service-tokens` writes; read as the file is now, so
+edits take effect without a restart); `_credentials` lists the file's under
+`nodes_credentials.file_tokens`. An API key whose role descriptors
 carry `restriction.workflows` runs only requests of those workflows (`search_application_query`:
 a search application's `_search`, with the searches it makes), anything else fails with
 `role_restriction_exception` ("access restricted by workflow"), `_authenticate` included. A search with `ignore_unavailable`
@@ -1294,7 +1296,10 @@ the rest are skipped by the tests' own prerequisites.
   `SET approximation` computes exactly and says so: each approximable aggregate (`COUNT`, `SUM`,
   `AVG`, `MEDIAN`, `PERCENTILE`) of the last `STATS` gets `_approximation_confidence_interval(x)`
   (`[x, x]`) and `_approximation_certified(x)` (`true`) with their `_meta`. `LIMIT n BY keys`
-  keeps the first `n` rows of each key. `unsigned_long` values above `i64::MAX` keep their
+  keeps the first `n` rows of each key. `METRICS_INFO` and `TS_INFO` after `TS` list the
+metric fields the client's field caps show (field level security hides the others): per data
+stream and metric its unit (`meta.unit`), metric and field type and the dimension fields,
+`TS_INFO` once per time series holding it, with its `dimensions` as a JSON object. `unsigned_long` values above `i64::MAX` keep their
   value (sorting, grouping, output; arithmetic on them answers `null`).
   Not yet: PromQL ranges other than the step, binary operators and unaggregated expressions,
   `CHANGE_POINT`, `COMPLETION`/`RERANK`, `EXPLAIN`, other `ST_*` functions

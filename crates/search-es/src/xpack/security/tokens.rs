@@ -293,10 +293,23 @@ fn authenticate_service_token(cluster: &Cluster, value: &str) -> EsResult<Princi
     let text = String::from_utf8_lossy(&bytes[4..]).into_owned();
     let Some((qualified, secret)) = text.split_once(':') else { return Err(invalid()) };
     let st = cluster.state();
-    let Some(t) = st.metadata.xpack.get(SERVICE_TOKENS, qualified) else { return Err(invalid()) };
-    if !super::verify_secret(secret, t.get("hash").and_then(Value::as_str).unwrap_or_default()) {
-        return Err(invalid());
-    }
+    // The security index's tokens, then `config/service_tokens`'s (`CompositeServiceAccountTokenStore`).
+    let file = match st.metadata.xpack.get(SERVICE_TOKENS, qualified) {
+        Some(t) => {
+            if !super::verify_secret(secret, t.get("hash").and_then(Value::as_str).unwrap_or_default()) {
+                return Err(invalid());
+            }
+            false
+        }
+        None => {
+            let tokens = file_tokens(cluster);
+            let Some((_, hash)) = tokens.iter().find(|(q, _)| q == qualified) else { return Err(invalid()) };
+            if !super::verify_password(secret, hash) {
+                return Err(invalid());
+            }
+            true
+        }
+    };
     let (account, name) = qualified.rsplit_once('/').unwrap_or((qualified, ""));
     Ok(Principal {
         username: account.to_string(),
@@ -307,8 +320,30 @@ fn authenticate_service_token(cluster: &Cluster, value: &str) -> EsResult<Princi
         realm_name: "_service_account",
         realm_type: "_service_account",
         authenticating: None,
-        kind: AuthKind::ServiceAccount { token: name.to_string() },
+        kind: AuthKind::ServiceAccount { token: name.to_string(), file },
     })
+}
+
+/// The largest `config/service_tokens` read.
+const MAX_TOKENS_FILE: u64 = 1 << 20;
+
+/// `config/service_tokens` (`FileServiceAccountTokenStore`, read as it is now, as Elasticsearch
+/// reloads it on change): `namespace/service/name:hash` lines, as (qualified name, hash).
+fn file_tokens(cluster: &Cluster) -> Vec<(String, String)> {
+    use std::io::Read;
+    let Some(dir) = cluster.config.node_setting("path.conf") else { return Vec::new() };
+    let Ok(f) = std::fs::File::open(std::path::Path::new(dir).join("service_tokens")) else { return Vec::new() };
+    let mut text = String::new();
+    if f.take(MAX_TOKENS_FILE).read_to_string(&mut text).is_err() {
+        return Vec::new();
+    }
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| l.split_once(':'))
+        .filter(|(q, _)| q.split('/').count() == 3)
+        .map(|(q, h)| (q.to_string(), h.to_string()))
+        .collect()
 }
 
 pub fn get_service_accounts(ctx: &Ctx) -> EsResult<Reply> {
@@ -376,11 +411,14 @@ pub fn get_service_credentials(ctx: &Ctx) -> EsResult<Reply> {
     let st = ctx.state();
     let prefix = format!("{account}/");
     let tokens: Map = st.metadata.xpack.iter(SERVICE_TOKENS).filter_map(|(k, _)| k.strip_prefix(&prefix).map(|n| (n.to_string(), obj! {}))).collect();
+    // The file tokens, by the nodes that have them (one: this node).
+    let node = ctx.cluster.config.node_name.clone();
+    let files: Map = file_tokens(ctx.cluster).into_iter().filter_map(|(q, _)| q.strip_prefix(&prefix).map(|n| (n.to_string(), obj! { "nodes" => crate::arr![node.clone()] }))).collect();
     Reply::ok(obj! {
         "service_account" => account,
-        "count" => tokens.len(),
+        "count" => tokens.len() + files.len(),
         "tokens" => Value::Obj(tokens),
-        "nodes_credentials" => obj! { "_nodes" => obj! { "total" => 1, "successful" => 1, "failed" => 0 }, "file_tokens" => obj! {} },
+        "nodes_credentials" => obj! { "_nodes" => obj! { "total" => 1, "successful" => 1, "failed" => 0 }, "file_tokens" => Value::Obj(files) },
     })
 }
 

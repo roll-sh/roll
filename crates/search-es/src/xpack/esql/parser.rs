@@ -332,6 +332,10 @@ pub enum Cmd {
     Stats { aggs: Vec<Named>, by: Vec<Named> },
     Sort(Vec<SortKey>),
     Limit(usize),
+    /// `METRICS_INFO` (after `TS`): one row per metric field the source maps.
+    MetricsInfo,
+    /// `TS_INFO` (after `TS`): one row per metric and time series holding it.
+    TsInfo,
     /// `LIMIT n BY expr, ...`: the first `n` rows of each distinct key.
     LimitBy(usize, Vec<Expr>),
     Keep(Vec<(String, usize)>),
@@ -765,6 +769,8 @@ impl<'a> P<'a> {
                 };
                 Cmd::Enrich { policy, policy_at: pt.start, on, with, at: t.start }
             }
+            "METRICS_INFO" => Cmd::MetricsInfo,
+            "TS_INFO" => Cmd::TsInfo,
             "SAMPLE" => {
                 let e = self.unary()?;
                 let p = match &e.kind {

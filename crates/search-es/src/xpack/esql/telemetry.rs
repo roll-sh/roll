@@ -95,6 +95,8 @@ impl Used {
                 Cmd::Sort(_) => "sort",
                 Cmd::Limit(_) => "limit",
                 Cmd::LimitBy(..) => "limit_by",
+                Cmd::MetricsInfo => "metrics_info",
+                Cmd::TsInfo => "ts_info",
                 Cmd::Keep(_) => "keep",
                 Cmd::Drop(_) => "drop",
                 Cmd::Rename(_) => "rename",
