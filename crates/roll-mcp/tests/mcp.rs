@@ -110,6 +110,10 @@ async fn tools_follow_the_tokens_rules() {
     let (s, h, _) = d.http("", Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }))).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     assert!(h["www-authenticate"].to_str().unwrap().contains("/.well-known/oauth-protected-resource/v1/mcp"));
+    // Its toolsets' counts are a caller's too.
+    assert_eq!(d.http("", Method::GET, "/v1/mcp/toolsets", None).await.0, StatusCode::UNAUTHORIZED);
+    let (s, _, costs) = d.http(OPERATOR, Method::GET, "/v1/mcp/toolsets", None).await;
+    assert!(s == StatusCode::OK && costs["products"].as_array().unwrap().iter().any(|p| p["product"] == "postgres" && p["tools"].as_u64() > Some(0)), "{costs}");
 
     let init = d.rpc(OPERATOR, "initialize", json!({ "protocolVersion": "2025-06-18" })).await;
     assert_eq!(init["protocolVersion"], "2025-06-18");

@@ -167,8 +167,13 @@ fn context_tokens(t: &Value) -> usize {
 /// `GET /v1/mcp/toolsets`: each product's tools as a connection with no narrowing gets them (the
 /// operator's view): how many, how many only read, and their context cost, so the connect panel
 /// can say what a choice of toolsets costs and whether a client's tool limit takes it (VS Code
-/// allows 128 tools a request, Windsurf 100). Counts only, never a tool's content.
-async fn toolset_costs(State(m): State<Mcp>) -> Json<Value> {
+/// allows 128 tools a request, Windsurf 100). Counts only, never a tool's content, and only to a
+/// caller (`/v1/mcp` answers its own 401s, and this sits under it).
+async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
+    let caller = roll_auth::Grant::on(&ext).is_some() || roll_auth::Operator::on(&ext) || ext.get::<roll_auth::SignedIn>().is_some() || !m.config.locked;
+    if !caller {
+        return unauthorized(&m.config);
+    }
     let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, toolsets: None, readonly: false, client: None, names: Default::default() };
     let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
     for t in ctx.tools() {
@@ -177,7 +182,7 @@ async fn toolset_costs(State(m): State<Mcp>) -> Json<Value> {
         e.1 += usize::from(t["annotations"]["readOnlyHint"].as_bool() == Some(true));
         e.2 += context_tokens(&t);
     }
-    Json(json!({ "products": by.into_iter().map(|(p, (n, ro, tok))| json!({ "product": p, "tools": n, "read_only": ro, "context_tokens": tok })).collect::<Vec<_>>() }))
+    Json(json!({ "products": by.into_iter().map(|(p, (n, ro, tok))| json!({ "product": p, "tools": n, "read_only": ro, "context_tokens": tok })).collect::<Vec<_>>() })).into_response()
 }
 
 fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
