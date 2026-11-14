@@ -597,7 +597,16 @@ TLS certificates for services (mTLS between them), with no CA to run.
   `GET /v1/secrets/crl/{id}` (DER, `application/pkix-crl`; `?format=pem`), without a token, as any
   CRL is fetched. Every certificate names it in its CRL distribution point (rolld's
   `ROLL_CODE_PUBLIC_URL`). Checked with OpenSSL: `openssl verify -crl_check` refuses a revoked one
-  (`certificate revoked`) and passes the rest. Clients that don't check CRLs still trust a revoked
+  (`certificate revoked`) and passes the rest. **OCSP** too, beside the
+  CRL (RFC 6960), for clients that ask about one certificate rather than fetch lists:
+  `POST /v1/secrets/ocsp/{id}` (the request's DER as the body) or `GET /v1/secrets/ocsp/{id}/<base64
+  of the request>` (cacheable), without a token. A certificate is `good` while the CA lists it
+  unrevoked, `revoked` with its time once revoked, `unknown` when the CA didn't sign it, it has
+  expired or the request names another issuer; the CA signs each answer itself, nonces are echoed,
+  and an answer without one is kept a minute per node (a revocation drops the CA's). Every
+  certificate names the responder (Authority Information Access). Checked with `openssl ocsp`:
+  `good` and `revoked`, `Response verify OK`, over POST with a nonce and over GET. Clients that
+  don't check CRLs or OCSP still trust a revoked
   certificate until it ends, so lifetimes stay short. A CA a key links to can't be deleted, nor one
   with a revoked certificate still within its lifetime (its CRL must keep answering; a deleted
   project's CAs keep serving theirs until then too); deleting one leaves what it signed valid until
@@ -1535,6 +1544,8 @@ isn't in the workspace is 404.
 | `GET /cas/{id}/certificates` | | `CaCertificate[]`: `{serial, names, source, not_after, issued_at, issued_by, revoked_at?}`, what it signed that hasn't expired, newest first (`read`) |
 | `POST /cas/{id}/revoke` | `{serial}` | 204; 404 for a serial it didn't sign or that has expired (`write`, audited) |
 | `GET /v1/secrets/crl/{id}` | | the CA's CRL, DER (`application/pkix-crl`) or `?format=pem`; no token |
+| `POST /v1/secrets/ocsp/{id}` | an OCSP request (DER) | an OCSP response (`application/ocsp-response`); no token |
+| `GET /v1/secrets/ocsp/{id}/{request}` | | the same, the request base64 and URL-encoded (RFC 6960 A.1); no token |
 | `POST /cas/{id}/sign` | `{csr, days?, ttl_minutes?}` | `{certificate, ca, serial, names, not_after}` (`write`, audited); 400 for a name outside the policy or a lifetime past `max_days` |
 | `GET /ssh-cas` | | `SshCa[]` (`read` on the project; public keys, never private ones) |
 | `POST /ssh-cas` | `{name, principals, max_hours?, host_domains?, max_host_days?}` | 201 `SshCa` (`admin`) |
@@ -1708,6 +1719,20 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
+Then (2026-11-14, latest): `roll://` references in files (#49: `roll run --env-file`, `render`) and
+check-and-set writes (#50: `if_version`, the dashboard's editor), each its own pull request on #20.
+
+A fifth independent review (2026-11-14, of host and user SSH certificates, ClickHouse,
+certificates ending, `--rotate-due` and the fourth review's fixes) found no high-severity issue; it
+found a CLI that would upload a private key given its path, SSH CAs that could claim a top-level
+domain, best-effort signing audits, a stale-CRL race, ClickHouse's kill-then-drop order, a
+known_hosts order and `--rotate-due --json` that didn't rotate: all fixed. Screenshots of the new
+surfaces are on #44, #45 and #48.
+
+Later still: SSH user certificates for keys people keep (#45: `…/sign-user`, `roll ssh --key`,
+checked with an agent-held key against a real `sshd`) and `roll secrets rotations --rotate-due`
+(#48).
+
 Then (2026-11-14, latest): certificates ending as health findings (#44: `certificate_expiring`)
 and ClickHouse outside roll (#39, merged up into #41 and #42: its HTTPS interface, `sha256_hash`
 passwords, checked live against ClickHouse 25.8).
@@ -1757,15 +1782,13 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **Transit keys scoped by name**: a grant's resources include one encryption key
-   (`secrets:transit/<name>`), so signing with one key doesn't need write on the project. Needs a
-   resource kind in roll-access's catalogue (the MCP thread's), so agree it there first.
-2. **Certificates for keys that stay put on SSH too**: `roll ssh` signs a key the user already has
-   (`…/ssh-cas/{id}/sign-user {public_key}`), for people who keep their key in an agent or a
-   hardware token.
-3. **Rotation for roll's own resources from outside**: `roll secrets rotate --all-due`, for an
-   operator's maintenance window, rotating every managed credential due within a week in one run
-   and reporting what failed.
+1. **The grid edits with check-and-set too** (on #50): each cell carries the version it showed, so
+   comparing environments side by side can't overwrite a change made meanwhile.
+2. **OCSP for project CAs** (on #44): a public responder next to the CRL, for clients (Java,
+   browsers in some setups) that check status per certificate rather than fetching lists.
+3. *Waits on the search thread:* OpenSearch clusters' links issue an internal user (`username`,
+   `password` beside `url`, one credential), agreed with it; and *waits on #24/#25 meeting #47:*
+   transit keys scoped by name.
 4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
 5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
@@ -1799,6 +1822,10 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#50, check-and-set writes** (after #20): `if_version` on a set or delete, refused as `stale`
+  when the key moved; the dashboard's editor sends it.
+- **#49, `roll://` references in files** (after #20): `roll run --env-file` and `render` resolve
+  `roll://ENV/KEY` beside plain values, as 1Password's `op://`.
 - **#48, failing rotations in health** (after #20): `rotation_failing` and `revoke_failing`
   findings, with the reason, until roll succeeds; a rotations overview of every managed credential.
 - **#47, encryption keys** (after #20): encryption as a service, as Vault's Transit: named,

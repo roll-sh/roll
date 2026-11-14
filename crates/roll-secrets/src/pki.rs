@@ -145,7 +145,7 @@ pub(crate) struct Provider {
 
 impl Provider {
     /// The CA's certificate, key (PEM) and policy.
-    fn open(&self, id: &str) -> Result<(String, Value, Policy)> {
+    pub(crate) fn open(&self, id: &str) -> Result<(String, Value, Policy)> {
         type Row = (String, String, Vec<u8>, String, String);
         let row: Option<Row> = self.db.read(|c| {
             Ok::<_, Error>(
@@ -228,7 +228,7 @@ impl LinkProvider for Provider {
         let ca_key = rcgen::KeyPair::from_pem(ca_key.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
         let issuer = rcgen::Issuer::from_ca_cert_pem(&ca_pem, &ca_key).map_err(|e| Error::Internal(format!("the CA's certificate: {e}")))?;
         let key = rcgen::KeyPair::generate().map_err(|e| Error::Internal(format!("a certificate's key: {e}")))?;
-        let params = leaf(&ca_pem, &names, minutes, crl_url(&self.public_api, r#ref))?;
+        let params = leaf(&ca_pem, &names, minutes, ca_urls(&self.public_api, r#ref))?;
         let cert = params.signed_by(&key, &issuer).map_err(|e| Error::Internal(format!("signing a certificate: {e}")))?;
         let not_after = (params.not_after.unix_timestamp_nanos() / 1_000_000) as i64;
         let project: String = self.db.read(|c| c.query_row("SELECT project_id FROM cas WHERE id = ?", [r#ref], |r| r.get(0)))?;
@@ -254,7 +254,7 @@ impl LinkProvider for Provider {
 
 /// A leaf certificate's parameters: `names`, `minutes` long (never past the CA's own end), and
 /// only this CA's usages.
-fn leaf(ca_pem: &str, names: &[String], minutes: u64, crl: Option<String>) -> Result<rcgen::CertificateParams> {
+fn leaf(ca_pem: &str, names: &[String], minutes: u64, urls: Option<(String, String)>) -> Result<rcgen::CertificateParams> {
     let now = time::OffsetDateTime::now_utc();
     let mut params = rcgen::CertificateParams::new(names.to_vec()).map_err(|e| Error::BadRequest(format!("a certificate's names: {e}")))?;
     params.distinguished_name = rcgen::DistinguishedName::new();
@@ -271,13 +271,19 @@ fn leaf(ca_pem: &str, names: &[String], minutes: u64, crl: Option<String>) -> Re
     params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
     params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth, rcgen::ExtendedKeyUsagePurpose::ClientAuth];
     params.use_authority_key_identifier_extension = true;
-    params.crl_distribution_points = crl.into_iter().map(|u| rcgen::CrlDistributionPoint { uris: vec![u] }).collect();
+    if let Some((crl, ocsp)) = urls {
+        params.crl_distribution_points = vec![rcgen::CrlDistributionPoint { uris: vec![crl] }];
+        params.custom_extensions = vec![rcgen::CustomExtension::from_oid_content(&[1, 3, 6, 1, 5, 5, 7, 1, 1], crate::ocsp::aia(&ocsp))];
+    }
     Ok(params)
 }
 
-/// Where a CA's CRL is fetched, once rolld has said where its API is.
-fn crl_url(public_api: &std::sync::OnceLock<String>, ca: &str) -> Option<String> {
-    public_api.get().map(|a| format!("{}/v1/secrets/crl/{ca}", a.trim_end_matches('/')))
+/// Where a CA's CRL and OCSP responder are reached, once rolld has said where its API is.
+fn ca_urls(public_api: &std::sync::OnceLock<String>, ca: &str) -> Option<(String, String)> {
+    public_api.get().map(|a| {
+        let a = a.trim_end_matches('/');
+        (format!("{a}/v1/secrets/crl/{ca}"), format!("{a}/v1/secrets/ocsp/{ca}"))
+    })
 }
 
 /// A certificate the CA signed, listed until it expires; what has expired goes in the same write.
@@ -355,17 +361,23 @@ fn hex(b: &[u8]) -> String {
 #[derive(Default)]
 pub(crate) struct CrlCache {
     signed: std::collections::HashMap<String, (i64, Arc<Vec<u8>>)>,
-    revoked: std::collections::HashMap<String, u64>,
+    pub(crate) revoked: std::collections::HashMap<String, u64>,
+    /// OCSP answers to requests without a nonce, by CA and request (ocsp.rs).
+    pub(crate) ocsp: std::collections::HashMap<(String, Vec<u8>), KeptAnswer>,
 }
 
 impl CrlCache {
     fn revoked(&mut self, ca: &str) {
         *self.revoked.entry(ca.to_string()).or_default() += 1;
         self.signed.remove(ca);
+        self.ocsp.retain(|(c, _), _| c != ca);
     }
 }
 
 pub(crate) type Crls = Arc<std::sync::Mutex<CrlCache>>;
+
+/// An OCSP answer kept: when it was made, the CA's revocation count then, and its DER.
+pub(crate) type KeptAnswer = (i64, u64, Arc<Vec<u8>>);
 
 /// The most certificates from CSRs one CA keeps valid at once (each is on its list, and a revoked
 /// one on its CRL, until it expires).
@@ -526,7 +538,7 @@ impl Secrets {
         if live >= CSR_MAX {
             return Err(Error::Conflict("limit", format!("{ca_name} has {CSR_MAX} certificates from CSRs still valid: that's the most one CA keeps")));
         }
-        let params = leaf(&ca_pem, &names, minutes, crl_url(&self.public_api, id))?;
+        let params = leaf(&ca_pem, &names, minutes, ca_urls(&self.public_api, id))?;
         let not_after = (params.not_after.unix_timestamp_nanos() / 1_000_000) as i64;
         let serial = hex(&serial_of(&params));
         let cert = rcgen::CertificateSigningRequestParams { params, public_key: csr.public_key }.signed_by(&issuer).map_err(|e| Error::BadRequest(format!("signing the CSR: {e}")))?;
@@ -540,7 +552,7 @@ impl Secrets {
         Ok(Signed { certificate: cert.pem(), ca: ca_pem, serial, names, not_after })
     }
 
-    fn pki(&self) -> Result<Provider> {
+    pub(crate) fn pki(&self) -> Result<Provider> {
         Ok(Provider { db: self.db.clone(), keys: self.keys()?.clone(), public_api: self.public_api.clone(), crls: self.crls.clone() })
     }
 

@@ -28,6 +28,7 @@ pub mod insights;
 pub mod leaks;
 pub mod links;
 pub mod names;
+pub mod ocsp;
 pub mod pki;
 pub mod ssh;
 mod oidc;
