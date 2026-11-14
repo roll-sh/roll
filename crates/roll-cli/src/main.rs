@@ -111,6 +111,10 @@ enum Cmd {
     /// Run a command with an environment's secrets in its environment, without writing files:
     /// `roll run -p shop -e production -- npm start`.
     Run(secrets::Run),
+    /// Print a completion script for your shell: `roll completions zsh > "${fpath[1]}/_roll"`,
+    /// `roll completions bash > ~/.local/share/bash-completion/completions/roll`,
+    /// `roll completions fish > ~/.config/fish/completions/roll.fish`.
+    Completions { shell: clap_complete::Shell },
     /// Preview environments: every service and a branch of every data resource of a project,
     /// per change or pull request.
     #[command(subcommand, alias = "previews")]
@@ -470,6 +474,10 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
         Cmd::Secrets { at, cmd } => return secrets::run(&secrets_api(&api).await?, cli.json, at, cmd).await,
         Cmd::Run(r) => return secrets::run_command(&secrets_api(&api).await?, r).await,
+        Cmd::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "roll", &mut std::io::stdout());
+            return Ok(());
+        }
         Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
         Cmd::Token(cmd) => return access::token(&api, cli.json, cmd).await,
         Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,

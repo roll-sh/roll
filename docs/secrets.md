@@ -584,6 +584,7 @@ roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
+roll completions bash|zsh|fish|powershell
 ```
 
 - The project is `-p`/`ROLL_PROJECT` (a name or id), the environment `-e`/`ROLL_ENV`, the path
@@ -612,6 +613,24 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
 - `roll run` fetches the resolved values (`…/values`), adds them to the child's environment and
   execs the command. It writes no file, and it fails before running anything if a reference is
   unresolved. Variables already set in the shell keep their value unless `--override` is passed.
+
+### The shell
+
+- `roll completions bash|zsh|fish|powershell` prints a completion script for every `roll` command
+  (clap's): `roll completions zsh > "${fpath[1]}/_roll"`,
+  `roll completions bash > ~/.local/share/bash-completion/completions/roll`,
+  `roll completions fish > ~/.config/fish/completions/roll.fish`.
+- With [direnv](https://direnv.net), a directory's environment loads as you `cd` into it. After
+  `roll secrets setup` has picked the project and environment for the directory, its `.envrc`:
+
+  ```sh
+  eval "$(roll secrets export --format shell)"   # single-quoted, so $, ` and quotes stay as they are
+  watch_file ~/.config/roll/secrets.json          # a new setup reloads it
+  ```
+
+  `direnv allow` once. Every process the shell starts then sees the values, and they change only
+  on `direnv reload`: for a server, `roll run [--watch]` keeps them to the one command and follows
+  changes. Each load is one audited read.
 
 ### Runtime resolve for services (roll apps)
 
