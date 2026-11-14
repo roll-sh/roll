@@ -100,6 +100,10 @@ pub struct Logs {
     /// With `--http`: only requests that took at least this many milliseconds.
     #[arg(long, requires = "http")]
     pub min_ms: Option<u64>,
+    /// With `--http`: only answers roll gave itself, for this reason (`firewall`, `rate_limit`,
+    /// `wake`…; `any`: all of them).
+    #[arg(long, requires = "http")]
+    pub by: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1064,8 +1068,10 @@ fn print_line(l: &Value) {
         && let Ok(r) = serde_json::from_str::<Value>(&s(&l["text"]))
     {
         let cold = if r["cold"] == true { format!("  cold +{}ms", r["waited_ms"]) } else { String::new() };
-        let inst = r["instance"].as_str().map(|i| i.rsplit('-').next().unwrap_or(i).to_string()).unwrap_or_default();
-        println!("{t} {inst:>5} │ {} {} {} {}ms{cold}", s(&r["method"]), s(&r["path"]), r["status"], r["ms"]);
+        let inst = r["instance"].as_str().map(|i| i.rsplit('-').next().unwrap_or(i).to_string()).or_else(|| r["by"].as_str().map(|_| "roll".to_string())).unwrap_or_default();
+        let by = r["by"].as_str().map(|b| format!("  ({b})")).unwrap_or_default();
+        let ip = r["ip"].as_str().map(|i| format!("  {i}")).unwrap_or_default();
+        println!("{t} {inst:>5} │ {} {} {} {}ms{cold}{by}{ip}", s(&r["method"]), s(&r["path"]), r["status"], r["ms"]);
         return;
     }
     let who = match l["stream"].as_str() {
@@ -1647,6 +1653,9 @@ pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
         }
         if let Some(ms) = l.min_ms {
             http.push_str(&format!("&min_ms={ms}"));
+        }
+        if let Some(b) = &l.by {
+            http.push_str(&format!("&by={}", enc(b)));
         }
     }
     if l.follow {

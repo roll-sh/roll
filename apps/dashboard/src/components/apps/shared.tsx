@@ -90,6 +90,20 @@ const STREAM_TEXT: Record<LogLine["stream"], string> = {
   http: "text-fg",
 };
 
+/** Why roll answered a request itself, as a person reads it. */
+const BY: Record<NonNullable<AccessLine["by"]>, string> = {
+  allow_list: "not on the allow list",
+  firewall: "firewall rule",
+  rate_limit: "rate limited",
+  private: "private environment",
+  maintenance: "maintenance",
+  wake: "couldn't wake",
+  capped: "spending limit",
+  not_deployed: "not deployed",
+  moving: "moving nodes",
+  unavailable: "settings unreadable",
+};
+
 /** An access line as a person reads it: `GET /path 200 12ms`, a 5xx in red, a cold start's wait. */
 function AccessText({ text }: { text: string }) {
   let a: AccessLine;
@@ -103,6 +117,8 @@ function AccessText({ text }: { text: string }) {
       <span className="text-muted">{a.method}</span> {a.path} <span className={a.status >= 500 ? "text-danger" : a.status >= 400 ? "text-soft" : "text-muted"}>{a.status}</span>{" "}
       <span className="text-subtle">
         {a.ms}ms{a.cold ? ` · cold +${a.waited_ms}ms` : ""}
+        {a.by ? ` · ${BY[a.by] ?? a.by}` : ""}
+        {a.ip ? ` · ${a.ip}` : ""}
       </span>
     </>
   );

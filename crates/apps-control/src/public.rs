@@ -382,18 +382,19 @@ struct SiteRequest {
     range: Option<String>,
     if_range: Option<String>,
     request_id: Option<String>,
+    seen: Seen,
 }
 
 impl SiteRequest {
     fn of(req: &Request) -> SiteRequest {
         let h = |n: &str| req.headers().get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
-        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), query: req.uri().query().map(str::to_string), if_none_match: h("if-none-match"), accept_encoding: h("accept-encoding"), range: h("range"), if_range: h("if-range"), request_id: h("x-request-id") }
+        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), query: req.uri().query().map(str::to_string), if_none_match: h("if-none-match"), accept_encoding: h("accept-encoding"), range: h("range"), if_range: h("if-range"), request_id: h("x-request-id"), seen: Seen::of(req) }
     }
 }
 
 async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &crate::live::Template, req: SiteRequest, service: &str, env: &str, began: Instant) -> Response {
     let key = tpl.site.clone().unwrap_or_default();
-    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), method: req.method.to_string(), path: req.path.chars().take(512).collect() };
+    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: req.seen };
     let request_id = req.request_id.as_deref().map(|v| v.chars().take(64).collect()).unwrap_or_else(|| crate::model::random(16));
     let done = |status: u16, bytes: u64| {
         live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, status, bytes);
@@ -760,7 +761,15 @@ fn strip_roll_headers(h: &mut axum::http::HeaderMap) {
 /// The waking proxy on the owner: an instance (woken if need be), the request forwarded, the
 /// answer metered.
 async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, req: Request) -> Response {
+    let (began, seen) = (Instant::now(), Seen::of(&req));
     let r = proxy_inner(apps.clone(), service, env, deployment, req).await;
+    // An answer roll gave itself, before any instance (an allow list's, a rate limit's, a wake
+    // that failed): in the access log with why, and metered, so its errors count.
+    if let Some(By(by)) = r.extensions().get::<By>().copied() {
+        let status = r.status().as_u16();
+        apps.live(service, env).meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, status, 0);
+        Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen }.write_by(status, began, by);
+    }
     let mut r = their_page(&apps, service, env, r).await;
     // A preview's answers (and a deployment's own URL, a copy of what's live) are never indexed,
     // whatever the app says (Vercel's): roll's pages, the 401 and the access link's redirect too.
@@ -779,16 +788,16 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // Its allow list first (deployment URLs too: they're public), before anything wakes.
     let gate = match apps.gate(&apps.live(service, env)).await {
         Ok(g) => g,
-        Err(_) => return page(StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "This environment's settings couldn't be read. Try again in a few seconds."),
+        Err(_) => return by("unavailable", page(StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "This environment's settings couldn't be read. Try again in a few seconds.")),
     };
     let client = roll_cluster::client_addr(&req);
     if !gate.admits(client.as_deref()) {
-        return page(StatusCode::FORBIDDEN, "Not from here", "This service only answers visitors from the networks its owner allowed.");
+        return by("allow_list", page(StatusCode::FORBIDDEN, "Not from here", "This service only answers visitors from the networks its owner allowed."));
     }
     // Its firewall rules (a 403 that says nothing of them).
     let ua = req.headers().get(header::USER_AGENT).map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned()).unwrap_or_default();
     if !gate.firewall.is_empty() && !gate.firewall_allows(req.method().as_str(), &crate::model::normal_path(req.uri().path()), &ua) {
-        return page(StatusCode::FORBIDDEN, "Not allowed", "This service doesn't answer this request.");
+        return by("firewall", page(StatusCode::FORBIDDEN, "Not allowed", "This service doesn't answer this request."));
     }
     // Its rate limit per client, before anything wakes.
     if let Some(limit) = &gate.rate
@@ -798,13 +807,13 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         if let Ok(v) = HeaderValue::from_str(&(wait.as_secs_f64().ceil() as u64).max(1).to_string()) {
             r.headers_mut().insert(header::RETRY_AFTER, v);
         }
-        return r;
+        return by("rate_limit", r);
     }
     // A private environment answers only visitors with its token, before anything wakes. A
     // site's rewrite (a header only roll sets) was let in by the site, by the project's own rule.
     let rewritten = req.headers().contains_key(VIA_SITE);
     if !rewritten && let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
-        return turned_away;
+        return by("private", turned_away);
     }
     // roll previews' feedback button: its script from the preview's own host, and a page load
     // (a browser's document, else a GET asking for HTML) gets the tag.
@@ -829,15 +838,15 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     }
     let live = match apps.load_live(service, env).await {
         Ok(l) => l,
-        Err(Error::Unavailable(_)) => return retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Starting up", "The service is waking up. Try again in a moment.")),
-        Err(e) => return page(StatusCode::NOT_FOUND, "Not deployed", &e.to_string()),
+        Err(Error::Unavailable(_)) => return by("moving", retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Starting up", "The service is waking up. Try again in a moment."))),
+        Err(e) => return by("not_deployed", page(StatusCode::NOT_FOUND, "Not deployed", &e.to_string())),
     };
     // In maintenance: roll's page, nothing woken. A deployment's own URL still answers (a fix
     // can be tried before maintenance ends).
     if deployment.is_none()
         && let Some(m) = &gate.maintenance
     {
-        return maintenance_page(m);
+        return by("maintenance", maintenance_page(m));
     }
     // A static site's rewrite to one of the project's services, before its own cookies (a
     // gradual rollout's bucket, affinity) are read: they're the target's to read too.
@@ -872,7 +881,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
                 again = Some(Again::Deployment(Box::new(t.clone())));
                 live.acquire_deployment(t).await
             }
-            Err(e) => return page(StatusCode::NOT_FOUND, "No such deployment", &e.to_string()),
+            Err(e) => return by("not_deployed", page(StatusCode::NOT_FOUND, "No such deployment", &e.to_string())),
         },
         None => match live.may_wake().map(|_| live.route(bucket)) {
             // A static site's files answer (a gradual rollout's bucket chose which deployment's).
@@ -896,17 +905,17 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     };
     let mut lease = match acquired {
         Ok(l) => l,
-        Err(WakeError::NoDeployment) => return page(StatusCode::NOT_FOUND, "Not deployed yet", "This service has no deployment in this environment yet."),
-        Err(WakeError::NotWeb) => return page(StatusCode::NOT_FOUND, "Not a web service", "This service is a worker or a cron job: it doesn't answer HTTP."),
-        Err(WakeError::Busy) => return retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Busy starting", "Too many requests are waiting for this service to start. Try again in a moment.")),
-        Err(WakeError::Capped) => return page(StatusCode::PAYMENT_REQUIRED, "Paused", "This project reached its spending limit for the month. Its owner can raise the limit to bring it back."),
+        Err(WakeError::NoDeployment) => return by("not_deployed", page(StatusCode::NOT_FOUND, "Not deployed yet", "This service has no deployment in this environment yet.")),
+        Err(WakeError::NotWeb) => return by("not_deployed", page(StatusCode::NOT_FOUND, "Not a web service", "This service is a worker or a cron job: it doesn't answer HTTP.")),
+        Err(WakeError::Busy) => return by("wake", retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Busy starting", "Too many requests are waiting for this service to start. Try again in a moment."))),
+        Err(WakeError::Capped) => return by("capped", page(StatusCode::PAYMENT_REQUIRED, "Paused", "This project reached its spending limit for the month. Its owner can raise the limit to bring it back.")),
         Err(e) => {
             live.log.stream(crate::logs::Stream::System).line(format!("a request couldn't wake the service: {e}"));
-            return page(StatusCode::SERVICE_UNAVAILABLE, "Starting up", "The service is waking up or failing to start. Try again in a few seconds.");
+            return by("wake", page(StatusCode::SERVICE_UNAVAILABLE, "Starting up", "The service is waking up or failing to start. Try again in a few seconds."));
         }
     };
     // The access line's method and path (no query: it can carry tokens).
-    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), method: req.method().to_string(), path: req.uri().path().chars().take(512).collect() };
+    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req) };
     let pq = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
     let Ok(uri) = format!("http://{}{pq}", lease.addr).parse::<Uri>() else {
         return (StatusCode::BAD_REQUEST, "bad request").into_response();
@@ -1149,16 +1158,62 @@ impl Drop for Done {
 /// `{method, path, status, ms, bytes, instance, request_id, cold, waited_ms}`.
 struct Access {
     log: crate::logs::LogSink,
+    seen: Seen,
+}
+
+/// What an access line says of the request: its method and path (no query: it can carry
+/// tokens), and who asked (the address the fleet vouches for, the user agent, the host): what an
+/// allow list or a firewall rule is written from.
+struct Seen {
     method: String,
     path: String,
+    ip: Option<String>,
+    ua: String,
+    host: String,
+}
+
+impl Seen {
+    fn of(req: &Request) -> Seen {
+        let text = |h: header::HeaderName, n: usize| req.headers().get(h).map(|v| String::from_utf8_lossy(v.as_bytes()).chars().take(n).collect()).unwrap_or_default();
+        Seen {
+            method: req.method().to_string(),
+            path: req.uri().path().chars().take(512).collect(),
+            ip: crate::live::client_ip(roll_cluster::client_addr(req).as_deref()).map(|ip| ip.to_string()),
+            ua: text(header::USER_AGENT, 256),
+            host: text(header::HOST, 255),
+        }
+    }
+}
+
+/// Marks an answer roll gave itself before any instance: `by` what (`allow_list`, `firewall`,
+/// `rate_limit`, `private`, `maintenance`, `wake`, `capped`, `not_deployed`, `moving`,
+/// `unavailable`), for [`proxy`] to log and meter.
+#[derive(Clone, Copy)]
+struct By(&'static str);
+
+fn by(why: &'static str, mut r: Response) -> Response {
+    r.extensions_mut().insert(By(why));
+    r
 }
 
 impl Access {
     #[allow(clippy::too_many_arguments)]
     fn write(&self, status: u16, began: Instant, bytes: u64, instance: &str, request_id: &str, cold: bool, waited_ms: u64) {
+        let s = &self.seen;
         let line = serde_json::json!({
-            "method": self.method, "path": self.path, "status": status, "ms": began.elapsed().as_millis() as u64,
+            "method": s.method, "path": s.path, "status": status, "ms": began.elapsed().as_millis() as u64,
             "bytes": bytes, "instance": instance, "request_id": request_id, "cold": cold, "waited_ms": waited_ms,
+            "ip": s.ip, "ua": s.ua, "host": s.host,
+        });
+        self.log.line(line.to_string());
+    }
+
+    /// An answer roll gave itself (no instance saw the request).
+    fn write_by(&self, status: u16, began: Instant, by: &str) {
+        let s = &self.seen;
+        let line = serde_json::json!({
+            "method": s.method, "path": s.path, "status": status, "ms": began.elapsed().as_millis() as u64,
+            "bytes": 0, "by": by, "ip": s.ip, "ua": s.ua, "host": s.host,
         });
         self.log.line(line.to_string());
     }

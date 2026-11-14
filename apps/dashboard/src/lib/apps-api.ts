@@ -720,10 +720,16 @@ export interface AccessLine {
   status: number;
   ms: number;
   bytes: number;
-  instance: string;
-  request_id: string;
-  cold: boolean;
-  waited_ms: number;
+  /** Who asked: the address the fleet vouches for, the user agent, the host. */
+  ip?: string | null;
+  ua?: string;
+  host?: string;
+  instance?: string;
+  request_id?: string;
+  cold?: boolean;
+  waited_ms?: number;
+  /** An answer roll gave itself, before any instance, and why. */
+  by?: "allow_list" | "firewall" | "rate_limit" | "private" | "maintenance" | "wake" | "capped" | "not_deployed" | "moving" | "unavailable";
 }
 
 /** Follows a service's changes (`…/changes`): `onChange` for each tick, `onOpen` as the stream comes and goes. */

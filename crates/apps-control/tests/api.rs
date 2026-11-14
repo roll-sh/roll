@@ -1108,6 +1108,17 @@ async fn requests_are_access_lines_filtered_by_status() {
     assert!(errors[0]["text"].as_str().unwrap().contains("/broken"));
     let (_, slow) = call(&w.api, "GET", &format!("{base}&min_ms=60000"), None).await;
     assert_eq!(slow, json!([]));
+    // What roll turns away itself is in the log too (why, who asked, what host), and metered.
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    assert_eq!(call(&w.api, "PUT", &env, Some(json!({"firewall": [{"action": "deny", "path": "/admin"}]}))).await.0, StatusCode::OK);
+    let req = Request::builder().uri("/admin").header("host", host.as_str()).header("user-agent", "scanner/1.0").body(Body::empty()).unwrap();
+    assert_eq!(w.public.clone().oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN);
+    let denied = get_until(&w.api, &format!("{base}&by=firewall"), |l| l.as_array().is_some_and(|a| !a.is_empty())).await;
+    let line: Value = serde_json::from_str(denied[0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!((line["by"].as_str(), line["status"].as_u64(), line["ua"].as_str(), line["host"].as_str()), (Some("firewall"), Some(403), Some("scanner/1.0"), Some(host.as_str())), "{line}");
+    assert_eq!(call(&w.api, "GET", &format!("{base}&by=any"), None).await.1.as_array().unwrap().len(), 1, "the app's own answers have no `by`");
+    let (_, m) = call(&w.api, "GET", &format!("{env}/metrics?minutes=5"), None).await;
+    assert_eq!(m["requests"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).sum::<f64>(), 3.0, "{m}");
 }
 
 /// Five minutes of 5xx answers past the alert's share make one `alert.errors` event; more of the

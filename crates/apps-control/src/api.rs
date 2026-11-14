@@ -478,13 +478,17 @@ struct LogQuery {
     status: Option<String>,
     /// Access lines that took at least this long.
     min_ms: Option<u64>,
+    /// Access lines of answers roll gave itself, and why (`firewall`, `rate_limit`, `wake`…; `any`:
+    /// every one of them).
+    by: Option<String>,
 }
 
 /// Which access lines `status` and `min_ms` keep (`None`: all of them).
 fn http_filter(q: &LogQuery) -> crate::Result<Option<impl Fn(&crate::logs::LogLine) -> bool + Send + Sync + 'static>> {
-    if q.status.is_none() && q.min_ms.is_none() {
+    if q.status.is_none() && q.min_ms.is_none() && q.by.is_none() {
         return Ok(None);
     }
+    let want_by = q.by.clone().filter(|b| !b.trim().is_empty());
     let range = match q.status.as_deref().map(str::trim) {
         None | Some("") => (0, 999),
         Some(s) if s.len() == 3 && s.ends_with("xx") => {
@@ -503,7 +507,9 @@ fn http_filter(q: &LogQuery) -> crate::Result<Option<impl Fn(&crate::logs::LogLi
     Ok(Some(move |l: &crate::logs::LogLine| {
         let v: Value = serde_json::from_str(&l.text).unwrap_or(Value::Null);
         let status = v["status"].as_u64().unwrap_or(0) as u16;
-        (range.0..=range.1).contains(&status) && v["ms"].as_u64().unwrap_or(0) >= min
+        (range.0..=range.1).contains(&status)
+            && v["ms"].as_u64().unwrap_or(0) >= min
+            && want_by.as_deref().is_none_or(|b| v["by"].as_str().is_some_and(|got| b == "any" || got == b))
     }))
 }
 
