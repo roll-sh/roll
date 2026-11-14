@@ -1589,6 +1589,26 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
+Then change policies per folder (#53), as Infisical's approval policies on secret paths.
+
+An eighth independent review (2026-11-14, of moving in, change policies per folder and the
+seventh review's fixes) found no high-severity issue; it found folder gates a reviewer, a
+promotion, an import or a folder delete could get around, apply checking the gates outside its
+transaction, backups without folder policies (#53), Vault walks that took any error for an empty
+folder and had no bound, colliding AWS keys (#52), and a `--watch` that restarted on every poll
+after its references changed (#49): all fixed, the Vault and AWS ones checked live. Screenshots
+of folder policies and request gates are on #53.
+
+A seventh independent review (2026-11-14, of RabbitMQ, the OpenSearch names and the sixth
+review's fixes) found no high-severity issue; it found a RabbitMQ template copied in part (an
+exchange left open), `render --watch` rendering twice, throttled OCSP answers marked cacheable,
+repeated flavor lookups, and the short public-suffix list: fixed, or documented for the last.
+Moving in from Vault trees and AWS Secrets Manager is #52 (checked against Vault 1.20 and
+LocalStack).
+
+Then RabbitMQ outside roll (#39, merged up into #41 and #42; checked live against RabbitMQ 4) and
+OpenSearch clusters' fields named as their clients read them (#51).
+
 A sixth independent review (2026-11-14, of `roll://` references, check-and-set, OCSP, OpenSearch
 links and the grant fix) found no high-severity issue; it found an OCSP route an anonymous caller
 could make sign and cache per request, references whose leases were renewed at the wrong project,
@@ -1664,24 +1684,30 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **RabbitMQ outside roll** (on #39), as Vault's and Infisical's RabbitMQ engines: two users take
-   turns, or a user per lease with a template user's vhost permissions, through the management
-   HTTPS API and the same guards; passwords as RabbitMQ's salted SHA-256 hash, so the broker never
-   sees one.
-2. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
+1. **`roll run` masks values in what the command prints**, as 1Password's `op run` does and
+   GitHub Actions does for its own secrets: a value of 8 characters or more (and each of its
+   lines, and its JSON and URL encodings) becomes `<concealed by roll>` on stdout and stderr when
+   they aren't a terminal (CI logs, files), so a debug print doesn't put a key in a build log.
+   `--mask` forces it in a terminal and `--no-mask` turns it off.
+2. **A screenshot of moving in** for #52's dashboard import dialog (it shows the CLI commands).
+3. **When #50, #51 and #53 meet** (whichever land later): `requests.rs` and `write.rs` keep the
+   canvas check before the provider (#51), check-and-set (#50) and folder gates (#53); a test of
+   the three together.
+4. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
-3. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47), a live check of
-   OpenSearch links (#29 and #51 in one build), and splitting the CLI's `secrets.rs` (2,700 lines)
-   by command once the stacked pull requests that touch it have landed.
-4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
+5. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
+   tools are ready), a live check of OpenSearch links (#29 and #51 in one build), and splitting the
+   CLI's `secrets.rs` (2,700 lines) by command once the stacked pull requests that touch it have
+   landed.
+6. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
-5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
+7. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
    token; the trust policy pins `sub`, as GCP's and Azure's do).
-6. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
+8. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
    notice.
-7. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
+9. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
    project can link their own databases, buckets and streams.
-8. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+10. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
    environment).
 
 Open pull requests after this one:
@@ -1706,6 +1732,10 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#53, change policies per folder** (after #20): a folder of an unprotected environment takes
+  changes only through approved requests, with its own approvals and approvers.
+- **#52, moving in from Vault trees and AWS Secrets Manager** (after #20): `import --from vault
+  --recursive` into folders, `--from aws` through the user's aws CLI.
 - **#51, search links on OpenSearch clusters** (after #20): an internal user (`user`,
   `password`) where the cluster has no API keys; the wrong field for a flavor is refused when linked.
 - **#50, check-and-set writes** (after #20): `if_version` on a set or delete, refused as `stale`
@@ -1733,7 +1763,7 @@ Open pull requests after this one:
   signature checked.
 - **#41, Redis outside roll** (after #39): two ACL users take turns (`#<sha256>` passwords), or a
   user per lease copying a template user's rules; the tenant's replies read by a bounded parser.
-- **#39, Postgres, MySQL and SQL Server outside roll** (after #20): two login roles take turns (rotation), or a
+- **#39, Postgres, MySQL, SQL Server, ClickHouse and RabbitMQ outside roll** (after #20): two login roles take turns (rotation), or a
   login per lease in a group role (dynamic), over verified TLS to a public address rolld resolved
   itself (Postgres gets a SCRAM verifier, never the password).
 
