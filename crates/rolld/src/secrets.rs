@@ -682,7 +682,8 @@ impl apps_control::integrations::SecretSource for ForApps {
             }
             // Linked keys are addresses as rolld sees them: apps rewrites them for the container.
             let linked: std::collections::HashSet<String> = v.linked.into_iter().collect();
-            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), value: value.expose().to_string(), name }).collect())
+            // Sensitive keys (secrets #46) come with the flag apps seals them by; none until then.
+            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: false, value: value.expose().to_string(), name }).collect())
         })
         .await?
     }
