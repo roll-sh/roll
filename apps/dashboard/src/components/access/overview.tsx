@@ -308,12 +308,14 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
   // A rotation can leave the old secret working for a while, so deployments switch first.
   const [keepOld, setKeepOld] = useState(0);
   const [kept, setKept] = useState(0);
+  const [rotating, setRotating] = useState(false);
   const rotate = async () => {
     setBusy(true);
     setError(null);
     try {
       setSecret((await accessApi.rotate(g.id, keepOld)).token);
       setKept(keepOld);
+      setRotating(false);
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -378,18 +380,9 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
               Edit
             </button>
             {g.kind === "token" && (
-              <span className="flex items-center gap-1">
-                <button onClick={rotate} disabled={busy} className={btn} title="A new secret with the same rules">
-                  Rotate
-                </button>
-                <select value={keepOld} onChange={(e) => setKeepOld(Number(e.target.value))} className={`${input} h-7 text-[11px]`} aria-label="The old secret after rotating">
-                  {KEEP_OLD.map((k) => (
-                    <option key={k.s} value={k.s}>
-                      old one {k.label}
-                    </option>
-                  ))}
-                </select>
-              </span>
+              <button onClick={() => setRotating((r) => !r)} disabled={busy} className={btn} aria-expanded={rotating} title="A new secret with the same rules">
+                Rotate
+              </button>
             )}
             <button onClick={() => setConfirm(true)} className={btn}>
               Revoke
@@ -407,6 +400,24 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
           </span>
         )}
       </div>
+      {rotating && !secret && (
+        <div className="rise mt-3 ml-6 flex flex-wrap items-center gap-2 text-[12px] text-muted">
+          A new secret, the same rules. The old one
+          <select value={keepOld} onChange={(e) => setKeepOld(Number(e.target.value))} className={`${input} h-7 text-[12px]`} aria-label="The old secret after rotating">
+            {KEEP_OLD.map((k) => (
+              <option key={k.s} value={k.s}>
+                {k.label}
+              </option>
+            ))}
+          </select>
+          <button onClick={rotate} disabled={busy} className={btn}>
+            Rotate now
+          </button>
+          <button onClick={() => setRotating(false)} className="text-subtle hover:text-fg">
+            Cancel
+          </button>
+        </div>
+      )}
       {secret && (
         <div className="rise mt-3 ml-6 space-y-1.5">
           <div className="flex items-center gap-1 rounded-lg border border-line bg-bg px-3 py-2">
