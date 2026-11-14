@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { denyRedirect, draftOf, expiringSoon, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, withToolsets, approvableTogether, byConcern, type Approval, type Preset } from "./access-api";
+import { denyRedirect, draftOf, expiringSoon, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, withToolsets, toolsetCost, approvableTogether, byConcern, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -75,6 +75,14 @@ describe("toolsets", () => {
   it("narrows the MCP URL to the products picked, and leaves it whole for none", () => {
     expect(withToolsets("https://api.roll.sh/v1/mcp", ["redis", "postgres"])).toBe("https://api.roll.sh/v1/mcp?toolsets=postgres,redis");
     expect(withToolsets("https://api.roll.sh/v1/mcp", [])).toBe("https://api.roll.sh/v1/mcp");
+    // What a choice lists: the access tools always, read-only only what reads.
+    const costs = [
+      { product: "access", tools: 5, read_only: 3, context_tokens: 400 },
+      { product: "apps", tools: 45, read_only: 20, context_tokens: 5400 },
+      { product: "redis", tools: 8, read_only: 4, context_tokens: 700 },
+    ];
+    expect(toolsetCost(costs, [], false)).toEqual({ tools: 58, tokens: 6500 });
+    expect(toolsetCost(costs, ["redis"], true)).toEqual({ tools: 7, tokens: 590 });
     expect(withToolsets("https://api.roll.sh/v1/mcp", ["postgres"], true)).toBe("https://api.roll.sh/v1/mcp?toolsets=postgres&readonly=1");
   });
 });

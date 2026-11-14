@@ -98,6 +98,7 @@ pub fn routes(api: Router, config: Config, sets: Vec<Arc<dyn ToolSet>>) -> Route
     Router::new()
         .route("/v1/mcp", post(handle).get(not_here).delete(not_here))
         .route("/v1/access/tokens/{id}/tools", axum::routing::get(seen_by))
+        .route("/v1/mcp/toolsets", axum::routing::get(toolset_costs))
         .with_state(state)
 }
 
@@ -142,14 +143,36 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
         names: Default::default(),
     };
     let tools = ctx.tools();
-    let bytes: usize = tools.iter().map(|t| t.to_string().len()).sum();
+    let cost: usize = tools.iter().map(context_tokens).sum();
     let listed: Vec<Value> = tools
         .iter()
         .map(|t| json!({ "name": t["name"], "title": t["title"], "product": t["_meta"]["roll/product"], "read_only": t["annotations"]["readOnlyHint"], "destructive": t["annotations"]["destructiveHint"] }))
         .collect();
     let prompts = prompts::list(&tool_names(&ctx))["prompts"].clone();
-    // About four bytes a token: what the list costs an agent's context before it does anything.
-    Json(json!({ "tools": listed, "prompts": prompts, "context_tokens": bytes / 4, "live": true })).into_response()
+    // What the list costs an agent's context before it does anything.
+    Json(json!({ "tools": listed, "prompts": prompts, "context_tokens": cost, "live": true })).into_response()
+}
+
+/// What a tool costs a model's context: what a client sends it (name, description, input
+/// schema), about four bytes a token.
+fn context_tokens(t: &Value) -> usize {
+    json!({ "name": t["name"], "description": t["description"], "input_schema": t["inputSchema"] }).to_string().len() / 4
+}
+
+/// `GET /v1/mcp/toolsets`: each product's tools as a connection with no narrowing gets them (the
+/// operator's view): how many, how many only read, and their context cost, so the connect panel
+/// can say what a choice of toolsets costs and whether a client's tool limit takes it (VS Code
+/// allows 128 tools a request, Windsurf 100). Counts only, never a tool's content.
+async fn toolset_costs(State(m): State<Mcp>) -> Json<Value> {
+    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, toolsets: None, readonly: false, client: None, names: Default::default() };
+    let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
+    for t in ctx.tools() {
+        let e = by.entry(t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string()).or_default();
+        e.0 += 1;
+        e.1 += usize::from(t["annotations"]["readOnlyHint"].as_bool() == Some(true));
+        e.2 += context_tokens(&t);
+    }
+    Json(json!({ "products": by.into_iter().map(|(p, (n, ro, tok))| json!({ "product": p, "tools": n, "read_only": ro, "context_tokens": tok })).collect::<Vec<_>>() }))
 }
 
 fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {

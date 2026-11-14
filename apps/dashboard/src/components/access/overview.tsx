@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import {
   accessApi,
   CLIENT_NAMES,
+  CLIENT_TOOL_LIMIT,
   CLIENT_WHERE,
   CLIENTS,
   describeRule,
@@ -13,6 +14,8 @@ import {
   type Checkup,
   productName,
   withToolsets,
+  toolsetCost,
+  type ToolsetCost,
   mcpUrl,
   reach,
   statusOf,
@@ -68,12 +71,20 @@ export function ConnectPanel({ token }: { token?: string }) {
   const [products, setProducts] = useState<string[]>([]);
   const [picked, setPicked] = useState<string[]>([]);
   const [readonly, setReadonly] = useState(false);
+  const [costs, setCosts] = useState<ToolsetCost[]>([]);
   useEffect(() => {
     accessApi
       .catalog()
       .then((c) => setProducts(c.products.filter((p) => p !== "access")))
       .catch(() => {});
+    accessApi
+      .toolsetCosts()
+      .then(setCosts)
+      .catch(() => {});
   }, []);
+  const cost = toolsetCost(costs, picked, readonly);
+  const limit = CLIENT_TOOL_LIMIT[client];
+  const over = limit && cost.tools > limit.tools;
   const url = withToolsets(mcpUrl(), picked, readonly);
   const cfg = mcpConfig(client, url, token);
   return (
@@ -129,6 +140,12 @@ export function ConnectPanel({ token }: { token?: string }) {
               })}
             </div>
           </div>
+        )}
+        {costs.length > 0 && (
+          <p className={`text-[12px] ${over ? "text-danger" : "text-subtle"}`} role={over ? "alert" : undefined}>
+            {cost.tools} tools · ~{cost.tokens.toLocaleString("en")} tokens of the agent's context before it does anything
+            {over && limit ? `. ${limit.note}: pick the products it needs.` : ""}
+          </p>
         )}
         <label className="flex items-center gap-2 text-[12px] text-muted">
           <input type="checkbox" checked={readonly} onChange={(e) => setReadonly(e.target.checked)} className="accent-accent" />
