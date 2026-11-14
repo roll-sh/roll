@@ -226,8 +226,11 @@ new version of its secret, and a delete makes a tombstone version, so history is
   the key and its version now) and nothing is written. The dashboard's editor sends the version it
   showed, and so does setting a key across environments from the grid (each environment's own
   entry, or 0 where it had none), so two people editing one key can't overwrite each other unseen
-  (the second sees the error and the new version). `if_seq` on a batch is the same for the whole environment (`roll
-  secrets edit` uses it).
+  (the second sees the error and the new version). On a protected environment a stale read is
+  told so before anything else, and a change request keeps the check: `if_version` is checked as
+  the request is opened, in the write that records what it's based on, and applying it later needs
+  the environment unchanged since. `if_seq` on a batch is the same for the whole environment
+  (`roll secrets edit` uses it).
 - **History** of an environment is its changes, newest first. A change's detail lists each key with
   what happened (`added`, `changed`, `deleted`, `comment`, `tags`, `link`), its old and new
   fingerprints, and never a value. Values of old versions can be revealed one at a time.

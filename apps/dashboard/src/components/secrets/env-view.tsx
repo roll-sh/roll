@@ -668,9 +668,10 @@ function SecretRow({
           onCancel={() => setEditing(null)}
           onSave={async (body) => {
             const type: SecretType | undefined = editing === "personal" || (editing === "edit" && personal) ? "personal" : undefined;
-            const op: Op = { op: "set", key: s.key, ...body, type };
-            // Editing this environment's own entry: only if nobody changed it since it was shown.
+            // Editing this environment's own entry: only if nobody changed it since it was shown
+            // (a change request where protected keeps that check).
             const ifVersion = editing === "edit" && own ? s.version : undefined;
+            const op: Op = { op: "set", key: s.key, ...body, type, if_version: ifVersion };
             const ok = await onWrite(() => api.set(env.slug, s.key, { ...body, type, if_version: ifVersion }, path), { path, ops: [op], message: `updated ${s.key}` }, editing === "personal" ? `Set ${s.key} for you` : editing === "own" ? `Set ${s.key} here` : `Saved ${s.key}`);
             if (ok) setEditing(null);
           }}

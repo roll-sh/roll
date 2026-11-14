@@ -263,11 +263,15 @@ impl Secrets {
         names::message(&message)?;
         let items = items(&path, &b.ops, caller)?;
         self.check_items(project, slug, &items, caller)?;
-        self.open_request_items(project, slug, &path, message, items, caller)
+        let expect = crate::write::expectations(&b.ops)?;
+        self.open_request_items(project, slug, &path, message, items, &expect, caller)
     }
 
     /// Open a request for `items` (a batch's, or a promotion's into a protected environment).
-    pub(crate) fn open_request_items(&self, project: &str, slug: &str, path: &str, message: String, items: Vec<Item>, caller: &Caller) -> Result<Request> {
+    /// `expect`: check-and-set, checked as the request is opened, in the write that records what
+    /// it's based on (applying it later needs the environment unchanged since).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_request_items(&self, project: &str, slug: &str, path: &str, message: String, items: Vec<Item>, expect: &[(usize, i64)], caller: &Caller) -> Result<Request> {
         let path = path.to_string();
         for i in &items {
             caller.need(if matches!(i.action, ItemAction::Delete) { Action::Delete } else { Action::Write }, &Scope::at(project, slug, &i.path))?;
@@ -302,6 +306,7 @@ impl Secrets {
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             let env = envs::by_slug(c, project, slug)?;
+            crate::write::check_versions(c, &env.id, &items, expect)?;
             let diff = plan(c, &dek, &env, &items)?;
             if diff.is_empty() {
                 return Err(Error::BadRequest("the request changes nothing".into()));

@@ -77,6 +77,35 @@ pub struct Batch {
     pub if_seq: Option<i64>,
 }
 
+/// Each op's `if_version`, by its item's index (each op makes one item, in order).
+pub(crate) fn expectations(ops: &[Op]) -> Result<Vec<(usize, i64)>> {
+    let expect: Vec<(usize, i64)> = ops
+        .iter()
+        .enumerate()
+        .filter_map(|(i, op)| match op {
+            Op::Set { if_version, .. } | Op::Delete { if_version, .. } => if_version.map(|v| (i, v)),
+        })
+        .collect();
+    if expect.iter().any(|(_, v)| *v < 0) {
+        return Err(Error::BadRequest("if_version is a key's version, or 0 for a key that must not exist yet".into()));
+    }
+    Ok(expect)
+}
+
+/// Check-and-set, inside a write: each expected key is still at the version its writer read.
+pub(crate) fn check_versions(c: &Conn<'_>, env_id: &str, items: &[Item], expect: &[(usize, i64)]) -> Result<()> {
+    for (i, want) in expect {
+        let item = &items[*i];
+        let now_at: Option<i64> = c.query_row("SELECT version FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ?", params![env_id, item.path, item.key, item.owner], |r| r.get(0)).optional()?;
+        let have = now_at.unwrap_or(0);
+        if have != *want {
+            let now_is = if have == 0 { "it doesn't exist".to_string() } else { format!("it's at version {have}") };
+            return Err(Error::Conflict("stale", format!("{} changed since version {want}: {now_is}; read it again and reapply", item.key)));
+        }
+    }
+    Ok(())
+}
+
 /// One key's operation, resolved to its folder and owner.
 #[derive(Clone, Debug)]
 pub(crate) struct Item {
@@ -631,6 +660,9 @@ impl Secrets {
         let now = self.db.now_ms()?;
         let res = self.db.write(|c| {
             let env = envs::by_slug(c, project, env_slug)?;
+            // Stale before protected: a writer whose read is out of date learns that, rather than
+            // opening a request for it.
+            check_versions(c, &env.id, &items, expect)?;
             if env.protected && !force {
                 return Err(Error::Conflict("approval_required", format!("{} is protected: open a change request", env.slug)));
             }
@@ -638,15 +670,6 @@ impl Secrets {
                 && last_seq(c, &env.id)? > s
             {
                 return Err(Error::Conflict("stale", format!("{} changed after #{s}", env.slug)));
-            }
-            for (i, want) in expect {
-                let item = &items[*i];
-                let now_at: Option<i64> = c.query_row("SELECT version FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ?", params![env.id, item.path, item.key, item.owner], |r| r.get(0)).optional()?;
-                let have = now_at.unwrap_or(0);
-                if have != *want {
-                    let now_is = if have == 0 { "it doesn't exist".to_string() } else { format!("it's at version {have}") };
-                    return Err(Error::Conflict("stale", format!("{} changed since version {want}: {now_is}; read it again and reapply", item.key)));
-                }
             }
             apply(c, &dek, &env, &prepared.items, kind, message, caller, now)
         });
@@ -685,18 +708,7 @@ impl Secrets {
         names::message(&message)?;
         let items = items(&path, &b.ops, caller)?;
         self.check_items(project, env, &items, caller)?;
-        // Each op makes one item, in order.
-        let expect: Vec<(usize, i64)> = b
-            .ops
-            .iter()
-            .enumerate()
-            .filter_map(|(i, op)| match op {
-                Op::Set { if_version, .. } | Op::Delete { if_version, .. } => if_version.map(|v| (i, v)),
-            })
-            .collect();
-        if expect.iter().any(|(_, v)| *v < 0) {
-            return Err(Error::BadRequest("if_version is a key's version, or 0 for a key that must not exist yet".into()));
-        }
+        let expect = expectations(&b.ops)?;
         self.commit_with(project, env, items, &expect, "write", &message, b.if_seq, false, caller)
     }
 
@@ -714,7 +726,7 @@ impl Secrets {
         let path = names::path(path)?;
         caller.need(Action::Delete, &Scope::at(project, env, &path))?;
         let items = items(&path, &[Op::Delete { key: key.into(), kind, path: None, if_version }], caller)?;
-        let expect: Vec<(usize, i64)> = if_version.map(|v| (0, v)).into_iter().collect();
+        let expect = expectations(&[Op::Delete { key: key.into(), kind, path: None, if_version }])?;
         let a = self.commit_with(project, env, items, &expect, "write", &format!("deleted {key}"), None, false, caller)?;
         Ok(Written { change: a.change, secret: None, warnings: vec![] })
     }
@@ -807,7 +819,7 @@ impl Secrets {
             if items.is_empty() {
                 return Ok(Applied { change: None, items: vec![], warnings: vec![], request: None });
             }
-            let request = self.open_request_items(project, to, &path, message, items, caller)?;
+            let request = self.open_request_items(project, to, &path, message, items, &[], caller)?;
             return Ok(Applied { change: None, items: vec![], warnings: vec![], request: Some(request) });
         }
         self.commit(project, to, items, "promote", &message, None, false, caller)

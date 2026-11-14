@@ -196,15 +196,16 @@ function SetAcross({ keyName, path, cols, names, initial, seen, onDone, onCancel
     const asked: string[] = [];
     try {
       for (const env of cols.filter((c) => picked.has(c))) {
+        // Check-and-set against what the grid showed: the environment's own entry at its version,
+        // or none (0). An inherited or personal cell says nothing about the own entry. A change
+        // request where protected keeps the check.
+        const cell = seen[env];
+        const if_version = cell == null ? 0 : cell.source === "own" && !cell.personal ? cell.version : undefined;
         try {
-          // Check-and-set against what the grid showed: the environment's own entry at its version,
-          // or none (0). An inherited or personal cell says nothing about the own entry.
-          const cell = seen[env];
-          const if_version = cell == null ? 0 : cell.source === "own" && !cell.personal ? cell.version : undefined;
           await api.set(env, keyName, { value, if_version }, path);
         } catch (e) {
           if (!needsApproval(e)) throw e;
-          await api.openRequest(env, { path, message: `set ${keyName}`, ops: [{ op: "set", key: keyName, value }] });
+          await api.openRequest(env, { path, message: `set ${keyName}`, ops: [{ op: "set", key: keyName, value, if_version }] });
           asked.push(names.get(env) ?? env);
         }
       }
