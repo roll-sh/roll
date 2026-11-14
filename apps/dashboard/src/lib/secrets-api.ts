@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, AwsUser, CloudAccount, NewCloudAccount, SignedCertificate, CaCertificate, Ca, SshCa, HostCertificate, UserCertificate } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, AwsUser, CloudAccount, NewCloudAccount, SignedCertificate, CaCertificate, Ca, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey } from "@roll/secrets/types";
 import { withSession } from "./code-token";
 import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 
@@ -211,6 +211,12 @@ export function secretsApi(project: string) {
     scanLeaks: (candidates: string[]) => req<{ index: number; key: string; environment: string; path: string }[]>("POST", `${P}/leaks`, { candidates }),
     /** `code`: also the keys no repository on the canvas mentions (a search per key: on request). */
     health: (code = false) => req<Finding[]>("GET", `${P}/health${qs({ code: code ? 1 : undefined })}`),
+    /** Encryption keys: apps encrypt and decrypt through roll; the key never leaves it. */
+    transitKeys: () => req<TransitKey[]>("GET", `${P}/transit`),
+    addTransitKey: (name: string) => req<TransitKey>("POST", `${P}/transit`, { name }),
+    rotateTransitKey: (name: string) => req<TransitKey>("POST", `${P}/transit/${enc(name)}/rotate`),
+    /** Every version's public signing key: what a service checks `…/sign`'s signatures with. */
+    transitPublicKeys: (name: string) => req<TransitPublicKey[]>("GET", `${P}/transit/${enc(name)}/public`),
     /** The project's certificate authorities (pki links). */
     cas: () => req<Ca[]>("GET", `${P}/cas`),
     addCa: (c: { name: string; domains: string[]; allow_ip?: boolean; max_days?: number }) => req<Ca>("POST", `${P}/cas`, c),

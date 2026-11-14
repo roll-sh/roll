@@ -1589,6 +1589,91 @@ async fn a_sensitive_keys_value_reaches_only_roll_s_runtimes() {
 }
 
 #[tokio::test]
+async fn an_encryption_key_encrypts_for_apps_and_never_leaves_roll() {
+    use base64::Engine;
+    let b64 = |s: &[u8]| base64::engine::general_purpose::STANDARD.encode(s);
+    let api = Api::new().await;
+    let k = api.ok(Method::POST, "/transit", Some(json!({ "name": "cards" }))).await;
+    assert_eq!(k["latest_version"], 1);
+    assert!(!api.ok(Method::GET, "/transit", None).await.to_string().contains("\"key\""), "no key material in a listing");
+    // Encrypt bound to a context; it opens under that context only.
+    let one = api.ok(Method::POST, "/transit/cards/encrypt", Some(json!({ "plaintext": b64(b"4111 1111 1111 1111"), "context": "order:42" }))).await;
+    let ct = one["ciphertext"].as_str().unwrap().to_string();
+    assert!(ct.starts_with("roll:v1:"), "{ct}");
+    let open = |ct: &str, context: &str| api.call(Method::POST, "/transit/cards/decrypt", Some(json!({ "ciphertext": ct, "context": context })));
+    assert_eq!(open(&ct, "order:42").await.1["plaintext"], b64(b"4111 1111 1111 1111"));
+    assert_eq!(open(&ct, "order:43").await.0, StatusCode::BAD_REQUEST);
+    // Rotation: new ciphertexts use v2, old ones still open, rewrap moves them without the plaintext.
+    assert_eq!(api.ok(Method::POST, "/transit/cards/rotate", None).await["latest_version"], 2);
+    let re = api.ok(Method::POST, "/transit/cards/rewrap", Some(json!({ "items": [{ "ciphertext": ct, "context": "order:42" }] }))).await;
+    let ct2 = re["items"][0]["ciphertext"].as_str().unwrap().to_string();
+    assert!(ct2.starts_with("roll:v2:") && open(&ct2, "order:42").await.1["plaintext"] == b64(b"4111 1111 1111 1111"));
+    // Retiring v1: what it encrypted no longer opens.
+    api.ok(Method::PATCH, "/transit/cards", Some(json!({ "min_decrypt_version": 2 }))).await;
+    let (s, e) = open(&ct, "order:42").await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("retired"), "{e}");
+    // A data key for local envelope encryption: its ciphertext opens to it.
+    let dk = api.ok(Method::POST, "/transit/cards/datakey", Some(json!({}))).await;
+    assert_eq!(base64::engine::general_purpose::STANDARD.decode(dk["plaintext"].as_str().unwrap()).unwrap().len(), 32);
+    assert_eq!(api.call(Method::POST, "/transit/cards/decrypt", Some(json!({ "ciphertext": dk["ciphertext"] }))).await.1["plaintext"], dk["plaintext"]);
+    // Signatures: by the newest version, checked here or by anyone with the public key.
+    let sig = api.ok(Method::POST, "/transit/cards/sign", Some(json!({ "input": b64(b"invoice 7") }))).await["signature"].as_str().unwrap().to_string();
+    assert!(sig.starts_with("roll:v2:"), "{sig}");
+    let check = |input: &[u8], sig: &str| api.ok(Method::POST, "/transit/cards/verify", Some(json!({ "items": [{ "input": b64(input), "signature": sig }] })));
+    assert_eq!(check(b"invoice 7", &sig).await["items"][0]["valid"], true);
+    assert_eq!(check(b"invoice 8", &sig).await["items"][0]["valid"], false);
+    assert_eq!(check(b"invoice 7", &sig.replace("roll:v2:", "roll:v9:")).await["items"][0]["valid"], false, "an unknown version doesn't verify");
+    let public = api.ok(Method::GET, "/transit/cards/public", None).await;
+    let raw = base64::engine::general_purpose::STANDARD.decode(public[1]["public_key"].as_str().unwrap()).unwrap();
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&sig["roll:v2:".len()..]).unwrap();
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, raw).verify(b"invoice 7", &bytes).expect("a stock Ed25519 check passes");
+    // HMACs: stable for one input (a blind index), checked only by writers.
+    let mac = |input: &[u8]| api.ok(Method::POST, "/transit/cards/hmac", Some(json!({ "input": b64(input) })));
+    let m = mac(b"ada@example.com").await["hmac"].clone();
+    assert_eq!(mac(b"ada@example.com").await["hmac"], m);
+    assert_ne!(mac(b"bob@example.com").await["hmac"], m);
+    assert_eq!(api.ok(Method::POST, "/transit/cards/hmac/verify", Some(json!({ "input": b64(b"ada@example.com"), "hmac": m }))).await["valid"], true);
+    // A backup carries the key: restored into another project, it still opens what it encrypted.
+    let secret = [9u8; 32];
+    let b = api.ok(Method::POST, "/backup", Some(json!({ "recipient": roll_secrets::crypto::public_key(&secret) }))).await;
+    let sealed: roll_secrets::crypto::Sealed = serde_json::from_value(b["sealed"].clone()).unwrap();
+    let archive: Value = serde_json::from_slice(&roll_secrets::crypto::open_sealed(&secret, b["context"].as_str().unwrap(), &sealed).unwrap()).unwrap();
+    let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "restored" }))).await;
+    let to = |p: &str| format!("/v1/secrets/projects/{}{p}", other["id"].as_str().unwrap());
+    api.ok(Method::POST, &to("/restore"), Some(archive)).await;
+    let back = api.call(Method::POST, &to("/transit/cards/decrypt"), Some(json!({ "ciphertext": ct2, "context": "order:42" }))).await;
+    assert_eq!(back.1["plaintext"], b64(b"4111 1111 1111 1111"), "{back:?}");
+    assert_eq!(api.ok(Method::POST, &to("/transit/cards/sign"), Some(json!({ "input": b64(b"invoice 7") }))).await["signature"], sig.as_str(), "and signs as it did");
+    // A key brought from Vault: Vault's own ciphertexts (aes256-gcm96, no AAD) open under the
+    // version that was Vault's, and rewrap into roll's form.
+    let vault_ct = |key: &[u8; 32], plain: &[u8]| {
+        use aes_gcm::aead::{Aead, KeyInit};
+        let nonce = [7u8; 12];
+        let mut raw = nonce.to_vec();
+        raw.extend(aes_gcm::Aes256Gcm::new_from_slice(key).unwrap().encrypt(aes_gcm::Nonce::from_slice(&nonce), plain).unwrap());
+        raw
+    };
+    let (k1, k2) = ([3u8; 32], [4u8; 32]);
+    assert_eq!(api.call(Method::POST, "/transit", Some(json!({ "name": "legacy", "key": b64(&[1u8; 16]) }))).await.0, StatusCode::BAD_REQUEST, "not 32 bytes");
+    let made = api.ok(Method::POST, "/transit", Some(json!({ "name": "legacy", "key": b64(&k1), "vault_version": 1 }))).await;
+    assert_eq!((made["versions"][0]["imported"].clone(), made["versions"][0]["vault_version"].clone()), (json!(true), json!(1)));
+    api.ok(Method::POST, "/transit/legacy/rotate", Some(json!({ "key": b64(&k2), "vault_version": 2 }))).await;
+    for (key, n, plain) in [(&k1, 1, &b"from vault v1"[..]), (&k2, 2, &b"from vault v2"[..])] {
+        let ct = format!("vault:v{n}:{}", b64(&vault_ct(key, plain)));
+        assert_eq!(api.ok(Method::POST, "/transit/legacy/decrypt", Some(json!({ "ciphertext": ct }))).await["plaintext"], b64(plain));
+        let moved = api.ok(Method::POST, "/transit/legacy/rewrap", Some(json!({ "ciphertext": ct }))).await["ciphertext"].as_str().unwrap().to_string();
+        assert!(moved.starts_with("roll:v2:"), "{moved}");
+        assert_eq!(api.ok(Method::POST, "/transit/legacy/decrypt", Some(json!({ "ciphertext": moved }))).await["plaintext"], b64(plain));
+    }
+    let wrong = format!("vault:v1:{}", b64(&vault_ct(&k2, b"x")));
+    assert_eq!(api.call(Method::POST, "/transit/legacy/decrypt", Some(json!({ "ciphertext": wrong }))).await.0, StatusCode::BAD_REQUEST);
+    // Deleting makes everything unreadable for good: only with the name repeated.
+    assert_eq!(api.call(Method::DELETE, "/transit/cards", None).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(api.call(Method::DELETE, "/transit/cards?confirm=cards", None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(open(&ct2, "order:42").await.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn reads_unlike_the_reader_are_alerted() {
     let api = Api::new().await;
     api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "notify_url": "https://hooks.example/T0/B0/x" }))).await;

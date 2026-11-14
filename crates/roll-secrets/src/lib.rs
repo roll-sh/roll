@@ -31,6 +31,7 @@ pub mod insights;
 pub mod leaks;
 pub mod links;
 pub mod names;
+pub mod transit;
 pub mod ocsp;
 pub mod pki;
 pub mod ssh;
@@ -419,6 +420,7 @@ impl Secrets {
         db.ensure_schema(notices::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
+        db.ensure_schema(transit::SCHEMA)?;
         db.ensure_schema(pki::SCHEMA)?;
         db.ensure_schema(ssh::SCHEMA)?;
         db.ensure_schema(aws::SCHEMA)?;
@@ -551,7 +553,7 @@ impl Secrets {
         let failed = self.revoke_managed(self.managed_where("project_id = ?", project));
         let now = self.db.now_ms()?;
         self.db.write(|c| {
-            for t in ["secrets", "versions", "changes", "requests", "tokens", "audit", "required", "shares", "syncs", "audit_sinks", "notices", "identities"] {
+            for t in ["secrets", "versions", "changes", "requests", "tokens", "audit", "required", "shares", "syncs", "audit_sinks", "notices", "identities", "transit_keys"] {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
             }
             c.execute("DELETE FROM leases WHERE project_id = ? AND revoked_at IS NOT NULL", [project])?;

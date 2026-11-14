@@ -9,6 +9,7 @@ import { CloudAccounts } from "./cloud-accounts";
 import { OutsideDatabases } from "./outside-databases";
 import { AwsRoles } from "./aws-roles";
 import { Rotators } from "./rotators";
+import { TransitKeys } from "./transit-keys";
 
 /** Syncs (docs/secrets.md, "Syncs"): one-way pushes of an environment's values to GitHub, a webhook or a deploy hook. */
 export function SyncsView() {
@@ -72,6 +73,7 @@ export function SyncsView() {
       </Section>
       <OutsideDatabases />
       <Rotators />
+      <TransitKeys />
       <Cas />
       <SshCas />
       <CloudAccounts />

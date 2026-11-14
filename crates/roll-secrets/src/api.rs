@@ -22,6 +22,9 @@ use std::sync::Arc;
 type S = State<Arc<Secrets>>;
 type Q = Query<HashMap<String, String>>;
 
+/// A transit batch: 4 MiB of plaintext as base64 in JSON.
+const TRANSIT_BODY: usize = 6 << 20;
+
 pub fn router(s: Arc<Secrets>) -> Router {
     const P: &str = "/v1/secrets/projects/{project}";
     const E: &str = "/v1/secrets/projects/{project}/environments/{env}";
@@ -91,6 +94,18 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/aws-users/{{id}}"), axum::routing::delete(delete_aws_user))
         .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
+        .route(&format!("{P}/transit"), get(transit_keys).post(add_transit_key))
+        .route(&format!("{P}/transit/{{name}}"), axum::routing::patch(config_transit_key).delete(delete_transit_key))
+        .route(&format!("{P}/transit/{{name}}/rotate"), post(rotate_transit_key))
+        .route(&format!("{P}/transit/{{name}}/encrypt"), post(transit_encrypt).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/decrypt"), post(transit_decrypt).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/rewrap"), post(transit_rewrap).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/datakey"), post(transit_datakey))
+        .route(&format!("{P}/transit/{{name}}/sign"), post(transit_sign).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/verify"), post(transit_verify).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/hmac"), post(transit_hmac).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/hmac/verify"), post(transit_hmac_verify).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/public"), get(transit_public))
         .route(&format!("{P}/cas"), get(cas).post(add_ca))
         .route(&format!("{P}/cas/{{id}}"), axum::routing::delete(delete_ca))
         .route(&format!("{P}/ssh-cas"), get(ssh_cas).post(add_ssh_ca))
@@ -1053,6 +1068,141 @@ async fn ocsp_get(State(s): S, Path((id, request)): Path<(String, String)>) -> c
     // Only a signed answer may be kept by a cache: never a tryLater or a malformedRequest.
     let cache = if successful { "public, max-age=60" } else { "no-store" };
     Ok(([(axum::http::header::CONTENT_TYPE, "application/ocsp-response"), (axum::http::header::CACHE_CONTROL, cache)], answer.to_vec()).into_response())
+}
+
+async fn transit_keys(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.transit_keys(&project, &c)).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewTransitKey {
+    name: String,
+    /// A key brought from outside (base64, 32 bytes).
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    vault_version: Option<u32>,
+}
+
+async fn add_transit_key(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: NewTransitKey = body(&b)?;
+    let brought = bring(n.key, n.vault_version)?;
+    Ok(created(blocking(s, move |s| s.add_transit_key(&project, &n.name, brought, &c)).await?))
+}
+
+fn bring(key: Option<String>, vault_version: Option<u32>) -> crate::Result<Option<crate::transit::Brought>> {
+    match (key, vault_version) {
+        (Some(key), vault_version) => Ok(Some(crate::transit::BringKey { key, vault_version }.check()?)),
+        (None, Some(_)) => Err(crate::Error::BadRequest("vault_version goes with the key it names".into())),
+        (None, None) => Ok(None),
+    }
+}
+
+async fn rotate_transit_key(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let brought = if b.is_empty() { None } else { Some(body::<crate::transit::BringKey>(&b)?.check()?) };
+    Ok(ok(blocking(s, move |s| s.rotate_transit_key(&project, &name, brought, &c)).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransitConfig {
+    min_decrypt_version: u32,
+}
+
+async fn config_transit_key(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let t: TransitConfig = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.set_min_decrypt_version(&project, &name, t.min_decrypt_version, &c)).await?))
+}
+
+#[derive(Deserialize)]
+struct Confirm {
+    #[serde(default)]
+    confirm: String,
+}
+
+async fn delete_transit_key(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, axum::extract::Query(q): axum::extract::Query<Confirm>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_transit_key(&project, &name, &q.confirm, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// One item, or `{items: […]}` for a batch: the answer has the same shape.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OneOrMany<T> {
+    Many { items: Vec<T> },
+    One(T),
+}
+
+impl<T> OneOrMany<T> {
+    fn split(self) -> (Vec<T>, bool) {
+        match self {
+            OneOrMany::Many { items } => (items, true),
+            OneOrMany::One(t) => (vec![t], false),
+        }
+    }
+}
+
+fn shaped(field: &str, out: Vec<serde_json::Value>, many: bool) -> serde_json::Value {
+    if many { json!({ "items": out.into_iter().map(|v| json!({ field: v })).collect::<Vec<_>>() }) } else { json!({ field: out.into_iter().next().unwrap_or_default() }) }
+}
+
+async fn transit_encrypt(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Plain>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_encrypt(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("ciphertext", out.into_iter().map(serde_json::Value::String).collect(), many)))
+}
+
+async fn transit_decrypt(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Cipher>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_decrypt(&project, &name, items, &c)).await?;
+    Ok(secret_response(ok(shaped("plaintext", out.iter().map(|v| serde_json::Value::String(v.expose().to_string())).collect(), many))))
+}
+
+async fn transit_rewrap(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Cipher>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_rewrap(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("ciphertext", out.into_iter().map(serde_json::Value::String).collect(), many)))
+}
+
+async fn transit_sign(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Input>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_sign(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("signature", out.into_iter().map(serde_json::Value::String).collect(), many)))
+}
+
+async fn transit_verify(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Signed>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_verify(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("valid", out.into_iter().map(serde_json::Value::Bool).collect(), many)))
+}
+
+async fn transit_hmac(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Input>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_hmac(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("hmac", out.into_iter().map(serde_json::Value::String).collect(), many)))
+}
+
+async fn transit_hmac_verify(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Signed>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_hmac_verify(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("valid", out.into_iter().map(serde_json::Value::Bool).collect(), many)))
+}
+
+async fn transit_public(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.transit_public(&project, &name, &c)).await?))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct DataKey {
+    #[serde(default)]
+    context: Option<String>,
+}
+
+async fn transit_datakey(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let d: DataKey = if b.is_empty() { DataKey::default() } else { body(&b)? };
+    Ok(secret_response(ok(blocking(s, move |s| s.transit_datakey(&project, &name, d.context, &c)).await?)))
 }
 
 async fn list_syncs(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
