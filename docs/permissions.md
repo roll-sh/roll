@@ -295,10 +295,13 @@ A rule can grant some indices of a search cluster: `{id: "cl_1", index: "logs-*,
 
 ### Secrets' encryption keys
 
-A rule can grant some of a project's encryption keys the same way, matched as index names are:
-`{id: "prj_1", index: "payments,pay-*"}` (the builder writes it `prj_1/payments,pay-*`, and lists
-a project's keys to tick, as it lists a cluster's indices). It
-covers the routes of one key (`/v1/secrets/projects/{project}/transit/{name}/…`: encrypt,
+A rule can grant some of a project's encryption keys: `{id: "prj_1", index: "payments,pay-*"}`,
+names (letters, digits, `-`, `_`) and `prefix*` patterns. Unlike indices, names are literal: a
+request names one key, so `_all`, a list or a `*` in a key's place reaches no key, and an approval
+remembers only a request that named one. The builder writes it `prj_1/payments,pay-*` and lists
+a project's keys to tick, as it lists a cluster's indices.
+
+It covers the routes of one key (`/v1/secrets/projects/{project}/transit/{name}/…`: encrypt,
 decrypt, sign, verify, HMAC, the public key), at their own actions, so a service that signs with
 one key needs write on that key only, not on the project. Listing, creating, rotating and deleting
 keys stay the project's (`roll_auth::scope::sub_resources` lists the products that have such

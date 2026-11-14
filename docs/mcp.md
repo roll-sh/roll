@@ -477,11 +477,14 @@ start and pre-deploy commands, schedule, kind, port, volume and `run.public`, ar
 a day or less); workload tokens (`Access::mint_workload`: minutes, within an identity's scope, owned
 by its maker, out of the list and caps) for secrets' identity logins; a person's own tokens' news is
 mailed to them (an approval waiting on them, used from a new network, revoked as leaked, about to
-expire; only their own, never a secret); the approval argument only where a person can be asked (a
-model reads every tool's schema: 92 → 73 KB for the operator and for tokens that only allow, every
-product on; `tools/list` 140 → 120 KB, 190 tools); the builder lists a secrets project's encryption
-keys to tick (one picker with search's indices; secrets' projects come from the workspace);
-encryption keys as MCP tools (`secrets_transit_encrypt`, `_decrypt`, `_sign`, `_verify`,
+expire; only their own, never a secret); the fourteenth review (key-scoped rules, before any row
+uses them): secrets' key names are literal (a key named `_all` is only that key; a list or a `*` in
+a request names none) and an approval remembers only a request that named one key; a pending answer
+says the call finds its approval without the argument too; the approval argument only where a person
+can be asked (a model reads every tool's schema: 92 → 73 KB for the operator and for tokens that
+only allow, every product on; `tools/list` 140 → 120 KB, 190 tools); the builder lists a secrets
+project's encryption keys to tick (one picker with search's indices; secrets' projects come from the
+workspace); encryption keys as MCP tools (`secrets_transit_encrypt`, `_decrypt`, `_sign`, `_verify`,
 `_public_key`; secrets #47: their rows narrow to one key); roll's mark as the server's icon
 (`serverInfo.icons`); a rule can narrow a secrets project to some of its encryption keys (`{id,
 index}`, as search's indices: signing with one key needn't be write on the project; secrets' transit
