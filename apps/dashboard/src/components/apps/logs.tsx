@@ -16,9 +16,9 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
   const [requests, setRequests] = useState(false);
   // A search back through the stored days, or the lines before a time, shown instead of the
   // live tail until left.
-  const [found, setFound] = useState<{ q?: string; before?: number; lines: LogLine[]; truncated: boolean; error?: string } | null>(null);
+  const [found, setFound] = useState<{ q?: string; before?: number; by?: string; lines: LogLine[]; truncated: boolean; error?: string } | null>(null);
   const [searching, setSearching] = useState(false);
-  const read = async (q: { q?: string; before?: number }) => {
+  const read = async (q: { q?: string; before?: number; by?: string }) => {
     setSearching(true);
     try {
       const got = await appsApi.readLogs(service, env, { ...q, since: Date.now() - 7 * 86_400_000, instance: instance || undefined, http: requests, tail: q.q ? 2000 : 500 });
@@ -107,6 +107,11 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
               </button>
             ))}
           </div>
+          {requests && (
+            <button type="button" className={btn} disabled={searching} onClick={() => void read({ by: "any" })} title="Only the requests roll answered itself: an allow list, a firewall rule, a rate limit, a private environment, maintenance, a wake that failed">
+              Turned away
+            </button>
+          )}
           {filter.trim() && !requests && (
             <button type="button" className={btn} disabled={searching} onClick={() => search()} title="Search the stored logs of the last 7 days, not just what's here">
               {searching ? "Searching…" : "Search 7 days"}
@@ -140,7 +145,12 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
           {found.error ? (
             <span className="text-danger">The search failed: {found.error}</span>
           ) : (
-            found.q ? (
+            found.by ? (
+              <>
+                {found.lines.length} {found.lines.length === 1 ? "request" : "requests"} roll answered itself in the last 7 days
+                {found.truncated && " (the newest)"}
+              </>
+            ) : found.q ? (
               <>
                 {found.truncated ? `The newest ${found.lines.length}` : found.lines.length} {found.lines.length === 1 ? "line" : "lines"} with “{found.q}” in the last 7 days
                 {found.truncated && " (more matched: narrow the search)"}
