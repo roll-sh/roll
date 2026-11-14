@@ -169,8 +169,11 @@ impl Secrets {
             {
                 add(Issue::Weak, w.clone());
             }
+            // Judged at write by the value; a link's secret field (or an older row's name) here, and
+            // only for a name a framework sends to browsers.
             let linked = || link.as_deref().and_then(|l| serde_json::from_str::<crate::Link>(l).ok());
-            if let Some(p) = public.clone().or_else(|| crate::strength::browser_exposure(key, None, self.secret_field(linked().as_ref()).as_deref())) {
+            let judged = || crate::strength::browser_exposure(key, None, self.secret_field(linked().as_ref()).as_deref());
+            if let Some(p) = public.clone().or_else(|| crate::strength::browser_named(key).then(judged).flatten()) {
                 add(Issue::Public, p);
             }
             if e.protected

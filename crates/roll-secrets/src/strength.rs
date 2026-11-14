@@ -97,6 +97,11 @@ const SERVER_ONLY: &[(&str, &str)] = &[
 /// browser keys, so they aren't enough here).
 const SECRET_WORDS: &[&str] = &["SECRET", "PASSWORD", "PASSWD", "PASSPHRASE", "PRIVATE_KEY", "SIGNING_KEY", "SERVICE_ROLE"];
 
+/// Whether a framework puts `key` in the browser bundle (its name's prefix): the cheap check first.
+pub(crate) fn browser_named(key: &str) -> bool {
+    BROWSER.iter().any(|(p, _)| key.len() >= p.len() && key[..p.len()].eq_ignore_ascii_case(p))
+}
+
 /// Why `key` would hand a credential to every visitor of a site built with it: a framework puts its
 /// prefix in the browser bundle, and its value is a server's credential (by its shape, a secret
 /// field of a linked resource, `secret_link`, or its own name). None for anything else.
