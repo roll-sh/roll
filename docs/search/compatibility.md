@@ -26,8 +26,8 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
 - Of the 3808 tests that pass on Elasticsearch 9.5.5 (and run here), roll passes **3808** (100%); every x-pack clients test passes.
   <!-- test-search: roll >= 3810 -->
 - Elasticsearch's module, plugin and x-pack YAML suites outside `test/free` (67 suites, 6,349
-  tests; [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 5,128,
-  **4,967 of the 5,541** that pass on Elasticsearch 9.5.5 (90%), each run like its suite's own
+  tests; [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 5,131,
+  **4,970 of the 5,541** that pass on Elasticsearch 9.5.5 (90%), each run like its suite's own
   test cluster (a full run of every suite at `a038254bd`, 2026-11-14). 28 suites pass every
   test Elasticsearch passes. What's left, largest first: x-pack `platinum` (1,064 of 1,412;
   machine learning is most of it), plugins roll doesn't ship (the `analysis-icu`, `-kuromoji`,
@@ -37,8 +37,7 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   `reindex-management` (none), `eql` (27 of 39), `mapper-extras` and `mapper-unsigned-long` (13
   and 12 short), `logsdb` (225 of 234: `_ignored_source` binary entries, the `@timestamp` doc
   values skipper), runtime fields (243 of 248: `geo_bounds` of `geo_point` runtime fields,
-  highlighting them, `ip` term tie order), `ingest-common` (172 of 175: a pipeline that changes
-  the target index). In `platinum` besides machine learning: `geo_shape` runtime fields,
+  highlighting them, `ip` term tie order). In `platinum` besides machine learning: `geo_shape` runtime fields,
   `geo_bounds` of shapes crossing the dateline, dateline-crossing `geohex` cells in the
   `geo_grid` processor, synthetic `_source` order of `counted_keyword` values.
 - The OpenSearch 3.9.0 suite (opensearch dialect): 1455 of 1506 pass — every test that passes
@@ -217,7 +216,7 @@ the discovery/store plugins.
 | `data-streams` | `modules/data-streams` | security | 170 | 159 | 159 | 159 | 0 |
 | `dot-prefix-validation` | `modules/dot-prefix-validation` | security | 6 | 6 | 2 | 2 | 4 |
 | `ingest-attachment` | `modules/ingest-attachment` | plain | 10 | 10 | 0 | 0 | 10 |
-| `ingest-common` | `modules/ingest-common` | security | 176 | 175 | 172 | 172 | 3 |
+| `ingest-common` | `modules/ingest-common` | security | 176 | 175 | 175 | 175 | 0 |
 | `ingest-ip-location` | `modules/ingest-ip-location` | plain | 21 | 1 | 0 | 0 | 1 |
 | `ingest-otel` | `modules/ingest-otel` | plain | 13 | 13 | 0 | 0 | 13 |
 | `ip-location` | `modules/ip-location` | plain | 4 | 1 | 0 | 0 | 1 |
@@ -278,13 +277,13 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | **6,349** | **5,541** | **5,128** | **4,967** | **574** |
+| **total** | | | **6,349** | **5,541** | **5,131** | **4,970** | **571** |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
 <!-- test-search: data-streams >= 159 -->
 <!-- test-search: dot-prefix-validation >= 2 -->
-<!-- test-search: ingest-common >= 172 -->
+<!-- test-search: ingest-common >= 175 -->
 <!-- test-search: lang-expression >= 3 -->
 <!-- test-search: lang-mustache >= 18 -->
 <!-- test-search: lang-painless >= 337 -->
