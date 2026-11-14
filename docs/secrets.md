@@ -1604,19 +1604,16 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **A project's own certificate authority** (Vault's PKI engine, Infisical's PKI): a CA per
-   project (its key sealed like a value), and `dynamic` links that issue a short-lived TLS
-   certificate and key per lease for the names the CA's policy allows, for mTLS between services.
-2. **SSH certificates** from a project's CA (Vault's SSH engine): a short-lived user certificate
+1. **SSH certificates** from a project's CA (Vault's SSH engine): a short-lived user certificate
    per lease for the principals the policy allows.
-3. **AWS through roll's issuer** (once #38 and #43 land): `AssumeRoleWithWebIdentity` with roll's
+2. **AWS through roll's issuer** (once #38 and #43 land): `AssumeRoleWithWebIdentity` with roll's
    own token, so roll needs no AWS keys of its own and the trust policy pins `sub` as GCP's and
    Azure's do.
-4. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
+3. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
    customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
-5. **Products say who owns a resource**, so a person's project can link their own databases,
+4. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams. Waits on products serving signed-in people.
-6. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
+5. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
    besides its owner.
 
 Open pull requests after this one:
@@ -1641,6 +1638,8 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#44, a project's own certificate authority** (after #20): short-lived TLS certificates for the
+  names its name-constrained CA allows, dynamic or managed; checked with a real TLS handshake.
 - **#43, dynamic GCP and Azure credentials** (after #20): roll as an OIDC issuer
   (`/v1/secrets/oidc`); GCP's workload identity federation and Azure's federated credentials trust
   its token for one project, checked with a decoy project at registration.
