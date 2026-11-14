@@ -316,6 +316,12 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   (roll secrets' flag): nothing of a protected environment resolves, whether directly, by
   reference, by import or through the base. The preview gets its own overrides and links. Only
   a project with `secrets.allow_production` and a trusted change resolve without it.
+- **No dynamic credentials.** A preview resolves with `dynamic: false` (as roll apps' resolver
+  does): a dynamic link (a per-lease database login) would be issued afresh at each service
+  start and job under a lease nobody renews, and lost with its TTL. Such a key is left out and
+  named as a problem ("a dynamic credential, which a preview can't renew; link it managed or
+  live for previews"). A roll secrets from before the field (#20 without #62) refuses it, and the
+  adapter asks again without it.
 - **Production secrets are never inherited unless the project allows it.** A base named
   `production` or `prod` is refused unless `secrets.allow_production` is true, and a fork's
   preview never gets them, whatever the setting says.

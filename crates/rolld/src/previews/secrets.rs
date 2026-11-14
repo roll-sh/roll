@@ -42,7 +42,22 @@ impl roll_previews::ports::Secrets for Secrets {
 
     async fn resolve(&self, project: &str, env: &str, untrusted: bool) -> anyhow::Result<roll_previews::ports::Resolved> {
         let path = format!("/v1/secrets/projects/{}/environments/{}/resolve", seg(project), seg(env));
-        match self.0.post(&path, json!({ "path": "/", "consumer": format!("preview:{env}"), "untrusted": untrusted })).await {
+        // No dynamic credentials (`dynamic: false`, as roll apps' resolver asks): each resolve
+        // would issue a new one under a lease nobody renews, and the preview would lose it with
+        // its TTL. Those keys come back named in `dynamic` instead. A roll secrets from before the
+        // field refuses it (unknown fields are a 400): asked again without it.
+        let body = |dynamic: bool| {
+            let mut b = json!({ "path": "/", "consumer": format!("preview:{env}"), "untrusted": untrusted });
+            if !dynamic {
+                b["dynamic"] = json!(false);
+            }
+            b
+        };
+        let answer = match self.0.post(&path, body(false)).await {
+            Err(e) if e.downcast_ref::<Refused>().is_some_and(|r| r.status == StatusCode::BAD_REQUEST && r.error.contains("dynamic")) => self.0.post(&path, body(true)).await,
+            other => other,
+        };
+        match answer {
             Ok(v) => Ok(roll_previews::ports::Resolved {
                 values: v["values"].as_object().into_iter().flatten().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect(),
                 problems: v["problems"]
@@ -50,6 +65,7 @@ impl roll_previews::ports::Secrets for Secrets {
                     .into_iter()
                     .flatten()
                     .map(|p| format!("{}: {}", p["key"].as_str().unwrap_or("?"), p["problem"].as_str().unwrap_or("doesn't resolve")))
+                    .chain(v["dynamic"].as_array().into_iter().flatten().filter_map(|k| k.as_str()).map(|k| format!("{k}: a dynamic credential, which a preview can't renew; link it managed or live for previews")))
                     .collect(),
             }),
             Err(e) if is_404(&e) => Ok(Default::default()),
