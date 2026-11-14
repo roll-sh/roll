@@ -292,6 +292,7 @@ fn api_capabilities(api: routes::Api) -> &'static [&'static str] {
         ],
         IndicesModifyDataStream => &["data_streams.modify.delete_index"],
         EsqlQuery | EsqlAsyncQuery => crate::xpack::esql::CAPABILITIES,
+        EqlSearch => &["filters_on_keys_fix"],
         EsqlGetView => &["view_index_abstraction"],
         EsqlPutView => &["view_index_abstraction", "views_put_serverless_scope"],
         EsqlPutDataSource | EsqlGetDataSource | EsqlDeleteDataSource | EsqlDeleteDataset => &["data_sources", "data_sources_serverless_scope"],

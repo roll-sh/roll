@@ -26,15 +26,15 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
 - Of the 3808 tests that pass on Elasticsearch 9.5.5 (and run here), roll passes **3808** (100%); every x-pack clients test passes.
   <!-- test-search: roll >= 3810 -->
 - Elasticsearch's module, plugin and x-pack YAML suites outside `test/free` (67 suites, 6,349 tests;
-  [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 5,158, **4,997 of
+  [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 5,170, **5,009 of
   the 5,541** that pass on Elasticsearch 9.5.5 (90%), each run like its suite's own test cluster (a
   full run of every suite at `1dce30b61` plus the dot-prefix warnings, 2026-11-14; `lang-mustache`,
-  `rank-eval` and `ilm` rerun since). 32 suites pass every test Elasticsearch passes. What's left,
+  `rank-eval`, `ilm` and `eql` rerun since). 33 suites pass every test Elasticsearch passes. What's left,
   largest first: x-pack `platinum` (1,064 of 1,412; machine learning is most of it), plugins roll
   doesn't ship (the `analysis-icu`, `-kuromoji`, `-nori`, `-phonetic`, `-smartcn`, `-stempel` and
   `-ukrainian` analyzers, `mapper-annotated-text`, `-murmur3` and `-size`, `ingest-attachment`,
   `ingest-otel`, `prometheus`), `apm-data`'s templates and pipelines (1 of 26), cross-cluster
-  replication, snapshot lifecycle management and `reindex-management` (none), `eql` (27 of 39),
+  replication, snapshot lifecycle management and `reindex-management` (none),
   `mapper-extras` (133 of 143: `match_only_text` synthetic source, `search_as_you_type`
   highlighting), `mapper-unsigned-long` (33 of 34: a `terms` aggregation across `long` and
   `unsigned_long` indices), `logsdb` (225 of 234: `_ignored_source` binary entries, the `@timestamp`
@@ -246,7 +246,7 @@ the discovery/store plugins.
 | `downsample` | `x-pack/plugin/downsample/qa/rest:downsample` | plain | 68 | 59 | 58 | 58 | 1 |
 | `downsample-with-security` | `x-pack/plugin/downsample/qa/rest:downsample-with-security` | security | 1 | 1 | 1 | 1 | 0 |
 | `ent-search` | `x-pack/plugin/ent-search` | security | 371 | 371 | 371 | 371 | 0 |
-| `eql` | `x-pack/plugin/eql/qa/rest` | basic | 39 | 39 | 27 | 27 | 12 |
+| `eql` | `x-pack/plugin/eql/qa/rest` | basic | 39 | 39 | 39 | 39 | 0 |
 | `fleet` | `x-pack/plugin/fleet` | security-basic | 21 | 21 | 21 | 21 | 0 |
 | `ilm` | `x-pack/plugin/ilm` | plain | 27 | 27 | 27 | 27 | 0 |
 | `kql` | `x-pack/plugin/kql` | plain | 34 | 34 | 34 | 34 | 0 |
@@ -279,7 +279,7 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | **6,349** | **5,541** | **5,158** | **4,997** | **544** |
+| **total** | | | **6,349** | **5,541** | **5,170** | **5,009** | **532** |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
@@ -303,7 +303,7 @@ the discovery/store plugins.
 <!-- test-search: downsample >= 58 -->
 <!-- test-search: downsample-with-security >= 1 -->
 <!-- test-search: ent-search >= 371 -->
-<!-- test-search: eql >= 27 -->
+<!-- test-search: eql >= 39 -->
 <!-- test-search: fleet >= 21 -->
 <!-- test-search: ilm >= 27 -->
 <!-- test-search: kql >= 34 -->
