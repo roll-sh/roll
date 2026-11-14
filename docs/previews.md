@@ -1323,29 +1323,39 @@ Ranked by what a person notices first. Done so far:
    (a `deploy`); previews holds no power of its own there. Production gets the preview's image
    as is (no build) with its own variables (live in `scripts/preview-apps.sh`: production served
    main, then the change's page). It merges into #28 with #26.
-2. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
+2. **Flaky screenshots told apart from changes** (Argos's and Chromatic's flake detection): a
+   page that differs from main is taken again at the same head; if the two takes differ from each
+   other, the page is unstable (an animation `hide` missed, a timestamp, a random avatar), shown
+   so with where it moved, and the visual review doesn't wait on it.
+3. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
    a preview reaches real people, but its code can still call any API (a payment provider's
    sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
    (today), `"roll"` (only roll's own products and the preview's branches) or a list of hosts;
    roll's runtime puts the containers on a network that allows only that (Docker's internal
    networks plus a small forwarding proxy), and what was refused is said in the activity.
+   A second look (2026-11-14): roll's runtime makes service containers through `code-preview`'s
+   Docker isolation (shared with roll code's checks), publishes each one's port on 127.0.0.1 for
+   its proxy, and every data branch is reached at `host.docker.internal`. An internal network
+   can't publish ports, and cuts the host off, so it means the proxy reaching containers by their
+   address on that network and a forwarder for each product port: a change to the isolation
+   roll code shares, not to previews alone.
    Ranked down after a look: enforcement needs either per-container firewall rules (not on a
    host whose firewall roll mustn't touch) or an internal network with a forwarding sidecar for
    every product port (an image of its own, and roll code's runner changed); on the cloud fleet
    it's security groups, with the cloud thread.
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-5. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+7. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1358,12 +1368,12 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-7. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+8. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
    Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
    minutes even with the parent's history reporting `end` past it, where pg-control's own test
    (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
    old; the live script will check it once this is understood.
-8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+9. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.
