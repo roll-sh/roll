@@ -578,6 +578,13 @@ async fn oauth_connects_an_mcp_client() {
     assert_eq!(s, StatusCode::CREATED, "{client}");
     assert!(client.as_object().unwrap().values().all(|v| !v.is_null()), "RFC 7591: unset fields are left out: {client}");
     let client_id = client["client_id"].as_str().unwrap();
+    // Registration stores nothing (a flood has nothing to fill): the id is the client, signed, and
+    // a forged one is no client.
+    assert!(client_id.starts_with("rlc_"), "{client_id}");
+    assert!(d.access.store.list_clients().unwrap().is_empty(), "nothing kept before consent");
+    let (body, _) = client_id.split_once('.').unwrap();
+    let forged = format!("{body}.AAAA");
+    assert!(d.access.store.client(&forged).unwrap().is_none(), "a forged id is no client");
     let bad = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "redirect_uris": ["http://evil.example/cb"] }))).await;
     assert_eq!(bad.1["error"], "invalid_redirect_uri");
 
@@ -590,6 +597,7 @@ async fn oauth_connects_an_mcp_client() {
     });
     let (s, out) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(consent)).await;
     assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(d.access.store.list_clients().unwrap().len(), 1, "kept once a person consented");
     let url = url::Url::parse(out["redirect"].as_str().unwrap()).unwrap();
     let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
     assert_eq!(q["state"], "xyz");
