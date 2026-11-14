@@ -145,7 +145,8 @@ gets its own cluster, deleted afterwards).
 The dashboard (`/dashboard/search/<cluster>`) lists indices; selecting one opens its documents
 (paged `_search` with a query string, as rows or as a table: the most common fields by default,
 a column picker over the page's paths and the mapping's leaf fields, kept per index in the
-browser, and click-to-sort on sortable columns, `.keyword` sub-fields for text), mapping (a
+browser, and click-to-sort on sortable columns, `.keyword` sub-fields for text; a time-based
+index adds a time range and documents over time, newest first), mapping (a
 field table: types, inference endpoints, vector settings, analyzers; or the JSON) and settings,
 with refresh and delete. Import fills an index from a file (NDJSON, a JSON array, or CSV whose
 columns are typed from the first 1,000 rows), previewed first and sent in `_bulk` batches through
@@ -263,7 +264,10 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    new index from a field editor (types and their options, objects from dotted names,
    `dense_vector` or OpenSearch's `knn_vector`, `semantic_text` only on an endpoint the cluster can
    run: the default ELSER needs machine learning nodes; the request shown or opened in the
-   console). Next: index templates and lifecycle policies listed per index, `_profile` of a
+   console), and a time-based index (`@timestamp`, `timestamp`, or its only top-level date field)
+   browsed as Discover does: range presets, documents over time (`auto_date_histogram`, counted
+   from the points tree), a click on a bar narrows to it, newest first unless a column sorts.
+   Next: index templates and lifecycle policies listed per index, `_profile` of a
    console search drawn as a tree, saved console requests. Signed-in users who aren't admins follow
    accounts' phase 2: today every product but code, agents and projects answers them 403
    (docs/accounts.md), search included.

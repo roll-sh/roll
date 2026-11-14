@@ -465,11 +465,11 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
         title="Indices"
         aside={
           <span className="flex gap-2">
-            <button onClick={() => setCreating(true)} disabled={creating} className={btn} title="Create an index with its fields mapped">
-              <Plus className="size-3.5" /> New index
+            <button onClick={() => setCreating(true)} disabled={creating} className={btn} title="Create an index with its fields mapped" aria-label="New index">
+              <Plus className="size-3.5" /> <span className="hidden sm:inline">New index</span>
             </button>
-            <button onClick={() => setImporting(true)} disabled={importing} className={btn} title="Index a JSON, NDJSON or CSV file">
-              <FileUp className="size-3.5" /> Import
+            <button onClick={() => setImporting(true)} disabled={importing} className={btn} title="Index a JSON, NDJSON or CSV file" aria-label="Import">
+              <FileUp className="size-3.5" /> <span className="hidden sm:inline">Import</span>
             </button>
             <button onClick={load} disabled={loading} className={btn}>
               <RefreshCw className={`size-3.5 ${loading ? "animate-spin motion-reduce:animate-none" : ""}`} /> Refresh

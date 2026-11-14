@@ -550,3 +550,43 @@ export function newIndexBody(fields: NewField[], dynamic: "true" | "strict", ope
   if (opensearch && fields.some((f) => f.name.trim() && f.type === "dense_vector")) body.settings = { "index.knn": true };
   return body;
 }
+
+/** A documents view's time range: the last stretch of time (`null`: all of it), or a span picked
+ * on the histogram (epoch ms, end excluded). */
+export type TimeRange = { last: string | null } | { gte: number; lt: number };
+
+export const TIME_PRESETS: { label: string; value: string | null }[] = [
+  { label: "15m", value: "15m" },
+  { label: "1h", value: "1h" },
+  { label: "24h", value: "24h" },
+  { label: "7d", value: "7d" },
+  { label: "30d", value: "30d" },
+  { label: "all", value: null },
+];
+
+/** The field a time-based index is browsed by: `@timestamp` (Elastic Common Schema, data
+ * streams), else `timestamp`, else its only top-level date field. */
+export function timeFieldOf(fields: MappedField[]): string | null {
+  const dates = fields.filter((f) => f.type === "date" || f.type === "date_nanos").map((f) => f.name);
+  for (const name of ["@timestamp", "timestamp"]) if (dates.includes(name)) return name;
+  const top = dates.filter((n) => !n.includes("."));
+  return top.length === 1 ? top[0] : null;
+}
+
+/** The `range` filter of a time range, or `null` for all time. */
+export function timeFilter(field: string, range: TimeRange): Record<string, unknown> | null {
+  if ("gte" in range) return { range: { [field]: { gte: range.gte, lt: range.lt, format: "epoch_millis" } } };
+  return range.last ? { range: { [field]: { gte: `now-${range.last}` } } } : null;
+}
+
+/** One bar of the documents-over-time histogram. */
+export interface TimeBucket {
+  key: number;
+  count: number;
+}
+
+/** The buckets of the documents view's `over_time` aggregation. */
+export function timeBuckets(resp: unknown): TimeBucket[] {
+  const b = (resp as { aggregations?: { over_time?: { buckets?: { key: number; doc_count: number }[] } } } | null)?.aggregations?.over_time?.buckets ?? [];
+  return b.map((x) => ({ key: x.key, count: x.doc_count }));
+}

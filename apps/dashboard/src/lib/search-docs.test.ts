@@ -1,7 +1,7 @@
 // Tests of the index browser's document helpers (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { cellText, columnsOf, deleteRequest, flatten, formatJson, hitSources, jsonSpans, mappingNotes, mappingRows, newIndexBody, newIndexProblem, parseDocument, sourceCells, tableColumns, writeRequest } from "./search-docs";
+import { cellText, columnsOf, deleteRequest, flatten, formatJson, hitSources, jsonSpans, mappingNotes, mappingRows, newIndexBody, newIndexProblem, timeBuckets, timeFieldOf, timeFilter, parseDocument, sourceCells, tableColumns, writeRequest } from "./search-docs";
 
 test("flatten", () => {
   assert.deepEqual([...flatten({ a: 1, u: { name: "x", geo: { lat: 1 } }, tags: ["a", "b"], e: {}, n: null })], [
@@ -218,4 +218,15 @@ test("a new index's request from the field editor", () => {
   assert.match(newIndexProblem([{ name: "user", type: "keyword" }, { name: "user.name", type: "keyword" }], false) ?? "", /also holds/);
   assert.match(newIndexProblem([{ name: "v", type: "dense_vector", dims: 5000 }], false) ?? "", /1 to 4096/);
   assert.match(newIndexProblem([{ name: "body", type: "semantic_text" }], false) ?? "", /pick an embeddings endpoint/);
+});
+
+test("time-based indices are browsed by their time field", () => {
+  const f = (name: string, type = "date") => ({ name, type });
+  assert.equal(timeFieldOf([f("created"), f("@timestamp"), f("title", "text")]), "@timestamp");
+  assert.equal(timeFieldOf([f("created"), f("event.ingested")]), "created");
+  assert.equal(timeFieldOf([f("created"), f("updated")]), null);
+  assert.deepEqual(timeFilter("@timestamp", { last: "15m" }), { range: { "@timestamp": { gte: "now-15m" } } });
+  assert.equal(timeFilter("@timestamp", { last: null }), null);
+  assert.deepEqual(timeFilter("t", { gte: 1, lt: 2 }), { range: { t: { gte: 1, lt: 2, format: "epoch_millis" } } });
+  assert.deepEqual(timeBuckets({ aggregations: { over_time: { buckets: [{ key: 10, doc_count: 3 }] } } }), [{ key: 10, count: 3 }]);
 });
