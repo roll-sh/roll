@@ -506,17 +506,37 @@ pub enum Requests {
 pub enum SshCasCmd {
     #[command(alias = "list")]
     Ls,
-    /// Make an SSH CA that signs for these logins.
+    /// Make an SSH CA that signs for these logins (user certificates) and/or the hosts under
+    /// these domains (host certificates).
     Add {
         name: String,
-        #[arg(long = "principal", required = true)]
+        #[arg(long = "principal", required_unless_present = "host_domains")]
         principals: Vec<String>,
         /// The longest a certificate lives (hours, 168 at most; 24 by default).
         #[arg(long)]
         max_hours: Option<u32>,
+        /// A DNS domain whose hosts it signs host keys for (repeatable).
+        #[arg(long = "host-domain")]
+        host_domains: Vec<String>,
+        /// The longest a host certificate lives (days, 397 at most; 90 by default).
+        #[arg(long)]
+        max_host_days: Option<u32>,
     },
     /// Print an SSH CA's public key, for servers' TrustedUserCAKeys.
     Key { id: String },
+    /// Sign a server's host key (its .pub file, or stdin) for its names; prints the certificate
+    /// for sshd's HostCertificate.
+    SignHost {
+        id: String,
+        #[arg(default_value = "-")]
+        public_key: String,
+        #[arg(long = "host", required = true)]
+        hosts: Vec<String>,
+        #[arg(long)]
+        days: Option<u32>,
+    },
+    /// Print the known_hosts line that trusts the hosts an SSH CA signs.
+    KnownHosts { id: String },
     Rm { id: String },
 }
 
@@ -1255,10 +1275,13 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {}  up to {} h", s(&a["id"]), s(&a["name"]), p.join(","), a["max_hours"]);
                 }
             }
-            SshCasCmd::Add { name, principals, max_hours } => {
-                let mut body = json!({ "name": name, "principals": principals });
+            SshCasCmd::Add { name, principals, max_hours, host_domains, max_host_days } => {
+                let mut body = json!({ "name": name, "principals": principals, "host_domains": host_domains });
                 if let Some(h) = max_hours {
                     body["max_hours"] = json!(h);
+                }
+                if let Some(d) = max_host_days {
+                    body["max_host_days"] = json!(d);
                 }
                 let v = c.call(Method::POST, &format!("{}/ssh-cas", c.base()), Some(body)).await?;
                 if json_out {
@@ -1270,6 +1293,28 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 let v = c.call(Method::GET, &format!("{}/ssh-cas", c.base()), None).await?;
                 let ca = v.as_array().into_iter().flatten().find(|a| a["id"] == id.as_str() || a["name"] == id.as_str()).ok_or_else(|| anyhow::anyhow!("no SSH CA {id}"))?;
                 println!("{}", s(&ca["public_key"]));
+            }
+            SshCasCmd::SignHost { id, public_key, hosts, days } => {
+                let line = if public_key == "-" {
+                    let mut t = String::new();
+                    std::io::stdin().read_to_string(&mut t).context("reading the host key from stdin")?;
+                    t
+                } else {
+                    std::fs::read_to_string(&public_key).with_context(|| format!("reading {public_key}"))?
+                };
+                let list = c.call(Method::GET, &format!("{}/ssh-cas", c.base()), None).await?;
+                let ca = list.as_array().into_iter().flatten().find(|a| a["id"] == id.as_str() || a["name"] == id.as_str()).ok_or_else(|| anyhow::anyhow!("no SSH CA {id}"))?;
+                let v = c.call(Method::POST, &format!("{}/ssh-cas/{}/sign-host", c.base(), enc(&s(&ca["id"]).to_string())), Some(json!({ "public_key": line.trim(), "hosts": hosts, "days": days }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("{}", s(&v["certificate"]));
+                eprintln!("sshd: HostCertificate <this file>; clients: {}", s(&v["known_hosts"]));
+            }
+            SshCasCmd::KnownHosts { id } => {
+                let v = c.call(Method::GET, &format!("{}/ssh-cas", c.base()), None).await?;
+                let ca = v.as_array().into_iter().flatten().find(|a| a["id"] == id.as_str() || a["name"] == id.as_str()).ok_or_else(|| anyhow::anyhow!("no SSH CA {id}"))?;
+                println!("{}", ca["known_hosts"].as_str().ok_or_else(|| anyhow::anyhow!("{id} signs no hosts: make one with --host-domain"))?);
             }
             SshCasCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/ssh-cas/{}", c.base(), enc(&id)), None).await?;
@@ -2596,13 +2641,20 @@ pub async fn ssh_command(api: &Api, a: Ssh) -> anyhow::Result<()> {
         f.open(&id).and_then(|mut file| file.write_all(key.as_bytes())).context("writing the key")?;
     }
     std::fs::write(&cert_path, format!("{}\n", cert.trim())).context("writing the certificate")?;
-    let status = std::process::Command::new("ssh")
-        .arg("-i")
-        .arg(&id)
-        .arg("-o")
-        .arg(format!("CertificateFile={}", cert_path.display()))
-        .arg("-o")
-        .arg("IdentitiesOnly=yes")
+    // Hosts the project's SSH CAs sign are trusted by their CA, not on first use: their
+    // @cert-authority lines go first, then the user's own known_hosts.
+    let trusted: Vec<String> = match c.call(Method::GET, &format!("{}/ssh-cas", c.base()), None).await {
+        Ok(cas) => cas.as_array().into_iter().flatten().filter_map(|ca| ca["known_hosts"].as_str().map(str::to_string)).collect(),
+        Err(_) => vec![],
+    };
+    let mut cmd = std::process::Command::new("ssh");
+    cmd.arg("-i").arg(&id).arg("-o").arg(format!("CertificateFile={}", cert_path.display())).arg("-o").arg("IdentitiesOnly=yes");
+    if !trusted.is_empty() {
+        let known = dir.path().join("known_hosts");
+        std::fs::write(&known, trusted.join("\n") + "\n").context("writing the CA's known_hosts")?;
+        cmd.arg("-o").arg(format!("UserKnownHostsFile={} ~/.ssh/known_hosts", known.display()));
+    }
+    let status = cmd
         .args(&a.args)
         .status()
         .context("running ssh")?;

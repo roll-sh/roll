@@ -1,10 +1,11 @@
-import { Check, Copy, Plus, Terminal, Trash2 } from "lucide-react";
+import { Check, Copy, Plus, Server, Terminal, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { SshCa } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, useLoad } from "./ui";
 
 const LOGIN = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$/;
+const DOMAIN = /^(?!-)[a-z0-9-]{1,63}(\.(?!-)[a-z0-9-]{1,63})*$/;
 
 /**
  * SSH CAs (docs/secrets.md, "SSH certificates"): a project's own SSH CA that signs short-lived user
@@ -18,22 +19,25 @@ export function SshCas() {
   const [name, setName] = useState("");
   const [logins, setLogins] = useState("");
   const [hours, setHours] = useState("8");
+  const [hostDomains, setHostDomains] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const principals = logins.split(",").map((l) => l.trim()).filter(Boolean);
+  const domains = hostDomains.split(",").map((d) => d.trim().toLowerCase()).filter(Boolean);
   const h = Number(hours);
-  const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name) && principals.length > 0 && principals.every((p) => LOGIN.test(p)) && Number.isInteger(h) && h >= 1 && h <= 168;
+  const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name) && principals.length + domains.length > 0 && principals.every((p) => LOGIN.test(p)) && domains.every((d) => DOMAIN.test(d)) && Number.isInteger(h) && h >= 1 && h <= 168;
 
   const add = async () => {
     setBusy(true);
     setError(null);
     try {
-      await api.addSshCa({ name, principals, max_hours: h });
+      await api.addSshCa({ name, principals, max_hours: h, host_domains: domains });
       setAdding(false);
       setName("");
       setLogins("");
+      setHostDomains("");
       list.reload();
     } catch (e) {
       setError(errorText(e));
@@ -46,9 +50,9 @@ export function SshCas() {
       () => (setDeleting(null), list.reload()),
       (e) => (setDeleting(null), setError(errorText(e))),
     );
-  const copy = (c: SshCa) => {
-    void navigator.clipboard?.writeText(c.public_key);
-    setCopied(c.id);
+  const copy = (c: SshCa, what: "key" | "hosts") => {
+    void navigator.clipboard?.writeText(what === "key" ? c.public_key : (c.known_hosts ?? ""));
+    setCopied(`${c.id}:${what}`);
     setTimeout(() => setCopied(null), 1200);
   };
 
@@ -82,6 +86,10 @@ export function SshCas() {
             <span className="mb-1 block text-[11px] font-medium text-subtle">Logins it signs for (comma-separated)</span>
             <input value={logins} onChange={(e) => setLogins(e.target.value)} placeholder="deploy, ubuntu" spellCheck={false} className={`${field} font-mono text-[12px]`} />
           </label>
+          <label className="min-w-48 flex-1">
+            <span className="mb-1 block text-[11px] font-medium text-subtle">Host domains it signs servers for (optional)</span>
+            <input value={hostDomains} onChange={(e) => setHostDomains(e.target.value)} placeholder="svc.internal" spellCheck={false} className={`${field} font-mono text-[12px]`} />
+          </label>
           <label className="w-28">
             <span className="mb-1 block text-[11px] font-medium text-subtle">Longest (hours)</span>
             <input value={hours} onChange={(e) => setHours(e.target.value)} inputMode="numeric" className={`${field} font-mono text-[12px]`} />
@@ -103,13 +111,20 @@ export function SshCas() {
               <div key={c.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
                 <Terminal className="size-3.5 text-muted" />
                 <span className="font-mono text-[12px]">{c.name}</span>
-                <span className="min-w-0 truncate font-mono text-[11.5px] text-subtle">{c.principals.join(", ")}</span>
+                <span className="min-w-0 truncate font-mono text-[11.5px] text-subtle">
+                  {[...c.principals, ...(c.host_domains ?? []).map((d) => `hosts under ${d}`)].join(", ")}
+                </span>
                 <span className="text-[11px] text-subtle">up to {c.max_hours} h</span>
                 <span className="ml-auto text-[11px] text-subtle">
                   made {ago(c.created_at)} · <ActorMark who={c.created_by} />
                 </span>
-                <button className={ghost} onClick={() => copy(c)} aria-label={`Copy ${c.name}'s public key`} title="Copy the CA's public key, for servers' TrustedUserCAKeys">
-                  {copied === c.id ? <Check className="size-3.5 text-ok" /> : <Copy className="size-3.5" />}
+                {c.known_hosts && (
+                  <button className={ghost} onClick={() => copy(c, "hosts")} aria-label={`Copy ${c.name}'s known_hosts line`} title="Copy the known_hosts line (@cert-authority) that trusts the servers it signs; sign a server's key with roll secrets ssh-cas sign-host">
+                    {copied === `${c.id}:hosts` ? <Check className="size-3.5 text-ok" /> : <Server className="size-3.5" />}
+                  </button>
+                )}
+                <button className={ghost} onClick={() => copy(c, "key")} aria-label={`Copy ${c.name}'s public key`} title="Copy the CA's public key, for servers' TrustedUserCAKeys">
+                  {copied === `${c.id}:key` ? <Check className="size-3.5 text-ok" /> : <Copy className="size-3.5" />}
                 </button>
                 {deleting === c.id ? (
                   <span className="flex gap-1">

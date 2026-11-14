@@ -602,7 +602,7 @@ TLS certificates for services (mTLS between them), with no CA to run.
 A project's own SSH CA, as Vault's SSH engine signs them: short-lived user certificates instead of
 long-lived public keys on every server. Servers trust one CA key (`TrustedUserCAKeys`).
 
-- `POST …/ssh-cas {name, principals, max_hours?}` (admin; `roll secrets ssh-cas add NAME --principal
+- `POST …/ssh-cas {name, principals, max_hours?, host_domains?, max_host_days?}` (admin; `roll secrets ssh-cas add NAME --principal
   deploy`, the Integrations tab) makes an Ed25519 key, sealed with the project's data key and bound to
   the CA. Its public key (`ssh-ed25519 …`, `roll secrets ssh-cas key NAME`) is what servers trust.
   `principals` are the logins it signs for; `max_hours` (24 by default, a week at most) is the longest
@@ -621,7 +621,23 @@ long-lived public keys on every server. Servers trust one CA key (`TrustedUserCA
   environment's `SSH_CERT` and `SSH_KEY` (`--cert`, `--identity` for other keys; a dynamic link gets
   a pair for this session), writes them to a private temporary directory (0700, the key 0600), runs
   `ssh -i … -o CertificateFile=… -o IdentitiesOnly=yes` with the rest of the arguments, deletes both
-  when it exits, and exits with ssh's code. A person never handles the key.
+  when it exits, and exits with ssh's code. A person never handles the key. Hosts the project's
+  SSH CAs sign are trusted by their CA (their `@cert-authority` lines are added before the user's
+  own `known_hosts`), so there's no "trust this host?" on first use.
+- **Host certificates**, as Vault's SSH engine signs host keys: an SSH CA with `host_domains`
+  (`--host-domain svc.internal`; `max_host_days`, 90 by default, 397 at most) signs a server's own
+  public key for its names. `POST …/ssh-cas/{id}/sign-host {public_key, hosts, days?}` (admin, since
+  a host certificate lets a server stand in for those names; audited; `roll secrets ssh-cas
+  sign-host NAME /etc/ssh/ssh_host_ed25519_key.pub --host db1.svc.internal`) takes the key line
+  (Ed25519, ECDSA P-256/384/521, or RSA of 2048–16384 bits, parsed with bounds), checks each name is
+  under a host domain (a `*.` one level under one too), and answers the `…-cert-v01@openssh.com`
+  line for sshd's `HostCertificate` and the `known_hosts` line clients add: `@cert-authority
+  *.svc.internal,svc.internal ssh-ed25519 …` (`roll secrets ssh-cas known-hosts NAME`, the CA's row
+  in the Integrations tab). The server's key never leaves it. A CA may sign users, hosts or both.
+  Checked against OpenSSH 10: `ssh-keygen -L` reads all three key types' certificates as host
+  certificates, and `ssh -o StrictHostKeyChecking=yes` with only the `@cert-authority` line accepts
+  a real `sshd`'s Ed25519, ECDSA and RSA host certificates and refuses another name (`Host key
+  verification failed`).
 
 ## Consumption
 
@@ -653,7 +669,8 @@ roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
 roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain]
                      | certs ID | revoke ID SERIAL | rm ID
-roll secrets ssh-cas ls | add NAME --principal P… [--max-hours N] | key ID | rm ID
+roll secrets ssh-cas ls | add NAME [--principal P…] [--max-hours N] [--host-domain D…] [--max-host-days N] | key ID
+                     | sign-host ID [KEY.pub|-] --host H… [--days N] | known-hosts ID | rm ID
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 roll ssh [-p project] [-e production] [--cert SSH_CERT] [--identity SSH_KEY] -- <ssh arguments…>
 ```
@@ -1499,8 +1516,9 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/crl/{id}` | | the CA's CRL, DER (`application/pkix-crl`) or `?format=pem`; no token |
 | `POST /cas/{id}/sign` | `{csr, days?, ttl_minutes?}` | `{certificate, ca, serial, names, not_after}` (`write`, audited); 400 for a name outside the policy or a lifetime past `max_days` |
 | `GET /ssh-cas` | | `SshCa[]` (`read` on the project; public keys, never private ones) |
-| `POST /ssh-cas` | `{name, principals, max_hours?}` | 201 `SshCa` (`admin`) |
+| `POST /ssh-cas` | `{name, principals, max_hours?, host_domains?, max_host_days?}` | 201 `SshCa` (`admin`) |
 | `DELETE /ssh-cas/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `POST /ssh-cas/{id}/sign-host` | `{public_key, hosts, days?}` | `{certificate, known_hosts, serial, hosts, valid_before}` (`admin`, audited); 400 for a name outside `host_domains` or a weak key |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
 

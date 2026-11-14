@@ -1139,6 +1139,43 @@ async fn an_ssh_ca_signs_short_lived_user_certificates_for_its_principals() {
     let public = ed25519_dalek::VerifyingKey::from_bytes(ca_key[ca_key.len() - 32..].try_into().unwrap()).unwrap();
     public.verify(&blob[..signed_to], &ed25519_dalek::Signature::from_slice(&sig[sig.len() - 64..]).unwrap()).expect("the CA's signature");
     assert_eq!(api.call(Method::DELETE, &format!("/ssh-cas/{}", ca["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
+    // Host certificates: a server's own key signed for names under the CA's host domains, and the
+    // known_hosts line that trusts them.
+    let hosts = api.ok(Method::POST, "/ssh-cas", Some(json!({ "name": "fleet", "principals": [], "host_domains": ["svc.internal"] }))).await;
+    let hosts_pub = hosts["public_key"].as_str().unwrap();
+    assert_eq!(hosts["known_hosts"], format!("@cert-authority *.svc.internal,svc.internal {hosts_pub}"));
+    let server = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
+    let mut server_blob = vec![];
+    for part in [&b"ssh-ed25519"[..], &server.verifying_key().to_bytes()[..]] {
+        server_blob.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        server_blob.extend_from_slice(part);
+    }
+    let line = format!("ssh-ed25519 {} root@db1", base64::engine::general_purpose::STANDARD.encode(&server_blob));
+    let sign_at = format!("/ssh-cas/{}/sign-host", hosts["id"].as_str().unwrap());
+    let sign = |hosts: Value| api.call(Method::POST, &sign_at, Some(json!({ "public_key": line, "hosts": hosts, "days": 30 })));
+    assert_eq!(sign(json!(["db1.example.com"])).await.0, StatusCode::BAD_REQUEST, "a name outside its domains");
+    let (s, signed) = sign(json!(["db1.svc.internal"])).await;
+    assert_eq!(s, StatusCode::OK, "{signed}");
+    let blob = base64::engine::general_purpose::STANDARD.decode(signed["certificate"].as_str().unwrap().split(' ').nth(1).unwrap()).unwrap();
+    let mut p = 0usize;
+    assert_eq!(take(&blob, &mut p), b"ssh-ed25519-cert-v01@openssh.com");
+    take(&blob, &mut p); // nonce
+    assert_eq!(take(&blob, &mut p), server.verifying_key().to_bytes(), "the server's own key");
+    p += 8;
+    assert_eq!(u32::from_be_bytes(blob[p..p + 4].try_into().unwrap()), 2, "a host certificate");
+    p += 4;
+    take(&blob, &mut p); // key id
+    assert_eq!(&take(&blob, &mut p)[4..], b"db1.svc.internal");
+    p += 16;
+    for _ in 0..3 {
+        take(&blob, &mut p);
+    }
+    let signer = take(&blob, &mut p);
+    let signed_to = p;
+    let sig = take(&blob, &mut p);
+    let fleet_key = base64::engine::general_purpose::STANDARD.decode(hosts_pub.split(' ').nth(1).unwrap()).unwrap();
+    assert_eq!(signer, fleet_key);
+    ed25519_dalek::VerifyingKey::from_bytes(fleet_key[fleet_key.len() - 32..].try_into().unwrap()).unwrap().verify(&blob[..signed_to], &ed25519_dalek::Signature::from_slice(&sig[sig.len() - 64..]).unwrap()).expect("the CA's signature");
 }
 
 #[tokio::test]
