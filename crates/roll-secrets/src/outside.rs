@@ -167,9 +167,23 @@ fn check_role(r: &str) -> bool {
     (1..=63).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') && !r.as_bytes()[0].is_ascii_digit()
 }
 
-/// A password nobody chose: 40 letters and digits (nothing that needs quoting in SQL).
+/// A password nobody chose: 40 upper- and lowercase letters and digits, each class present
+/// (SQL Server's and Azure's complexity policy wants three of four classes; nothing needs quoting
+/// in SQL).
 fn password() -> String {
-    names::new_id("p", 40)[2..].to_string()
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    loop {
+        let mut out = String::with_capacity(40);
+        while out.len() < 40 {
+            let mut b = [0u8; 64];
+            getrandom::fill(&mut b).expect("system randomness");
+            // 248 = 4 × 62: no bias toward the first letters.
+            out.extend(b.iter().filter(|x| **x < 248).map(|x| ALPHABET[(*x % 62) as usize] as char).take(40 - out.len()));
+        }
+        if out.bytes().any(|b| b.is_ascii_uppercase()) && out.bytes().any(|b| b.is_ascii_lowercase()) && out.bytes().any(|b| b.is_ascii_digit()) {
+            return out;
+        }
+    }
 }
 
 const FIELDS: &[Field] = &[
