@@ -362,8 +362,10 @@ fn hex(b: &[u8]) -> String {
 pub(crate) struct CrlCache {
     signed: std::collections::HashMap<String, (i64, Arc<Vec<u8>>)>,
     pub(crate) revoked: std::collections::HashMap<String, u64>,
-    /// OCSP answers to requests without a nonce, by CA and request (ocsp.rs).
+    /// OCSP answers by CA and what they answer (ocsp.rs), and each CA's fresh signatures this
+    /// second.
     pub(crate) ocsp: std::collections::HashMap<(String, Vec<u8>), KeptAnswer>,
+    pub(crate) signing: std::collections::HashMap<String, (i64, u32)>,
 }
 
 impl CrlCache {
