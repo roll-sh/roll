@@ -870,6 +870,9 @@ async fn a_persons_token_past_the_policy_waits_for_an_admin() {
     assert!(hers.as_array().unwrap().iter().any(|g| g["kind"] == "oauth" && g["pending"] == true), "{hers}");
     let read = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]);
     let reveal = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "reveal": "allow" } }]);
+    // She's told first what waits (the builder and consent screen say so before she makes one).
+    let (_, me) = d.as_user("usr_alice", Method::GET, "/v1/access", None).await;
+    assert_eq!(me["approve_people"], json!(["reveal", "admin"]), "{me}");
     // Within the policy: it works at once.
     let (_, plain) = d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "reader", "rules": read }))).await;
     assert!(plain["grant"]["pending"].is_null(), "{plain}");

@@ -537,7 +537,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: the sixteenth review's #25 findings fixed: a person's OAuth connection past the policy
+Done lately: a person is told before making a token or connecting a client that it will wait for an admin (GitHub's "this token will require approval"; `approve_people` in `GET /v1/access`) (#25); the sixteenth review's #25 findings fixed: a person's OAuth connection past the policy
 waits too (it didn't), a waiting token's rules are frozen until an admin decides (an approval took
 whatever it had become), widening and waiting again are one transaction, admins' mail is cleaned
 names and once an hour per token, and tokens made before the policy show as `unapproved` in an

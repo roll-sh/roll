@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, toolsetCost, withToolsets, type Approval, type Preset } from "./access-api";
+import { approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -89,6 +89,10 @@ describe("toolsets", () => {
       { product: "redis", tools: 8, read_only: 4, context_tokens: 700 },
     ];
     expect(toolsetCost(costs, [], false)).toEqual({ tools: 58, tokens: 6500 });
+    // A person's token that reaches what the policy has an admin approve says so before it's made.
+    const person = { kind: "user" as const, user: { id: "usr_a", handle: "a" }, reach: ["workspace"], approve_people: ["admin" as const], locked: true };
+    const read = [{ product: "workspace", resources: "*" as const, actions: { read: "allow" as const } }];
+    expect([waitsForAdmin(person, read, false), waitsForAdmin(person, read, true), waitsForAdmin(person, [{ ...read[0], actions: { admin: "allow" as const } }], false), waitsForAdmin({ kind: "operator", locked: true }, read, true)]).toEqual([false, true, true, false]);
     expect(toolsetCost(costs, ["redis"], true)).toEqual({ tools: 7, tokens: 590 });
     expect(withToolsets("https://api.roll.sh/v1/mcp", ["postgres"], true)).toBe("https://api.roll.sh/v1/mcp?toolsets=postgres&readonly=1");
   });
