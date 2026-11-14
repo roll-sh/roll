@@ -647,7 +647,7 @@ pub struct Workloads(pub Arc<roll_access::Access>);
 impl roll_secrets::Workloads for Workloads {
     fn mint(&self, name: &str, rule: roll_auth::scope::Rule, ip_allow: Option<Vec<String>>, minutes: u32, owner: Option<&str>) -> roll_secrets::Result<roll_secrets::Minted> {
         let within = roll_auth::scope::Scope(vec![rule]);
-        let new = roll_access::store::NewGrant { name: name.chars().take(64).collect(), rules: within.clone(), expires_at: None, ip_allow: ip_allow.unwrap_or_default(), rate_per_minute: None, ask_otherwise: false };
+        let new = roll_access::store::NewGrant { name: name.chars().take(64).collect(), rules: within.clone(), expires_at: None, not_before: None, ip_allow: ip_allow.unwrap_or_default(), rate_per_minute: None, ask_otherwise: false, pending: false };
         let (access, owner) = (self.0.clone(), owner.map(str::to_string));
         // Logins run on the store's blocking threads (`blocking` in roll-secrets' api.rs), inside
         // the runtime: never call this from an async task, where `block_on` panics.
