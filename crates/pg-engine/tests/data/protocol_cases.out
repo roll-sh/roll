@@ -10,15 +10,15 @@ rf7_show	1 2 E{S=ERROR|C=22023|M=unsupported format code: 7|F=printtup.c|L=290|R
 rf7_named_again	1 2 T:7 ZT / E{S=ERROR|C=22023|M=unsupported format code: 7|F=printtup.c|L=290|R=printtup_prepare_info} ZE
 rf7_fetch_none	1 2 C:FETCH 0 ZT
 rf7_copyout	1 2 H d c C:COPY 1 ZI
-copy_bad_parse	G / E{S=ERROR|C=08P01|M=unexpected message type 0x50 during COPY from stdin|F=copyfromparse.c|L=292|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
-copy_bad_unknown	G / E{S=ERROR|C=08P01|M=unexpected message type 0x79 during COPY from stdin|F=copyfromparse.c|L=292|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
-copy_bad_terminate	G / E{S=ERROR|C=08P01|M=unexpected message type 0x58 during COPY from stdin|F=copyfromparse.c|L=292|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
-copy_badlen	G / E{S=ERROR|C=08006|M=unexpected EOF on client connection with an open transaction|F=copyfromparse.c|L=301|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
-copy_done_long	G / E{S=ERROR|C=08006|M=unexpected EOF on client connection with an open transaction|F=copyfromparse.c|L=301|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
+copy_bad_parse	G / E{S=ERROR|C=08P01|M=unexpected message type 0x50 during COPY from stdin|W=COPY cp, line 1|F=copyfromparse.c|L=292|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
+copy_bad_unknown	G / E{S=ERROR|C=08P01|M=unexpected message type 0x79 during COPY from stdin|W=COPY cp, line 1|F=copyfromparse.c|L=292|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
+copy_bad_terminate	G / E{S=ERROR|C=08P01|M=unexpected message type 0x58 during COPY from stdin|W=COPY cp, line 1|F=copyfromparse.c|L=292|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
+copy_badlen	G / E{S=ERROR|C=08006|M=unexpected EOF on client connection with an open transaction|W=COPY cp, line 1|F=copyfromparse.c|L=301|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
+copy_done_long	G / E{S=ERROR|C=08006|M=unexpected EOF on client connection with an open transaction|W=COPY cp, line 1|F=copyfromparse.c|L=301|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
 copy_done_trailing	G / C:COPY 0 ZI
-copy_fail_nostr	G / E{S=ERROR|C=08P01|M=invalid string in message|F=pqformat.c|L=593|R=pq_getmsgstring} ZI
+copy_fail_nostr	G / E{S=ERROR|C=08P01|M=invalid string in message|W=COPY cp, line 1|F=pqformat.c|L=593|R=pq_getmsgstring} ZI
 copy_flush_sync	G / C:COPY 1 ZI
-copy_ext_bad	1 2 G / E{S=ERROR|C=08P01|M=unexpected message type 0x50 during COPY from stdin|F=copyfromparse.c|L=292|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
+copy_ext_bad	1 2 G / E{S=ERROR|C=08P01|M=unexpected message type 0x50 during COPY from stdin|W=COPY cp, line 1|F=copyfromparse.c|L=292|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
 bind_dup_portal	1 2 E{S=ERROR|C=42P03|M=cursor "p" already exists|F=portalmem.c|L=185|R=CreatePortal} ZE
 bind_dup_implicit	1 2 E{S=ERROR|C=42P03|M=cursor "p" already exists|F=portalmem.c|L=185|R=CreatePortal} ZI
 bind_dup_cursor	1 E{S=ERROR|C=42P03|M=cursor "c" already exists|F=portalmem.c|L=185|R=CreatePortal} ZE
@@ -33,7 +33,7 @@ sync_trailing_implicit	1 2 C:INSERT 0 1 E{S=ERROR|C=08P01|M=invalid message form
 flush_trailing	E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZI
 parse_trailing	E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZI
 bind_trailing	1 E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZI
-bind_trailing_badval	1 E{S=ERROR|C=22P02|M=invalid input syntax for type integer: "x"|F=numutils.c|L=615|R=pg_strtoint32_safe} ZI
+bind_trailing_badval	1 E{S=ERROR|C=22P02|M=invalid input syntax for type integer: "x"|W=unnamed portal parameter $1 = '...'|F=numutils.c|L=615|R=pg_strtoint32_safe} ZI
 execute_trailing	1 2 E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZI
 describe_trailing	1 E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZI
 describe_bad_kind_trailing	E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZI
@@ -57,9 +57,9 @@ parse_badtype_second	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=t
 parse_badtype_sub	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=tupdesc.c|L=896|R=TupleDescInitEntry} ZI
 parse_badtype_relation	E{S=ERROR|C=XX000|M=cache lookup failed for type 1259|F=tupdesc.c|L=896|R=TupleDescInitEntry} ZI
 parse_badtype_utility	1 ZI
-parse_badtype_bind_text	1 E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=3183|R=getTypeInputInfo} ZI
-parse_badtype_bind_null	1 E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=3183|R=getTypeInputInfo} ZI
-parse_badtype_bind_binary	1 E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=3249|R=getTypeBinaryInputInfo} ZI
+parse_badtype_bind_text	1 E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|W=unnamed portal parameter $1|F=lsyscache.c|L=3183|R=getTypeInputInfo} ZI
+parse_badtype_bind_null	1 E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|W=unnamed portal parameter $1|F=lsyscache.c|L=3183|R=getTypeInputInfo} ZI
+parse_badtype_bind_binary	1 E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|W=unnamed portal parameter $1|F=lsyscache.c|L=3249|R=getTypeBinaryInputInfo} ZI
 proto_30	R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=on S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:4 ZI
 proto_31	R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=on S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:4 ZI
 proto_32	R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=on S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:32 ZI
@@ -82,11 +82,11 @@ len_execute_10001	closed
 len_query_3	closed
 len_parse_huge	closed
 len_unknown_huge	E{S=FATAL|C=08P01|M=invalid frontend message type 121|F=postgres.c|L=454|R=SocketBackend} closed
-unknown_in_skip	E{S=ERROR|C=42601|M=syntax error at or near "selec"|F=scan.l|L=1236|R=scanner_yyerror} E{S=FATAL|C=08P01|M=invalid frontend message type 121|F=postgres.c|L=454|R=SocketBackend} closed
+unknown_in_skip	E{S=ERROR|C=42601|M=syntax error at or near "selec"|P=1|F=scan.l|L=1236|R=scanner_yyerror} E{S=FATAL|C=08P01|M=invalid frontend message type 121|F=postgres.c|L=454|R=SocketBackend} closed
 unknown_in_failed	E{S=FATAL|C=08P01|M=invalid frontend message type 121|F=postgres.c|L=454|R=SocketBackend} closed
 copydata_outside	T:0 D:["1"] C:SELECT 1 ZI
-copydata_in_skip	E{S=ERROR|C=42601|M=syntax error at or near "selec"|F=scan.l|L=1236|R=scanner_yyerror} ZI
-failed_flush	E{S=ERROR|C=42601|M=syntax error at or near "selec"|F=scan.l|L=1236|R=scanner_yyerror} quiet / quiet / ZI
+copydata_in_skip	E{S=ERROR|C=42601|M=syntax error at or near "selec"|P=1|F=scan.l|L=1236|R=scanner_yyerror} ZI
+failed_flush	E{S=ERROR|C=42601|M=syntax error at or near "selec"|P=1|F=scan.l|L=1236|R=scanner_yyerror} quiet / quiet / ZI
 close_missing	3 3 3 3 ZI
 close_in_failed	3 ZE / C:ROLLBACK ZI / E{S=ERROR|C=26000|M=prepared statement "q" does not exist|F=prepare.c|L=451|R=FetchPreparedStatement} ZI
 maxrows_suspend_sync	1 2 D:["1"] s ZI / E{S=ERROR|C=34000|M=portal "p" does not exist|F=postgres.c|L=2136|R=exec_execute_message} ZI
@@ -112,7 +112,7 @@ ps_ext_set_flush	1 2 C:SET quiet / S:application_name=ext ZI
 ps_set_config	T:0 D:["cfg"] C:SELECT 1 S:application_name=cfg ZI
 ps_set_role	C:SET S:is_superuser=off ZI / C:RESET S:is_superuser=on ZI / C:DROP ROLE ZI
 ps_discard_all	C:DISCARD ALL S:application_name= ZI
-ib_set_fail	C:SET E{S=ERROR|C=42P01|M=relation "nope_t" does not exist|F=parse_relation.c|L=1498|R=parserOpenTable} ZI / T:0 D:[""] C:SHOW ZI
+ib_set_fail	C:SET E{S=ERROR|C=42P01|M=relation "nope_t" does not exist|P=43|F=parse_relation.c|L=1498|R=parserOpenTable} ZI / T:0 D:[""] C:SHOW ZI
 ib_set_set_fail	C:SET C:SET E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI / T:0 D:[""] C:SHOW T:0 D:["4MB"] C:SHOW ZI
 ib_set_begin_deferrable	C:SET C:BEGIN T:0 D:["serializable"] C:SHOW T:0 D:["on"] C:SHOW T:0 D:["on"] C:SHOW C:COMMIT ZI
 ib_select_begin_iso	T:0 D:["1"] C:SELECT 1 E{S=ERROR|C=25001|M=SET TRANSACTION ISOLATION LEVEL must be called before any query|F=guc.c|L=6977|R=call_enum_check_hook} ZI / T:0 D:["read committed"] C:SHOW ZI
@@ -129,7 +129,7 @@ ib_set_vacuum	C:SET E{S=ERROR|C=25001|M=VACUUM cannot run inside a transaction b
 ib_others_fail	C:SET C:SET C:RESET C:LISTEN C:PREPARE C:DEALLOCATE E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI / T:0 D:["UTF8"] C:SHOW T:0 D:["read committed"] C:SHOW T:0 C:SELECT 0 T:0 D:["1"] C:SELECT 1 ZI / E{S=ERROR|C=26000|M=prepared statement "q2" does not exist|F=prepare.c|L=451|R=FetchPreparedStatement} ZI
 ib_lock	C:LOCK TABLE C:BEGIN T:0 D:["serializable"] C:SHOW C:COMMIT ZI
 ib_ps_reported	C:SET S:application_name=r ZI / C:SET E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI / T:0 D:["r"] C:SHOW ZI
-ib_ext_set_fail	1 2 C:SET E{S=ERROR|C=42P01|M=relation "nope_t" does not exist|F=parse_relation.c|L=1498|R=parserOpenTable} ZI / T:0 D:[""] C:SHOW ZI
+ib_ext_set_fail	1 2 C:SET E{S=ERROR|C=42P01|M=relation "nope_t" does not exist|P=15|F=parse_relation.c|L=1498|R=parserOpenTable} ZI / T:0 D:[""] C:SHOW ZI
 ib_ext_select_begin_iso	1 2 D:["1"] C:SELECT 1 1 2 E{S=ERROR|C=25001|M=SET TRANSACTION ISOLATION LEVEL must be called before any query|F=guc.c|L=6977|R=call_enum_check_hook} ZI / N{S=WARNING|C=25P01|M=there is no transaction in progress|F=xact.c|L=4275|R=UserAbortTransactionBlock} C:ROLLBACK ZI
 ib_settxn_after_query	C:BEGIN T:0 D:["1"] C:SELECT 1 E{S=ERROR|C=25001|M=SET TRANSACTION [NOT] DEFERRABLE must be called before any query|F=guc.c|L=6825|R=call_bool_check_hook} ZE / C:ROLLBACK ZI / C:BEGIN C:SAVEPOINT E{S=ERROR|C=25001|M=SET TRANSACTION ISOLATION LEVEL must not be called in a subtransaction|F=guc.c|L=6977|R=call_enum_check_hook} ZE / C:ROLLBACK ZI
 ib_block_fail	C:BEGIN C:SET C:SAVEPOINT C:SET S:application_name=inner ZT / E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} S:application_name=outer ZE / C:ROLLBACK T:0 D:["outer"] C:SHOW ZT / E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZE / C:ROLLBACK S:application_name= ZI
@@ -146,20 +146,20 @@ plan_div0_generic	1 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div
 plan_case_value	1 2 D:["0"] C:SELECT 1 ZI
 plan_case_generic	1 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
 plan_div0_dml	1 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
-plan_div0_function	1 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
+plan_div0_function	1 E{S=ERROR|C=22012|M=division by zero|W=SQL function "f0" statement 1|F=int.c|L=870|R=int4div} ZI
 plan_div0_utility	1 2 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
 plan_div0_volatile	1 2 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
 plan_div0_in_block	1 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZE / C:ROLLBACK ZI
 plan_generic_after_custom	1 2 D:["1"] C:SELECT 1 ZI / E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
-plan_literal	E{S=ERROR|C=22P02|M=invalid input syntax for type integer: "a"|F=numutils.c|L=615|R=pg_strtoint32_safe} ZI
+plan_literal	E{S=ERROR|C=22P02|M=invalid input syntax for type integer: "a"|P=8|F=numutils.c|L=615|R=pg_strtoint32_safe} ZI
 badtype_func	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=parse_type.c|L=699|R=typeOrDomainTypeRelid} ZI
 badtype_func_nested	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=parse_type.c|L=699|R=typeOrDomainTypeRelid} ZI
-badtype_func_two	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=2852|R=getBaseTypeAndTypmod} ZI
+badtype_func_two	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|P=8|F=lsyscache.c|L=2852|R=getBaseTypeAndTypmod} ZI
 badtype_func_variadic	1 ZI
-badtype_orderby	E{S=ERROR|C=42704|M=type with OID 999999 does not exist|F=typcache.c|L=471|R=lookup_type_cache} ZI
-badtype_orderby_col	E{S=ERROR|C=42704|M=type with OID 999999 does not exist|F=typcache.c|L=471|R=lookup_type_cache} ZI
-badtype_groupby	E{S=ERROR|C=42704|M=type with OID 999999 does not exist|F=typcache.c|L=471|R=lookup_type_cache} ZI
-badtype_isnull	1 t:1 T:0 E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=3183|R=getTypeInputInfo} ZI
+badtype_orderby	E{S=ERROR|C=42704|M=type with OID 999999 does not exist|P=19|F=typcache.c|L=471|R=lookup_type_cache} ZI
+badtype_orderby_col	E{S=ERROR|C=42704|M=type with OID 999999 does not exist|P=25|F=typcache.c|L=471|R=lookup_type_cache} ZI
+badtype_groupby	E{S=ERROR|C=42704|M=type with OID 999999 does not exist|P=19|F=typcache.c|L=471|R=lookup_type_cache} ZI
+badtype_isnull	1 t:1 T:0 E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|W=unnamed portal parameter $1|F=lsyscache.c|L=3183|R=getTypeInputInfo} ZI
 badtype_twice	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=2852|R=getBaseTypeAndTypmod} ZI
 badtype_coalesce	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=tupdesc.c|L=896|R=TupleDescInitEntry} ZI
 badtype_array	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=format_type.c|L=137|R=format_type_extended} ZI
@@ -172,3 +172,37 @@ startup_role_reset	T:0,0,0 D:["pc_r1","postgres","off"] C:SELECT 1 ZI / C:SET S:
 sessauth_ps	C:SET S:session_authorization=pc_r1 S:is_superuser=off ZI / C:RESET S:session_authorization=postgres S:is_superuser=on ZI / C:SET S:session_authorization=pc_su ZI
 sessauth_rollback	C:BEGIN C:SET C:ROLLBACK ZI / C:BEGIN C:SET S:session_authorization=pc_r1 S:is_superuser=off ZT / C:COMMIT S:session_authorization=postgres S:is_superuser=on ZI
 sessauth_fail	C:SET E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI / C:SET E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI / T:0,0 D:["postgres","on"] C:SELECT 1 ZI
+plf_setup	
+plf_simple	N{S=NOTICE|C=00000|M=fi 1|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} T:0 D:["10"] D:["10"] D:["10"] C:SELECT 3 ZI
+plf_simple_empty	N{S=NOTICE|C=00000|M=fi 0|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} E{S=ERROR|C=22012|M=division by zero|W=PL/pgSQL function pc_fi(integer) line 1 at RETURN|F=int.c|L=870|R=int4div} ZI / N{S=NOTICE|C=00000|M=fi 0|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} E{S=ERROR|C=22012|M=division by zero|W=PL/pgSQL function pc_fi(integer) line 1 at RETURN|F=int.c|L=870|R=int4div} ZI
+plf_stable	T:0 N{S=NOTICE|C=00000|M=fs 1|W=PL/pgSQL function pc_fs(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} D:["10"] N{S=NOTICE|C=00000|M=fs 1|W=PL/pgSQL function pc_fs(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} D:["10"] C:SELECT 2 ZI
+plf_case	N{S=NOTICE|C=00000|M=fi 0|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} E{S=ERROR|C=22012|M=division by zero|W=PL/pgSQL function pc_fi(integer) line 1 at RETURN|F=int.c|L=870|R=int4div} ZI
+plf_bind	1 t:0 T:0 N{S=NOTICE|C=00000|M=fi 0|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} E{S=ERROR|C=22012|M=division by zero|W=PL/pgSQL function pc_fi(integer) line 1 at RETURN|F=int.c|L=870|R=int4div} ZI
+plf_named_once	1 ZI / N{S=NOTICE|C=00000|M=fi 6|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} 2 D:["1"] C:SELECT 1 ZI / 2 D:["1"] C:SELECT 1 ZI
+plf_custom_then_generic	1 ZI / N{S=NOTICE|C=00000|M=fi 5|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} 2 D:["2"] C:SELECT 1 ZI / N{S=NOTICE|C=00000|M=fi 5|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} 2 D:["2"] C:SELECT 1 ZI / N{S=NOTICE|C=00000|M=fi 5|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} 2 D:["2"] C:SELECT 1 ZI / N{S=NOTICE|C=00000|M=fi 5|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} 2 D:["2"] C:SELECT 1 ZI / N{S=NOTICE|C=00000|M=fi 5|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} 2 D:["2"] C:SELECT 1 ZI / 2 N{S=NOTICE|C=00000|M=fi 5|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} D:["2"] C:SELECT 1 ZI
+plf_prepare	N{S=NOTICE|C=00000|M=fi 4|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} T:0 D:["2"] C:SELECT 1 ZI / T:0 D:["2"] C:SELECT 1 ZI
+plf_sql_body	N{S=NOTICE|C=00000|M=fi 1|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE
+SQL function "pc_fsql" statement 1|F=pl_exec.c|L=3909|R=exec_stmt_raise} T:0 D:["11"] C:SELECT 1 ZI
+plf_from_error	N{S=NOTICE|C=00000|M=fi 0|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} E{S=ERROR|C=22012|M=division by zero|W=PL/pgSQL function pc_fi(integer) line 1 at RETURN|F=int.c|L=870|R=int4div} ZI
+plf_check	C:CREATE TABLE ZI / N{S=NOTICE|C=00000|M=fi 2|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} C:INSERT 0 2 ZI
+plf_explain	N{S=NOTICE|C=00000|M=fi 2|W=PL/pgSQL function pc_fi(integer) line 1 at RAISE|F=pl_exec.c|L=3909|R=exec_stmt_raise} T:0 D:["Result"] D:["  Output: 5"] C:EXPLAIN ZI
+badtype_union	E{S=ERROR|C=42704|M=type with OID 999999 does not exist|P=8|F=typcache.c|L=471|R=lookup_type_cache} ZI
+badtype_union_all	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=tupdesc.c|L=896|R=TupleDescInitEntry} ZI
+badtype_union_mixed	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=2852|R=getBaseTypeAndTypmod} ZI
+badtype_union_order	E{S=ERROR|C=42704|M=type with OID 999999 does not exist|P=45|F=typcache.c|L=471|R=lookup_type_cache} ZI
+badtype_window_order	E{S=ERROR|C=42704|M=type with OID 999999 does not exist|P=40|F=typcache.c|L=471|R=lookup_type_cache} ZI
+badtype_window_lag	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=tupdesc.c|L=896|R=TupleDescInitEntry} ZI
+badtype_window_ntile	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|P=8|F=lsyscache.c|L=2852|R=getBaseTypeAndTypmod} ZI
+badtype_subcol	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=tupdesc.c|L=896|R=TupleDescInitEntry} ZI
+badtype_subcol_func	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=parse_type.c|L=699|R=typeOrDomainTypeRelid} ZI
+badtype_subcol_isnull	1 t:1 T:0 E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|W=unnamed portal parameter $1|F=lsyscache.c|L=3183|R=getTypeInputInfo} ZI
+badtype_insert	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=2852|R=getBaseTypeAndTypmod} ZI
+badtype_insert_returning	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=tupdesc.c|L=896|R=TupleDescInitEntry} ZI
+badtype_update_isnull	1 t:1 n E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|W=unnamed portal parameter $1|F=lsyscache.c|L=3183|R=getTypeInputInfo} ZI
+badtype_merge_unused	1 t:1 n E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|W=unnamed portal parameter $1|F=lsyscache.c|L=3183|R=getTypeInputInfo} ZI
+loc_int	E{S=ERROR|C=22003|M=integer out of range|F=int.c|L=827|R=int4pl} ZI / T:0 E{S=ERROR|C=22003|M=integer out of range|F=int.c|L=855|R=int4mul} ZI / T:0 E{S=ERROR|C=22003|M=smallint out of range|F=int.c|L=956|R=int2mi} ZI / T:0 E{S=ERROR|C=22003|M=bigint out of range|F=int8.c|L=927|R=int84pl} ZI / T:0 E{S=ERROR|C=22003|M=smallint out of range|F=int.c|L=382|R=i4toi2} ZI / T:0 E{S=ERROR|C=22003|M=bigint out of range|F=int8.c|L=446|R=int8um} ZI / E{S=ERROR|C=22012|M=division by zero|F=int8.c|L=1112|R=int82div} ZI / E{S=ERROR|C=22012|M=division by zero|F=int.c|L=1166|R=int4mod} ZI
+loc_float_numeric	E{S=ERROR|C=2201F|M=cannot take square root of a negative number|F=float.c|L=1452|R=dsqrt} ZI / E{S=ERROR|C=2201E|M=cannot take logarithm of zero|F=float.c|L=1700|R=dlog1} ZI / E{S=ERROR|C=22012|M=division by zero|F=float.c|L=104|R=float_zero_divide_error} ZI / E{S=ERROR|C=22003|M=value out of range: overflow|F=float.c|L=88|R=float_overflow_error} ZI / E{S=ERROR|C=22003|M=integer out of range|F=float.c|L=1227|R=dtoi4} ZI / E{S=ERROR|C=22003|M=input is out of range|F=float.c|L=1770|R=dacos} ZI / E{S=ERROR|C=22012|M=division by zero|F=numeric.c|L=9436|R=div_var} ZI / E{S=ERROR|C=2201F|M=cannot take square root of a negative number|F=numeric.c|L=10491|R=sqrt_var} ZI / E{S=ERROR|C=0A000|M=cannot convert NaN to bigint|F=numeric.c|L=4628|R=numeric_int8_opt_error} ZI
+loc_bind	1 E{S=ERROR|C=22003|M=smallint out of range|F=int.c|L=942|R=int2pl} ZI
+loc_misc	E{S=ERROR|C=22P02|M=invalid input value for enum lms.e: "b"|P=8|F=enum.c|L=129|R=enum_in} ZI / E{S=ERROR|C=22023|M=character number must be positive|F=oracle_compat.c|L=1058|R=chr} ZI / E{S=ERROR|C=22023|M=cannot cast jsonb numeric to type boolean|F=jsonb.c|L=2029|R=cannotCastJsonbValue} ZI / T:0 E{S=ERROR|C=23514|M=value for domain lms.pos violates check constraint "pos_check"|F=execExprInterp.c|L=4497|R=ExecEvalConstraintCheck} ZI / E{S=ERROR|C=42883|M=operator does not exist: integer + text|H=No operator matches the given name and argument types. You might need to add explicit type casts.|P=10|F=parse_oper.c|L=635|R=op_error} ZI / N{S=NOTICE|C=00000|M=table "lms_nope" does not exist, skipping|F=tablecmds.c|L=1506|R=DropErrorMsgNonExistent} C:DROP TABLE ZI
+copy_freeze_refused	G / E{S=ERROR|C=55000|M=cannot perform COPY FREEZE because the table was not created or truncated in the current subtransaction|F=copyfrom.c|L=904|R=CopyFrom} ZI
+copy_fail_line	G / E{S=ERROR|C=57014|M=COPY from stdin failed: bye|W=COPY cpf, line 3|F=copyfromparse.c|L=315|R=CopyGetData} ZI

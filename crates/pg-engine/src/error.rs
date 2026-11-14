@@ -177,6 +177,9 @@ pub struct Objects {
     /// The ROUTINE field, where clients read it to tell errors apart (asyncpg and pgjdbc
     /// recognise a plan invalidated by DDL by RevalidateCachedQuery).
     pub routine: Option<&'static str>,
+    /// The line in `routine` that raised it, where the routine raises its message at more
+    /// than one (`error_location`).
+    pub line: Option<u32>,
 }
 
 /// How bad it is: the `S`/`V` field of an ErrorResponse or NoticeResponse.
@@ -233,6 +236,14 @@ impl Error {
     /// The source function Postgres reports raising it (the ROUTINE field).
     pub fn routine(mut self, r: &'static str) -> Self {
         self.objects_mut().routine = Some(r);
+        self
+    }
+
+    /// `routine`, raised at `line` of it.
+    pub fn routine_at(mut self, r: &'static str, line: u32) -> Self {
+        let o = self.objects_mut();
+        o.routine = Some(r);
+        o.line = Some(line);
         self
     }
     /// `errtable`: the table (and its schema) it concerns.

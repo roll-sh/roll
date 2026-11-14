@@ -7473,7 +7473,11 @@ impl Binder<'_, '_> {
                     None => t.display(),
                 })
                 .collect();
-            format!("{name}({})", parts.join(", "))
+            // (func_signature_string: the name as written, qualified or not.)
+            match schema {
+                Some(s) => format!("{s}.{name}({})", parts.join(", ")),
+                None => format!("{name}({})", parts.join(", ")),
+            }
         };
         // The parameters a call matches against: (name, type, default).
         let params =
