@@ -485,6 +485,13 @@ impl Secrets {
     /// link's resource rotating. Decrypts nothing, issues nothing, isn't audited: what
     /// `roll run --watch` polls.
     pub fn digest(&self, project: &str, slug: &str, path: &str, caller: &Caller) -> Result<String> {
+        Ok(self.digest_of(project, slug, path, caller)?.0)
+    }
+
+    /// The digest, and whether reading the folder would issue a dynamic credential (one of its
+    /// keys, or a key a reference reaches, links dynamically): the digest doesn't move when such a
+    /// credential's lease ends, so a reader can't keep one because the digest held.
+    pub(crate) fn digest_of(&self, project: &str, slug: &str, path: &str, caller: &Caller) -> Result<(String, bool)> {
         use sha2::{Digest, Sha256};
         let path = names::path(path)?;
         caller.need(Action::Read, &Scope::at(project, slug, &path))?;
@@ -496,10 +503,14 @@ impl Secrets {
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let dek = self.project(project)?;
         let mut h = Sha256::new();
+        let dynamic = std::cell::Cell::new(false);
         // A live link's value is the resource's credential as it is: it moves when roll rotates it.
         let generations: HashMap<(String, String), i64> = self.db.read(|c| c.query("SELECT kind, ref, generation FROM source_generations", (), |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?))))?.into_iter().collect();
         // No fingerprint: a digest is readable without reveal, and a version moves with every value.
         let stamp = |h: &mut Sha256, e: &Entry| {
+            if e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic) {
+                dynamic.set(true);
+            }
             let generation = e.row.link.as_ref().filter(|l| l.mode == Mode::Live).and_then(|l| generations.get(&(l.kind.clone(), l.r#ref.clone()))).copied().unwrap_or(0);
             // Only once rotated, so a digest taken before there were generations stays the same.
             let rotated = if generation > 0 { format!("\0{generation}") } else { String::new() };
@@ -537,7 +548,18 @@ impl Secrets {
         for m in self.missing_required(project, &path, &have)? {
             h.update(format!("required\0{}\n", m.key));
         }
-        Ok(h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect())
+        Ok((h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect(), dynamic.get()))
+    }
+
+    /// A conditional read (`If-None-Match`): `Some(digest)` when the folder's values are as they
+    /// were for `etag`, so nothing is read, issued or audited (a 304). Never when the read would
+    /// issue a dynamic credential: the cached one may have ended with its lease. Needs reveal, as
+    /// the read does: whether values changed isn't told to whoever couldn't read them.
+    pub fn unchanged(&self, project: &str, slug: &str, path: &str, etag: &str, dynamic: bool, caller: &Caller) -> Result<Option<String>> {
+        let at = names::path(path)?;
+        caller.need(Action::Reveal, &Scope::at(project, slug, &at))?;
+        let (digest, has_dynamic) = self.digest_of(project, slug, &at, caller)?;
+        Ok((digest == etag && !(dynamic && has_dynamic)).then_some(digest))
     }
 
     pub fn versions(&self, project: &str, slug: &str, path: &str, key: &str, kind: Option<SecretType>, caller: &Caller) -> Result<Vec<Version>> {

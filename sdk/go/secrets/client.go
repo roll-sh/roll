@@ -32,9 +32,26 @@ type Client struct {
 	Project string
 	// HTTP is the client requests go through; http.DefaultClient when nil.
 	HTTP *http.Client
+	// CacheTTL keeps Values answers this long and answers from memory meanwhile; after that it asks
+	// again with the digest they were read against, and an unchanged folder costs a 304 that reads,
+	// issues and audits nothing. A folder holding dynamic credentials is never kept (they end with
+	// their lease). Zero: off.
+	CacheTTL time.Duration
+	// Now is the clock CacheTTL is measured with (for tests); time.Now when nil.
+	Now func() time.Time
 
 	once    sync.Mutex
 	project string
+
+	cacheMu sync.Mutex
+	cache   map[string]cached
+}
+
+// cached is a Values answer kept by CacheTTL, with the digest it was read against.
+type cached struct {
+	values *Values
+	etag   string
+	at     time.Time
 }
 
 // Problem is a key that didn't resolve (a reference to nothing, a cycle, a link that failed).
@@ -182,8 +199,87 @@ func (c *Client) Values(ctx context.Context, env, path string) (*Values, error) 
 	if err != nil {
 		return nil, err
 	}
+	if c.CacheTTL > 0 {
+		return c.cachedValues(ctx, e+"/values"+query(path))
+	}
 	var v Values
 	return &v, c.call(ctx, http.MethodGet, e+"/values"+query(path), nil, &v)
+}
+
+// cachedValues answers from memory within CacheTTL, else revalidates with the digest (a 304
+// keeps the values) or reads them again.
+func (c *Client) cachedValues(ctx context.Context, path string) (*Values, error) {
+	now := time.Now
+	if c.Now != nil {
+		now = c.Now
+	}
+	c.cacheMu.Lock()
+	hit, ok := c.cache[path]
+	c.cacheMu.Unlock()
+	if ok && now().Sub(hit.at) < c.CacheTTL {
+		return hit.values, nil
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.API, "/")+path+sep+"digest=1", nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	if ok && hit.etag != "" {
+		req.Header.Set("If-None-Match", `"`+hit.etag+`"`)
+	}
+	h := c.HTTP
+	if h == nil {
+		h = http.DefaultClient
+	}
+	res, err := h.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusNotModified && ok {
+		c.cacheMu.Lock()
+		hit.at = now()
+		c.cache[path] = hit
+		c.cacheMu.Unlock()
+		return hit.values, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(res.Body, 16<<20))
+	if err != nil {
+		return nil, err
+	}
+	if res.StatusCode >= 300 {
+		var e struct {
+			Error string `json:"error"`
+			Code  string `json:"code"`
+		}
+		_ = json.Unmarshal(data, &e)
+		if e.Error == "" {
+			e.Error = res.Status
+		}
+		return nil, &Error{Status: res.StatusCode, Code: e.Code, Message: e.Error}
+	}
+	var v Values
+	if err := json.Unmarshal(data, &v); err != nil {
+		return nil, err
+	}
+	etag := strings.Trim(strings.TrimPrefix(res.Header.Get("ETag"), "W/"), `"`)
+	c.cacheMu.Lock()
+	if len(v.Dynamic) > 0 {
+		delete(c.cache, path)
+	} else {
+		if c.cache == nil {
+			c.cache = map[string]cached{}
+		}
+		c.cache[path] = cached{values: &v, etag: etag, at: now()}
+	}
+	c.cacheMu.Unlock()
+	return &v, nil
 }
 
 // Resolve is env's values as consumer (`app:web`), what a running service gets: dynamic

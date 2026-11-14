@@ -16,6 +16,7 @@ import base64
 import json
 import os
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -69,11 +70,18 @@ def _q(path: str) -> str:
 class Client:
     """Reads one project's secrets."""
 
-    def __init__(self, api: str, token: str, project: Optional[str] = None, timeout: float = 30.0):
+    def __init__(self, api: str, token: str, project: Optional[str] = None, timeout: float = 30.0, cache_ttl: float = 0.0, clock: Callable[[], float] = time.monotonic):
+        """``cache_ttl`` (seconds) keeps ``values`` answers that long and answers from memory
+        meanwhile; after that it asks again with the digest they were read against, and an
+        unchanged folder costs a 304 that reads, issues and audits nothing. A folder holding dynamic
+        credentials is never kept (they end with their lease). ``clock`` is for tests."""
         self.api = api.rstrip("/")
         self.token = token
         self.project = project
         self.timeout = timeout
+        self.cache_ttl = cache_ttl
+        self._clock = clock
+        self._cache: Dict[str, Any] = {}
         self._lock = threading.Lock()
 
     def _call(self, method: str, path: str, body: Any = None) -> Any:
@@ -109,7 +117,42 @@ class Client:
 
     def values(self, env: str, path: str = "") -> Values:
         """``env``'s values under ``path`` (the root by default), references resolved."""
-        return Values._of(self._call("GET", self._env(env) + "/values" + _q(path)))
+        url = self._env(env) + "/values" + _q(path)
+        if self.cache_ttl <= 0:
+            return Values._of(self._call("GET", url))
+        return self._cached(url)
+
+    def _cached(self, url: str) -> Values:
+        """Kept for ``cache_ttl``, then revalidated with the digest (a 304 keeps them)."""
+        with self._lock:
+            hit = self._cache.get(url)
+        if hit and self._clock() - hit[2] < self.cache_ttl:
+            return hit[0]
+        req = urllib.request.Request(self.api + url + ("&" if "?" in url else "?") + "digest=1", method="GET")
+        if self.token:
+            req.add_header("Authorization", "Bearer " + self.token)
+        if hit and hit[1]:
+            req.add_header("If-None-Match", '"' + hit[1] + '"')
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as res:
+                text, etag = res.read(16 << 20), res.headers.get("ETag") or ""
+        except urllib.error.HTTPError as e:
+            if e.code == 304 and hit:
+                with self._lock:
+                    self._cache[url] = (hit[0], hit[1], self._clock())
+                return hit[0]
+            try:
+                err = json.loads(e.read(1 << 16) or b"{}")
+            except ValueError:
+                err = {}
+            raise SecretsError(err.get("error") or f"{e.code} {e.reason}", e.code, err.get("code")) from None
+        v = Values._of(json.loads(text))
+        with self._lock:
+            if v.dynamic:
+                self._cache.pop(url, None)
+            else:
+                self._cache[url] = (v, etag.removeprefix("W/").strip('"'), self._clock())
+        return v
 
     def resolve(self, env: str, consumer: str, path: str = "") -> Values:
         """``env``'s values as ``consumer`` (``app:web``), what a running service gets: dynamic

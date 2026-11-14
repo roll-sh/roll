@@ -18,6 +18,9 @@ key, _ := secrets.GenerateKey()
 v, err = c.ResolveSealed(ctx, "production", "", "app:web", key)
 
 // Reload when the environment changes; dynamic credentials' leases are renewed meanwhile.
+// Read per request? Keep answers 30 s, then revalidate (a 304 while unchanged).
+c.CacheTTL = 30 * time.Second
+
 err = c.Watch(ctx, "production", secrets.Watch{OnChange: func(v *secrets.Values) error {
 	return reload(v.Values)
 }})

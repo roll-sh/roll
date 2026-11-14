@@ -11,6 +11,15 @@ export type ClientOptions = {
   project?: string;
   /** For tests and other runtimes; the global `fetch` by default. */
   fetch?: typeof fetch;
+  /**
+   * Keep `values()` answers this long (ms) and answer from memory meanwhile; after that, ask
+   * again with the digest it was read against, and an unchanged folder costs a 304 that reads,
+   * issues and audits nothing. A folder holding dynamic credentials is never kept (they end with
+   * their lease). Off by default.
+   */
+  cacheTtlMs?: number;
+  /** For tests: the clock (ms) the cache's TTL is measured with; `Date.now` by default. */
+  now?: () => number;
 };
 
 export type WatchOptions = {
@@ -86,7 +95,41 @@ export function createClient(options: ClientOptions) {
   function values(environment: string, o: { path?: string; format: ExportFormat; resolve?: boolean }): Promise<string>;
   async function values(environment: string, o: { path?: string; format?: ExportFormat; resolve?: boolean } = {}): Promise<Values | string> {
     const url = `${await env(environment)}/values${qs({ path: o.path, format: o.format, resolve: o.resolve === false ? "false" : undefined })}`;
-    return (await call("GET", url, undefined, !!o.format)) as Values | string;
+    if (!options.cacheTtlMs || o.format) return (await call("GET", url, undefined, !!o.format)) as Values | string;
+    return cached(url, options.cacheTtlMs);
+  }
+
+  /** Values kept for `ttl` ms, then revalidated with their digest (a 304 keeps them). */
+  const cache = new Map<string, { values: Values; etag: string | null; at: number }>();
+  const now = options.now ?? Date.now;
+  async function cached(url: string, ttl: number): Promise<Values> {
+    const hit = cache.get(url);
+    if (hit && now() - hit.at < ttl) return hit.values;
+    const sep = url.includes("?") ? "&" : "?";
+    const res = await doFetch(`${base}${url}${sep}digest=1`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${options.token}`, ...(hit?.etag ? { "if-none-match": `"${hit.etag}"` } : {}) },
+      cache: "no-store",
+    });
+    if (res.status === 304 && hit) {
+      hit.at = now();
+      return hit.values;
+    }
+    const text = await res.text();
+    if (!res.ok) {
+      let err: { error?: string; code?: string } = {};
+      try {
+        err = JSON.parse(text);
+      } catch {
+        // not JSON: the status says it
+      }
+      throw new SecretsError(err.error ?? `${res.status} ${res.statusText}`.trim(), res.status, err.code ?? null);
+    }
+    const v = JSON.parse(text) as Values;
+    const etag = res.headers.get("etag")?.replace(/^W\//, "").replace(/"/g, "") ?? null;
+    if (v.dynamic.length) cache.delete(url);
+    else cache.set(url, { values: v, etag, at: now() });
+    return v;
   }
 
   function resolve(environment: string, o: { consumer: string; path?: string; sealTo?: undefined }): Promise<Values>;

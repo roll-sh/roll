@@ -82,6 +82,10 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    const env = secrets.open(await secrets.resolve("production", { consumer: "app:web", sealTo: keys.publicKey }), keys.secretKey);
    const stop = secrets.watch("staging", { onChange: (v) => reconfigure(v.values) });
 
+   // A process that reads values per request keeps them a while: within the TTL from memory,
+   // then a conditional read that costs a 304 (nothing read, issued or audited) while unchanged.
+   const cached = createClient({ api: process.env.ROLL_API_URL!, token: process.env.ROLL_TOKEN!, cacheTtlMs: 30_000 });
+
    // An encryption key (below, "Encryption keys"): the key stays in roll.
    const cards = secrets.transit("cards");
    const ct = await cards.encrypt(cardNumber, `order:${id}`);
@@ -2271,7 +2275,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
-| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
+| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`); with `digest=1` or `If-None-Match` an `ETag` (the digest), and `If-None-Match` with the digest still current is a 304 that reads, issues and audits nothing (never for a folder holding a dynamic credential unless `dynamic=false`: a lease ends without moving the digest) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, projects it's shared with, folders that import it, readers in 30 days |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
@@ -2716,12 +2720,12 @@ user's call).
    Infisical's providers do; each pod logs in with its own service account. Checked live against
    the driver v1.6.2 on k3s (mount, no Secret, another account refused, rotation in about 20 s, a
    key that stops resolving keeps the files).
-2. **`roll login` for people**: a browser sign-in (roll-access's OAuth with a loopback redirect)
-   whose token sits in the OS keychain and acts as the person, as `doppler login`, `infisical
-   login` and `op signin` do; today a person mints a project token per project and pastes it.
-3. **Conditional reads and caching in the SDKs**: `ETag` (the digest) on `…/values` and
-   `…/resolve`, a 304 that decrypts nothing and writes no audit row, and a TTL cache in the
-   TypeScript, Go and Python clients (AWS' caching clients, Vault Agent, Infisical's `cacheTtl`).
+2. **`roll login` for people** (roll MCP is building it on #25, where a person's own token acts as
+   them): a browser sign-in with PKCE and a loopback redirect, the token kept and refreshed, as
+   `doppler login`, `infisical login` and `op signin` do.
+3. **Conditional reads and caching in the SDKs** (#65, on #62): `ETag` and `If-None-Match` on
+   `…/values` (a 304 reads, issues and audits nothing; never for dynamic credentials), and a TTL
+   cache in the TypeScript, Go and Python clients that revalidates with it.
 4. **Terraform without values in state**: an `ephemeral "roll_secrets_values"` resource and a
    write-only `value_wo` (Vault's, AWS', Infisical's providers have both); resources for CAs, SSH
    CAs, encryption keys and outside databases; transit in the Go and Python clients (the
