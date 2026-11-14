@@ -1586,6 +1586,10 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
+Later still: SSH user certificates for keys people keep (#45: `…/sign-user`, `roll ssh --key`,
+checked with an agent-held key against a real `sshd`) and `roll secrets rotations --rotate-due`
+(#48).
+
 Then (2026-11-14, latest): certificates ending as health findings (#44: `certificate_expiring`)
 and ClickHouse outside roll (#39, merged up into #41 and #42: its HTTPS interface, `sha256_hash`
 passwords, checked live against ClickHouse 25.8).
@@ -1635,15 +1639,16 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **Transit keys scoped by name**: a grant's resources include one encryption key
-   (`secrets:transit/<name>`), so signing with one key doesn't need write on the project. Needs a
-   resource kind in roll-access's catalogue (the MCP thread's), so agree it there first.
-2. **Certificates for keys that stay put on SSH too**: `roll ssh` signs a key the user already has
-   (`…/ssh-cas/{id}/sign-user {public_key}`), for people who keep their key in an agent or a
-   hardware token.
-3. **Rotation for roll's own resources from outside**: `roll secrets rotate --all-due`, for an
-   operator's maintenance window, rotating every managed credential due within a week in one run
-   and reporting what failed.
+1. **A fifth independent review** of what came after the fourth (SSH host and user certificates,
+   ClickHouse outside roll, certificates ending in health, `--rotate-due`, the fourth review's
+   fixes), and its fixes.
+2. **Screenshots of the new surfaces** for their pull requests: Health's "Managed credentials"
+   (#48), a CA's CSR panel and certificate list (#44), an SSH CA's host domains (#45), an encryption
+   key's public key (#47).
+3. *Waits on #24/#25 meeting #47:* transit keys scoped by name. Agreed with the MCP thread:
+   `.index("name")` on the data-plane rows (encrypt, rewrap, decrypt, datakey, sign, verify, hmac,
+   hmac/verify, public), so a signing service holds `write` on `prj_…/payments` and nothing else;
+   rotate, retire and delete stay the project's admin.
 4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
 5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
