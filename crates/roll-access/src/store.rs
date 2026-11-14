@@ -141,10 +141,12 @@ pub const MAX_GRANTS: usize = 10_000;
 pub const USER_MAX_GRANTS: usize = 100;
 /// A registered client's id prefix: the client itself, signed (`Store::register_client`).
 pub const CLIENT_PREFIX: &str = "rlc_";
-/// How long a registered client's id works before a person consents to it.
-pub const UNCONSENTED_CLIENT_MS: i64 = 24 * 3600 * 1000;
-/// A registered client's name, URI and redirect URIs together, at most (its id carries them).
-pub const MAX_CLIENT_PAYLOAD: usize = 3000;
+/// How long a registered client's id works before a person consents to it: long, because clients
+/// keep their registration and only register again when told it's gone.
+pub const UNCONSENTED_CLIENT_MS: i64 = 90 * 24 * 3600 * 1000;
+/// A registered client's name, URI and redirect URIs together, at most (its id carries them, and
+/// is kept as a key once consented: under Postgres's index row limit).
+pub const MAX_CLIENT_PAYLOAD: usize = 1500;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Grant {

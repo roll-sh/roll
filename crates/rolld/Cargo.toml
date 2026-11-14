@@ -16,6 +16,7 @@ axum.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
+ipnet.workspace = true
 roll-cluster.workspace = true
 code-control.workspace = true
 code-review.workspace = true

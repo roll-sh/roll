@@ -144,8 +144,9 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
   exactly.
 - Registration is open, so it stores nothing: a registered client's `client_id` is the client
   itself (`rlc_<payload>.<mac>`: its name, URI and redirect URIs, signed with a key every node
-  shares), kept in `oauth_clients` only once a person consents to it. Until then the id works for a
-  day. A flood of registrations has nothing to fill, as a metadata document's client never did. A
+  shares), kept in `oauth_clients` only once a person consents to it. Until then the id works for 90
+  days (clients keep their registration); together the name, URI and redirect URIs are at most
+  1,500 bytes, so a kept id stays under Postgres's index row limit. A flood of registrations has nothing to fill, as a metadata document's client never did. A
   network (/24, /48) still registers at most 20 a minute on a node (`429` with `Retry-After`).
 - Codes are good for one minute, once. Access tokens (`rlo_`) last an hour. Refresh tokens (`rlf_`)
   rotate on every use, and a used one fails; a connection expires 30 days after its last refresh.
@@ -412,10 +413,11 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **The thirteenth review:** stateless client registration (signed `rlc_` ids, the shared key,
-   consent keeping the client) and `ROLL_TRUSTED_PROXIES`, adversarially (in progress).
-2. **The siblings' latest heads through the per-method route check** with #25 (apps-next, previews-next,
-   search), sending each thread what it flags.
+1. **Forwarded addresses in roll code** (the thirteenth review): `code-control/src/streams.rs` and the
+   device-login caps take `X-Forwarded-For`'s left-most entry raw (`ROLL_CODE_TRUST_FORWARDED_FOR`);
+   they should share `roll_access::evaluate::forwarded_client` or the gate's `ClientIp`.
+2. **Apps-next merges with #25 again:** its head now conflicts in `crates/rolld/src/main.rs`; send the
+   thread the recipe, then run the per-method check on the merge.
 3. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
    lands after #20, #25 and #30): kept merged both ways; secrets' tenth-review fixes are in #30
    (an admin's token reaches operator projects, project-wide metadata needs a rule over the whole
@@ -423,9 +425,8 @@ waits on a sibling PR reaching main is last.
    twice: a token's one-resource request 83–115 µs p50 with it, 105–116 µs without).
 4. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions.
-5. **The operator's steps:** where the API listener can be reached other than through the edge,
-   set `ROLL_TRUSTED_PROXIES` to the edge's or load balancer's addresses (the cloud deploy, with no
-   thread running now, is where); and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
+5. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+   roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
 6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
@@ -442,12 +443,15 @@ start and pre-deploy commands, schedule, kind, port, volume and `run.public`, ar
 a day or less); workload tokens (`Access::mint_workload`: minutes, within an identity's scope, owned
 by its maker, out of the list and caps) for secrets' identity logins; a person's own tokens' news is
 mailed to them (an approval waiting on them, used from a new network, revoked as leaked, about to
-expire; only their own, never a secret); `ROLL_TRUSTED_PROXIES` (X-Forwarded-For only from the
-edge's addresses, the client the right-most entry that isn't one: a direct request can't name its
-own address for IP allowlists or registration's limit); sealed apps variables explained to agents
-(apps-next #26); the prefix check per method (rolld logs each route's methods; 194 `METHOD route`
-lines reviewed, 7 newly found and looked at: a route with its own row for one method can't gain
-another a prefix decides unseen); sensitive secrets explained to agents (`secrets_reveal` and
+expire; only their own, never a secret); the thirteenth review (X-Forwarded-For only from listed
+proxies, every line, a bad entry stopping the walk, IPv4-mapped addresses matched; nothing listed,
+the header counts for nothing; MCP tool calls carry the gate's address; unconsented client ids good
+for 90 days and kept ids small enough for Postgres); `ROLL_TRUSTED_PROXIES` (X-Forwarded-For only
+from the edge's addresses, the client the right-most entry that isn't one: a direct request can't
+name its own address for IP allowlists or registration's limit); sealed apps variables explained to
+agents (apps-next #26); the prefix check per method (rolld logs each route's methods; 194 `METHOD
+route` lines reviewed, 7 newly found and looked at: a route with its own row for one method can't
+gain another a prefix decides unseen); sensitive secrets explained to agents (`secrets_reveal` and
 `roll://guide`: a 403 and `withheld` are expected; secrets #46); open registration stores nothing (a
 client's id is the client, signed; kept once a person consents, else good for a day), so a flood has
 nothing to fill; the twelfth review's contained findings (CSV cells all quoted with formulas defused
