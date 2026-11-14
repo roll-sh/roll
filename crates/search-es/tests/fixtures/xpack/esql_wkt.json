@@ -1,0 +1,1559 @@
+{
+  "description" : "ES|QL WKT conversions: Elasticsearch's grammar, coordinate checks, EMPTY parts, non-finite cartesian coordinates, ST_X/ST_Y float checks",
+  "steps" : [
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOPOINT(\"LINESTRING (1 2, 3 4)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_point"
+          }
+        ],
+        "values" : [
+          [
+            "LINESTRING (1.0 2.0, 3.0 4.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"LINESTRING (1 2)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "LINESTRING (1.0 2.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POLYGON ((0 0, 1 0, 1 1))\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POLYGON ((0.0 0.0, 1.0 0.0, 1.0 1.0))"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POLYGON ((0 0, 1 0, 1 1, 0 1))\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POLYGON ((0.0 0.0, 1.0 0.0, 1.0 1.0, 0.0 1.0))"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT foo\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT *(1 2)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0 2.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT Z (1 2)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT Z (1 2 3)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0 2.0 3.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT z (1 2 3)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"LINESTRING (1 2, 3 4 5)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"LINESTRING (1 2 3, 3 4)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"MULTIPOINT ((1 2), (3 4))\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT (1 2) # comment\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0 2.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT (1 2 foo)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT (0x1p3 1d)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (8.0 1.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT (1 2, 3)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_CARTESIANSHAPE(\"BBOX (3, 2, 4, 1)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "cartesian_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"BBOX (3, 2, 4, 1)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "BBOX (3.0, 2.0, 4.0, 1.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"CIRCLE (1 2 3)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "CIRCLE (1.0 2.0 3.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"CIRCLE EMPTY\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"BBOX EMPTY\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POLYGON ((0 0, 1 0, 1 1, 0 0), (0 0, 1 0, 1 1 1, 0 0))\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"GEOMETRYCOLLECTION (POINT (1 2), POINT (1 2 3))\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"MULTILINESTRING ((1 2, 3 4), EMPTY)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "MULTILINESTRING ((1.0 2.0, 3.0 4.0),EMPTY)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"MULTIPOLYGON (EMPTY, ((0 0, 1 0, 1 1, 0 0)))\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "MULTIPOLYGON (EMPTY,((0.0 0.0, 1.0 0.0, 1.0 1.0, 0.0 0.0)))"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POLYGON EMPTY\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POLYGON EMPTY"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"GEOMETRYCOLLECTION EMPTY\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "GEOMETRYCOLLECTION EMPTY"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT (-0.0 1E2)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT (+1 .5)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0 0.5)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT (1 2)\")::STRING"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0 2.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"LINESTRING (1 2, 3 4 5, 6 7)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOPOINT(\"POINT (1 2) POINT (3 4)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_point"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0 2.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"GEOMETRYCOLLECTION (POINT (1 2), LINESTRING EMPTY)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "GEOMETRYCOLLECTION (POINT (1.0 2.0),LINESTRING EMPTY)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_CARTESIANPOINT(\"POINT (1e400 1)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "cartesian_point"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (Infinity 1.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_CARTESIANPOINT(\"POINT (1e308 2)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "cartesian_point"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0E308 2.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = ST_Y(TO_CARTESIANPOINT(\"POINT (1 NaN)\"))"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = ST_X(TO_CARTESIANPOINT(\"POINT (Infinity 1)\"))"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = ST_X(TO_GEOPOINT(\"POINT (1 2)\"))"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            0.9999999403953552
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT(\t1 2)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0 2.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT (1 Infinity)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_CARTESIANSHAPE(\"POINT (1 infinity)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "cartesian_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_CARTESIANSHAPE(\"POINT (1 nan)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "cartesian_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0 NaN)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOPOINT(\"POINT (200 2)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_point"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POLYGON ((0 0, 1 0, 1 1, 0 0)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"BBOX (1, 2, 3)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOPOINT(\"POINT (1 2\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_point"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOPOINT(\"POINT (1e400 2)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_point"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOPOINT(\"POINT(日 1)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_point"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"MULTIPOLYGON (((0 0, 1 0, 1 1, 0 0)), EMPTY)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "MULTIPOLYGON (((0.0 0.0, 1.0 0.0, 1.0 1.0, 0.0 0.0)),EMPTY)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_CARTESIANSHAPE(\"POINT (NaN 2)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "cartesian_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (NaN 2.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_CARTESIANPOINT(\"POINT (Infinity 2)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "cartesian_point"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (Infinity 2.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT EMPTY\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = ST_X(TO_CARTESIANPOINT(\"POINT (1e308 2)\"))"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_CARTESIANPOINT(\"POINT (1e308 2)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "cartesian_point"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0E308 2.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOPOINT(\"LINESTRING (1 2, 3 4)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_point"
+          }
+        ],
+        "values" : [
+          [
+            "LINESTRING (1.0 2.0, 3.0 4.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_CARTESIANPOINT(\"POINT EMPTY\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "cartesian_point"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOPOINT(\"POINT EMPTY\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_point"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"foo\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE([\"POINT (1 2)\", \"bar\", \"POINT (500 1)\"])"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0 2.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOPOINT(\"POINT (1 2 3)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_point"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0 2.0 3.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT (1 2) extra\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0 2.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"LINESTRING (1 2)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "LINESTRING (1.0 2.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POLYGON ((0 0, 1 0, 1 1))\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POLYGON ((0.0 0.0, 1.0 0.0, 1.0 1.0))"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POLYGON ((0 0, 1 0, 1 1, 0 1))\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POLYGON ((0.0 0.0, 1.0 0.0, 1.0 1.0, 0.0 1.0))"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_CARTESIANSHAPE(\"CIRCLE (1 2 3)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "cartesian_shape"
+          }
+        ],
+        "values" : [
+          [
+            "CIRCLE (1.0 2.0 3.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"BBOX (1, 2, 3, 4)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"POINT (1 100)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"GEOMETRYCOLLECTION (POINT EMPTY)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"MULTIPOINT (EMPTY)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"MULTIPOINT EMPTY\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "MULTIPOINT EMPTY"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_CARTESIANSHAPE(\"POINT (-Infinity 2)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "cartesian_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (-Infinity 2.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOPOINT(\"POINT (NaN NaN)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_point"
+          }
+        ],
+        "values" : [
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"point (1 2)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0 2.0)"
+          ]
+        ]
+      }
+    }
+  ]
+}

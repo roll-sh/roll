@@ -1,0 +1,586 @@
+{
+  "description": "REST framing: routing errors, parameters, media types, filter_path, error_trace, formats.",
+  "steps": [
+    {
+      "req": "GET /_nope/x/y",
+      "status": 400,
+      "response": {
+        "error": "no handler found for uri [/_nope/x/y] and method [GET]"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "DELETE /_cluster/health",
+      "status": 405,
+      "response": {
+        "error": "Incorrect HTTP method for uri [/_cluster/health] and method [DELETE], allowed: [GET]",
+        "status": 405
+      },
+      "response_headers": {
+        "content-type": "application/json",
+        "allow": "GET"
+      }
+    },
+    {
+      "req": "POST /esm-r1/_settings",
+      "status": 405,
+      "response": {
+        "error": "Incorrect HTTP method for uri [/esm-r1/_settings] and method [POST], allowed: [GET, PUT]",
+        "status": 405
+      },
+      "response_headers": {
+        "content-type": "application/json",
+        "allow": "GET,PUT"
+      }
+    },
+    {
+      "req": "GET /_cluster/health?leve=indices",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "request [/_cluster/health] contains unrecognized parameter: [leve] -> did you mean [level]?"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "request [/_cluster/health] contains unrecognized parameter: [leve] -> did you mean [level]?"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_cluster/health?foo=1&bar=2",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "request [/_cluster/health] contains unrecognized parameters: [bar], [foo]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "request [/_cluster/health] contains unrecognized parameters: [bar], [foo]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_cluster/pending_tasks?prety",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "request [/_cluster/pending_tasks] contains unrecognized parameter: [prety] -> did you mean [pretty]?"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "request [/_cluster/pending_tasks] contains unrecognized parameter: [prety] -> did you mean [pretty]?"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-r1",
+      "body": {
+        "settings": {
+          "number_of_replicas": 0
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-r1"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-r1/_settings?filter_path=**.number_of_shards",
+      "status": 200,
+      "response": {
+        "esm-r1": {
+          "settings": {
+            "index": {
+              "number_of_shards": "1"
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-r1/_settings?filter_path=-**.uuid,-**.creation_date,-**.version",
+      "status": 200,
+      "response": {
+        "esm-r1": {
+          "settings": {
+            "index": {
+              "routing": {
+                "allocation": {
+                  "include": {
+                    "_tier_preference": "data_content"
+                  }
+                }
+              },
+              "number_of_shards": "1",
+              "provided_name": "esm-r1",
+              "number_of_replicas": "0"
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-r1/_settings?filter_path=esm-r1.settings.index.number_*,-esm-r1.settings.index.number_of_replicas",
+      "status": 200,
+      "response": {
+        "esm-r1": {
+          "settings": {
+            "index": {
+              "number_of_shards": "1"
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-r1/_settings?filter_path=nope",
+      "status": 200,
+      "response": {},
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-r1/_settings?filter_path=*.settings.index.provided_name&pretty",
+      "status": 200,
+      "response": {
+        "esm-r1": {
+          "settings": {
+            "index": {
+              "provided_name": "esm-r1"
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-r1/_settings?filter_path=*.settings.index.provided_name&format=yaml",
+      "status": 200,
+      "text": "---\nesm-r1:\n  settings:\n    index:\n      provided_name: \"esm-r1\"\n",
+      "response_headers": {
+        "content-type": "application/yaml"
+      }
+    },
+    {
+      "req": "GET /esm-r1/_settings?filter_path=*.settings.index.provided_name",
+      "headers": {
+        "Accept": "application/yaml"
+      },
+      "status": 200,
+      "text": "---\nesm-r1:\n  settings:\n    index:\n      provided_name: \"esm-r1\"\n",
+      "response_headers": {
+        "content-type": "application/yaml"
+      }
+    },
+    {
+      "req": "GET /esm-nope?error_trace=false",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "index_not_found_exception",
+              "reason": "no such index [esm-nope]",
+              "resource.type": "index_or_alias",
+              "resource.id": "esm-nope",
+              "index_uuid": "_na_",
+              "index": "esm-nope"
+            }
+          ],
+          "type": "index_not_found_exception",
+          "reason": "no such index [esm-nope]",
+          "resource.type": "index_or_alias",
+          "resource.id": "esm-nope",
+          "index_uuid": "_na_",
+          "index": "esm-nope"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-r1/_settings?filter_path=*.settings.index.provided_name",
+      "headers": {
+        "Accept": "application/vnd.elasticsearch+json; compatible-with=8"
+      },
+      "status": 200,
+      "response": {
+        "esm-r1": {
+          "settings": {
+            "index": {
+              "provided_name": "esm-r1"
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/vnd.elasticsearch+json;compatible-with=8"
+      }
+    },
+    {
+      "req": "GET /esm-r1/_settings?filter_path=*.settings.index.provided_name",
+      "headers": {
+        "Accept": "application/vnd.elasticsearch+json;compatible-with=9"
+      },
+      "status": 200,
+      "response": {
+        "esm-r1": {
+          "settings": {
+            "index": {
+              "provided_name": "esm-r1"
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/vnd.elasticsearch+json;compatible-with=9"
+      }
+    },
+    {
+      "req": "GET /esm-r1/_settings?filter_path=*.settings.index.provided_name",
+      "headers": {
+        "Accept": "application/vnd.elasticsearch+json; compatible-with=6"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "media_type_header_exception",
+              "reason": "Invalid media-type value on headers [Content-Type, Accept]"
+            }
+          ],
+          "type": "media_type_header_exception",
+          "reason": "Invalid media-type value on headers [Content-Type, Accept]",
+          "caused_by": {
+            "type": "status_exception",
+            "reason": "Accept version must be either version 9 or 8, but found 6. Accept=application/vnd.elasticsearch+json; compatible-with=6"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-r1/_settings?filter_path=*.settings.index.provided_name",
+      "headers": {
+        "Accept": "bogus"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "media_type_header_exception",
+              "reason": "Invalid media-type value on headers [Accept]"
+            }
+          ],
+          "type": "media_type_header_exception",
+          "reason": "Invalid media-type value on headers [Accept]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "invalid media-type [bogus]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-r2",
+      "raw": "{}",
+      "headers": {
+        "Content-Type": "text/plain"
+      },
+      "status": 406,
+      "response": {
+        "error": "Content-Type header [text/plain] is not supported",
+        "status": 406
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-r2",
+      "raw": "{}",
+      "headers": {
+        "Content-Type": "application/vnd.elasticsearch+json; compatible-with=8",
+        "Accept": "application/vnd.elasticsearch+json; compatible-with=9"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "media_type_header_exception",
+              "reason": "Invalid media-type value on headers [Content-Type, Accept]"
+            }
+          ],
+          "type": "media_type_header_exception",
+          "reason": "Invalid media-type value on headers [Content-Type, Accept]",
+          "caused_by": {
+            "type": "status_exception",
+            "reason": "A compatible version is required on both Content-Type and Accept headers if either one has requested a compatible version and the compatible versions must match. Accept=application/vnd.elasticsearch+json; compatible-with=9, Content-Type=application/vnd.elasticsearch+json; compatible-with=8"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-r2",
+      "raw": "{bad",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "x_content_parse_exception",
+              "reason": "[1:2] Unexpected character ('b' (code 98)): was expecting double-quote to start field name\n at [Source: (byte[])\"{bad\"; line: 1, column: 2]"
+            }
+          ],
+          "type": "x_content_parse_exception",
+          "reason": "[1:2] Unexpected character ('b' (code 98)): was expecting double-quote to start field name\n at [Source: (byte[])\"{bad\"; line: 1, column: 2]",
+          "caused_by": {
+            "type": "json_parse_exception",
+            "reason": "Unexpected character ('b' (code 98)): was expecting double-quote to start field name\n at [Source: (byte[])\"{bad\"; line: 1, column: 2]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-r2",
+      "raw": "{\"settings\":",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "x_content_e_o_f_exception",
+              "reason": "[1:13] Unexpected end of file"
+            }
+          ],
+          "type": "x_content_e_o_f_exception",
+          "reason": "[1:13] Unexpected end of file",
+          "caused_by": {
+            "type": "json_e_o_f_exception",
+            "reason": "Unexpected end-of-input within/between Object entries\n at [Source: (byte[])\"{\"settings\":\"; line: 1, column: 13]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-r2",
+      "raw": "{\"a\":1,\"a\":2}",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "x_content_parse_exception",
+              "reason": "[1:11] Duplicate field 'a'\n at [Source: (byte[])\"{\"a\":1,\"a\":2}\"; line: 1, column: 11]"
+            }
+          ],
+          "type": "x_content_parse_exception",
+          "reason": "[1:11] Duplicate field 'a'\n at [Source: (byte[])\"{\"a\":1,\"a\":2}\"; line: 1, column: 11]",
+          "caused_by": {
+            "type": "json_parse_exception",
+            "reason": "Duplicate field 'a'\n at [Source: (byte[])\"{\"a\":1,\"a\":2}\"; line: 1, column: 11]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-r2?source=%7B%22settings%22%3A%7B%22number_of_replicas%22%3A0%7D%7D&source_content_type=application/json",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "request [/esm-r2] contains unrecognized parameters: [source], [source_content_type]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "request [/esm-r2] contains unrecognized parameters: [source], [source_content_type]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-r2/_settings/index.number_of_replicas?flat_settings",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "index_not_found_exception",
+              "reason": "no such index [esm-r2]",
+              "resource.type": "index_or_alias",
+              "resource.id": "esm-r2",
+              "index_uuid": "_na_",
+              "index": "esm-r2"
+            }
+          ],
+          "type": "index_not_found_exception",
+          "reason": "no such index [esm-r2]",
+          "resource.type": "index_or_alias",
+          "resource.id": "esm-r2",
+          "index_uuid": "_na_",
+          "index": "esm-r2"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-r3?source=%7B%7D",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "request [/esm-r3] contains unrecognized parameter: [source]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "request [/esm-r3] contains unrecognized parameter: [source]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_cluster/health?filter_path=status,number_of_nodes&human",
+      "mask": [
+        "cluster_name",
+        "status"
+      ],
+      "status": 200,
+      "response": {
+        "status": "yellow",
+        "number_of_nodes": 1
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "OPTIONS /_cluster/health",
+      "status": 200,
+      "text": "",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8",
+        "allow": "GET"
+      }
+    },
+    {
+      "req": "GET /esm-r1/_search",
+      "status": 200,
+      "response": {
+        "took": 5,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 0,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": []
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      },
+      "skip": "document and search APIs arrive with the engine"
+    },
+    {
+      "req": "GET /esm-r1/_doc/1",
+      "status": 404,
+      "response": {
+        "_index": "esm-r1",
+        "_id": "1",
+        "found": false
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      },
+      "skip": "document and search APIs arrive with the engine"
+    }
+  ]
+}

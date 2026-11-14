@@ -1,0 +1,167 @@
+# Tests of Elasticsearch 9.5.5's `analysis-common` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+analysis-common:analysis-common/10_basic/Module loaded
+analysis-common:analysis-common/20_analyzers/arabic
+analysis-common:analysis-common/20_analyzers/armenian
+analysis-common:analysis-common/20_analyzers/basque
+analysis-common:analysis-common/20_analyzers/bengali
+analysis-common:analysis-common/20_analyzers/brazilian
+analysis-common:analysis-common/20_analyzers/bulgarian
+analysis-common:analysis-common/20_analyzers/catalan
+analysis-common:analysis-common/20_analyzers/chinese
+analysis-common:analysis-common/20_analyzers/cjk
+analysis-common:analysis-common/20_analyzers/czech
+analysis-common:analysis-common/20_analyzers/danish
+analysis-common:analysis-common/20_analyzers/dutch
+analysis-common:analysis-common/20_analyzers/english
+analysis-common:analysis-common/20_analyzers/estonian
+analysis-common:analysis-common/20_analyzers/fingerprint
+analysis-common:analysis-common/20_analyzers/finnish
+analysis-common:analysis-common/20_analyzers/french
+analysis-common:analysis-common/20_analyzers/galician
+analysis-common:analysis-common/20_analyzers/german
+analysis-common:analysis-common/20_analyzers/greek
+analysis-common:analysis-common/20_analyzers/hindi
+analysis-common:analysis-common/20_analyzers/hungarian
+analysis-common:analysis-common/20_analyzers/indonesian
+analysis-common:analysis-common/20_analyzers/irish
+analysis-common:analysis-common/20_analyzers/italian
+analysis-common:analysis-common/20_analyzers/latvian
+analysis-common:analysis-common/20_analyzers/lithuanian
+analysis-common:analysis-common/20_analyzers/norwegian
+analysis-common:analysis-common/20_analyzers/pattern
+analysis-common:analysis-common/20_analyzers/persian
+analysis-common:analysis-common/20_analyzers/persian stemming
+analysis-common:analysis-common/20_analyzers/portuguese
+analysis-common:analysis-common/20_analyzers/romanian
+analysis-common:analysis-common/20_analyzers/russian
+analysis-common:analysis-common/20_analyzers/serbian
+analysis-common:analysis-common/20_analyzers/snowball
+analysis-common:analysis-common/20_analyzers/sorani
+analysis-common:analysis-common/20_analyzers/spanish
+analysis-common:analysis-common/20_analyzers/swedish
+analysis-common:analysis-common/20_analyzers/thai
+analysis-common:analysis-common/20_analyzers/turkish
+analysis-common:analysis-common/20_analyzers/whitespace
+analysis-common:analysis-common/30_tokenizers/PathHierarchy
+analysis-common:analysis-common/30_tokenizers/classic
+analysis-common:analysis-common/30_tokenizers/edge_ngram
+analysis-common:analysis-common/30_tokenizers/keyword
+analysis-common:analysis-common/30_tokenizers/letter
+analysis-common:analysis-common/30_tokenizers/lowercase
+analysis-common:analysis-common/30_tokenizers/ngram
+analysis-common:analysis-common/30_tokenizers/ngram_exception
+analysis-common:analysis-common/30_tokenizers/path_hierarchy
+analysis-common:analysis-common/30_tokenizers/pattern
+analysis-common:analysis-common/30_tokenizers/simple_pattern
+analysis-common:analysis-common/30_tokenizers/simple_pattern_split
+analysis-common:analysis-common/30_tokenizers/thai_tokenizer
+analysis-common:analysis-common/30_tokenizers/uax_url_email
+analysis-common:analysis-common/30_tokenizers/whitespace
+analysis-common:analysis-common/40_token_filters/apostrophe
+analysis-common:analysis-common/40_token_filters/arabic_normalization
+analysis-common:analysis-common/40_token_filters/arabic_stem
+analysis-common:analysis-common/40_token_filters/asciifolding
+analysis-common:analysis-common/40_token_filters/bengali_normalization
+analysis-common:analysis-common/40_token_filters/bengali_stem
+analysis-common:analysis-common/40_token_filters/brazilian_stem
+analysis-common:analysis-common/40_token_filters/cjk_bigram
+analysis-common:analysis-common/40_token_filters/cjk_width
+analysis-common:analysis-common/40_token_filters/classic
+analysis-common:analysis-common/40_token_filters/common_grams
+analysis-common:analysis-common/40_token_filters/czech_stem
+analysis-common:analysis-common/40_token_filters/decimal_digit
+analysis-common:analysis-common/40_token_filters/decompounder
+analysis-common:analysis-common/40_token_filters/delimited_payload
+analysis-common:analysis-common/40_token_filters/dutch_stem
+analysis-common:analysis-common/40_token_filters/edge_ngram
+analysis-common:analysis-common/40_token_filters/edge_ngram side deprecated
+analysis-common:analysis-common/40_token_filters/elision
+analysis-common:analysis-common/40_token_filters/fingerprint
+analysis-common:analysis-common/40_token_filters/french_stem
+analysis-common:analysis-common/40_token_filters/german_normalization
+analysis-common:analysis-common/40_token_filters/german_stem
+analysis-common:analysis-common/40_token_filters/hindi_normalization
+analysis-common:analysis-common/40_token_filters/indic_normalization
+analysis-common:analysis-common/40_token_filters/keep_filter
+analysis-common:analysis-common/40_token_filters/keep_types_filter
+analysis-common:analysis-common/40_token_filters/keywordmarker
+analysis-common:analysis-common/40_token_filters/kstem
+analysis-common:analysis-common/40_token_filters/length
+analysis-common:analysis-common/40_token_filters/limit_count
+analysis-common:analysis-common/40_token_filters/lowercase
+analysis-common:analysis-common/40_token_filters/min_hash
+analysis-common:analysis-common/40_token_filters/multiplexer
+analysis-common:analysis-common/40_token_filters/ngram
+analysis-common:analysis-common/40_token_filters/pattern_capture
+analysis-common:analysis-common/40_token_filters/pattern_replace
+analysis-common:analysis-common/40_token_filters/pattern_replace_filter
+analysis-common:analysis-common/40_token_filters/persian_normalization
+analysis-common:analysis-common/40_token_filters/porterstem
+analysis-common:analysis-common/40_token_filters/reverse
+analysis-common:analysis-common/40_token_filters/russian_stem
+analysis-common:analysis-common/40_token_filters/scandinavian_folding
+analysis-common:analysis-common/40_token_filters/scandinavian_normalization
+analysis-common:analysis-common/40_token_filters/serbian_normalization
+analysis-common:analysis-common/40_token_filters/snowball
+analysis-common:analysis-common/40_token_filters/sorani_normalization
+analysis-common:analysis-common/40_token_filters/stemmer
+analysis-common:analysis-common/40_token_filters/stemmer_override
+analysis-common:analysis-common/40_token_filters/stemmer_override file access
+analysis-common:analysis-common/40_token_filters/synonym
+analysis-common:analysis-common/40_token_filters/synonym_graph
+analysis-common:analysis-common/40_token_filters/synonym_graph and flatten_graph
+analysis-common:analysis-common/40_token_filters/synonym_graph_without_index
+analysis-common:analysis-common/40_token_filters/synonym_without_index
+analysis-common:analysis-common/40_token_filters/trim
+analysis-common:analysis-common/40_token_filters/truncate
+analysis-common:analysis-common/40_token_filters/unique
+analysis-common:analysis-common/40_token_filters/unique only_on_same_pos
+analysis-common:analysis-common/40_token_filters/unique test position correction
+analysis-common:analysis-common/40_token_filters/uppercase
+analysis-common:analysis-common/40_token_filters/word_delimiter
+analysis-common:analysis-common/40_token_filters/word_delimiter_graph
+analysis-common:analysis-common/50_chained_synonym_filters/Test chained synonym_graph filters
+analysis-common:analysis-common/50_char_filters/chained mapping char filters are bounded by index.analyze.max_char_count
+analysis-common:analysis-common/50_char_filters/html_strip
+analysis-common:analysis-common/50_char_filters/mapping
+analysis-common:analysis-common/50_char_filters/pattern_replace
+analysis-common:analysis-common/50_char_filters/pattern_replace error handling (too complex pattern)
+analysis-common:analysis-common/60_analysis_scripting/condition
+analysis-common:analysis-common/60_analysis_scripting/condition-vars
+analysis-common:analysis-common/60_analysis_scripting/script_filter
+analysis-common:analysis-common/60_analysis_scripting/script_filter_position
+analysis-common:cluster.stats/10_analysis_stats/get cluster stats returns analysis stats
+analysis-common:cluster.stats/20_analysis_stats_synonyms/get cluster stats returns multiple synonym graph filter stats
+analysis-common:cluster.stats/20_analysis_stats_synonyms/get cluster stats returns synonym sets stats
+analysis-common:indices.analyze/10_synonyms/Non-standard position length
+analysis-common:indices.analyze/10_synonyms/Synonym filter with char_filter
+analysis-common:indices.analyze/15_analyze/Custom analyzer is not buildable
+analysis-common:indices.analyze/15_analyze/Custom normalizer in request
+analysis-common:indices.analyze/15_analyze/Custom normalizer with illegal filter in request
+analysis-common:indices.analyze/15_analyze/Synonym filter with tokenizer
+analysis-common:indices/validate_query/10_synonyms/validate query with synonyms
+analysis-common:search.query/10_match/match query with stacked stems
+analysis-common:search.query/20_ngram_search/ngram search
+analysis-common:search.query/20_ngram_search/testNGramCopyField
+analysis-common:search.query/30_ngram_highligthing/ngram highlighting
+analysis-common:search.query/40_query_string/Test query string with snowball
+analysis-common:search.query/41_query_string_with_default_analyzer/Test default search analyzer is applied
+analysis-common:search.query/50_queries_with_synonyms/Test common terms query with stacked tokens
+analysis-common:search.query/50_queries_with_synonyms/Test match query with synonyms - see #3881 for extensive description of the issue
+analysis-common:search.query/50_queries_with_synonyms/Test multi_match phrase with no positions
+analysis-common:search.query/60_synonym_graph/index_phrases
+analysis-common:search.query/60_synonym_graph/minimum should match
+analysis-common:search.query/60_synonym_graph/multiterm synonyms phrase
+analysis-common:search.query/60_synonym_graph/phrase prefix
+analysis-common:search.query/60_synonym_graph/simple multiterm and
+analysis-common:search.query/60_synonym_graph/simple multiterm phrase
+analysis-common:search.query/70_intervals/Test use_field
+analysis-common:search.suggest/20_phrase/breaks ties by sorting terms
+analysis-common:search.suggest/20_phrase/doesn't fail when asked to run on a field without unigrams when force_unigrams=false
+analysis-common:search.suggest/20_phrase/fails when asked to run on a field without unigrams
+analysis-common:search.suggest/20_phrase/reverse suggestions
+analysis-common:search.suggest/20_phrase/sorts by score
+analysis-common:search.suggest/30_synonyms/suggestions with synonyms
+analysis-common:termvectors/10_payloads/term vectors with payloads tests

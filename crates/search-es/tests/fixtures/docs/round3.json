@@ -1,0 +1,4406 @@
+{
+  "description": "Round 3: synthetic _source (field types, arrays and offsets, keep modes, ignored values, copy_to, nested, dynamic limits), vector exclusion from _source and dense_vector doc values, ignore_dynamic_beyond_limit, multi-valued binary doc values, constant_keyword, date math in date_range values, open range bounds, dynamic objects under subobjects: false",
+  "steps": [
+    {
+      "req": "PUT /es-docs-syn-0",
+      "body": {
+        "settings": {
+          "index.mode": "logsdb"
+        },
+        "mappings": {
+          "properties": {
+            "k": {
+              "type": "keyword"
+            },
+            "n": {
+              "type": "long"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-0"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-0/_doc/0?refresh=true",
+      "body": {
+        "@timestamp": "2024-01-01T00:00:00Z",
+        "k": [
+          "b",
+          "a",
+          "b",
+          null
+        ],
+        "n": [
+          3,
+          1,
+          3
+        ],
+        "o": [
+          {
+            "x": 1
+          },
+          {
+            "x": 2,
+            "y": "z"
+          }
+        ]
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-0",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-0/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-0",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "@timestamp": "2024-01-01T00:00:00.000Z",
+          "k": [
+            "b",
+            "a",
+            "b",
+            null
+          ],
+          "n": [
+            3,
+            1,
+            3
+          ],
+          "o": [
+            {
+              "x": 1
+            },
+            {
+              "x": 2,
+              "y": "z"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-0",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-1",
+      "body": {
+        "settings": {
+          "index.mapping.source.mode": "synthetic"
+        },
+        "mappings": {
+          "properties": {
+            "k": {
+              "type": "keyword"
+            },
+            "n": {
+              "type": "long"
+            },
+            "f": {
+              "type": "float"
+            },
+            "h": {
+              "type": "half_float"
+            },
+            "s": {
+              "type": "scaled_float",
+              "scaling_factor": 100
+            },
+            "d": {
+              "type": "date"
+            },
+            "ip": {
+              "type": "ip"
+            },
+            "b": {
+              "type": "boolean"
+            },
+            "g": {
+              "type": "geo_point"
+            },
+            "t": {
+              "type": "text"
+            },
+            "kw": {
+              "type": "keyword",
+              "ignore_above": 3
+            },
+            "nm": {
+              "type": "long",
+              "ignore_malformed": true
+            },
+            "bin": {
+              "type": "binary",
+              "doc_values": true
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-1"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-1/_doc/0?refresh=true",
+      "body": {
+        "k": [
+          "b",
+          "a",
+          "b",
+          null
+        ],
+        "n": [
+          3,
+          1,
+          "3"
+        ],
+        "f": [
+          1.1,
+          0.3
+        ],
+        "h": 3.14,
+        "s": [
+          1.234,
+          "2"
+        ],
+        "d": [
+          "2020-01-01",
+          "2019-01-01T10:00:00.123+01:00",
+          1000
+        ],
+        "ip": [
+          "::1",
+          "10.0.0.1",
+          "10.0.0.1"
+        ],
+        "b": [
+          true,
+          false,
+          "true"
+        ],
+        "g": [
+          {
+            "lat": 41.12,
+            "lon": -71.34
+          },
+          "POINT (1 2)"
+        ],
+        "t": [
+          "z",
+          "a"
+        ],
+        "kw": [
+          "abcd",
+          "x",
+          "efgh",
+          "abcd"
+        ],
+        "nm": [
+          5,
+          "bad",
+          2
+        ],
+        "bin": [
+          "AQI=",
+          "AAA="
+        ],
+        "zz": {
+          "a.b": 1,
+          "c": [
+            1,
+            2
+          ]
+        },
+        "a.b.c": "dot"
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-1",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-1/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-1",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "a": {
+            "b": {
+              "c": "dot"
+            }
+          },
+          "b": [
+            false,
+            true,
+            true
+          ],
+          "bin": [
+            "AAA=",
+            "AQI="
+          ],
+          "d": [
+            "1000-01-01T00:00:00.000Z",
+            "2019-01-01T09:00:00.123Z",
+            "2020-01-01T00:00:00.000Z"
+          ],
+          "f": [
+            0.3,
+            1.1
+          ],
+          "g": [
+            {
+              "lat": 1.9999999646097422,
+              "lon": 0.9999999403953552
+            },
+            {
+              "lat": 41.1199999647215,
+              "lon": -71.34000004269183
+            }
+          ],
+          "h": 3.140625,
+          "ip": [
+            "::1",
+            "10.0.0.1"
+          ],
+          "k": [
+            "a",
+            "b"
+          ],
+          "kw": [
+            "x",
+            "abcd",
+            "efgh",
+            "abcd"
+          ],
+          "n": [
+            1,
+            3,
+            3
+          ],
+          "nm": [
+            2,
+            5,
+            "bad"
+          ],
+          "s": [
+            1.23,
+            2.0
+          ],
+          "t": [
+            "z",
+            "a"
+          ],
+          "zz": {
+            "a": {
+              "b": 1
+            },
+            "c": [
+              1,
+              2
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-1",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-2",
+      "body": {
+        "settings": {
+          "index.mapping.source.mode": "synthetic"
+        },
+        "mappings": {
+          "properties": {
+            "nest": {
+              "type": "nested",
+              "properties": {
+                "a": {
+                  "type": "keyword"
+                },
+                "b": {
+                  "type": "long"
+                }
+              }
+            },
+            "obj": {
+              "properties": {
+                "a": {
+                  "type": "keyword"
+                },
+                "b": {
+                  "type": "long"
+                }
+              }
+            },
+            "dis": {
+              "type": "object",
+              "dynamic": false,
+              "properties": {
+                "m": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "nv": {
+              "type": "keyword",
+              "null_value": "NULL"
+            },
+            "norm": {
+              "type": "keyword",
+              "normalizer": "lowercase"
+            },
+            "sk": {
+              "type": "keyword",
+              "store": true
+            },
+            "tk": {
+              "type": "text",
+              "fields": {
+                "raw": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "ul": {
+              "type": "unsigned_long"
+            },
+            "df": {
+              "type": "date",
+              "format": "yyyy/MM/dd||epoch_millis"
+            },
+            "dn": {
+              "type": "date_nanos"
+            },
+            "mot": {
+              "type": "match_only_text"
+            },
+            "w": {
+              "type": "wildcard"
+            },
+            "v": {
+              "type": "version"
+            },
+            "ck": {
+              "type": "constant_keyword",
+              "value": "foo"
+            },
+            "dv": {
+              "type": "dense_vector",
+              "dims": 3,
+              "index": false
+            },
+            "fl": {
+              "type": "flattened"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-2"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-2/_doc/0?refresh=true",
+      "body": {
+        "nest": [
+          {
+            "a": "y",
+            "b": 2
+          },
+          {
+            "a": "x"
+          },
+          {
+            "b": [
+              3,
+              1
+            ]
+          }
+        ],
+        "obj": [
+          {
+            "a": "y",
+            "b": 2
+          },
+          {
+            "a": "x"
+          },
+          {
+            "b": [
+              3,
+              1
+            ]
+          }
+        ],
+        "dis": {
+          "m": [
+            "q",
+            "p"
+          ],
+          "u": {
+            "x.y": 1
+          },
+          "u2": [
+            1,
+            2
+          ]
+        },
+        "nv": [
+          null,
+          "a"
+        ],
+        "norm": [
+          "B",
+          "a"
+        ],
+        "sk": [
+          "z",
+          "a",
+          "z"
+        ],
+        "tk": [
+          "z",
+          "a",
+          "a"
+        ],
+        "ul": [
+          18446744073709551615,
+          1
+        ],
+        "df": [
+          "2020/01/02",
+          0
+        ],
+        "dn": "2020-01-01T00:00:00.123456789Z",
+        "mot": [
+          "z",
+          "a"
+        ],
+        "w": [
+          "z",
+          "a",
+          "a"
+        ],
+        "v": [
+          "1.10.0",
+          "1.2.0"
+        ],
+        "ck": "foo",
+        "dv": [
+          1,
+          2.5,
+          3
+        ],
+        "fl": {
+          "b": {
+            "c": "1",
+            "a": [
+              "x",
+              "x",
+              2
+            ]
+          },
+          "a": true
+        }
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-2",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-2/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-2",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "ck": "foo",
+          "df": [
+            "1970/01/01",
+            "2020/01/02"
+          ],
+          "dis": {
+            "m": [
+              "p",
+              "q"
+            ],
+            "u": {
+              "x.y": 1
+            },
+            "u2": [
+              1,
+              2
+            ]
+          },
+          "dn": "2020-01-01T00:00:00.123456789Z",
+          "fl": {
+            "a": "true",
+            "b": {
+              "a": [
+                "2",
+                "x"
+              ],
+              "c": "1"
+            }
+          },
+          "mot": [
+            "z",
+            "a"
+          ],
+          "nest": [
+            {
+              "a": "y",
+              "b": 2
+            },
+            {
+              "a": "x"
+            },
+            {
+              "b": [
+                1,
+                3
+              ]
+            }
+          ],
+          "norm": [
+            "a",
+            "b"
+          ],
+          "nv": [
+            "NULL",
+            "a"
+          ],
+          "obj": {
+            "a": [
+              "x",
+              "y"
+            ],
+            "b": [
+              1,
+              2,
+              3
+            ]
+          },
+          "sk": [
+            "z",
+            "a",
+            "z"
+          ],
+          "tk": [
+            "a",
+            "z"
+          ],
+          "ul": [
+            1,
+            18446744073709551615
+          ],
+          "v": [
+            "1.2.0",
+            "1.10.0"
+          ],
+          "w": [
+            "a",
+            "z"
+          ]
+        }
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-2/_doc/1?refresh=true",
+      "body": {
+        "nest": {
+          "a": "s"
+        },
+        "obj": {},
+        "nv": null,
+        "tk": "single",
+        "ck": "foo"
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-2",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 1,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-2/_doc/1",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-2",
+        "_id": "1",
+        "_version": 1,
+        "_seq_no": 1,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "ck": "foo",
+          "nest": {
+            "a": "s"
+          },
+          "nv": "NULL",
+          "tk": "single"
+        }
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-2/_doc/2?refresh=true",
+      "body": {
+        "dis": {
+          "u": 3
+        }
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-2",
+        "_id": "2",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 2,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-2/_doc/2",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-2",
+        "_id": "2",
+        "_version": 1,
+        "_seq_no": 2,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "dis": {
+            "u": 3
+          }
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-2",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-3",
+      "body": {
+        "settings": {
+          "index.mapping.source.mode": "synthetic"
+        },
+        "mappings": {
+          "dynamic": false,
+          "properties": {
+            "a": {
+              "type": "keyword",
+              "copy_to": "c"
+            },
+            "c": {
+              "type": "keyword"
+            },
+            "r": {
+              "type": "integer_range"
+            },
+            "lr": {
+              "type": "long_range"
+            },
+            "dr": {
+              "type": "date_range"
+            },
+            "ipr": {
+              "type": "ip_range"
+            },
+            "fr": {
+              "type": "float_range"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-3"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-3/_doc/0?refresh=true",
+      "body": {
+        "z": 1,
+        "a": [
+          "q",
+          "p"
+        ],
+        "y.x": [
+          {
+            "a": 1
+          }
+        ],
+        "r": [
+          {
+            "gt": 1,
+            "lt": 5
+          },
+          {
+            "gte": 0,
+            "lte": 2
+          }
+        ],
+        "lr": {
+          "gte": 1
+        },
+        "dr": {
+          "gte": "2020-01-01",
+          "lt": "2020-02-01"
+        },
+        "ipr": "10.0.0.0/24",
+        "fr": {
+          "gt": 1.5,
+          "lte": 3
+        }
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-3",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-3/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-3",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "a": [
+            "q",
+            "p"
+          ],
+          "dr": {
+            "gte": "2020-01-01T00:00:00.000Z",
+            "lte": "2020-01-31T23:59:59.999Z"
+          },
+          "fr": {
+            "gte": 1.5000001,
+            "lte": 3.0
+          },
+          "ipr": {
+            "gte": "10.0.0.0",
+            "lte": "10.0.0.255"
+          },
+          "lr": {
+            "gte": 1,
+            "lte": null
+          },
+          "r": [
+            {
+              "gte": 0,
+              "lte": 2
+            },
+            {
+              "gte": 2,
+              "lte": 4
+            }
+          ],
+          "y": {
+            "x": [
+              {
+                "a": 1
+              }
+            ]
+          },
+          "z": 1
+        }
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-3/_doc/1?refresh=true",
+      "body": {
+        "c": "direct",
+        "a": "x"
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-3",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 1,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-3/_doc/1",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-3",
+        "_id": "1",
+        "_version": 1,
+        "_seq_no": 1,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "a": "x",
+          "c": "direct"
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-3",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-4",
+      "body": {
+        "settings": {
+          "index.mapping.source.mode": "synthetic"
+        },
+        "mappings": {
+          "properties": {
+            "sf": {
+              "type": "object",
+              "subobjects": false,
+              "properties": {
+                "a.b": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "ka": {
+              "type": "keyword",
+              "synthetic_source_keep": "arrays"
+            },
+            "kall": {
+              "type": "keyword",
+              "synthetic_source_keep": "all"
+            },
+            "oa": {
+              "type": "object",
+              "synthetic_source_keep": "arrays",
+              "properties": {
+                "x": {
+                  "type": "long"
+                }
+              }
+            },
+            "oall": {
+              "properties": {
+                "x": {
+                  "type": "long"
+                }
+              },
+              "synthetic_source_keep": "all"
+            },
+            "ne": {
+              "type": "nested",
+              "synthetic_source_keep": "all",
+              "properties": {
+                "x": {
+                  "type": "long"
+                }
+              }
+            },
+            "dis": {
+              "type": "object",
+              "enabled": false
+            },
+            "n": {
+              "type": "long"
+            },
+            "d": {
+              "type": "double"
+            },
+            "kn": {
+              "type": "keyword"
+            },
+            "bo": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-4"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-4/_doc/0?refresh=true",
+      "body": {
+        "sf": {
+          "a.b": [
+            "z",
+            "y"
+          ],
+          "c": {
+            "d": 1
+          }
+        },
+        "ka": [
+          "z",
+          "a",
+          "z",
+          null
+        ],
+        "kall": "one",
+        "oa": [
+          {
+            "x": [
+              2,
+              1
+            ]
+          },
+          {
+            "x": 0
+          }
+        ],
+        "oall": {
+          "x": [
+            2,
+            1
+          ]
+        },
+        "ne": [
+          {
+            "x": [
+              2,
+              1
+            ]
+          }
+        ],
+        "dis": [
+          {
+            "a": 1
+          },
+          {
+            "b": 2
+          }
+        ],
+        "n": [
+          1.7,
+          "2"
+        ],
+        "d": [
+          1e+20,
+          0.1,
+          -0.0,
+          5
+        ],
+        "kn": [
+          2,
+          true,
+          1.5
+        ],
+        "bo": [
+          "false",
+          true
+        ],
+        "e": [],
+        "eo": {},
+        "nn": null,
+        "arr": [
+          [
+            1,
+            2
+          ],
+          [
+            3
+          ]
+        ],
+        "mix": [
+          {
+            "q": 1
+          },
+          {
+            "q": [
+              2
+            ]
+          }
+        ]
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-4",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-4/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-4",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "arr": [
+            1,
+            2,
+            3
+          ],
+          "bo": [
+            false,
+            true
+          ],
+          "d": [
+            -0.0,
+            0.1,
+            5.0,
+            1e+20
+          ],
+          "dis": [
+            {
+              "a": 1
+            },
+            {
+              "b": 2
+            }
+          ],
+          "ka": [
+            "z",
+            "a",
+            "z",
+            null
+          ],
+          "kall": "one",
+          "kn": [
+            "1.5",
+            "2",
+            "true"
+          ],
+          "mix": {
+            "q": [
+              1,
+              2
+            ]
+          },
+          "n": [
+            1,
+            2
+          ],
+          "ne": [
+            {
+              "x": [
+                2,
+                1
+              ]
+            }
+          ],
+          "oa": [
+            {
+              "x": [
+                2,
+                1
+              ]
+            },
+            {
+              "x": 0
+            }
+          ],
+          "oall": {
+            "x": [
+              2,
+              1
+            ]
+          },
+          "sf": {
+            "a.b": [
+              "y",
+              "z"
+            ],
+            "c.d": 1
+          }
+        }
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-4/_doc/1?refresh=true",
+      "body": {
+        "oa": {
+          "x": [
+            5,
+            4
+          ]
+        },
+        "ka": "single",
+        "n": []
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-4",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 1,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-4/_doc/1",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-4",
+        "_id": "1",
+        "_version": 1,
+        "_seq_no": 1,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "ka": "single",
+          "oa": {
+            "x": [
+              4,
+              5
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-4",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-5",
+      "body": {
+        "settings": {
+          "index.mapping.source.mode": "synthetic",
+          "index.mapping.total_fields.limit": 3,
+          "index.mapping.total_fields.ignore_dynamic_beyond_limit": true
+        },
+        "mappings": {
+          "properties": {
+            "a": {
+              "type": "keyword"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-5"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-5/_doc/0?refresh=true",
+      "body": {
+        "a": "x",
+        "b": 1,
+        "c": 2,
+        "d": {
+          "e": 1
+        },
+        "f": [
+          1,
+          2
+        ]
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-5",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-5/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-5",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "a": "x",
+          "b": 1,
+          "c": 2,
+          "d": {
+            "e": 1
+          },
+          "f": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-5",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-6",
+      "body": {
+        "settings": {
+          "index.mapping.source.mode": "synthetic"
+        },
+        "mappings": {
+          "dynamic": "runtime",
+          "properties": {
+            "a": {
+              "type": "keyword"
+            }
+          },
+          "runtime": {
+            "r": {
+              "type": "keyword"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-6"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-6/_doc/0?refresh=true",
+      "body": {
+        "a": "x",
+        "b": 1,
+        "r": "rt",
+        "c": {
+          "d": [
+            2,
+            1
+          ]
+        },
+        "f": [
+          3,
+          1,
+          2
+        ]
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-6",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-6/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-6",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "a": "x",
+          "b": 1,
+          "c": {
+            "d": [
+              2,
+              1
+            ]
+          },
+          "f": [
+            3,
+            1,
+            2
+          ],
+          "r": "rt"
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-6",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-7",
+      "body": {
+        "settings": {
+          "index.mapping.source.mode": "synthetic",
+          "index.mapping.synthetic_source_keep": "arrays"
+        },
+        "mappings": {
+          "properties": {
+            "k": {
+              "type": "keyword"
+            },
+            "k2": {
+              "type": "keyword"
+            },
+            "k3": {
+              "type": "keyword"
+            },
+            "n": {
+              "type": "long"
+            },
+            "n2": {
+              "type": "long"
+            },
+            "sf": {
+              "type": "scaled_float",
+              "scaling_factor": 10
+            },
+            "t": {
+              "type": "text"
+            },
+            "mk": {
+              "type": "keyword",
+              "fields": {
+                "x": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "o": {
+              "properties": {
+                "a": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "ne": {
+              "type": "nested",
+              "properties": {
+                "a": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "d": {
+              "type": "date"
+            },
+            "ip": {
+              "type": "ip"
+            },
+            "b": {
+              "type": "boolean"
+            },
+            "kim": {
+              "type": "keyword",
+              "ignore_above": 2
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-7"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-7/_doc/0?refresh=true",
+      "body": {
+        "k": [
+          "a"
+        ],
+        "k2": [],
+        "k3": [
+          null
+        ],
+        "n": [
+          null,
+          2,
+          1,
+          2
+        ],
+        "n2": [
+          [
+            3,
+            1
+          ],
+          2
+        ],
+        "sf": [
+          1.234,
+          "2"
+        ],
+        "t": [
+          "z",
+          "a"
+        ],
+        "mk": [
+          "z",
+          "a"
+        ],
+        "o": {
+          "a": [
+            "z",
+            "a"
+          ]
+        },
+        "ne": [
+          {
+            "a": [
+              "z",
+              "a"
+            ]
+          },
+          {
+            "a": "q"
+          }
+        ],
+        "d": [
+          "2020-01-01",
+          "2019-01-01"
+        ],
+        "ip": [
+          "::2",
+          "::1"
+        ],
+        "b": [
+          true,
+          false
+        ],
+        "kim": [
+          "abc",
+          "z",
+          "a"
+        ],
+        "u": [
+          "z",
+          "a"
+        ],
+        "uo": [
+          {
+            "a": 1
+          }
+        ]
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-7",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-7/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-7",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "b": [
+            true,
+            false
+          ],
+          "d": [
+            "2020-01-01",
+            "2019-01-01"
+          ],
+          "ip": [
+            "::2",
+            "::1"
+          ],
+          "k": [
+            "a"
+          ],
+          "k2": [],
+          "k3": [
+            null
+          ],
+          "kim": [
+            "z",
+            "a",
+            "abc"
+          ],
+          "mk": [
+            "z",
+            "a"
+          ],
+          "n": [
+            null,
+            2,
+            1,
+            2
+          ],
+          "n2": [
+            3,
+            1,
+            2
+          ],
+          "ne": [
+            {
+              "a": [
+                "z",
+                "a"
+              ]
+            },
+            {
+              "a": "q"
+            }
+          ],
+          "o": {
+            "a": [
+              "z",
+              "a"
+            ]
+          },
+          "sf": [
+            1.2,
+            2.0
+          ],
+          "t": [
+            "z",
+            "a"
+          ],
+          "u": [
+            "z",
+            "a"
+          ],
+          "uo": [
+            {
+              "a": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-7",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-8",
+      "body": {
+        "settings": {
+          "index.mapping.source.mode": "synthetic",
+          "index.mapping.synthetic_source_keep": "arrays"
+        },
+        "mappings": {
+          "properties": {
+            "ip": {
+              "type": "ip"
+            },
+            "ul": {
+              "type": "unsigned_long"
+            },
+            "b": {
+              "type": "boolean"
+            },
+            "dn": {
+              "type": "date_nanos"
+            },
+            "f": {
+              "type": "float"
+            },
+            "h": {
+              "type": "half_float"
+            },
+            "w": {
+              "type": "wildcard"
+            },
+            "v": {
+              "type": "version"
+            },
+            "g": {
+              "type": "geo_point"
+            },
+            "bin": {
+              "type": "binary",
+              "doc_values": true
+            },
+            "mot": {
+              "type": "match_only_text"
+            },
+            "fl": {
+              "type": "flattened"
+            },
+            "kn": {
+              "type": "keyword",
+              "null_value": "N"
+            },
+            "nn": {
+              "type": "long",
+              "null_value": 7
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-8"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-8/_doc/0?refresh=true",
+      "body": {
+        "ip": [
+          "0:0::2",
+          "::1"
+        ],
+        "ul": [
+          5,
+          "1"
+        ],
+        "b": [
+          "true",
+          false
+        ],
+        "dn": [
+          "2020-01-01",
+          "2019-01-01"
+        ],
+        "f": [
+          1.1,
+          "0.5"
+        ],
+        "h": [
+          3.14
+        ],
+        "w": [
+          "z",
+          "a"
+        ],
+        "v": [
+          "2.0",
+          "1.0"
+        ],
+        "g": [
+          [
+            1,
+            2
+          ],
+          [
+            0,
+            1
+          ]
+        ],
+        "bin": [
+          "AQI=",
+          "AAA="
+        ],
+        "mot": [
+          "z",
+          "a"
+        ],
+        "fl": [
+          {
+            "a": "z"
+          },
+          {
+            "a": "b"
+          }
+        ],
+        "kn": [
+          null,
+          "a",
+          null
+        ],
+        "nn": [
+          null,
+          1
+        ]
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-8",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-8/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-8",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "b": [
+            true,
+            false
+          ],
+          "bin": [
+            "AQI=",
+            "AAA="
+          ],
+          "dn": [
+            "2020-01-01",
+            "2019-01-01"
+          ],
+          "f": [
+            1.1,
+            0.5
+          ],
+          "fl": [
+            {
+              "a": "z"
+            },
+            {
+              "a": "b"
+            }
+          ],
+          "g": [
+            {
+              "lat": 0.9999999823048711,
+              "lon": 0.0
+            },
+            {
+              "lat": 1.9999999646097422,
+              "lon": 0.9999999403953552
+            }
+          ],
+          "h": [
+            3.140625
+          ],
+          "ip": [
+            "::2",
+            "::1"
+          ],
+          "kn": [
+            "N",
+            "a",
+            "N"
+          ],
+          "mot": [
+            "z",
+            "a"
+          ],
+          "nn": [
+            7,
+            1
+          ],
+          "ul": [
+            5,
+            1
+          ],
+          "v": [
+            "2.0",
+            "1.0"
+          ],
+          "w": [
+            "z",
+            "a"
+          ]
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-8",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-9",
+      "body": {
+        "settings": {
+          "index.mapping.source.mode": "synthetic"
+        },
+        "mappings": {
+          "properties": {
+            "r": {
+              "type": "integer_range"
+            },
+            "lr": {
+              "type": "long_range"
+            },
+            "dr": {
+              "type": "date_range",
+              "format": "yyyy-MM-dd"
+            },
+            "dr2": {
+              "type": "date_range"
+            },
+            "ipr": {
+              "type": "ip_range"
+            },
+            "fr": {
+              "type": "float_range"
+            },
+            "dbr": {
+              "type": "double_range"
+            },
+            "fl": {
+              "type": "flattened",
+              "ignore_above": 3
+            },
+            "fl2": {
+              "type": "flattened"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-9"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-9/_doc/0?refresh=true",
+      "body": {
+        "r": [
+          {
+            "gt": 1,
+            "lt": 5
+          },
+          {
+            "gte": 0,
+            "lte": 2
+          },
+          {
+            "gte": 0,
+            "lte": 2
+          },
+          {
+            "lte": 3
+          },
+          {}
+        ],
+        "lr": [
+          {
+            "gte": 1,
+            "lt": null
+          }
+        ],
+        "dr": {
+          "gt": "2020-01-01",
+          "lte": "2020-01-03"
+        },
+        "dr2": [
+          {
+            "gte": "2020-01-01||/M",
+            "lte": "2020-01-03||/d"
+          },
+          {
+            "gt": 0
+          }
+        ],
+        "ipr": [
+          "10.0.0.0/8",
+          {
+            "gt": "::1",
+            "lt": "::5"
+          }
+        ],
+        "fr": {
+          "gt": 1.5,
+          "lt": 2
+        },
+        "dbr": {
+          "gt": 1.5,
+          "lte": 1e+300
+        },
+        "fl": {
+          "a": [
+            "abcd",
+            "x",
+            "y"
+          ],
+          "b.c": "zz",
+          "b": {
+            "d": 1
+          }
+        },
+        "fl2": [
+          {
+            "k": "v"
+          },
+          {
+            "k": "a",
+            "z": {
+              "y.x": true
+            }
+          }
+        ]
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-9",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-9/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-9",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "dbr": {
+            "gte": 1.5000000000000002,
+            "lte": 1e+300
+          },
+          "dr": {
+            "gte": "2020-01-02",
+            "lte": "2020-01-03"
+          },
+          "dr2": [
+            {
+              "gte": "1970-01-01T00:00:00.001Z",
+              "lte": null
+            },
+            {
+              "gte": "2020-01-01T00:00:00.000Z",
+              "lte": "2020-01-03T23:59:59.999Z"
+            }
+          ],
+          "fl": {
+            "a": [
+              "abcd",
+              "x",
+              "y"
+            ],
+            "b": {
+              "c": "zz",
+              "d": "1"
+            }
+          },
+          "fl2": {
+            "k": [
+              "a",
+              "v"
+            ],
+            "z": {
+              "y": {
+                "x": "true"
+              }
+            }
+          },
+          "fr": {
+            "gte": 1.5000001,
+            "lte": 1.9999999
+          },
+          "ipr": [
+            {
+              "gte": "10.0.0.0",
+              "lte": "10.255.255.255"
+            },
+            {
+              "gte": "::2",
+              "lte": "::4"
+            }
+          ],
+          "lr": {
+            "gte": 1,
+            "lte": 9223372036854775806
+          },
+          "r": [
+            {
+              "gte": null,
+              "lte": 3
+            },
+            {
+              "gte": null,
+              "lte": null
+            },
+            {
+              "gte": 0,
+              "lte": 2
+            },
+            {
+              "gte": 2,
+              "lte": 4
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-9",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-10",
+      "body": {
+        "settings": {},
+        "mappings": {
+          "properties": {
+            "ck": {
+              "type": "constant_keyword",
+              "value": "foo"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-10"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-10/_doc/0?refresh=true",
+      "body": {
+        "ck": "foo"
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-10",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-10/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-10",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "ck": "foo"
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-10",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-11",
+      "body": {
+        "settings": {
+          "index.mapping.source.mode": "synthetic"
+        },
+        "mappings": {
+          "properties": {
+            "ck": {
+              "type": "constant_keyword",
+              "value": "foo"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-11"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-11/_doc/0?refresh=true",
+      "body": {
+        "ck": "foo"
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-11",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-11/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-11",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "ck": "foo"
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-11",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-12",
+      "body": {
+        "settings": {},
+        "mappings": {
+          "properties": {
+            "sf": {
+              "type": "object",
+              "subobjects": false,
+              "properties": {
+                "a.b": {
+                  "type": "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-12"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-12/_doc/0?refresh=true",
+      "body": {
+        "sf": {
+          "c": {
+            "d": 1
+          }
+        }
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-12",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-12/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-12",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "sf": {
+            "c": {
+              "d": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-12",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-13",
+      "body": {
+        "settings": {},
+        "mappings": {}
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-13"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-13/_doc/0?refresh=true",
+      "body": {
+        "e": []
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-13",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-13/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-13",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "e": []
+        }
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-13/_doc/1?refresh=true",
+      "body": {
+        "arr": [
+          [
+            1,
+            2
+          ],
+          [
+            3
+          ]
+        ]
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-13",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 1,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-13/_doc/1",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-13",
+        "_id": "1",
+        "_version": 1,
+        "_seq_no": 1,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "arr": [
+            [
+              1,
+              2
+            ],
+            [
+              3
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-13/_doc/2?refresh=true",
+      "body": {
+        "eo": {}
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-13",
+        "_id": "2",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 2,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-13/_doc/2",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-13",
+        "_id": "2",
+        "_version": 1,
+        "_seq_no": 2,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "eo": {}
+        }
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-13/_doc/3?refresh=true",
+      "body": {
+        "nn": null
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-13",
+        "_id": "3",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 3,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-13/_doc/3",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-13",
+        "_id": "3",
+        "_version": 1,
+        "_seq_no": 3,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "nn": null
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-13",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-14",
+      "body": {
+        "settings": {},
+        "mappings": {
+          "properties": {
+            "dr2": {
+              "type": "date_range"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-14"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-14/_doc/0?refresh=true",
+      "body": {
+        "dr2": {
+          "gte": "2020-01-01||/M",
+          "lte": "2020-01-03||/d"
+        }
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-14",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-14/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-14",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "dr2": {
+            "gte": "2020-01-01||/M",
+            "lte": "2020-01-03||/d"
+          }
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-14",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-15",
+      "body": {
+        "settings": {},
+        "mappings": {
+          "properties": {
+            "dv": {
+              "type": "dense_vector",
+              "dims": 3
+            },
+            "dv2": {
+              "type": "dense_vector",
+              "dims": 3,
+              "index": false
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-15"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-15/_doc/0?refresh=true",
+      "body": {
+        "dv": [
+          1,
+          2,
+          3
+        ],
+        "dv2": [
+          1,
+          2,
+          3
+        ],
+        "x": 1
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-15",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-15/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-15",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "x": 1
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-15",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-16",
+      "body": {
+        "settings": {
+          "index.mapping.source.mode": "synthetic"
+        },
+        "mappings": {
+          "properties": {
+            "dv": {
+              "type": "dense_vector",
+              "dims": 3
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-16"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-16/_doc/0?refresh=true",
+      "body": {
+        "dv": [
+          1,
+          2,
+          3
+        ],
+        "x": 1
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-16",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-16/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-16",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "x": 1
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-16",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-17",
+      "body": {
+        "settings": {
+          "index.mapping.exclude_source_vectors": false
+        },
+        "mappings": {
+          "properties": {
+            "dv": {
+              "type": "dense_vector",
+              "dims": 3
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-syn-17"
+      }
+    },
+    {
+      "req": "PUT /es-docs-syn-17/_doc/0?refresh=true",
+      "body": {
+        "dv": [
+          1,
+          2,
+          3
+        ],
+        "x": 1
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-syn-17",
+        "_id": "0",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-syn-17/_doc/0",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-syn-17",
+        "_id": "0",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "dv": [
+            1,
+            2,
+            3
+          ],
+          "x": 1
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-syn-17",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-fs",
+      "body": {
+        "mappings": {
+          "properties": {
+            "obj": {
+              "properties": {
+                "kwd": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "v": {
+              "type": "dense_vector",
+              "dims": 3,
+              "similarity": "l2_norm"
+            },
+            "vb": {
+              "type": "dense_vector",
+              "dims": 3,
+              "element_type": "byte",
+              "index": false
+            },
+            "n": {
+              "type": "nested",
+              "properties": {
+                "v": {
+                  "type": "dense_vector",
+                  "dims": 2
+                }
+              }
+            },
+            "sv": {
+              "type": "sparse_vector"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-fs"
+      }
+    },
+    {
+      "req": "PUT /es-docs-fs/_doc/1?refresh=true",
+      "body": {
+        "obj.kwd": "foo",
+        "v": [
+          1,
+          2.5,
+          -3
+        ],
+        "vb": [
+          1,
+          -2,
+          3
+        ],
+        "n": [
+          {
+            "v": [
+              1,
+              2
+            ],
+            "k": 1
+          },
+          {
+            "k": 2
+          }
+        ],
+        "sv": {
+          "a": 1,
+          "b": 2.5
+        }
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-fs",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-fs/_doc/1",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-fs",
+        "_id": "1",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "obj.kwd": "foo",
+          "n": [
+            {
+              "k": 1
+            },
+            {
+              "k": 2
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "GET /es-docs-fs/_doc/1?force_synthetic_source=true",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-fs",
+        "_id": "1",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "n": [
+            {
+              "k": 1
+            },
+            {
+              "k": 2
+            }
+          ],
+          "obj": {
+            "kwd": "foo"
+          }
+        }
+      }
+    },
+    {
+      "req": "GET /es-docs-fs/_doc/1?_source_exclude_vectors=false",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-fs",
+        "_id": "1",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "obj.kwd": "foo",
+          "vb": [
+            1,
+            -2,
+            3
+          ],
+          "n": [
+            {
+              "k": 1,
+              "v": [
+                1.0,
+                2.0
+              ]
+            },
+            {
+              "k": 2
+            }
+          ],
+          "v": [
+            1.0,
+            2.5,
+            -3.0
+          ],
+          "sv": {
+            "a": 1.0,
+            "b": 2.5
+          }
+        }
+      },
+      "unordered": true
+    },
+    {
+      "req": "GET /es-docs-fs/_doc/1?_source_includes=v,n.v",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-fs",
+        "_id": "1",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "v": [
+            1.0,
+            2.5,
+            -3.0
+          ],
+          "n": [
+            {
+              "v": [
+                1.0,
+                2.0
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "GET /es-docs-fs/_source/1",
+      "status": 200,
+      "response": {
+        "obj.kwd": "foo",
+        "n": [
+          {
+            "k": 1
+          },
+          {
+            "k": 2
+          }
+        ]
+      }
+    },
+    {
+      "req": "POST /es-docs-fs/_search",
+      "body": {
+        "_source": {
+          "exclude_vectors": false
+        }
+      },
+      "unordered": true,
+      "status": 200,
+      "response": {
+        "took": 3,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "es-docs-fs",
+              "_id": "1",
+              "_score": 1.0,
+              "_source": {
+                "obj.kwd": "foo",
+                "vb": [
+                  1,
+                  -2,
+                  3
+                ],
+                "n": [
+                  {
+                    "k": 1,
+                    "v": [
+                      1.0,
+                      2.0
+                    ]
+                  },
+                  {
+                    "k": 2
+                  }
+                ],
+                "v": [
+                  1.0,
+                  2.5,
+                  -3.0
+                ],
+                "sv": {
+                  "a": 1.0,
+                  "b": 2.5
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-fs/_search",
+      "body": {
+        "_source": [
+          "v",
+          "obj"
+        ]
+      },
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "es-docs-fs",
+              "_id": "1",
+              "_score": 1.0,
+              "_source": {
+                "v": [
+                  1.0,
+                  2.5,
+                  -3.0
+                ],
+                "obj.kwd": "foo"
+              }
+            }
+          ]
+        }
+      },
+      "unordered": true
+    },
+    {
+      "req": "POST /es-docs-fs/_search",
+      "body": {
+        "_source": {
+          "includes": [
+            "n.v"
+          ],
+          "exclude_vectors": true
+        }
+      },
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "es-docs-fs",
+              "_id": "1",
+              "_score": 1.0,
+              "_source": {
+                "n": [
+                  {
+                    "v": [
+                      1.0,
+                      2.0
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-fs/_search?force_synthetic_source=true",
+      "body": {
+        "_source": {
+          "excludes": [
+            "n"
+          ]
+        }
+      },
+      "status": 200,
+      "response": {
+        "took": 3,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "es-docs-fs",
+              "_id": "1",
+              "_score": 1.0,
+              "_source": {
+                "obj": {
+                  "kwd": "foo"
+                },
+                "sv": {
+                  "a": 1.0,
+                  "b": 2.5
+                },
+                "v": [
+                  1.0,
+                  2.5,
+                  -3.0
+                ],
+                "vb": [
+                  1,
+                  -2,
+                  3
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "unordered": true
+    },
+    {
+      "req": "POST /es-docs-fs/_search",
+      "body": {
+        "_source": false,
+        "docvalue_fields": [
+          "v",
+          "vb"
+        ]
+      },
+      "status": 200,
+      "response": {
+        "took": 7,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "es-docs-fs",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "v": [
+                  [
+                    1.0,
+                    2.5,
+                    -3.0
+                  ]
+                ],
+                "vb": [
+                  [
+                    1,
+                    -2,
+                    3
+                  ]
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-fs/_search",
+      "body": {
+        "_source": false,
+        "docvalue_fields": [
+          {
+            "field": "v",
+            "format": "binary"
+          },
+          {
+            "field": "vb",
+            "format": "binary"
+          }
+        ]
+      },
+      "status": 200,
+      "response": {
+        "took": 3,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "es-docs-fs",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "v": [
+                  "P4AAAEAgAADAQAAA"
+                ],
+                "vb": [
+                  "Af4D"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-fs/_search",
+      "body": {
+        "_source": false,
+        "fields": [
+          "v"
+        ]
+      },
+      "status": 200,
+      "response": {
+        "took": 5,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "es-docs-fs",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "v": [
+                  1.0,
+                  2.5,
+                  -3.0
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-fs/_update/1?_source=true",
+      "body": {
+        "doc": {
+          "v": [
+            4,
+            5,
+            6
+          ]
+        }
+      },
+      "status": 200,
+      "response": {
+        "_index": "es-docs-fs",
+        "_id": "1",
+        "_version": 2,
+        "result": "updated",
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 1,
+        "_primary_term": 1,
+        "get": {
+          "_seq_no": 1,
+          "_primary_term": 1,
+          "found": true,
+          "_source": {
+            "obj.kwd": "foo",
+            "vb": [
+              1,
+              -2,
+              3
+            ],
+            "n": [
+              {
+                "k": 1,
+                "v": [
+                  1.0,
+                  2.0
+                ]
+              },
+              {
+                "k": 2
+              }
+            ],
+            "v": [
+              4,
+              5,
+              6
+            ],
+            "sv": {
+              "a": 1.0,
+              "b": 2.5
+            }
+          }
+        }
+      },
+      "unordered": true
+    },
+    {
+      "req": "GET /es-docs-fs/_doc/1?_source_exclude_vectors=false",
+      "unordered": true,
+      "status": 200,
+      "response": {
+        "_index": "es-docs-fs",
+        "_id": "1",
+        "_version": 2,
+        "_seq_no": 1,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "obj.kwd": "foo",
+          "vb": [
+            1,
+            -2,
+            3
+          ],
+          "n": [
+            {
+              "k": 1,
+              "v": [
+                1.0,
+                2.0
+              ]
+            },
+            {
+              "k": 2
+            }
+          ],
+          "v": [
+            4.0,
+            5.0,
+            6.0
+          ],
+          "sv": {
+            "a": 1.0,
+            "b": 2.5
+          }
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-fs",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-lim",
+      "body": {
+        "settings": {
+          "index.mapping.total_fields.limit": 4,
+          "index.mapping.total_fields.ignore_dynamic_beyond_limit": true
+        },
+        "mappings": {
+          "properties": {
+            "a": {
+              "type": "keyword"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-lim"
+      }
+    },
+    {
+      "req": "PUT /es-docs-lim/_doc/1?refresh=true",
+      "body": {
+        "a": "x",
+        "b": 1,
+        "c": "s",
+        "d": {
+          "e": 1,
+          "g": 2
+        },
+        "f": [
+          1,
+          2
+        ],
+        "h": {
+          "i": {
+            "j": 1
+          }
+        },
+        "nn": null,
+        "ea": []
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-lim",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-lim/_mapping",
+      "status": 200,
+      "response": {
+        "es-docs-lim": {
+          "mappings": {
+            "properties": {
+              "a": {
+                "type": "keyword"
+              },
+              "b": {
+                "type": "long"
+              },
+              "c": {
+                "type": "text",
+                "fields": {
+                  "keyword": {
+                    "type": "keyword",
+                    "ignore_above": 256
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "req": "GET /es-docs-lim/_doc/1",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-lim",
+        "_id": "1",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "a": "x",
+          "b": 1,
+          "c": "s",
+          "d": {
+            "e": 1,
+            "g": 2
+          },
+          "f": [
+            1,
+            2
+          ],
+          "h": {
+            "i": {
+              "j": 1
+            }
+          },
+          "nn": null,
+          "ea": []
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-lim/_search",
+      "body": {
+        "query": {
+          "exists": {
+            "field": "_ignored"
+          }
+        },
+        "docvalue_fields": [
+          "_ignored"
+        ]
+      },
+      "status": 200,
+      "response": {
+        "took": 3,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "es-docs-lim",
+              "_id": "1",
+              "_score": 1.0,
+              "_ignored": [
+                "d",
+                "ea",
+                "f",
+                "h"
+              ],
+              "_source": {
+                "a": "x",
+                "b": 1,
+                "c": "s",
+                "d": {
+                  "e": 1,
+                  "g": 2
+                },
+                "f": [
+                  1,
+                  2
+                ],
+                "h": {
+                  "i": {
+                    "j": 1
+                  }
+                },
+                "nn": null,
+                "ea": []
+              },
+              "fields": {
+                "_ignored": [
+                  "d",
+                  "ea",
+                  "f",
+                  "h"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-lim",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-lim2",
+      "body": {
+        "settings": {
+          "index.mode": "logsdb",
+          "index.mapping.total_fields.limit": 3
+        },
+        "mappings": {
+          "properties": {
+            "@timestamp": {
+              "type": "date"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-lim2"
+      }
+    },
+    {
+      "req": "PUT /es-docs-lim2/_doc/1?refresh=true",
+      "body": {
+        "@timestamp": "2024-01-01T00:00:00Z",
+        "b": [
+          3,
+          1
+        ],
+        "c": {
+          "d": "x"
+        },
+        "e": "long"
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-lim2",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-lim2/_doc/1",
+      "status": 200,
+      "response": {
+        "_index": "es-docs-lim2",
+        "_id": "1",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "@timestamp": "2024-01-01T00:00:00.000Z",
+          "b": [
+            3,
+            1
+          ],
+          "c": {
+            "d": "x"
+          },
+          "e": "long"
+        }
+      }
+    },
+    {
+      "req": "GET /es-docs-lim2/_mapping",
+      "status": 200,
+      "response": {
+        "es-docs-lim2": {
+          "mappings": {
+            "_data_stream_timestamp": {
+              "enabled": true
+            },
+            "properties": {
+              "@timestamp": {
+                "type": "date",
+                "ignore_malformed": false
+              },
+              "b": {
+                "type": "long"
+              },
+              "c": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-lim2",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-misc",
+      "body": {
+        "mappings": {
+          "properties": {
+            "bin": {
+              "type": "binary",
+              "doc_values": true
+            },
+            "ck": {
+              "type": "constant_keyword",
+              "value": "c"
+            },
+            "dr": {
+              "type": "date_range"
+            },
+            "ir": {
+              "type": "integer_range"
+            },
+            "lr": {
+              "type": "long_range"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-misc"
+      }
+    },
+    {
+      "req": "PUT /es-docs-misc/_doc/1?refresh=true",
+      "body": {
+        "bin": [
+          "AQI=",
+          "AAA=",
+          "AQI="
+        ],
+        "ck": "c",
+        "dr": {
+          "gte": "2020-01-01||/M",
+          "lt": "2020-02-01||/M"
+        },
+        "ir": {
+          "gt": 1,
+          "lt": null
+        },
+        "lr": {
+          "gt": null,
+          "lte": 5
+        }
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-misc",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "POST /es-docs-misc/_search",
+      "body": {
+        "docvalue_fields": [
+          "bin"
+        ],
+        "_source": false
+      },
+      "status": 200,
+      "response": {
+        "took": 3,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "es-docs-misc",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "bin": [
+                  "AAA=",
+                  "AQI="
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-misc/_search",
+      "body": {
+        "query": {
+          "term": {
+            "ck": "c"
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "es-docs-misc",
+              "_id": "1",
+              "_score": 1.0,
+              "_source": {
+                "bin": [
+                  "AQI=",
+                  "AAA=",
+                  "AQI="
+                ],
+                "ck": "c",
+                "dr": {
+                  "gte": "2020-01-01||/M",
+                  "lt": "2020-02-01||/M"
+                },
+                "ir": {
+                  "gt": 1,
+                  "lt": null
+                },
+                "lr": {
+                  "gt": null,
+                  "lte": 5
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-misc/_search",
+      "body": {
+        "query": {
+          "range": {
+            "dr": {
+              "gte": "2020-01-31T23:59:59.999Z",
+              "lte": "2020-01-31T23:59:59.999Z"
+            }
+          }
+        },
+        "_source": false
+      },
+      "status": 200,
+      "response": {
+        "took": 6,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "es-docs-misc",
+              "_id": "1",
+              "_score": 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-misc/_search",
+      "body": {
+        "query": {
+          "range": {
+            "dr": {
+              "gte": "2020-02-01",
+              "lte": "2020-02-01"
+            }
+          }
+        },
+        "_source": false
+      },
+      "status": 200,
+      "response": {
+        "took": 15,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 0,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": []
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-misc/_search",
+      "body": {
+        "query": {
+          "term": {
+            "ir": 2147483647
+          }
+        },
+        "_source": false
+      },
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 0,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": []
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-misc/_search",
+      "body": {
+        "query": {
+          "term": {
+            "ir": 2147483646
+          }
+        },
+        "_source": false
+      },
+      "status": 200,
+      "response": {
+        "took": 1,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "es-docs-misc",
+              "_id": "1",
+              "_score": 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-misc/_search",
+      "body": {
+        "query": {
+          "term": {
+            "lr": -9223372036854775808
+          }
+        },
+        "_source": false
+      },
+      "status": 200,
+      "response": {
+        "took": 1,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 0,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": []
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-misc/_search",
+      "body": {
+        "query": {
+          "term": {
+            "lr": -9223372036854775807
+          }
+        },
+        "_source": false
+      },
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "es-docs-misc",
+              "_id": "1",
+              "_score": 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req": "DELETE /es-docs-misc",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    },
+    {
+      "req": "PUT /es-docs-sub",
+      "body": {
+        "mappings": {
+          "properties": {
+            "sf": {
+              "type": "object",
+              "subobjects": false
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "es-docs-sub"
+      }
+    },
+    {
+      "req": "PUT /es-docs-sub/_doc/1?refresh=true",
+      "body": {
+        "sf": {
+          "c": {
+            "d": 1,
+            "e": {
+              "f": "x"
+            }
+          },
+          "g.h": true
+        }
+      },
+      "status": 201,
+      "response": {
+        "_index": "es-docs-sub",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "req": "GET /es-docs-sub/_mapping",
+      "status": 200,
+      "response": {
+        "es-docs-sub": {
+          "mappings": {
+            "properties": {
+              "sf": {
+                "subobjects": false,
+                "properties": {
+                  "c.d": {
+                    "type": "long"
+                  },
+                  "c.e.f": {
+                    "type": "text",
+                    "fields": {
+                      "keyword": {
+                        "type": "keyword",
+                        "ignore_above": 256
+                      }
+                    }
+                  },
+                  "g.h": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "req": "POST /es-docs-sub/_search",
+      "body": {
+        "query": {
+          "term": {
+            "sf.c.e.f.keyword": "x"
+          }
+        },
+        "fields": [
+          "sf.*"
+        ]
+      },
+      "status": 200,
+      "response": {
+        "took": 5,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 0.2876821,
+          "hits": [
+            {
+              "_index": "es-docs-sub",
+              "_id": "1",
+              "_score": 0.2876821,
+              "_source": {
+                "sf": {
+                  "c": {
+                    "d": 1,
+                    "e": {
+                      "f": "x"
+                    }
+                  },
+                  "g.h": true
+                }
+              },
+              "fields": {
+                "sf.c.e.f.keyword": [
+                  "x"
+                ],
+                "sf.c.e.f": [
+                  "x"
+                ],
+                "sf.g.h": [
+                  true
+                ],
+                "sf.c.d": [
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "unordered": true
+    },
+    {
+      "req": "DELETE /es-docs-sub",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      }
+    }
+  ]
+}

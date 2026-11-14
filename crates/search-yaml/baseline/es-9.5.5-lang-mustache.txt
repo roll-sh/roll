@@ -1,0 +1,24 @@
+# Tests of Elasticsearch 9.5.5's `lang-mustache` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+lang-mustache:lang_mustache/10_basic/Mustache loaded
+lang-mustache:lang_mustache/20_render_search_template/Escaped Inline Template validate tests
+lang-mustache:lang_mustache/20_render_search_template/Escaped Stored Template validate tests
+lang-mustache:lang_mustache/20_render_search_template/Indexed Template query tests
+lang-mustache:lang_mustache/20_render_search_template/Inline Template validate tests
+lang-mustache:lang_mustache/20_render_search_template/Stored Template validate tests
+lang-mustache:lang_mustache/25_custom_functions/Rendering using {{url}} and {{join}} functions
+lang-mustache:lang_mustache/25_custom_functions/Rendering using {{url}} function
+lang-mustache:lang_mustache/30_search_template/Missing template search request
+lang-mustache:lang_mustache/30_search_template/Template search request
+lang-mustache:lang_mustache/30_search_template/Test explain templated search
+lang-mustache:lang_mustache/30_search_template/Test that parameters can be used
+lang-mustache:lang_mustache/30_search_template/Test with invalid track_total_hits
+lang-mustache:lang_mustache/30_search_template/Test with new response format
+lang-mustache:lang_mustache/50_multi_search_template/Basic multi-search template
+lang-mustache:lang_mustache/50_multi_search_template/Basic multi-search using stored template
+lang-mustache:lang_mustache/50_multi_search_template/Multi-search template with errors
+lang-mustache:lang_mustache/50_multi_search_template/Multi-search template with invalid request
+lang-mustache:lang_mustache/50_multi_search_template/Test with rest_total_hits_as_int
+lang-mustache:lang_mustache/60_typed_keys/Multisearch template with typed_keys parameter
+lang-mustache:lang_mustache/60_typed_keys/Search template with typed_keys parameter

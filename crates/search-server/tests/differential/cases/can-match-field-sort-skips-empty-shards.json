@@ -1,0 +1,109 @@
+{
+  "diff": {
+    "es": 5,
+    "path": "._shards.skipped",
+    "roll": 0
+  },
+  "found": {
+    "case": 2,
+    "case_seed": 1000005,
+    "seed": 1
+  },
+  "roll": {
+    "body": {
+      "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 5,
+        "total": 5
+      },
+      "hits": {
+        "hits": [],
+        "max_score": null,
+        "total": {
+          "relation": "eq",
+          "value": 0
+        }
+      },
+      "timed_out": false,
+      "took": 0
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+  },
+  "signature": "POST _search ._shards.skipped",
+  "steps": [
+    {
+      "body": {
+        "mappings": {
+          "properties": {
+            "date0": {
+              "type": "date"
+            }
+          }
+        },
+        "settings": {
+          "number_of_shards": 5
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m1-b",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m1-b"
+    },
+    {
+      "body": {
+        "query": {
+          "range": {
+            "date0": {}
+          }
+        },
+        "sort": [
+          {
+            "date0": {}
+          }
+        ]
+      },
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "skipped": 5,
+            "successful": 5,
+            "total": 5
+          },
+          "hits": {
+            "hits": [],
+            "max_score": 0.0,
+            "total": {
+              "relation": "eq",
+              "value": 0
+            }
+          },
+          "timed_out": false,
+          "took": 1
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m1-*/_search"
+    }
+  ]
+}

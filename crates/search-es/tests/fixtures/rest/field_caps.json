@@ -1,0 +1,4866 @@
+{
+  "description" : "_field_caps: types, flags, sub-fields, runtime fields, merging across indices, filters, errors",
+  "steps" : [
+    {
+      "req" : "PUT /esm-fc1",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "text",
+              "fields" : {
+                "raw" : {
+                  "type" : "keyword"
+                }
+              },
+              "meta" : {
+                "unit" : "ms"
+              }
+            },
+            "k" : {
+              "type" : "keyword",
+              "index" : false
+            },
+            "kn" : {
+              "type" : "keyword",
+              "index" : false,
+              "doc_values" : false
+            },
+            "c" : {
+              "type" : "constant_keyword",
+              "value" : "x"
+            },
+            "w" : {
+              "type" : "wildcard"
+            },
+            "m" : {
+              "type" : "match_only_text"
+            },
+            "n" : {
+              "type" : "long",
+              "doc_values" : false
+            },
+            "o" : {
+              "properties" : {
+                "x" : {
+                  "type" : "ip"
+                }
+              }
+            },
+            "nest" : {
+              "type" : "nested",
+              "properties" : {
+                "y" : {
+                  "type" : "boolean"
+                }
+              }
+            },
+            "a" : {
+              "type" : "alias",
+              "path" : "k"
+            },
+            "d" : {
+              "type" : "date_nanos"
+            },
+            "f" : {
+              "type" : "flattened"
+            },
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 3
+            },
+            "s" : {
+              "type" : "scaled_float",
+              "scaling_factor" : 10
+            },
+            "h" : {
+              "type" : "half_float"
+            },
+            "g" : {
+              "type" : "geo_shape"
+            },
+            "ip" : {
+              "type" : "ip_range"
+            },
+            "bin" : {
+              "type" : "binary"
+            },
+            "cmp" : {
+              "type" : "completion"
+            },
+            "rf" : {
+              "type" : "rank_feature"
+            },
+            "tc" : {
+              "type" : "token_count",
+              "analyzer" : "standard"
+            },
+            "sat" : {
+              "type" : "search_as_you_type"
+            },
+            "j" : {
+              "type" : "join",
+              "relations" : {
+                "q" : "ans"
+              }
+            },
+            "tfd" : {
+              "type" : "text",
+              "fielddata" : true
+            }
+          },
+          "runtime" : {
+            "r" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-fc1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-fc1/_field_caps?fields=*",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-fc1"
+        ],
+        "fields" : {
+          "_ignored_source" : {
+            "_ignored_source" : {
+              "type" : "_ignored_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_feature" : {
+            "_feature" : {
+              "type" : "_feature",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "bin" : {
+            "binary" : {
+              "type" : "binary",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ignored" : {
+            "_ignored" : {
+              "type" : "_ignored",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "j#q" : {
+            "parent" : {
+              "type" : "parent",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "nest.y" : {
+            "boolean" : {
+              "type" : "boolean",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_version" : {
+            "_version" : {
+              "type" : "_version",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_doc_count" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_inference_fields" : {
+            "_inference_fields" : {
+              "type" : "_inference_fields",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "ip" : {
+            "ip_range" : {
+              "type" : "ip_range",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "sat._index_prefix" : {
+            "prefix" : {
+              "type" : "prefix",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_tier" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_seq_no" : {
+            "_seq_no" : {
+              "type" : "_seq_no",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "tfd" : {
+            "text" : {
+              "type" : "text",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "rf" : {
+            "rank_feature" : {
+              "type" : "rank_feature",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "o.x" : {
+            "ip" : {
+              "type" : "ip",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_source" : {
+            "_source" : {
+              "type" : "_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_index" : {
+            "_index" : {
+              "type" : "_index",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "cmp" : {
+            "completion" : {
+              "type" : "completion",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_data_stream_timestamp" : {
+            "_data_stream_timestamp" : {
+              "type" : "_data_stream_timestamp",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "t.raw" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "a" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "kn" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "c" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "d" : {
+            "date_nanos" : {
+              "type" : "date_nanos",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "f" : {
+            "flattened" : {
+              "type" : "flattened",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "sat" : {
+            "search_as_you_type" : {
+              "type" : "search_as_you_type",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "g" : {
+            "geo_shape" : {
+              "type" : "geo_shape",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "h" : {
+            "half_float" : {
+              "type" : "half_float",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "j" : {
+            "join" : {
+              "type" : "join",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "nest" : {
+            "nested" : {
+              "type" : "nested",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "k" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_index_mode" : {
+            "_index_mode" : {
+              "type" : "_index_mode",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "m" : {
+            "text" : {
+              "type" : "text",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "n" : {
+            "long" : {
+              "type" : "long",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "o" : {
+            "object" : {
+              "type" : "object",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "tc" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "r" : {
+            "long" : {
+              "type" : "long",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "sat._2gram" : {
+            "search_as_you_type" : {
+              "type" : "search_as_you_type",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "s" : {
+            "scaled_float" : {
+              "type" : "scaled_float",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_nested_path" : {
+            "_nested_path" : {
+              "type" : "_nested_path",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "t" : {
+            "text" : {
+              "type" : "text",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false,
+              "meta" : {
+                "unit" : [
+                  "ms"
+                ]
+              }
+            }
+          },
+          "_field_names" : {
+            "_field_names" : {
+              "type" : "_field_names",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "v" : {
+            "dense_vector" : {
+              "type" : "dense_vector",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "w" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "sat._3gram" : {
+            "search_as_you_type" : {
+              "type" : "search_as_you_type",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-fc1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-fc2",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "sv" : {
+              "type" : "sparse_vector"
+            },
+            "rfs" : {
+              "type" : "rank_features"
+            },
+            "hist" : {
+              "type" : "histogram"
+            },
+            "amd" : {
+              "type" : "aggregate_metric_double",
+              "metrics" : [
+                "min",
+                "max"
+              ],
+              "default_metric" : "max"
+            },
+            "ver" : {
+              "type" : "version"
+            },
+            "ck" : {
+              "type" : "counted_keyword"
+            },
+            "pnt" : {
+              "type" : "point"
+            },
+            "shp" : {
+              "type" : "shape"
+            },
+            "perc" : {
+              "type" : "percolator"
+            },
+            "tip" : {
+              "type" : "text",
+              "index_prefixes" : { },
+              "index_phrases" : true
+            },
+            "gpn" : {
+              "type" : "geo_point",
+              "index" : false
+            },
+            "bn" : {
+              "type" : "boolean",
+              "index" : false
+            },
+            "dn" : {
+              "type" : "date",
+              "index" : false
+            },
+            "sat4" : {
+              "type" : "search_as_you_type",
+              "max_shingle_size" : 4
+            },
+            "dis" : {
+              "type" : "object",
+              "enabled" : false
+            },
+            "kw" : {
+              "type" : "keyword",
+              "fields" : {
+                "t" : {
+                  "type" : "text"
+                }
+              }
+            },
+            "ul" : {
+              "type" : "unsigned_long"
+            },
+            "vi" : {
+              "type" : "dense_vector",
+              "dims" : 3,
+              "index" : false
+            },
+            "lr" : {
+              "type" : "long_range"
+            },
+            "ipf" : {
+              "type" : "ip",
+              "index" : false,
+              "doc_values" : false
+            },
+            "cmpd" : {
+              "type" : "keyword",
+              "meta" : {
+                "a" : "1",
+                "b" : "2"
+              }
+            }
+          },
+          "runtime" : {
+            "rd" : {
+              "type" : "date"
+            },
+            "rg" : {
+              "type" : "geo_point"
+            },
+            "rb" : {
+              "type" : "boolean"
+            },
+            "rip" : {
+              "type" : "ip"
+            },
+            "rdb" : {
+              "type" : "double"
+            },
+            "rk" : {
+              "type" : "keyword"
+            },
+            "rgs" : {
+              "type" : "geo_shape"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-fc2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Parameter [default_metric] is deprecated and will be removed in a future version\""
+        ]
+      }
+    },
+    {
+      "req" : "GET /esm-fc2/_field_caps?fields=*",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-fc2"
+        ],
+        "fields" : {
+          "_ignored_source" : {
+            "_ignored_source" : {
+              "type" : "_ignored_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_feature" : {
+            "_feature" : {
+              "type" : "_feature",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "lr" : {
+            "long_range" : {
+              "type" : "long_range",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "dn" : {
+            "date" : {
+              "type" : "date",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "perc.extracted_terms" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "perc.minimum_should_match_field" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_ignored" : {
+            "_ignored" : {
+              "type" : "_ignored",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "hist" : {
+            "histogram" : {
+              "type" : "histogram",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "ul" : {
+            "unsigned_long" : {
+              "type" : "unsigned_long",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "rip" : {
+            "ip" : {
+              "type" : "ip",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "tip" : {
+            "text" : {
+              "type" : "text",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "perc.query_builder_field" : {
+            "binary" : {
+              "type" : "binary",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_version" : {
+            "_version" : {
+              "type" : "_version",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "ipf" : {
+            "ip" : {
+              "type" : "ip",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_inference_fields" : {
+            "_inference_fields" : {
+              "type" : "_inference_fields",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "sat4._3gram" : {
+            "search_as_you_type" : {
+              "type" : "search_as_you_type",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "ver" : {
+            "version" : {
+              "type" : "version",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_doc_count" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "gpn" : {
+            "geo_point" : {
+              "type" : "geo_point",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "rb" : {
+            "boolean" : {
+              "type" : "boolean",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_tier" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_seq_no" : {
+            "_seq_no" : {
+              "type" : "_seq_no",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "rd" : {
+            "date" : {
+              "type" : "date",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "perc.extraction_result" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "vi" : {
+            "dense_vector" : {
+              "type" : "dense_vector",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "rg" : {
+            "geo_point" : {
+              "type" : "geo_point",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "pnt" : {
+            "point" : {
+              "type" : "point",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "rk" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "amd" : {
+            "aggregate_metric_double" : {
+              "type" : "aggregate_metric_double",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "shp" : {
+            "shape" : {
+              "type" : "shape",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_source" : {
+            "_source" : {
+              "type" : "_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "sat4._4gram" : {
+            "search_as_you_type" : {
+              "type" : "search_as_you_type",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "sat4" : {
+            "search_as_you_type" : {
+              "type" : "search_as_you_type",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "rfs" : {
+            "rank_features" : {
+              "type" : "rank_features",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "kw.t" : {
+            "text" : {
+              "type" : "text",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_index" : {
+            "_index" : {
+              "type" : "_index",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "bn" : {
+            "boolean" : {
+              "type" : "boolean",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "sat4._2gram" : {
+            "search_as_you_type" : {
+              "type" : "search_as_you_type",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "perc" : {
+            "percolator" : {
+              "type" : "percolator",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_data_stream_timestamp" : {
+            "_data_stream_timestamp" : {
+              "type" : "_data_stream_timestamp",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "perc.range_field" : {
+            "ip_range" : {
+              "type" : "ip_range",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "rgs" : {
+            "geo_shape" : {
+              "type" : "geo_shape",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "sv" : {
+            "sparse_vector" : {
+              "type" : "sparse_vector",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "ck" : {
+            "counted_keyword" : {
+              "type" : "counted_keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "ck_count" : {
+            "binary" : {
+              "type" : "binary",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_index_mode" : {
+            "_index_mode" : {
+              "type" : "_index_mode",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "kw" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "cmpd" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "meta" : {
+                "a" : [
+                  "1"
+                ],
+                "b" : [
+                  "2"
+                ]
+              }
+            }
+          },
+          "rdb" : {
+            "double" : {
+              "type" : "double",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "sat4._index_prefix" : {
+            "prefix" : {
+              "type" : "prefix",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_nested_path" : {
+            "_nested_path" : {
+              "type" : "_nested_path",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_field_names" : {
+            "_field_names" : {
+              "type" : "_field_names",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-fc2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ft1",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "text" : {
+              "type" : "text"
+            },
+            "keyword" : {
+              "type" : "keyword",
+              "meta" : {
+                "x" : "1"
+              }
+            },
+            "number" : {
+              "type" : "double"
+            },
+            "geo" : {
+              "type" : "geo_point"
+            },
+            "object" : {
+              "type" : "object",
+              "properties" : {
+                "nested1" : {
+                  "type" : "text",
+                  "index" : false
+                },
+                "nested2" : {
+                  "type" : "float",
+                  "doc_values" : false
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ft1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ft2",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "text" : {
+              "type" : "text"
+            },
+            "keyword" : {
+              "type" : "keyword",
+              "meta" : {
+                "x" : "2"
+              }
+            },
+            "number" : {
+              "type" : "double"
+            },
+            "date" : {
+              "type" : "date"
+            },
+            "object" : {
+              "type" : "object",
+              "properties" : {
+                "nested1" : {
+                  "type" : "text",
+                  "index" : true
+                },
+                "nested2" : {
+                  "type" : "float",
+                  "doc_values" : true
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ft2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ft0",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "number" : {
+              "type" : "long"
+            },
+            "geo" : {
+              "type" : "keyword"
+            },
+            "object" : {
+              "type" : "nested",
+              "properties" : {
+                "nested1" : {
+                  "type" : "long",
+                  "index" : false
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ft0"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ft*/_field_caps?fields=number,geo,object*,keyword,date&include_unmapped=true",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-ft0",
+          "esm-ft1",
+          "esm-ft2"
+        ],
+        "fields" : {
+          "date" : {
+            "date" : {
+              "type" : "date",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "indices" : [
+                "esm-ft2"
+              ]
+            },
+            "unmapped" : {
+              "type" : "unmapped",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false,
+              "indices" : [
+                "esm-ft0",
+                "esm-ft1"
+              ]
+            }
+          },
+          "object.nested2" : {
+            "float" : {
+              "type" : "float",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false,
+              "indices" : [
+                "esm-ft1",
+                "esm-ft2"
+              ],
+              "non_aggregatable_indices" : [
+                "esm-ft1"
+              ]
+            },
+            "unmapped" : {
+              "type" : "unmapped",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false,
+              "indices" : [
+                "esm-ft0"
+              ]
+            }
+          },
+          "geo" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "indices" : [
+                "esm-ft0"
+              ]
+            },
+            "unmapped" : {
+              "type" : "unmapped",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false,
+              "indices" : [
+                "esm-ft2"
+              ]
+            },
+            "geo_point" : {
+              "type" : "geo_point",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "indices" : [
+                "esm-ft1"
+              ]
+            }
+          },
+          "number" : {
+            "double" : {
+              "type" : "double",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "indices" : [
+                "esm-ft1",
+                "esm-ft2"
+              ]
+            },
+            "long" : {
+              "type" : "long",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "indices" : [
+                "esm-ft0"
+              ]
+            }
+          },
+          "object.nested1" : {
+            "long" : {
+              "type" : "long",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "indices" : [
+                "esm-ft0"
+              ]
+            },
+            "text" : {
+              "type" : "text",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false,
+              "indices" : [
+                "esm-ft1",
+                "esm-ft2"
+              ],
+              "non_searchable_indices" : [
+                "esm-ft1"
+              ]
+            }
+          },
+          "keyword" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "indices" : [
+                "esm-ft1",
+                "esm-ft2"
+              ],
+              "meta" : {
+                "x" : [
+                  "1",
+                  "2"
+                ]
+              }
+            },
+            "unmapped" : {
+              "type" : "unmapped",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false,
+              "indices" : [
+                "esm-ft0"
+              ]
+            }
+          },
+          "object" : {
+            "nested" : {
+              "type" : "nested",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false,
+              "indices" : [
+                "esm-ft0"
+              ]
+            },
+            "object" : {
+              "type" : "object",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false,
+              "indices" : [
+                "esm-ft1",
+                "esm-ft2"
+              ]
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ft*/_field_caps?fields=_*&filters=-metadata",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-ft0",
+          "esm-ft1",
+          "esm-ft2"
+        ],
+        "fields" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ft*/_field_caps?fields=*&filters=%2Bmetadata",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-ft0",
+          "esm-ft1",
+          "esm-ft2"
+        ],
+        "fields" : {
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_doc_count" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_inference_fields" : {
+            "_inference_fields" : {
+              "type" : "_inference_fields",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ignored_source" : {
+            "_ignored_source" : {
+              "type" : "_ignored_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_index" : {
+            "_index" : {
+              "type" : "_index",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_feature" : {
+            "_feature" : {
+              "type" : "_feature",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_index_mode" : {
+            "_index_mode" : {
+              "type" : "_index_mode",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_tier" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_ignored" : {
+            "_ignored" : {
+              "type" : "_ignored",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_seq_no" : {
+            "_seq_no" : {
+              "type" : "_seq_no",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_nested_path" : {
+            "_nested_path" : {
+              "type" : "_nested_path",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_data_stream_timestamp" : {
+            "_data_stream_timestamp" : {
+              "type" : "_data_stream_timestamp",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_field_names" : {
+            "_field_names" : {
+              "type" : "_field_names",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_source" : {
+            "_source" : {
+              "type" : "_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_version" : {
+            "_version" : {
+              "type" : "_version",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ft*/_field_caps?fields=*&filters=-nested,-multifield,-parent&types=keyword,long",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-ft0",
+          "esm-ft1",
+          "esm-ft2"
+        ],
+        "fields" : {
+          "_tier" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "geo" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "number" : {
+            "long" : {
+              "type" : "long",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "keyword" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "meta" : {
+                "x" : [
+                  "1",
+                  "2"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ft*/_field_caps?fields=object.nested1",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-ft0",
+          "esm-ft1",
+          "esm-ft2"
+        ],
+        "fields" : {
+          "object.nested1" : {
+            "long" : {
+              "type" : "long",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "indices" : [
+                "esm-ft0"
+              ]
+            },
+            "text" : {
+              "type" : "text",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false,
+              "indices" : [
+                "esm-ft1",
+                "esm-ft2"
+              ],
+              "non_searchable_indices" : [
+                "esm-ft1"
+              ]
+            }
+          },
+          "object" : {
+            "nested" : {
+              "type" : "nested",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false,
+              "indices" : [
+                "esm-ft0"
+              ]
+            },
+            "object" : {
+              "type" : "object",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false,
+              "indices" : [
+                "esm-ft1",
+                "esm-ft2"
+              ]
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ft*/_field_caps?fields=object.nested1&filters=-parent",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-ft0",
+          "esm-ft1",
+          "esm-ft2"
+        ],
+        "fields" : {
+          "object.nested1" : {
+            "long" : {
+              "type" : "long",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "indices" : [
+                "esm-ft0"
+              ]
+            },
+            "text" : {
+              "type" : "text",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false,
+              "indices" : [
+                "esm-ft1",
+                "esm-ft2"
+              ],
+              "non_searchable_indices" : [
+                "esm-ft1"
+              ]
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ft*/_field_caps?fields=object.nested1&filters=-nested",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-ft0",
+          "esm-ft1",
+          "esm-ft2"
+        ],
+        "fields" : {
+          "object.nested1" : {
+            "text" : {
+              "type" : "text",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false,
+              "non_searchable_indices" : [
+                "esm-ft1"
+              ]
+            }
+          },
+          "object" : {
+            "object" : {
+              "type" : "object",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ft*/_field_caps?fields=keyword&include_empty_fields=false",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-ft0",
+          "esm-ft1",
+          "esm-ft2"
+        ],
+        "fields" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ft*/_field_caps?fields=a&filters=bogus",
+      "unordered" : true,
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Unknown field caps filter [bogus]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Unknown field caps filter [bogus]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ft*/_field_caps?fields=number&types=bogus",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-ft0",
+          "esm-ft1",
+          "esm-ft2"
+        ],
+        "fields" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ft*/_field_caps?",
+      "unordered" : true,
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: no fields specified;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: no fields specified;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-nope/_field_caps?fields=a",
+      "unordered" : true,
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-nope",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-nope",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-nope*/_field_caps?fields=a",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [ ],
+        "fields" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-ft*/_field_caps?fields=number",
+      "body" : {
+        "fields" : [
+          "keyword"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "can't specify a request body and [fields] request parameter, either specify a request body or the [fields] request parameter"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "can't specify a request body and [fields] request parameter, either specify a request body or the [fields] request parameter"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-ft*/_field_caps",
+      "body" : {
+        "runtime_mappings" : {
+          "rr" : {
+            "type" : "keyword"
+          }
+        },
+        "fields" : [
+          "rr"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-ft0",
+          "esm-ft1",
+          "esm-ft2"
+        ],
+        "fields" : {
+          "rr" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-ft*/_field_caps",
+      "body" : {
+        "bogus" : 1,
+        "fields" : [
+          "a"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:2] [field_caps_request] unknown field [bogus]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:2] [field_caps_request] unknown field [bogus]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series",
+          "index.routing_path" : "h"
+        },
+        "mappings" : {
+          "properties" : {
+            "h" : {
+              "type" : "keyword",
+              "time_series_dimension" : true
+            },
+            "v" : {
+              "type" : "double",
+              "time_series_metric" : "gauge"
+            },
+            "c" : {
+              "type" : "long",
+              "time_series_metric" : "counter"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ts"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ts/_field_caps?fields=*",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-ts"
+        ],
+        "fields" : {
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_inference_fields" : {
+            "_inference_fields" : {
+              "type" : "_inference_fields",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_doc_count" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ignored_source" : {
+            "_ignored_source" : {
+              "type" : "_ignored_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "c" : {
+            "long" : {
+              "type" : "long",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "time_series_metric" : "counter"
+            }
+          },
+          "_index" : {
+            "_index" : {
+              "type" : "_index",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_feature" : {
+            "_feature" : {
+              "type" : "_feature",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_tsid" : {
+            "_tsid" : {
+              "type" : "_tsid",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "h" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "time_series_dimension" : true
+            }
+          },
+          "_index_mode" : {
+            "_index_mode" : {
+              "type" : "_index_mode",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_tier" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_ignored" : {
+            "_ignored" : {
+              "type" : "_ignored",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_seq_no" : {
+            "_seq_no" : {
+              "type" : "_seq_no",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "@timestamp" : {
+            "date" : {
+              "type" : "date",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_nested_path" : {
+            "_nested_path" : {
+              "type" : "_nested_path",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_data_stream_timestamp" : {
+            "_data_stream_timestamp" : {
+              "type" : "_data_stream_timestamp",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_field_names" : {
+            "_field_names" : {
+              "type" : "_field_names",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "v" : {
+            "double" : {
+              "type" : "double",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "time_series_metric" : "gauge"
+            }
+          },
+          "_ts_routing_hash" : {
+            "_ts_routing_hash" : {
+              "type" : "_ts_routing_hash",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_source" : {
+            "_source" : {
+              "type" : "_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_version" : {
+            "_version" : {
+              "type" : "_version",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ts,esm-ft1/_field_caps?fields=h,v,c,number",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-ft1",
+          "esm-ts"
+        ],
+        "fields" : {
+          "h" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "time_series_dimension" : true
+            }
+          },
+          "number" : {
+            "double" : {
+              "type" : "double",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "c" : {
+            "long" : {
+              "type" : "long",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "time_series_metric" : "counter"
+            }
+          },
+          "v" : {
+            "double" : {
+              "type" : "double",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "time_series_metric" : "gauge"
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts2",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series",
+          "index.routing_path" : "h"
+        },
+        "mappings" : {
+          "properties" : {
+            "h" : {
+              "type" : "keyword",
+              "time_series_dimension" : true
+            },
+            "v" : {
+              "type" : "double",
+              "time_series_metric" : "counter"
+            },
+            "c" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ts2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ts,esm-ts2/_field_caps?fields=h,v,c",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-ts",
+          "esm-ts2"
+        ],
+        "fields" : {
+          "h" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "time_series_dimension" : true
+            }
+          },
+          "c" : {
+            "long" : {
+              "type" : "long",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "metric_conflicts_indices" : [
+                "esm-ts",
+                "esm-ts2"
+              ]
+            }
+          },
+          "v" : {
+            "double" : {
+              "type" : "double",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "metric_conflicts_indices" : [
+                "esm-ts",
+                "esm-ts2"
+              ]
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-ft0",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-ft1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-ft2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-ts",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-ts2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-im1",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "time_series",
+            "routing_path" : [
+              "container"
+            ],
+            "time_series" : {
+              "start_time" : "2021-04-28T00:00:00Z",
+              "end_time" : "2021-04-29T00:00:00Z"
+            }
+          }
+        },
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "container" : {
+              "type" : "keyword",
+              "time_series_dimension" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-im1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-im2",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "only2" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-im2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-im*/_field_caps?fields=*",
+      "body" : {
+        "index_filter" : {
+          "term" : {
+            "_index_mode" : "time_series"
+          }
+        }
+      },
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-im1"
+        ],
+        "fields" : {
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "container" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "time_series_dimension" : true
+            }
+          },
+          "_doc_count" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_inference_fields" : {
+            "_inference_fields" : {
+              "type" : "_inference_fields",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ignored_source" : {
+            "_ignored_source" : {
+              "type" : "_ignored_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_index" : {
+            "_index" : {
+              "type" : "_index",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_feature" : {
+            "_feature" : {
+              "type" : "_feature",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_tsid" : {
+            "_tsid" : {
+              "type" : "_tsid",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_index_mode" : {
+            "_index_mode" : {
+              "type" : "_index_mode",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_ignored" : {
+            "_ignored" : {
+              "type" : "_ignored",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_tier" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_seq_no" : {
+            "_seq_no" : {
+              "type" : "_seq_no",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "@timestamp" : {
+            "date" : {
+              "type" : "date",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_nested_path" : {
+            "_nested_path" : {
+              "type" : "_nested_path",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_field_names" : {
+            "_field_names" : {
+              "type" : "_field_names",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_data_stream_timestamp" : {
+            "_data_stream_timestamp" : {
+              "type" : "_data_stream_timestamp",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ts_routing_hash" : {
+            "_ts_routing_hash" : {
+              "type" : "_ts_routing_hash",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_source" : {
+            "_source" : {
+              "type" : "_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_version" : {
+            "_version" : {
+              "type" : "_version",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-im*/_field_caps?fields=*",
+      "body" : {
+        "index_filter" : {
+          "term" : {
+            "_index_mode" : "logs"
+          }
+        }
+      },
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [ ],
+        "fields" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-im*/_field_caps?fields=*",
+      "body" : {
+        "index_filter" : {
+          "term" : {
+            "_index_mode" : "standard"
+          }
+        }
+      },
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-im2"
+        ],
+        "fields" : {
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_doc_count" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_inference_fields" : {
+            "_inference_fields" : {
+              "type" : "_inference_fields",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ignored_source" : {
+            "_ignored_source" : {
+              "type" : "_ignored_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_index" : {
+            "_index" : {
+              "type" : "_index",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_feature" : {
+            "_feature" : {
+              "type" : "_feature",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "only2" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_index_mode" : {
+            "_index_mode" : {
+              "type" : "_index_mode",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_tier" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_ignored" : {
+            "_ignored" : {
+              "type" : "_ignored",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_seq_no" : {
+            "_seq_no" : {
+              "type" : "_seq_no",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "@timestamp" : {
+            "date" : {
+              "type" : "date",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_nested_path" : {
+            "_nested_path" : {
+              "type" : "_nested_path",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_data_stream_timestamp" : {
+            "_data_stream_timestamp" : {
+              "type" : "_data_stream_timestamp",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_field_names" : {
+            "_field_names" : {
+              "type" : "_field_names",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_source" : {
+            "_source" : {
+              "type" : "_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_version" : {
+            "_version" : {
+              "type" : "_version",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-im*/_field_caps?fields=*",
+      "body" : {
+        "index_filter" : {
+          "match_none" : { }
+        }
+      },
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [ ],
+        "fields" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-im*/_field_caps?fields=*",
+      "body" : {
+        "index_filter" : {
+          "match_all" : { }
+        }
+      },
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-im1",
+          "esm-im2"
+        ],
+        "fields" : {
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "container" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "time_series_dimension" : true
+            }
+          },
+          "_doc_count" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_inference_fields" : {
+            "_inference_fields" : {
+              "type" : "_inference_fields",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ignored_source" : {
+            "_ignored_source" : {
+              "type" : "_ignored_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_index" : {
+            "_index" : {
+              "type" : "_index",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_feature" : {
+            "_feature" : {
+              "type" : "_feature",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_tsid" : {
+            "_tsid" : {
+              "type" : "_tsid",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "only2" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_index_mode" : {
+            "_index_mode" : {
+              "type" : "_index_mode",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_ignored" : {
+            "_ignored" : {
+              "type" : "_ignored",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_tier" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_seq_no" : {
+            "_seq_no" : {
+              "type" : "_seq_no",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "@timestamp" : {
+            "date" : {
+              "type" : "date",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_nested_path" : {
+            "_nested_path" : {
+              "type" : "_nested_path",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_field_names" : {
+            "_field_names" : {
+              "type" : "_field_names",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_data_stream_timestamp" : {
+            "_data_stream_timestamp" : {
+              "type" : "_data_stream_timestamp",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ts_routing_hash" : {
+            "_ts_routing_hash" : {
+              "type" : "_ts_routing_hash",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_source" : {
+            "_source" : {
+              "type" : "_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_version" : {
+            "_version" : {
+              "type" : "_version",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-im*/_field_caps?fields=*",
+      "body" : {
+        "index_filter" : {
+          "term" : {
+            "_index" : "esm-im2"
+          }
+        }
+      },
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-im2"
+        ],
+        "fields" : {
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_doc_count" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_inference_fields" : {
+            "_inference_fields" : {
+              "type" : "_inference_fields",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ignored_source" : {
+            "_ignored_source" : {
+              "type" : "_ignored_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_index" : {
+            "_index" : {
+              "type" : "_index",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_feature" : {
+            "_feature" : {
+              "type" : "_feature",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "only2" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_index_mode" : {
+            "_index_mode" : {
+              "type" : "_index_mode",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_tier" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_ignored" : {
+            "_ignored" : {
+              "type" : "_ignored",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_seq_no" : {
+            "_seq_no" : {
+              "type" : "_seq_no",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "@timestamp" : {
+            "date" : {
+              "type" : "date",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_nested_path" : {
+            "_nested_path" : {
+              "type" : "_nested_path",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_data_stream_timestamp" : {
+            "_data_stream_timestamp" : {
+              "type" : "_data_stream_timestamp",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_field_names" : {
+            "_field_names" : {
+              "type" : "_field_names",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_source" : {
+            "_source" : {
+              "type" : "_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_version" : {
+            "_version" : {
+              "type" : "_version",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-im*/_field_caps?fields=*",
+      "body" : {
+        "index_filter" : {
+          "terms" : {
+            "_index" : [
+              "esm-im1",
+              "x"
+            ]
+          }
+        }
+      },
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-im1"
+        ],
+        "fields" : {
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "container" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "time_series_dimension" : true
+            }
+          },
+          "_doc_count" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_inference_fields" : {
+            "_inference_fields" : {
+              "type" : "_inference_fields",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ignored_source" : {
+            "_ignored_source" : {
+              "type" : "_ignored_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_index" : {
+            "_index" : {
+              "type" : "_index",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_feature" : {
+            "_feature" : {
+              "type" : "_feature",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_tsid" : {
+            "_tsid" : {
+              "type" : "_tsid",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_index_mode" : {
+            "_index_mode" : {
+              "type" : "_index_mode",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_ignored" : {
+            "_ignored" : {
+              "type" : "_ignored",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_tier" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_seq_no" : {
+            "_seq_no" : {
+              "type" : "_seq_no",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "@timestamp" : {
+            "date" : {
+              "type" : "date",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_nested_path" : {
+            "_nested_path" : {
+              "type" : "_nested_path",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_field_names" : {
+            "_field_names" : {
+              "type" : "_field_names",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_data_stream_timestamp" : {
+            "_data_stream_timestamp" : {
+              "type" : "_data_stream_timestamp",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ts_routing_hash" : {
+            "_ts_routing_hash" : {
+              "type" : "_ts_routing_hash",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_source" : {
+            "_source" : {
+              "type" : "_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_version" : {
+            "_version" : {
+              "type" : "_version",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-im*/_field_caps?fields=*",
+      "body" : {
+        "index_filter" : {
+          "prefix" : {
+            "_index" : "esm-im1"
+          }
+        }
+      },
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-im1"
+        ],
+        "fields" : {
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "container" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "time_series_dimension" : true
+            }
+          },
+          "_doc_count" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_inference_fields" : {
+            "_inference_fields" : {
+              "type" : "_inference_fields",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ignored_source" : {
+            "_ignored_source" : {
+              "type" : "_ignored_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_index" : {
+            "_index" : {
+              "type" : "_index",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_feature" : {
+            "_feature" : {
+              "type" : "_feature",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_tsid" : {
+            "_tsid" : {
+              "type" : "_tsid",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_index_mode" : {
+            "_index_mode" : {
+              "type" : "_index_mode",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_ignored" : {
+            "_ignored" : {
+              "type" : "_ignored",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_tier" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_seq_no" : {
+            "_seq_no" : {
+              "type" : "_seq_no",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "@timestamp" : {
+            "date" : {
+              "type" : "date",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_nested_path" : {
+            "_nested_path" : {
+              "type" : "_nested_path",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_field_names" : {
+            "_field_names" : {
+              "type" : "_field_names",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_data_stream_timestamp" : {
+            "_data_stream_timestamp" : {
+              "type" : "_data_stream_timestamp",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ts_routing_hash" : {
+            "_ts_routing_hash" : {
+              "type" : "_ts_routing_hash",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_source" : {
+            "_source" : {
+              "type" : "_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_version" : {
+            "_version" : {
+              "type" : "_version",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-im*/_field_caps?fields=*",
+      "body" : {
+        "index_filter" : {
+          "bool" : {
+            "filter" : [
+              {
+                "term" : {
+                  "_index_mode" : "standard"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-im2"
+        ],
+        "fields" : {
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_doc_count" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_inference_fields" : {
+            "_inference_fields" : {
+              "type" : "_inference_fields",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ignored_source" : {
+            "_ignored_source" : {
+              "type" : "_ignored_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_index" : {
+            "_index" : {
+              "type" : "_index",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_feature" : {
+            "_feature" : {
+              "type" : "_feature",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "only2" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_index_mode" : {
+            "_index_mode" : {
+              "type" : "_index_mode",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_tier" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_ignored" : {
+            "_ignored" : {
+              "type" : "_ignored",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_seq_no" : {
+            "_seq_no" : {
+              "type" : "_seq_no",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "@timestamp" : {
+            "date" : {
+              "type" : "date",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_nested_path" : {
+            "_nested_path" : {
+              "type" : "_nested_path",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_data_stream_timestamp" : {
+            "_data_stream_timestamp" : {
+              "type" : "_data_stream_timestamp",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_field_names" : {
+            "_field_names" : {
+              "type" : "_field_names",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_source" : {
+            "_source" : {
+              "type" : "_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_version" : {
+            "_version" : {
+              "type" : "_version",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-im*/_field_caps?fields=*",
+      "body" : {
+        "index_filter" : {
+          "exists" : {
+            "field" : "only2"
+          }
+        }
+      },
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-im2"
+        ],
+        "fields" : {
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_doc_count" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_inference_fields" : {
+            "_inference_fields" : {
+              "type" : "_inference_fields",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ignored_source" : {
+            "_ignored_source" : {
+              "type" : "_ignored_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_index" : {
+            "_index" : {
+              "type" : "_index",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_feature" : {
+            "_feature" : {
+              "type" : "_feature",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "only2" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_index_mode" : {
+            "_index_mode" : {
+              "type" : "_index_mode",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_tier" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_ignored" : {
+            "_ignored" : {
+              "type" : "_ignored",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_seq_no" : {
+            "_seq_no" : {
+              "type" : "_seq_no",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "@timestamp" : {
+            "date" : {
+              "type" : "date",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_nested_path" : {
+            "_nested_path" : {
+              "type" : "_nested_path",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_data_stream_timestamp" : {
+            "_data_stream_timestamp" : {
+              "type" : "_data_stream_timestamp",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_field_names" : {
+            "_field_names" : {
+              "type" : "_field_names",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_source" : {
+            "_source" : {
+              "type" : "_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_version" : {
+            "_version" : {
+              "type" : "_version",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-im*/_field_caps?fields=*",
+      "body" : {
+        "index_filter" : {
+          "term" : {
+            "only2" : "x"
+          }
+        }
+      },
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-im2"
+        ],
+        "fields" : {
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_doc_count" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_inference_fields" : {
+            "_inference_fields" : {
+              "type" : "_inference_fields",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ignored_source" : {
+            "_ignored_source" : {
+              "type" : "_ignored_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_index" : {
+            "_index" : {
+              "type" : "_index",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_feature" : {
+            "_feature" : {
+              "type" : "_feature",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "only2" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_index_mode" : {
+            "_index_mode" : {
+              "type" : "_index_mode",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_tier" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_ignored" : {
+            "_ignored" : {
+              "type" : "_ignored",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_seq_no" : {
+            "_seq_no" : {
+              "type" : "_seq_no",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "@timestamp" : {
+            "date" : {
+              "type" : "date",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_nested_path" : {
+            "_nested_path" : {
+              "type" : "_nested_path",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_data_stream_timestamp" : {
+            "_data_stream_timestamp" : {
+              "type" : "_data_stream_timestamp",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_field_names" : {
+            "_field_names" : {
+              "type" : "_field_names",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_source" : {
+            "_source" : {
+              "type" : "_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_version" : {
+            "_version" : {
+              "type" : "_version",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-im*/_field_caps?fields=*",
+      "body" : {
+        "index_filter" : {
+          "term" : {
+            "_tier" : "data_content"
+          }
+        }
+      },
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-im1",
+          "esm-im2"
+        ],
+        "fields" : {
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "container" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "time_series_dimension" : true
+            }
+          },
+          "_doc_count" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_inference_fields" : {
+            "_inference_fields" : {
+              "type" : "_inference_fields",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ignored_source" : {
+            "_ignored_source" : {
+              "type" : "_ignored_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_index" : {
+            "_index" : {
+              "type" : "_index",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_feature" : {
+            "_feature" : {
+              "type" : "_feature",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_tsid" : {
+            "_tsid" : {
+              "type" : "_tsid",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "only2" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_index_mode" : {
+            "_index_mode" : {
+              "type" : "_index_mode",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_ignored" : {
+            "_ignored" : {
+              "type" : "_ignored",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_tier" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_seq_no" : {
+            "_seq_no" : {
+              "type" : "_seq_no",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "@timestamp" : {
+            "date" : {
+              "type" : "date",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_nested_path" : {
+            "_nested_path" : {
+              "type" : "_nested_path",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_field_names" : {
+            "_field_names" : {
+              "type" : "_field_names",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_data_stream_timestamp" : {
+            "_data_stream_timestamp" : {
+              "type" : "_data_stream_timestamp",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ts_routing_hash" : {
+            "_ts_routing_hash" : {
+              "type" : "_ts_routing_hash",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_source" : {
+            "_source" : {
+              "type" : "_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_version" : {
+            "_version" : {
+              "type" : "_version",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-im*/_field_caps?fields=*&filters=-nested",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-im1",
+          "esm-im2"
+        ],
+        "fields" : {
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "container" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false,
+              "time_series_dimension" : true
+            }
+          },
+          "_doc_count" : {
+            "integer" : {
+              "type" : "integer",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_inference_fields" : {
+            "_inference_fields" : {
+              "type" : "_inference_fields",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ignored_source" : {
+            "_ignored_source" : {
+              "type" : "_ignored_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_index" : {
+            "_index" : {
+              "type" : "_index",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_feature" : {
+            "_feature" : {
+              "type" : "_feature",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_tsid" : {
+            "_tsid" : {
+              "type" : "_tsid",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "only2" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_index_mode" : {
+            "_index_mode" : {
+              "type" : "_index_mode",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_ignored" : {
+            "_ignored" : {
+              "type" : "_ignored",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_tier" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_seq_no" : {
+            "_seq_no" : {
+              "type" : "_seq_no",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "@timestamp" : {
+            "date" : {
+              "type" : "date",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_nested_path" : {
+            "_nested_path" : {
+              "type" : "_nested_path",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_field_names" : {
+            "_field_names" : {
+              "type" : "_field_names",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_data_stream_timestamp" : {
+            "_data_stream_timestamp" : {
+              "type" : "_data_stream_timestamp",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_ts_routing_hash" : {
+            "_ts_routing_hash" : {
+              "type" : "_ts_routing_hash",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_source" : {
+            "_source" : {
+              "type" : "_source",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_version" : {
+            "_version" : {
+              "type" : "_version",
+              "metadata_field" : true,
+              "searchable" : false,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-im1,esm-im2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

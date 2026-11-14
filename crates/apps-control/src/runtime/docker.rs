@@ -55,6 +55,50 @@ pub async fn available() -> bool {
 struct Known {
     /// Container name → (full id, published host port, CPU limit in nano-CPUs).
     containers: HashMap<String, (String, Option<u16>, Option<i64>)>,
+    /// Instance → its sandbox's network, while the sandbox runs.
+    sandboxes: HashMap<String, Sandbox>,
+    /// Instance → its waker: listening, with the connections its network had accepted when it
+    /// was armed (`Some`), or not armed (`None`). Absent: not known (an earlier process's).
+    wakers: HashMap<String, Option<u64>>,
+    /// Instance → the connections its network had accepted when it went to sleep, or when it
+    /// was last asked about callers ([`super::Runtime::take_callers`]).
+    marks: HashMap<String, u64>,
+}
+
+/// Where to read who's at an instance's port: its sandbox's process (`/proc/<pid>/net`), the
+/// app's port, and the host's addresses on its network.
+#[derive(Clone)]
+struct Sandbox {
+    /// Its container's id: what its pid's cgroup names while it's still the sandbox.
+    id: String,
+    pid: u32,
+    port: u16,
+    host: Vec<std::net::IpAddr>,
+}
+
+impl Sandbox {
+    /// Whether its pid is still the sandbox's (after a Docker restart it may be another
+    /// process's, and its numbers another network's): its cgroup names the container.
+    fn alive(&self) -> bool {
+        std::fs::read_to_string(format!("/proc/{}/cgroup", self.pid)).is_ok_and(|c| c.contains(&self.id))
+    }
+
+    /// Its `tcp` and `tcp6` tables (empty when the sandbox is gone).
+    fn tables(&self) -> (String, String) {
+        let read = |f: &str| std::fs::read_to_string(format!("/proc/{}/net/{f}", self.pid)).unwrap_or_default();
+        (read("tcp"), read("tcp6"))
+    }
+
+    /// Whether something listens on the app's port (the app, or the waker): a dear read.
+    fn listening(&self) -> bool {
+        let (tcp, tcp6) = self.tables();
+        super::netns::listening(&tcp, &tcp6, self.port)
+    }
+
+    /// The connections its network has accepted: a cheap read.
+    fn accepted(&self) -> Option<u64> {
+        super::netns::passive_opens(&std::fs::read_to_string(format!("/proc/{}/net/snmp", self.pid)).ok()?)
+    }
 }
 
 pub struct Docker {
@@ -63,13 +107,36 @@ pub struct Docker {
     scratch: PathBuf,
     /// The daemon's socket, when it's on this host.
     engine: Option<Engine>,
+    /// A web instance's network lives in a sandbox container made with it ([`sandbox_name`]):
+    /// a wake starts only the app, which joins the sandbox's network namespace, so Docker sets
+    /// no network up on the wake's path. `ROLL_APPS_NETNS=0` turns it off.
+    netns: bool,
+}
+
+/// The sandbox holding `instance`'s network, its aliases and its published port.
+pub fn sandbox_name(instance: &str) -> String {
+    format!("{instance}-net")
+}
+
+/// The waker in `instance`'s sandbox: it listens on the app's port while the app is stopped,
+/// takes the first private caller, and hands that connection to the app once it listens.
+pub fn waker_name(instance: &str) -> String {
+    format!("{instance}-wake")
 }
 
 impl Docker {
     pub fn new(scratch: PathBuf) -> Docker {
         // Env files a stopped process left behind (they hold variables' values).
         let _ = std::fs::remove_dir_all(&scratch);
-        Docker { known: Mutex::new(Known::default()), scratch, engine: Engine::local() }
+        let netns = std::env::var("ROLL_APPS_NETNS").map_or(true, |v| v != "0");
+        Docker { known: Mutex::new(Known::default()), scratch, engine: Engine::local(), netns }
+    }
+
+    /// With or without network sandboxes, whatever `ROLL_APPS_NETNS` says (a measurement
+    /// compares the two).
+    pub fn with_netns(mut self, on: bool) -> Docker {
+        self.netns = on;
+        self
     }
 
     async fn id_and_port(&self, name: &str) -> anyhow::Result<(String, Option<u16>)> {
@@ -92,6 +159,104 @@ impl Docker {
         let cpu = docker(&["inspect", "-f", "{{index .Config.Labels \"sh.roll.apps.cpu\"}}", name]).await.ok().and_then(|c| c.parse().ok());
         self.known.lock().containers.insert(name.to_string(), (id.clone(), port, cpu));
         Ok((id, port, cpu))
+    }
+
+    /// `instance`'s sandbox, if it has one that runs (looked up once, then remembered).
+    async fn sandbox(&self, instance: &str) -> Option<Sandbox> {
+        let cached = self.known.lock().sandboxes.get(instance).cloned();
+        if let Some(s) = cached {
+            if s.alive() {
+                return Some(s);
+            }
+            self.known.lock().sandboxes.remove(instance);
+        }
+        let i = self.engine.as_ref()?.inspect(&sandbox_name(instance)).await.ok()?;
+        let s = Sandbox { id: i.id, pid: i.pid?, port: i.exposed?, host: i.gateways };
+        self.known.lock().sandboxes.insert(instance.to_string(), s.clone());
+        Some(s)
+    }
+
+    /// Before the app starts, the waker lets go of its port (unless it holds a caller: then it
+    /// has already, and hands that caller to the app). rolld calls it once through the published
+    /// port: accepting closes its listener in a millisecond, where killing its container takes
+    /// Docker some 70. The empty call it then hands the app is closed at once. A waker that
+    /// doesn't let go is killed. What it knows comes from the cheap count of accepted
+    /// connections; only a waker an earlier process armed costs a read of the socket table.
+    async fn quiet_waker(&self, engine: &Engine, instance: &str) {
+        let Some(sb) = self.sandbox(instance).await else { return };
+        let known = self.known.lock().wakers.get(instance).copied();
+        let armed_at = match known {
+            Some(None) => return,
+            Some(Some(at)) => at,
+            None if !sb.listening() => {
+                self.known.lock().wakers.insert(instance.to_string(), None);
+                return;
+            }
+            None => sb.accepted().unwrap_or(0),
+        };
+        self.known.lock().wakers.insert(instance.to_string(), None);
+        let Some(now) = sb.accepted() else { return };
+        // It accepted a caller since it was armed: its listener is closed already.
+        if now > armed_at {
+            return;
+        }
+        let free = |within: Duration| {
+            let sb = sb.clone();
+            async move {
+                let until = std::time::Instant::now() + within;
+                while sb.listening() {
+                    if std::time::Instant::now() >= until {
+                        return false;
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                true
+            }
+        };
+        let poked = match self.id_and_port(instance).await {
+            Ok((_, Some(hp))) => tokio::time::timeout(Duration::from_millis(200), tokio::net::TcpStream::connect(("127.0.0.1", hp))).await.is_ok_and(|c| c.is_ok()),
+            _ => false,
+        };
+        // Taken: the count moves when it accepts, and accepting closed its listener.
+        if poked {
+            let until = std::time::Instant::now() + Duration::from_millis(200);
+            while std::time::Instant::now() < until {
+                if sb.accepted().is_some_and(|a| a > now) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+        let _ = engine.kill(&waker_name(instance)).await;
+        // Its socket goes with its process: wait for that, so the app's bind never fails.
+        free(Duration::from_secs(2)).await;
+    }
+
+    /// Asleep: the waker listens for private callers, armed with the count of accepted
+    /// connections now (one more is its caller). Waited for (off any request's path, a socket
+    /// table read every 25 ms, some 150 ms in all), so a request right after the sleep finds it
+    /// listening and frees the port with a poke, not a kill.
+    async fn arm_waker(&self, engine: &Engine, instance: &str) {
+        let Some(sb) = self.sandbox(instance).await else { return };
+        let w = waker_name(instance);
+        let _ = engine.kill(&w).await;
+        let at = sb.accepted().unwrap_or(0);
+        self.known.lock().marks.insert(instance.to_string(), at);
+        if let Err(e) = engine.start(&w).await {
+            tracing::debug!(instance, error = %e, "apps: the waker didn't start");
+            self.known.lock().wakers.insert(instance.to_string(), None);
+            return;
+        }
+        self.known.lock().wakers.insert(instance.to_string(), Some(at));
+        let until = std::time::Instant::now() + Duration::from_secs(2);
+        while !sb.listening() {
+            if std::time::Instant::now() >= until {
+                // Not bound yet on a busy host: the next start looks before it trusts it.
+                self.known.lock().wakers.remove(instance);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
 
     fn cgroup_dir(id: &str) -> Option<PathBuf> {
@@ -160,6 +325,41 @@ impl Runtime for Docker {
             None => None,
         };
         if let Some(engine) = &self.engine {
+            // A web instance on a network: its network first, in a sandbox that runs from now on.
+            if self.netns
+                && let (Some(_), Some(_)) = (spec.port, &spec.network)
+            {
+                let sandbox = sandbox_name(&spec.name);
+                let made = async {
+                    engine.create(&sandbox, &sandbox_config(spec, host_port)).await?;
+                    engine.start(&sandbox).await
+                }
+                .await;
+                match made {
+                    Ok(()) => match engine.create(&spec.name, &joined(engine_config(spec, None)?, &sandbox)).await {
+                        Ok(id) => {
+                            self.known.lock().containers.insert(spec.name.clone(), (id, host_port, Some(nanos(spec.cpu))));
+                            // Without a waker a stopped instance only wakes through rolld.
+                            if let Err(e) = engine.create(&waker_name(&spec.name), &waker_config(spec, &sandbox)).await {
+                                tracing::debug!(instance = %spec.name, error = %e, "apps: no waker; private callers can't wake it");
+                            }
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            let _ = docker(&["rm", "-f", "-v", &sandbox]).await;
+                            if !e.to_string().contains("No such image") {
+                                return Err(e);
+                            }
+                        }
+                    },
+                    // No sandbox (its image isn't here yet, say): the instance holds its own
+                    // network, as before.
+                    Err(e) => {
+                        tracing::debug!(sandbox, error = %e, "apps: no network sandbox; the instance holds its own");
+                        let _ = docker(&["rm", "-f", "-v", &sandbox]).await;
+                    }
+                }
+            }
             match engine.create(&spec.name, &engine_config(spec, host_port)?).await {
                 Ok(id) => {
                     self.known.lock().containers.insert(spec.name.clone(), (id, host_port, Some(nanos(spec.cpu))));
@@ -247,6 +447,9 @@ impl Runtime for Docker {
         let now = chrono::Utc::now();
         let (o, e) = (log.stream(Stream::Stdout), log.stream(Stream::Stderr));
         if let Some(engine) = &self.engine {
+            self.quiet_waker(engine, name).await;
+            // Running: its own connections aren't callers; the next sleep marks it again.
+            self.known.lock().marks.remove(name);
             engine.start(name).await?;
             let (_, port) = self.id_and_port(name).await?;
             // Follow its output until it stops (the logs request ends with the container).
@@ -295,6 +498,10 @@ impl Runtime for Docker {
     }
 
     async fn suspend(&self, name: &str) -> anyhow::Result<()> {
+        // Marked before the pause: a connection in between is answered, not missed.
+        if let Some(n) = self.sandbox(name).await.and_then(|sb| sb.accepted()) {
+            self.known.lock().marks.insert(name.to_string(), n);
+        }
         match &self.engine {
             Some(e) => e.pause(name).await,
             None => docker(&["pause", name]).await.map(|_| ()),
@@ -316,6 +523,9 @@ impl Runtime for Docker {
             Some(e) => e.stop(name, secs).await,
             None => docker_within(&["stop", "-t", &secs.to_string(), name], Some(Duration::from_secs(secs + 60))).await.map(|_| ()),
         };
+        if let (Ok(()), Some(engine)) = (&stopped, &self.engine) {
+            self.arm_waker(engine, name).await;
+        }
         // The next start gets the boost again (set now, off the wake's path).
         if let (Ok(()), Ok((_, _, Some(cpu)))) = (&stopped, self.known_of(name).await) {
             let boosted = nanos(boost(cpu as f64 / 1e9));
@@ -328,8 +538,38 @@ impl Runtime for Docker {
     }
 
     async fn remove(&self, name: &str) {
-        let _ = docker(&["rm", "-f", "-v", name]).await;
-        self.known.lock().containers.remove(name);
+        let _ = docker(&["rm", "-f", "-v", name, &waker_name(name), &sandbox_name(name)]).await;
+        let mut k = self.known.lock();
+        k.containers.remove(name);
+        k.sandboxes.remove(name);
+        k.wakers.remove(name);
+        k.marks.remove(name);
+    }
+
+    async fn network_container(&self, name: &str) -> Option<String> {
+        if self.sandbox(name).await.is_some() {
+            return Some(sandbox_name(name));
+        }
+        self.running(name).await.then(|| name.to_string())
+    }
+
+    async fn take_callers(&self, name: &str) -> bool {
+        let Some(sb) = self.sandbox(name).await else { return false };
+        let Some(now) = sb.accepted() else {
+            // Its sandbox went (or another process took the pid): look it up again next time.
+            self.known.lock().sandboxes.remove(name);
+            return false;
+        };
+        let mut k = self.known.lock();
+        // Not marked (an earlier process put it to sleep): from now on.
+        let mark = k.marks.entry(name.to_string()).or_insert(now);
+        std::mem::replace(mark, now) < now
+    }
+
+    async fn private_peers(&self, name: &str) -> Option<u32> {
+        let sb = self.sandbox(name).await?;
+        let (tcp, tcp6) = sb.tables();
+        (!tcp.is_empty() || !tcp6.is_empty()).then(|| super::netns::private_peers(&tcp, &tcp6, sb.port, &sb.host))
     }
 
     async fn wait(&self, name: &str) -> anyhow::Result<i32> {
@@ -471,6 +711,86 @@ fn nanos(cpu: f64) -> i64 {
 pub const CAP_DROP: [&str; 4] = ["NET_RAW", "MKNOD", "AUDIT_WRITE", "SETFCAP"];
 
 /// The Engine API's create config for an instance: the same container the CLI path makes.
+/// Half a CPU for the sandbox and the waker: they use none once started, but their start runs
+/// in their cgroup, and at a twentieth of a CPU it took 800 ms instead of 170.
+///
+/// The sandbox's container: busybox asleep, holding the instance's network, its aliases on the
+/// project network and its published port; nothing else, and allowed nothing else.
+fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>) -> serde_json::Value {
+    use serde_json::json;
+    let mut host = json!({
+        "Memory": 16i64 << 20,
+        "MemorySwap": 16i64 << 20,
+        "NanoCpus": 500_000_000i64,
+        "PidsLimit": 8,
+        "SecurityOpt": ["no-new-privileges"],
+        "CapDrop": ["ALL"],
+        "ReadonlyRootfs": true,
+        "RestartPolicy": {"Name": "no"},
+        "Init": true,
+        "ExtraHosts": ["host.docker.internal:host-gateway"],
+        "LogConfig": {"Type": "none", "Config": {}},
+    });
+    let mut config = json!({
+        "Image": VOLUME_IMAGE,
+        "Cmd": ["sleep", "2147483647"],
+        "Labels": { LABEL: spec.service, format!("{LABEL}.env"): spec.env, format!("{LABEL}.role"): "network" },
+    });
+    if let (Some(p), Some(hp)) = (spec.port, host_port) {
+        let port = format!("{p}/tcp");
+        config["ExposedPorts"] = json!({ &port: {} });
+        host["PortBindings"] = json!({ &port: [{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}] });
+    }
+    if let Some(net) = &spec.network {
+        host["NetworkMode"] = json!(net);
+        config["NetworkingConfig"] = json!({"EndpointsConfig": { net: {"Aliases": spec.aliases} }});
+    }
+    config["HostConfig"] = host;
+    config
+}
+
+/// The waker's container, in the sandbox's network: busybox's `nc` listens once on the app's
+/// port (accepting closes its listener, so the app can bind while the caller is held), waits up
+/// to a minute for the app to listen, then joins the caller to it. Nothing else: no host, no
+/// capabilities, a read-only root, 16 MiB, half a CPU.
+fn waker_config(spec: &InstanceSpec, sandbox: &str) -> serde_json::Value {
+    use serde_json::json;
+    let p = spec.port.unwrap_or(80);
+    let relay = format!("i=0; until nc -z 127.0.0.1 {p}; do i=$((i+1)); [ $i -gt 3000 ] && exit 1; sleep 0.02; done; exec nc 127.0.0.1 {p}");
+    json!({
+        "Image": VOLUME_IMAGE,
+        "Cmd": ["nc", "-l", "-p", p.to_string(), "-e", "sh", "-c", relay],
+        "Labels": { LABEL: spec.service, format!("{LABEL}.env"): spec.env, format!("{LABEL}.role"): "wake" },
+        "HostConfig": {
+            "NetworkMode": format!("container:{sandbox}"),
+            "Memory": 16i64 << 20,
+            "MemorySwap": 16i64 << 20,
+            "NanoCpus": 500_000_000i64,
+            "PidsLimit": 8,
+            "SecurityOpt": ["no-new-privileges"],
+            "CapDrop": ["ALL"],
+            "ReadonlyRootfs": true,
+            "RestartPolicy": {"Name": "no"},
+            "LogConfig": {"Type": "none", "Config": {}},
+        },
+    })
+}
+
+/// An instance's config joined to its sandbox's network: no network, port or hosts of its own
+/// (Docker refuses those with another container's network).
+fn joined(mut config: serde_json::Value, sandbox: &str) -> serde_json::Value {
+    if let Some(o) = config.as_object_mut() {
+        o.remove("ExposedPorts");
+        o.remove("NetworkingConfig");
+    }
+    if let Some(h) = config["HostConfig"].as_object_mut() {
+        h.remove("PortBindings");
+        h.remove("ExtraHosts");
+        h.insert("NetworkMode".into(), serde_json::json!(format!("container:{sandbox}")));
+    }
+    config
+}
+
 fn engine_config(spec: &InstanceSpec, host_port: Option<u16>) -> anyhow::Result<serde_json::Value> {
     use serde_json::json;
     let mut env = Vec::with_capacity(spec.vars.len());
@@ -639,6 +959,12 @@ impl Builder for DockerBuilder {
         if !job.env.is_empty() && !job.own_dockerfile {
             cmd.arg("--build-arg").arg(format!("ROLL_BUILD_ENV={}", job.env_hash));
         }
+        if let Some(v) = &job.layers {
+            cmd.env(apps_build::LAYERS_ARG, v).arg("--build-arg").arg(apps_build::LAYERS_ARG);
+        }
+        if job.no_cache {
+            cmd.args(["--no-cache", "--pull"]);
+        }
         let mut child = cmd
             .arg(&job.context)
             .stdin(Stdio::null())
@@ -667,6 +993,10 @@ impl Builder for DockerBuilder {
         // The tag is the deployment's own (`roll-apps-<service>:<deployment>`), never moved.
         docker(&["image", "inspect", "-f", "{{.Id}}", &job.tag]).await?;
         Ok(job.tag.clone())
+    }
+
+    fn shares_caches(&self) -> bool {
+        true
     }
 
     async fn remove_image(&self, image: &str) {

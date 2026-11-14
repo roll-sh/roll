@@ -1,0 +1,27 @@
+# Tests of Elasticsearch 9.5.5's `parent-join` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+parent-join:11_parent_child/HasChild disallow expensive queries
+parent-join:11_parent_child/Parent/child inner hits
+parent-join:11_parent_child/Parent/child inner hits with seq no
+parent-join:20_parent_join/HasChild disallow expensive queries
+parent-join:20_parent_join/Test basic
+parent-join:20_parent_join/Test field retrieval
+parent-join:20_parent_join/Test parent_id query
+parent-join:20_parent_join/deprecated use of multi-fields
+parent-join:20_parent_join/join field named _type is not returned as root metadata
+parent-join:20_parent_join/keyword field named _type is not returned as root metadata
+parent-join:30_inner_hits/HasParent disallow expensive queries
+parent-join:30_inner_hits/Test two sub-queries with only one having inner_hits
+parent-join:30_inner_hits/profile fetch
+parent-join:40_aggregations/children
+parent-join:40_aggregations/children cardinality
+parent-join:40_aggregations/children terms terms
+parent-join:40_aggregations/parent
+parent-join:40_aggregations/parent cardinality
+parent-join:40_aggregations/parent terms terms
+parent-join:40_aggregations/term children
+parent-join:40_aggregations/term parent
+parent-join:40_aggregations/unconfigured children
+parent-join:40_aggregations/unconfigured parent
+parent-join:60_synthetic_source/supported

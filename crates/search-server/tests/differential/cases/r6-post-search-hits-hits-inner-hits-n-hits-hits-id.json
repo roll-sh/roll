@@ -1,0 +1,354 @@
+{
+ "found": {
+  "case": 59,
+  "case_seed": 108000383,
+  "seed": 108
+ },
+ "signature": "POST _search .hits.hits[].inner_hits.n.hits.hits[]._id",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "kwl0": {
+       "normalizer": "lowercase",
+       "type": "keyword"
+      },
+      "n": {
+       "properties": {
+        "kw0": {
+         "type": "keyword"
+        },
+        "long0": {
+         "type": "long"
+        },
+        "text0": {
+         "analyzer": "simple",
+         "type": "text"
+        }
+       },
+       "type": "nested"
+      },
+      "sayt0": {
+       "type": "search_as_you_type"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "type": "text"
+      },
+      "text1": {
+       "analyzer": "stop",
+       "term_vector": "with_positions_offsets",
+       "type": "text"
+      },
+      "wild0": {
+       "type": "wildcard"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 1,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m8-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m8-a"
+  },
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "comp0": {
+       "type": "completion"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dbl0": {
+       "type": "double"
+      },
+      "dnanos0": {
+       "type": "date_nanos"
+      },
+      "flt0": {
+       "type": "float"
+      },
+      "half0": {
+       "type": "half_float"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "kwl0": {
+       "normalizer": "lowercase",
+       "type": "keyword"
+      },
+      "n": {
+       "properties": {
+        "kw0": {
+         "type": "keyword"
+        },
+        "long0": {
+         "type": "long"
+        },
+        "text0": {
+         "analyzer": "simple",
+         "type": "text"
+        }
+       },
+       "type": "nested"
+      },
+      "sayt0": {
+       "type": "search_as_you_type"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "type": "text"
+      },
+      "text1": {
+       "analyzer": "stop",
+       "term_vector": "with_positions_offsets",
+       "type": "text"
+      },
+      "wild0": {
+       "type": "wildcard"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 2,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m8-b",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m8-b"
+  },
+  {
+   "es": {
+    "body": {
+     "errors": false,
+     "items": [
+      {
+       "index": {
+        "_id": "3",
+        "_index": "diff-m8-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      }
+     ],
+     "took": 200
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": {
+      "_id": "3",
+      "_index": "diff-m8-a"
+     }
+    },
+    {
+     "comp0": "ran",
+     "date0": "2024-01-12T10:00:00Z",
+     "dbl0": 57.89,
+     "flt0": null,
+     "half0": 117.26,
+     "kw0": "rho",
+     "kwl0": "user@example.com",
+     "n": [
+      {
+       "kw0": "delta",
+       "long0": 77,
+       "text0": "dog over cat"
+      },
+      {
+       "kw0": "Alpha",
+       "long0": 72,
+       "text0": "dog engine stream slow roll score Dogs"
+      },
+      {
+       "kw0": "pi",
+       "long0": 94,
+       "text0": "over roll cat red cats green cherry banana"
+      }
+     ],
+     "sayt0": "cherry apple the dog",
+     "text0": [
+      "runs banana banana apple cat running fox",
+      "index roll blue fox Dogs Dogs fox jumps lazy",
+      "slow of apple apple cherry running runs banana"
+     ]
+    }
+   ],
+   "method": "POST",
+   "path": "/_bulk"
+  },
+  {
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "successful": 3,
+      "total": 3
+     }
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m8-a,diff-m8-b/_refresh"
+  },
+  {
+   "body": {
+    "query": {
+     "nested": {
+      "inner_hits": {},
+      "path": "n",
+      "query": {
+       "range": {
+        "n.long0": {}
+       }
+      }
+     }
+    },
+    "stored_fields": "_none_"
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "hits": {
+      "hits": [
+       {
+        "_index": "diff-m8-a",
+        "_score": 1.0,
+        "inner_hits": {
+         "n": {
+          "hits": {
+           "hits": [
+            {
+             "_index": "diff-m8-a",
+             "_nested": {
+              "field": "n",
+              "offset": 0
+             },
+             "_score": 1.0,
+             "_source": {
+              "kw0": "delta",
+              "long0": 77,
+              "text0": "dog over cat"
+             }
+            },
+            {
+             "_index": "diff-m8-a",
+             "_nested": {
+              "field": "n",
+              "offset": 1
+             },
+             "_score": 1.0,
+             "_source": {
+              "kw0": "Alpha",
+              "long0": 72,
+              "text0": "dog engine stream slow roll score Dogs"
+             }
+            },
+            {
+             "_index": "diff-m8-a",
+             "_nested": {
+              "field": "n",
+              "offset": 2
+             },
+             "_score": 1.0,
+             "_source": {
+              "kw0": "pi",
+              "long0": 94,
+              "text0": "over roll cat red cats green cherry banana"
+             }
+            }
+           ],
+           "max_score": 1.0,
+           "total": {
+            "relation": "eq",
+            "value": 3
+           }
+          }
+         }
+        }
+       }
+      ],
+      "max_score": 1.0,
+      "total": {
+       "relation": "eq",
+       "value": 1
+      }
+     },
+     "timed_out": false,
+     "took": 1
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m8-a/_search"
+  }
+ ]
+}

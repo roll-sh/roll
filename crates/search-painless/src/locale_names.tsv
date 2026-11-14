@@ -1,0 +1,601 @@
+# java.util.Locale data captured from Elasticsearch 9.5.5's JDK by tests/fixtures/capture_dates.py:
+# L language ISO3 English-name (I = in Locale.getISOLanguages()), C country ISO3 English-name, S script name, V variant name
+L	aa	aar	Afar	I
+L	ab	abk	Abkhazian	I
+L	ae	ave	Avestan	I
+L	af	afr	Afrikaans	I
+L	ak	aka	Akan	I
+L	am	amh	Amharic	I
+L	an	arg	Aragonese	I
+L	ar	ara	Arabic	I
+L	as	asm	Assamese	I
+L	av	ava	Avaric	I
+L	ay	aym	Aymara	I
+L	az	aze	Azerbaijani	I
+L	ba	bak	Bashkir	I
+L	be	bel	Belarusian	I
+L	bg	bul	Bulgarian	I
+L	bh	bih	Bihari	I
+L	bi	bis	Bislama	I
+L	bm	bam	Bambara	I
+L	bn	ben	Bangla	I
+L	bo	bod	Tibetan	I
+L	br	bre	Breton	I
+L	bs	bos	Bosnian	I
+L	ca	cat	Catalan	I
+L	ce	che	Chechen	I
+L	ch	cha	Chamorro	I
+L	co	cos	Corsican	I
+L	cr	cre	Cree	I
+L	cs	ces	Czech	I
+L	cu	chu	Church Slavic	I
+L	cv	chv	Chuvash	I
+L	cy	cym	Welsh	I
+L	da	dan	Danish	I
+L	de	deu	German	I
+L	dv	div	Divehi	I
+L	dz	dzo	Dzongkha	I
+L	ee	ewe	Ewe	I
+L	el	ell	Greek	I
+L	en	eng	English	I
+L	eo	epo	Esperanto	I
+L	es	spa	Spanish	I
+L	et	est	Estonian	I
+L	eu	eus	Basque	I
+L	fa	fas	Persian	I
+L	ff	ful	Fula	I
+L	fi	fin	Finnish	I
+L	fj	fij	Fijian	I
+L	fo	fao	Faroese	I
+L	fr	fra	French	I
+L	fy	fry	Western Frisian	I
+L	ga	gle	Irish	I
+L	gd	gla	Scottish Gaelic	I
+L	gl	glg	Galician	I
+L	gn	grn	Guarani	I
+L	gu	guj	Gujarati	I
+L	gv	glv	Manx	I
+L	ha	hau	Hausa	I
+L	he	heb	Hebrew	I
+L	hi	hin	Hindi	I
+L	ho	hmo	Hiri Motu	I
+L	hr	hrv	Croatian	I
+L	ht	hat	Haitian Creole	I
+L	hu	hun	Hungarian	I
+L	hy	hye	Armenian	I
+L	hz	her	Herero	I
+L	ia	ina	Interlingua	I
+L	id	ind	Indonesian	I
+L	ie	ile	Interlingue	I
+L	ig	ibo	Igbo	I
+L	ii	iii	Sichuan Yi	I
+L	ik	ipk	Inupiaq	I
+L	in	ind	Indonesian	I
+L	io	ido	Ido	I
+L	is	isl	Icelandic	I
+L	it	ita	Italian	I
+L	iu	iku	Inuktitut	I
+L	iw	heb	Hebrew	I
+L	ja	jpn	Japanese	I
+L	ji	yid	Yiddish	I
+L	jv	jav	Javanese	I
+L	ka	kat	Georgian	I
+L	kg	kon	Kongo	I
+L	ki	kik	Kikuyu	I
+L	kj	kua	Kuanyama	I
+L	kk	kaz	Kazakh	I
+L	kl	kal	Kalaallisut	I
+L	km	khm	Khmer	I
+L	kn	kan	Kannada	I
+L	ko	kor	Korean	I
+L	kr	kau	Kanuri	I
+L	ks	kas	Kashmiri	I
+L	ku	kur	Kurmanji	I
+L	kv	kom	Komi	I
+L	kw	cor	Cornish	I
+L	ky	kir	Kyrgyz	I
+L	la	lat	Latin	I
+L	lb	ltz	Luxembourgish	I
+L	lg	lug	Ganda	I
+L	li	lim	Limburgish	I
+L	ln	lin	Lingala	I
+L	lo	lao	Lao	I
+L	lt	lit	Lithuanian	I
+L	lu	lub	Luba-Katanga	I
+L	lv	lav	Latvian	I
+L	mg	mlg	Malagasy	I
+L	mh	mah	Marshallese	I
+L	mi	mri	Māori	I
+L	mk	mkd	Macedonian	I
+L	ml	mal	Malayalam	I
+L	mn	mon	Mongolian	I
+L	mo	mol	Moldavian	I
+L	mr	mar	Marathi	I
+L	ms	msa	Malay	I
+L	mt	mlt	Maltese	I
+L	my	mya	Burmese	I
+L	na	nau	Nauru	I
+L	nb	nob	Norwegian Bokmål	I
+L	nd	nde	North Ndebele	I
+L	ne	nep	Nepali	I
+L	ng	ndo	Ndonga	I
+L	nl	nld	Dutch	I
+L	nn	nno	Norwegian Nynorsk	I
+L	no	nor	Norwegian	I
+L	nr	nbl	South Ndebele	I
+L	nv	nav	Navajo	I
+L	ny	nya	Nyanja	I
+L	oc	oci	Occitan	I
+L	oj	oji	Ojibwa	I
+L	om	orm	Oromo	I
+L	or	ori	Odia	I
+L	os	oss	Ossetic	I
+L	pa	pan	Punjabi	I
+L	pi	pli	Pali	I
+L	pl	pol	Polish	I
+L	ps	pus	Pashto	I
+L	pt	por	Portuguese	I
+L	qu	que	Quechua	I
+L	rm	roh	Romansh	I
+L	rn	run	Rundi	I
+L	ro	ron	Romanian	I
+L	ru	rus	Russian	I
+L	rw	kin	Kinyarwanda	I
+L	sa	san	Sanskrit	I
+L	sc	srd	Sardinian	I
+L	sd	snd	Sindhi	I
+L	se	sme	Northern Sami	I
+L	sg	sag	Sango	I
+L	si	sin	Sinhala	I
+L	sk	slk	Slovak	I
+L	sl	slv	Slovenian	I
+L	sm	smo	Samoan	I
+L	sn	sna	Shona	I
+L	so	som	Somali	I
+L	sq	sqi	Albanian	I
+L	sr	srp	Serbian	I
+L	ss	ssw	Swati	I
+L	st	sot	Southern Sotho	I
+L	su	sun	Sundanese	I
+L	sv	swe	Swedish	I
+L	sw	swa	Swahili	I
+L	ta	tam	Tamil	I
+L	te	tel	Telugu	I
+L	tg	tgk	Tajik	I
+L	th	tha	Thai	I
+L	ti	tir	Tigrinya	I
+L	tk	tuk	Turkmen	I
+L	tl	tgl	Tagalog	I
+L	tn	tsn	Tswana	I
+L	to	ton	Tongan	I
+L	tr	tur	Turkish	I
+L	ts	tso	Tsonga	I
+L	tt	tat	Tatar	I
+L	tw	twi	Twi	I
+L	ty	tah	Tahitian	I
+L	ug	uig	Uyghur	I
+L	uk	ukr	Ukrainian	I
+L	ur	urd	Urdu	I
+L	uz	uzb	Uzbek	I
+L	ve	ven	Venda	I
+L	vi	vie	Vietnamese	I
+L	vo	vol	Volapük	I
+L	wa	wln	Walloon	I
+L	wo	wol	Wolof	I
+L	xh	xho	Xhosa	I
+L	yi	yid	Yiddish	I
+L	yo	yor	Yoruba	I
+L	za	zha	Zhuang	I
+L	zh	zho	Chinese	I
+L	zu	zul	Zulu	I
+L	ksh		Colognian	
+L	ccp		Chakma	
+L	kgp		Kaingang	
+L	raj		Rajasthani	
+L	teo		Teso	
+L	kam		Kamba	
+L	gaa		Ga	
+L	fur		Friulian	
+L	xnr		Kangri	
+L	dsb		Lower Sorbian	
+L	ceb		Cebuano	
+L	shi		Tachelhit	
+L	xog		Soga	
+L	twq		Tasawaq	
+L	kxv		Kuvi	
+L	mzn		Mazanderani	
+L	smn		Inari Sami	
+L	sat		Santali	
+L	yue		Cantonese	
+L	cgg		Chiga	
+L	vai		Vai	
+L	zgh		Standard Moroccan Tamazight	
+L	vmw		Makhuwa	
+L	dje		Zarma	
+L	sms		Skolt Sami	
+L	nus		Nuer	
+L	chr		Cherokee	
+L	kok		Konkani	
+L	sbp		Sangu	
+L	mas		Masai	
+L	nyn		Nyankole	
+L	pcm		Nigerian Pidgin	
+L	nso		Northern Sotho	
+L	ckb		Central	
+L	agq		Aghem	
+L	gsw		Swiss German	
+L	vec		Venetian	
+L	naq		Nama	
+L	szl		Silesian	
+L	jgo		Ngomba	
+L	khq		Koyra Chiini	
+L	guz		Gusii	
+L	tok		Toki Pona	
+L	bez		Bena	
+L	haw		Hawaiian	
+L	kab		Kabyle	
+L	nds		Low German	
+L	lij		Ligurian	
+L	syr		Syriac	
+L	vun		Vunjo	
+L	lag		Langi	
+L	pis		Pijin	
+L	shn		Shan	
+L	rwk		Rwa	
+L	rof		Rombo	
+L	luo		Luo	
+L	ewo		Ewondo	
+L	ann		Obolo	
+L	kea		Kabuverdianu	
+L	brx		Bodo	
+L	blo		Anii	
+L	frr		Northern Frisian	
+L	csw		Swampy Cree	
+L	seh		Sena	
+L	pms		Piedmontese	
+L	mdf		Moksha	
+L	scn		Sicilian	
+L	dav		Taita	
+L	wae		Walser	
+L	bal		Baluchi	
+L	asa		Asu	
+L	yav		Yangben	
+L	ast		Asturian	
+L	nmg		Kwasio	
+L	tyv		Tuvinian	
+L	hsb		Upper Sorbian	
+L	mer		Meru	
+L	lmo		Lombard	
+L	tzm		Central Atlas Tamazight	
+L	nnh		Ngiemboon	
+L	nqo		N’Ko	
+L	lrc		Northern Luri	
+L	lkt		Lakota	
+L	mai		Maithili	
+L	ksf		Bafia	
+L	saq		Samburu	
+L	luy		Luyia	
+L	ses		Koyraboro Senni	
+L	kln		Kalenjin	
+L	ebu		Embu	
+L	jmc		Machame	
+L	bas		Basaa	
+L	sah		Yakut	
+L	mgo		Metaʼ	
+L	dyo		Jola-Fonyi	
+L	dua		Duala	
+L	fil		Filipino	
+L	mfe		Morisyen	
+L	mgh		Makhuwa-Meetto	
+L	mni		Manipuri	
+L	bua		Buriat	
+L	bgc		Haryanvi	
+L	yrl		Nheengatu	
+L	mua		Mundang	
+L	bem		Bemba	
+L	bho		Bhojpuri	
+L	doi		Dogri	
+L	ksb		Shambala	
+L	kkj		Kako	
+L	kde		Makonde	
+C	AD	AND	Andorra	I
+C	AE	ARE	United Arab Emirates	I
+C	AF	AFG	Afghanistan	I
+C	AG	ATG	Antigua & Barbuda	I
+C	AI	AIA	Anguilla	I
+C	AL	ALB	Albania	I
+C	AM	ARM	Armenia	I
+C	AO	AGO	Angola	I
+C	AQ	ATA	Antarctica	I
+C	AR	ARG	Argentina	I
+C	AS	ASM	American Samoa	I
+C	AT	AUT	Austria	I
+C	AU	AUS	Australia	I
+C	AW	ABW	Aruba	I
+C	AX	ALA	Åland Islands	I
+C	AZ	AZE	Azerbaijan	I
+C	BA	BIH	Bosnia & Herzegovina	I
+C	BB	BRB	Barbados	I
+C	BD	BGD	Bangladesh	I
+C	BE	BEL	Belgium	I
+C	BF	BFA	Burkina Faso	I
+C	BG	BGR	Bulgaria	I
+C	BH	BHR	Bahrain	I
+C	BI	BDI	Burundi	I
+C	BJ	BEN	Benin	I
+C	BL	BLM	St. Barthélemy	I
+C	BM	BMU	Bermuda	I
+C	BN	BRN	Brunei	I
+C	BO	BOL	Bolivia	I
+C	BQ	BES	Caribbean Netherlands	I
+C	BR	BRA	Brazil	I
+C	BS	BHS	Bahamas	I
+C	BT	BTN	Bhutan	I
+C	BV	BVT	Bouvet Island	I
+C	BW	BWA	Botswana	I
+C	BY	BLR	Belarus	I
+C	BZ	BLZ	Belize	I
+C	CA	CAN	Canada	I
+C	CC	CCK	Cocos (Keeling) Islands	I
+C	CD	COD	Congo - Kinshasa	I
+C	CF	CAF	Central African Republic	I
+C	CG	COG	Congo - Brazzaville	I
+C	CH	CHE	Switzerland	I
+C	CI	CIV	Côte d’Ivoire	I
+C	CK	COK	Cook Islands	I
+C	CL	CHL	Chile	I
+C	CM	CMR	Cameroon	I
+C	CN	CHN	China	I
+C	CO	COL	Colombia	I
+C	CR	CRI	Costa Rica	I
+C	CU	CUB	Cuba	I
+C	CV	CPV	Cape Verde	I
+C	CW	CUW	Curaçao	I
+C	CX	CXR	Christmas Island	I
+C	CY	CYP	Cyprus	I
+C	CZ	CZE	Czechia	I
+C	DE	DEU	Germany	I
+C	DJ	DJI	Djibouti	I
+C	DK	DNK	Denmark	I
+C	DM	DMA	Dominica	I
+C	DO	DOM	Dominican Republic	I
+C	DZ	DZA	Algeria	I
+C	EC	ECU	Ecuador	I
+C	EE	EST	Estonia	I
+C	EG	EGY	Egypt	I
+C	EH	ESH	Western Sahara	I
+C	ER	ERI	Eritrea	I
+C	ES	ESP	Spain	I
+C	ET	ETH	Ethiopia	I
+C	FI	FIN	Finland	I
+C	FJ	FJI	Fiji	I
+C	FK	FLK	Falkland Islands	I
+C	FM	FSM	Micronesia	I
+C	FO	FRO	Faroe Islands	I
+C	FR	FRA	France	I
+C	GA	GAB	Gabon	I
+C	GB	GBR	United Kingdom	I
+C	GD	GRD	Grenada	I
+C	GE	GEO	Georgia	I
+C	GF	GUF	French Guiana	I
+C	GG	GGY	Guernsey	I
+C	GH	GHA	Ghana	I
+C	GI	GIB	Gibraltar	I
+C	GL	GRL	Greenland	I
+C	GM	GMB	Gambia	I
+C	GN	GIN	Guinea	I
+C	GP	GLP	Guadeloupe	I
+C	GQ	GNQ	Equatorial Guinea	I
+C	GR	GRC	Greece	I
+C	GS	SGS	South Georgia & South Sandwich Islands	I
+C	GT	GTM	Guatemala	I
+C	GU	GUM	Guam	I
+C	GW	GNB	Guinea-Bissau	I
+C	GY	GUY	Guyana	I
+C	HK	HKG	Hong Kong SAR China	I
+C	HM	HMD	Heard & McDonald Islands	I
+C	HN	HND	Honduras	I
+C	HR	HRV	Croatia	I
+C	HT	HTI	Haiti	I
+C	HU	HUN	Hungary	I
+C	ID	IDN	Indonesia	I
+C	IE	IRL	Ireland	I
+C	IL	ISR	Israel	I
+C	IM	IMN	Isle of Man	I
+C	IN	IND	India	I
+C	IO	IOT	British Indian Ocean Territory	I
+C	IQ	IRQ	Iraq	I
+C	IR	IRN	Iran	I
+C	IS	ISL	Iceland	I
+C	IT	ITA	Italy	I
+C	JE	JEY	Jersey	I
+C	JM	JAM	Jamaica	I
+C	JO	JOR	Jordan	I
+C	JP	JPN	Japan	I
+C	KE	KEN	Kenya	I
+C	KG	KGZ	Kyrgyzstan	I
+C	KH	KHM	Cambodia	I
+C	KI	KIR	Kiribati	I
+C	KM	COM	Comoros	I
+C	KN	KNA	St. Kitts & Nevis	I
+C	KP	PRK	North Korea	I
+C	KR	KOR	South Korea	I
+C	KW	KWT	Kuwait	I
+C	KY	CYM	Cayman Islands	I
+C	KZ	KAZ	Kazakhstan	I
+C	LA	LAO	Laos	I
+C	LB	LBN	Lebanon	I
+C	LC	LCA	St. Lucia	I
+C	LI	LIE	Liechtenstein	I
+C	LK	LKA	Sri Lanka	I
+C	LR	LBR	Liberia	I
+C	LS	LSO	Lesotho	I
+C	LT	LTU	Lithuania	I
+C	LU	LUX	Luxembourg	I
+C	LV	LVA	Latvia	I
+C	LY	LBY	Libya	I
+C	MA	MAR	Morocco	I
+C	MC	MCO	Monaco	I
+C	MD	MDA	Moldova	I
+C	ME	MNE	Montenegro	I
+C	MF	MAF	St. Martin	I
+C	MG	MDG	Madagascar	I
+C	MH	MHL	Marshall Islands	I
+C	MK	MKD	North Macedonia	I
+C	ML	MLI	Mali	I
+C	MM	MMR	Myanmar (Burma)	I
+C	MN	MNG	Mongolia	I
+C	MO	MAC	Macao SAR China	I
+C	MP	MNP	Northern Mariana Islands	I
+C	MQ	MTQ	Martinique	I
+C	MR	MRT	Mauritania	I
+C	MS	MSR	Montserrat	I
+C	MT	MLT	Malta	I
+C	MU	MUS	Mauritius	I
+C	MV	MDV	Maldives	I
+C	MW	MWI	Malawi	I
+C	MX	MEX	Mexico	I
+C	MY	MYS	Malaysia	I
+C	MZ	MOZ	Mozambique	I
+C	NA	NAM	Namibia	I
+C	NC	NCL	New Caledonia	I
+C	NE	NER	Niger	I
+C	NF	NFK	Norfolk Island	I
+C	NG	NGA	Nigeria	I
+C	NI	NIC	Nicaragua	I
+C	NL	NLD	Netherlands	I
+C	NO	NOR	Norway	I
+C	NP	NPL	Nepal	I
+C	NR	NRU	Nauru	I
+C	NU	NIU	Niue	I
+C	NZ	NZL	New Zealand	I
+C	OM	OMN	Oman	I
+C	PA	PAN	Panama	I
+C	PE	PER	Peru	I
+C	PF	PYF	French Polynesia	I
+C	PG	PNG	Papua New Guinea	I
+C	PH	PHL	Philippines	I
+C	PK	PAK	Pakistan	I
+C	PL	POL	Poland	I
+C	PM	SPM	St. Pierre & Miquelon	I
+C	PN	PCN	Pitcairn Islands	I
+C	PR	PRI	Puerto Rico	I
+C	PS	PSE	Palestinian Territories	I
+C	PT	PRT	Portugal	I
+C	PW	PLW	Palau	I
+C	PY	PRY	Paraguay	I
+C	QA	QAT	Qatar	I
+C	RE	REU	Réunion	I
+C	RO	ROU	Romania	I
+C	RS	SRB	Serbia	I
+C	RU	RUS	Russia	I
+C	RW	RWA	Rwanda	I
+C	SA	SAU	Saudi Arabia	I
+C	SB	SLB	Solomon Islands	I
+C	SC	SYC	Seychelles	I
+C	SD	SDN	Sudan	I
+C	SE	SWE	Sweden	I
+C	SG	SGP	Singapore	I
+C	SH	SHN	St. Helena	I
+C	SI	SVN	Slovenia	I
+C	SJ	SJM	Svalbard & Jan Mayen	I
+C	SK	SVK	Slovakia	I
+C	SL	SLE	Sierra Leone	I
+C	SM	SMR	San Marino	I
+C	SN	SEN	Senegal	I
+C	SO	SOM	Somalia	I
+C	SR	SUR	Suriname	I
+C	SS	SSD	South Sudan	I
+C	ST	STP	São Tomé & Príncipe	I
+C	SV	SLV	El Salvador	I
+C	SX	SXM	Sint Maarten	I
+C	SY	SYR	Syria	I
+C	SZ	SWZ	Eswatini	I
+C	TC	TCA	Turks & Caicos Islands	I
+C	TD	TCD	Chad	I
+C	TF	ATF	French Southern Territories	I
+C	TG	TGO	Togo	I
+C	TH	THA	Thailand	I
+C	TJ	TJK	Tajikistan	I
+C	TK	TKL	Tokelau	I
+C	TL	TLS	Timor-Leste	I
+C	TM	TKM	Turkmenistan	I
+C	TN	TUN	Tunisia	I
+C	TO	TON	Tonga	I
+C	TR	TUR	Türkiye	I
+C	TT	TTO	Trinidad & Tobago	I
+C	TV	TUV	Tuvalu	I
+C	TW	TWN	Taiwan	I
+C	TZ	TZA	Tanzania	I
+C	UA	UKR	Ukraine	I
+C	UG	UGA	Uganda	I
+C	UM	UMI	U.S. Outlying Islands	I
+C	US	USA	United States	I
+C	UY	URY	Uruguay	I
+C	UZ	UZB	Uzbekistan	I
+C	VA	VAT	Vatican City	I
+C	VC	VCT	St. Vincent & Grenadines	I
+C	VE	VEN	Venezuela	I
+C	VG	VGB	British Virgin Islands	I
+C	VI	VIR	U.S. Virgin Islands	I
+C	VN	VNM	Vietnam	I
+C	VU	VUT	Vanuatu	I
+C	WF	WLF	Wallis & Futuna	I
+C	WS	WSM	Samoa	I
+C	YE	YEM	Yemen	I
+C	YT	MYT	Mayotte	I
+C	ZA	ZAF	South Africa	I
+C	ZM	ZMB	Zambia	I
+C	ZW	ZWE	Zimbabwe	I
+C	419		Latin America	
+C	150		Europe	
+C	001		world	
+C	DG		Diego Garcia	
+C	XK		Kosovo	
+C	EA		Ceuta & Melilla	
+C	IC		Canary Islands	
+C	CS		Serbia and Montenegro	
+S	Latn	Latin
+S	Cyrl	Cyrillic
+S	Deva	Devanagari
+S	Telu	Telugu
+S	Tfng	Tifinagh
+S	Olck	Ol Chiki
+S	Hant	Traditional
+S	Vaii	Vai
+S	Ethi	Ethiopic
+S	Arab	Arabic
+S	Tibt	Tibetan
+S	Guru	Gurmukhi
+S	Syrc	Syriac
+S	Mymr	Myanmar
+S	Grek	Greek
+S	Beng	Bangla
+S	Hans	Simplified
+S	Adlm	Adlam
+S	Orya	Odia
+S	Sinh	Sinhala
+S	Geor	Georgian
+S	Hebr	Hebrew
+S	Mlym	Malayalam
+S	Knda	Kannada
+S	Cans	Unified Canadian Aboriginal Syllabics
+S	Laoo	Lao
+S	Khmr	Khmer
+S	Nkoo	N’Ko
+S	Jpan	Japanese
+S	Armn	Armenian
+S	Cakm	Chakma
+S	Taml	Tamil
+S	Kore	Korean
+S	Yiii	Yi
+S	Cher	Cherokee
+S	Thai	Thai
+S	Gujr	Gujarati
+V	TARASK	Taraskievica orthography
+V	NY	Nynorsk
+V	VALENCIA	Valencian
+V	TH	TH
+V	JP	JP
+V	POLYTON	Polytonic
+V	POSIX	Computer

@@ -1,0 +1,502 @@
+1 + 2 * 3
+----
+(1 + 2) * 3
+----
+10 / 4
+----
+10 % 4
+----
+-7 % 3
+----
+7.5 % -2
+----
+1 / 0
+----
+-1 / 0
+----
+0 / 0
+----
+2 - -3
+----
++5
+----
+- - 5
+----
+!0
+----
+!5
+----
+!0.5
+----
+!-0.5
+----
+~5
+----
+~0.5
+----
+~-1.5
+----
+5 & 3
+----
+5 | 3
+----
+5 ^ 3
+----
+-1 & 0xFF
+----
+1.9 & 3.9
+----
+1 << 3
+----
+1 << 64
+----
+1 << 65
+----
+-16 >> 2
+----
+-16 >>> 60
+----
+1 << 2.9
+----
+2.9 << 1
+----
+1 < 2
+----
+2 <= 2
+----
+3 > 4
+----
+3 >= 3
+----
+1 == 1
+----
+1 != 1
+----
+0.1 + 0.2 == 0.3
+----
+1 && 2
+----
+1 && 0
+----
+0 || 0.5
+----
+0.5 || 0
+----
+0.5 && 1
+----
+1 ? 2 : 3
+----
+0 ? 2 : 3
+----
+0.5 ? 2 : 3
+----
+1 ? 0 ? 4 : 5 : 6
+----
+1 + 2 > 2 ? 10 : 20
+----
+3 & 1 == 1
+----
+0x10 + 010
+----
+0xFFFFFFFF
+----
+0x7fffffffffffffff
+----
+017
+----
+1e3 + .5 + 2.
+----
+1E-2
+----
+3 & 0x7fffffffffffffff
+----
+abs(-3)
+----
+acos(0.5)
+----
+acosh(2)
+----
+asin(1)
+----
+asinh(1)
+----
+asinh(-0.0)
+----
+atan(1)
+----
+atan2(1, 2)
+----
+atanh(0.5)
+----
+ceil(1.2)
+----
+cos(1)
+----
+cosh(1)
+----
+exp(1)
+----
+floor(-1.5)
+----
+haversin(40.7143528, -74.0059731, 40.759011, -73.9844722)
+----
+haversinMeters(40.7143528, -74.0059731, 40.759011, -73.9844722)
+----
+ln(10)
+----
+log10(1000)
+----
+logn(2, 8)
+----
+max(1, 2)
+----
+min(1, 2)
+----
+pow(2, 0.5)
+----
+sin(1)
+----
+sinh(1)
+----
+sqrt(2)
+----
+tan(1)
+----
+tanh(1)
+----
+sqrt(-1)
+----
+max(0 / 0, 1)
+----
+min(-0.0, 0.0)
+----
+!abs(0.4)
+----
+abs(1, 2)
+----
+max(1)
+----
+foo(1)
+----
+foo()
+----
+cbrt(8)
+----
+doc['l'].value
+----
+doc['l']
+----
+doc["l"].value
+----
+doc['l'].min()
+----
+doc['l'].max()
+----
+doc['l'].avg()
+----
+doc['l'].median()
+----
+doc['l'].sum()
+----
+doc['l'].count()
+----
+doc['l'].length
+----
+doc['l'].empty
+----
+doc['l'].getValue()
+----
+doc['l'].isEmpty()
+----
+doc['l'].size()
+----
+doc['l'].foo
+----
+doc['l'].foo()
+----
+doc['l'].min(1)
+----
+doc['l'].value.x
+----
+doc['l'][0]
+----
+doc['i'] + doc['d'] + doc['f']
+----
+doc['hf'] * 100
+----
+doc['sf'] * 1000
+----
+doc['by']
+----
+doc['ul']
+----
+doc['b'].sum()
+----
+doc['d'].empty
+----
+doc['dt']
+----
+doc['dt'].value
+----
+doc['dt'].getYear()
+----
+doc['dt'].getMonth()
+----
+doc['dt'].getDayOfMonth()
+----
+doc['dt'].getHourOfDay()
+----
+doc['dt'].getMinutes()
+----
+doc['dt'].getSeconds()
+----
+doc['dt'].min() + doc['dt'].max()
+----
+doc['dt'].length
+----
+doc['dt'].year
+----
+doc['dt'].date.year
+----
+doc['dt'].date.monthOfYear
+----
+doc['dt'].date.dayOfMonth
+----
+doc['dt'].date.dayOfWeek
+----
+doc['dt'].date.dayOfYear
+----
+doc['dt'].date.hourOfDay
+----
+doc['dt'].date.minuteOfHour
+----
+doc['dt'].date.secondOfMinute
+----
+doc['dt'].date.millisOfSecond
+----
+doc['dt'].date.millisOfDay
+----
+doc['dt'].date.minuteOfDay
+----
+doc['dt'].date.secondOfDay
+----
+doc['dt'].date.era
+----
+doc['dt'].date.centuryOfEra
+----
+doc['dt'].date.yearOfCentury
+----
+doc['dt'].date.yearOfEra
+----
+doc['dt'].date.weekOfWeekyear
+----
+doc['dt'].date.weekyear
+----
+doc['dt'].date.getYear()
+----
+doc['dt'].getDate().getMonthOfYear()
+----
+doc['dt'].date.getDayOfWeek()
+----
+doc['dt'].date.getWeekOfWeekyear()
+----
+doc['dt'].date.foo
+----
+doc['dt'].date.foo()
+----
+doc['dt'].date
+----
+doc['dt'].foo.year
+----
+doc['old'].getYear()
+----
+doc['old'].getMonth()
+----
+doc['old'].getDayOfMonth()
+----
+doc['old'].date.year
+----
+doc['old'].date.dayOfMonth
+----
+doc['old'].date.era
+----
+doc['dn']
+----
+doc['dn'].getSeconds()
+----
+doc['dn'].date.millisOfSecond
+----
+doc['g'].lat
+----
+doc['g'].lon
+----
+doc['g'].empty
+----
+doc['g'].getLat()
+----
+doc['g'].getLon()
+----
+doc['g'].isEmpty()
+----
+doc['g'].value
+----
+doc['g'].foo()
+----
+doc['g']
+----
+doc['k']
+----
+doc['t']
+----
+doc['ip']
+----
+doc['nope']
+----
+doc['nope'].value + doc['k']
+----
+doc
+----
+doc.l
+----
+doc[0]
+----
+foo
+----
+foo.bar
+----
+_score
+----
+_value
+----
+#params: {"x": 2.5, "s": "str", "n": null, "big": 9007199254740993, "arr": [1]}
+x * 2
+----
+#params: {"x": 2.5, "s": "str", "n": null, "big": 9007199254740993, "arr": [1]}
+s + 1
+----
+#params: {"x": 2.5, "s": "str", "n": null, "big": 9007199254740993, "arr": [1]}
+n
+----
+#params: {"x": 2.5, "s": "str", "n": null, "big": 9007199254740993, "arr": [1]}
+big
+----
+#params: {"x": 2.5, "s": "str", "n": null, "big": 9007199254740993, "arr": [1]}
+arr
+----
+#params: {"doc": 3}
+doc + 1
+----
+#params: {"l": 3}
+doc['l'] + l
+----
+doc['neg'] * 2
+----
+doc['big'] * 10
+----
+(doc['big'] | 0) + (doc['neg'] | 0)
+----
+doc['neg'] ? 1 : 2
+----
+!doc['neg']
+----
+doc['l'] + 
+----
+1 +* 2
+----
+(1 + 2
+----
+1 + 2)
+----
+1 2
+----
+1 # 2
+----
+'str'
+----
+doc ['l']
+----
+doc['l'] .value
+----
+doc[ 'l' ]
+----
+max(1,)
+----
+,1
+----
+1 ? 2
+----
+?
+----
+08
+----
+1..2
+----
+1e
+----
+0x
+----
+$foo
+----
+_a.b
+----
+doc['l'].value()
+----
+doc['a\'b']
+----
+doc["a\"b"]
+----
+abs(doc['l']) + max(doc['l'].min(), doc['d'])
+----
+#context: score
+_score * 2 + doc['l']
+----
+#context: score
+doc['l'].median() + _value
+----
+#context: score
+doc['d']
+----
+#context: score
+doc['nope']
+----
+#context: score
+1 +
+----
+#context: sort
+doc['l'] * -1 + _score
+----
+#context: sort
+doc['dt'].date.dayOfYear
+----
+#context: aggs
+doc['l'].sum() + _score
+----
+#context: aggs
+doc['d'] * 2
+----
+#context: aggs
+_value
+----
+#context: value
+_value * 2
+----
+#context: value
+_value + doc['d']
+----
+#context: value
+_score
+----
+#context: filter
+doc['l'] > 4
+----
+#context: filter
+doc['d'].empty
+----
+#context: filter
+0.5
+----
+#context: filter
+_score
+----
+#context: filter
+doc['k'] > 1

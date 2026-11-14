@@ -1,0 +1,23 @@
+{
+  "search": {
+    "overlay": true,
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/api-reference/search-apis/search/",
+      "description": "Parameters RestSearchAction reads that the vendored spec file lacks."
+    },
+    "params": {
+      "phase_took": {
+        "type": "boolean",
+        "description": "Indicates whether to return phase-level `took` time values in the response."
+      },
+      "cancel_after_time_interval": {
+        "type": "time",
+        "description": "The time after which the search request will be cancelled."
+      },
+      "verbose_pipeline": {
+        "type": "boolean",
+        "description": "Report each search pipeline processor's input, output and duration."
+      }
+    }
+  }
+}

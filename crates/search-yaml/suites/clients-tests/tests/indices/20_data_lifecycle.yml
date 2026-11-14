@@ -1,0 +1,29 @@
+---
+requires:
+  serverless: false
+  stack: true
+---
+setup:
+  - do:
+      indices.create: { index: 'my-data-stream' }
+---
+teardown:
+  - do:
+      indices.delete: { index: 'my-data-stream' }
+---
+'data_lifecycle':
+  - do:
+      indices.put_data_lifecycle:
+        name: 'my-data-stream'
+        body:
+          data_retention: '7d'
+  - is_true: 'acknowledged'
+
+  - do:
+      indices.get_data_lifecycle_stats: {}
+  - match: { data_streams: [] }
+
+  - do:
+      indices.delete_data_lifecycle:
+        name: 'my-data-stream'
+  - match: { acknowledged: true }

@@ -71,7 +71,10 @@ fn env_name(k: &str) -> String {
 
 /// The buildspec of one build (YAML; each command a JSON string, which YAML reads as a quoted
 /// scalar).
-pub fn buildspec(registry: &str, repo_uri: &str, tag: &str, dockerfile: &str, names: &[String], own_args: Option<&[String]>, env_hash: &str) -> String {
+/// `no_cache`: no layer from the registry cache (which the build then writes afresh) and base
+/// images pulled again.
+#[allow(clippy::too_many_arguments)]
+pub fn buildspec(registry: &str, repo_uri: &str, tag: &str, dockerfile: &str, names: &[String], own_args: Option<&[String]>, env_hash: &str, no_cache: bool) -> String {
     let args = own_args.unwrap_or_default();
     let image = format!("{repo_uri}:{tag}");
     let cache = format!("{repo_uri}:{CACHE_TAG}");
@@ -84,7 +87,11 @@ pub fn buildspec(registry: &str, repo_uri: &str, tag: &str, dockerfile: &str, na
     .map(str::to_string));
     build.push(quote(dockerfile));
     build.extend(["--tag".into(), quote(&image), "--label".into(), quote(&format!("{}={tag}", super::LABEL))]);
-    build.extend(["--cache-from".into(), quote(&format!("type=registry,ref={cache}"))]);
+    if no_cache {
+        build.extend(["--no-cache".into(), "--pull".into()]);
+    } else {
+        build.extend(["--cache-from".into(), quote(&format!("type=registry,ref={cache}"))]);
+    }
     build.extend(["--cache-to".into(), quote(&format!("type=registry,ref={cache},mode=max,image-manifest=true,oci-mediatypes=true"))]);
     for k in names {
         build.push("--secret".into());
@@ -265,7 +272,7 @@ impl CodeBuild {
         let registry = repo_uri.split('/').next().unwrap_or(&repo_uri).to_string();
         let tag = job.deployment.strip_prefix("dep_").unwrap_or(&job.deployment);
         let args = super::build_args(job);
-        let spec = buildspec(&registry, &repo_uri, tag, &job.dockerfile, names, job.own_dockerfile.then_some(&args[..]), &job.env_hash);
+        let spec = buildspec(&registry, &repo_uri, tag, &job.dockerfile, names, job.own_dockerfile.then_some(&args[..]), &job.env_hash, job.no_cache);
         let env: Vec<EnvironmentVariable> = match secret {
             Some(s) => names
                 .iter()
@@ -422,7 +429,7 @@ mod tests {
 
     #[test]
     fn the_buildspec_names_variables_and_quotes_what_it_takes() {
-        let s = buildspec("1.dkr.ecr.us-east-1.amazonaws.com", "1.dkr.ecr.us-east-1.amazonaws.com/apps/web", "abc", "it's/Dockerfile", &["NPM_TOKEN".into(), "LD_PRELOAD".into()], None, "h1");
+        let s = buildspec("1.dkr.ecr.us-east-1.amazonaws.com", "1.dkr.ecr.us-east-1.amazonaws.com/apps/web", "abc", "it's/Dockerfile", &["NPM_TOKEN".into(), "LD_PRELOAD".into()], None, "h1", false);
         assert!(s.starts_with("version: 0.2\n"), "{s}");
         assert!(s.contains(r#"'it'\\''s/Dockerfile'"#), "{s}");
         assert!(s.contains("--secret 'id=NPM_TOKEN,env=ROLL_BV_NPM_TOKEN'") && s.contains("'ROLL_BUILD_ENV=h1'") && !s.contains("--build-arg 'NPM_TOKEN'"), "{s}");
@@ -430,7 +437,7 @@ mod tests {
         assert!(s.contains("env=ROLL_BV_LD_PRELOAD") && !s.contains("LD_PRELOAD=") && !s.contains("env=LD_PRELOAD"), "{s}");
         assert!(s.contains("type=registry,ref=1.dkr.ecr.us-east-1.amazonaws.com/apps/web:buildcache,mode=max"), "{s}");
         assert!(s.contains("--tag '1.dkr.ecr.us-east-1.amazonaws.com/apps/web:abc'") && s.contains("--push ."), "{s}");
-        let own = buildspec("r", "r/apps/web", "abc", "Dockerfile", &["NPM_TOKEN".into()], Some(&["NPM_TOKEN".into()]), "h1");
+        let own = buildspec("r", "r/apps/web", "abc", "Dockerfile", &["NPM_TOKEN".into()], Some(&["NPM_TOKEN".into()]), "h1", false);
         assert!(own.contains(r#"NPM_TOKEN=\"$ROLL_BV_NPM_TOKEN\" docker buildx build"#) && own.contains("--build-arg 'NPM_TOKEN'") && !own.contains("ROLL_BUILD_ENV"), "{own}");
     }
 }

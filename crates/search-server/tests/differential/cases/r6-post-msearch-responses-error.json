@@ -1,0 +1,469 @@
+{
+ "found": {
+  "case": 87,
+  "case_seed": 105000402,
+  "seed": 105
+ },
+ "signature": "POST _msearch .responses[].error",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "bool0": {
+       "type": "boolean"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dbl0": {
+       "type": "double"
+      },
+      "half0": {
+       "type": "half_float"
+      },
+      "irange0": {
+       "type": "integer_range"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "long0": {
+       "type": "long"
+      },
+      "n": {
+       "properties": {
+        "kw0": {
+         "type": "keyword"
+        },
+        "long0": {
+         "type": "long"
+        },
+        "text0": {
+         "analyzer": "simple",
+         "fields": {
+          "raw": {
+           "ignore_above": 32,
+           "type": "keyword"
+          }
+         },
+         "term_vector": "with_positions_offsets",
+         "type": "text"
+        }
+       },
+       "type": "nested"
+      },
+      "scaled0": {
+       "scaling_factor": 100,
+       "type": "scaled_float"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "text1": {
+       "analyzer": "stop",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 1,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m4-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m4-a"
+  },
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "bool0": {
+       "type": "boolean"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dbl0": {
+       "type": "double"
+      },
+      "half0": {
+       "type": "half_float"
+      },
+      "irange0": {
+       "type": "integer_range"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "long0": {
+       "type": "long"
+      },
+      "n": {
+       "properties": {
+        "kw0": {
+         "type": "keyword"
+        },
+        "long0": {
+         "type": "long"
+        },
+        "text0": {
+         "analyzer": "simple",
+         "fields": {
+          "raw": {
+           "ignore_above": 32,
+           "type": "keyword"
+          }
+         },
+         "term_vector": "with_positions_offsets",
+         "type": "text"
+        }
+       },
+       "type": "nested"
+      },
+      "scaled0": {
+       "scaling_factor": 100,
+       "type": "scaled_float"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "text1": {
+       "analyzer": "stop",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 2,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m4-b",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m4-b"
+  },
+  {
+   "es": {
+    "body": {
+     "responses": [
+      {
+       "error": {
+        "caused_by": {
+         "caused_by": {
+          "reason": "[inner_hits] already contains an entry for key [n]",
+          "type": "illegal_argument_exception"
+         },
+         "reason": "[inner_hits] already contains an entry for key [n]",
+         "type": "illegal_argument_exception"
+        },
+        "failed_shards": [
+         {
+          "index": "diff-m4-a",
+          "node": "GTFtKRkMSi-lm0r0R4ztbA",
+          "reason": {
+           "reason": "[inner_hits] already contains an entry for key [n]",
+           "type": "illegal_argument_exception"
+          },
+          "shard": 0
+         },
+         {
+          "index": "diff-m4-b",
+          "node": "GTFtKRkMSi-lm0r0R4ztbA",
+          "reason": {
+           "reason": "[inner_hits] already contains an entry for key [n]",
+           "type": "illegal_argument_exception"
+          },
+          "shard": 0
+         }
+        ],
+        "grouped": true,
+        "phase": "query",
+        "reason": "all shards failed",
+        "root_cause": [
+         {
+          "reason": "[inner_hits] already contains an entry for key [n]",
+          "type": "illegal_argument_exception"
+         },
+         {
+          "reason": "[inner_hits] already contains an entry for key [n]",
+          "type": "illegal_argument_exception"
+         }
+        ],
+        "type": "search_phase_execution_exception"
+       },
+       "status": 400
+      },
+      {
+       "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 3,
+        "total": 3
+       },
+       "aggregations": {
+        "stats_31": {
+         "avg": null,
+         "count": 0,
+         "max": null,
+         "min": null,
+         "sum": 0.0
+        },
+        "stats_33": {
+         "avg": null,
+         "count": 0,
+         "max": null,
+         "min": null,
+         "sum": 0.0
+        },
+        "terms_32": {
+         "buckets": [],
+         "doc_count_error_upper_bound": 0,
+         "sum_other_doc_count": 0
+        }
+       },
+       "hits": {
+        "hits": [],
+        "max_score": null,
+        "total": {
+         "relation": "eq",
+         "value": 0
+        }
+       },
+       "status": 200,
+       "timed_out": false,
+       "took": 0
+      },
+      {
+       "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 2,
+        "total": 2
+       },
+       "hits": {
+        "hits": [],
+        "max_score": null,
+        "total": {
+         "relation": "eq",
+         "value": 0
+        }
+       },
+       "status": 200,
+       "timed_out": false,
+       "took": 0
+      }
+     ],
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": "diff-m4-a,diff-m4-b"
+    },
+    {
+     "post_filter": {
+      "nested": {
+       "inner_hits": {},
+       "path": "n",
+       "query": {
+        "match_phrase": {
+         "n.text0": {
+          "query": "fox brown"
+         }
+        }
+       }
+      }
+     },
+     "query": {
+      "bool": {
+       "must": [
+        {
+         "bool": {
+          "minimum_should_match": 2,
+          "should": [
+           {
+            "nested": {
+             "inner_hits": {
+              "size": 2
+             },
+             "path": "n",
+             "query": {
+              "range": {
+               "n.long0": {
+                "gt": 64
+               }
+              }
+             },
+             "score_mode": "min"
+            }
+           },
+           {
+            "term": {
+             "dbl0": 26.72
+            }
+           }
+          ]
+         }
+        }
+       ]
+      }
+     }
+    },
+    {
+     "index": "diff-m4-*"
+    },
+    {
+     "_source": [
+      "text0"
+     ],
+     "aggs": {
+      "stats_31": {
+       "stats": {
+        "field": "half0",
+        "missing": 0
+       }
+      },
+      "stats_33": {
+       "stats": {
+        "field": "date0"
+       }
+      },
+      "terms_32": {
+       "terms": {
+        "field": "dbl0",
+        "order": {
+         "_count": "asc"
+        }
+       }
+      }
+     },
+     "query": {
+      "bool": {
+       "filter": [
+        {
+         "range": {
+          "long0": {
+           "gt": 50,
+           "lte": 59
+          }
+         }
+        },
+        {
+         "nested": {
+          "path": "n",
+          "query": {
+           "term": {
+            "n.long0": 70
+           }
+          },
+          "score_mode": "sum"
+         }
+        },
+        {
+         "term": {
+          "long0": 98
+         }
+        }
+       ],
+       "minimum_should_match": 2,
+       "should": [
+        {
+         "match_phrase_prefix": {
+          "text1": {
+           "max_expansions": 2,
+           "query": "data r",
+           "slop": 1
+          }
+         }
+        },
+        {
+         "term": {
+          "bool0": false
+         }
+        }
+       ]
+      }
+     },
+     "size": 0
+    },
+    {
+     "index": "diff-m4-b"
+    },
+    {
+     "highlight": {
+      "fields": {
+       "text0": {}
+      }
+     },
+     "query": {
+      "match": {
+       "text0": "search lazy"
+      }
+     },
+     "timeout": "10s"
+    }
+   ],
+   "method": "POST",
+   "path": "/_msearch"
+  }
+ ]
+}

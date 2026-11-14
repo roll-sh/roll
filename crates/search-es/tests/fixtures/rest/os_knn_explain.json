@@ -1,0 +1,3277 @@
+{
+  "description" : "OpenSearch 3.9.0 k-NN query explanations (approximate, exact filtered, radial, disk-based rescoring; faiss and lucene engines; float, byte and binary vectors; every space type), _validate/query texts and profiles",
+  "dialect" : "opensearch",
+  "steps" : [
+    {
+      "req" : "PUT /esm-e",
+      "body" : {
+        "settings" : {
+          "index.knn" : true,
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "l2" : {
+              "type" : "knn_vector",
+              "dimension" : 2
+            },
+            "cos" : {
+              "type" : "knn_vector",
+              "dimension" : 2,
+              "space_type" : "cosinesimil"
+            },
+            "ip" : {
+              "type" : "knn_vector",
+              "dimension" : 2,
+              "space_type" : "innerproduct"
+            },
+            "luc" : {
+              "type" : "knn_vector",
+              "dimension" : 2,
+              "method" : {
+                "name" : "hnsw",
+                "engine" : "lucene"
+              }
+            },
+            "lip" : {
+              "type" : "knn_vector",
+              "dimension" : 2,
+              "method" : {
+                "name" : "hnsw",
+                "engine" : "lucene",
+                "space_type" : "innerproduct"
+              }
+            },
+            "ham" : {
+              "type" : "knn_vector",
+              "dimension" : 8,
+              "data_type" : "binary",
+              "space_type" : "hamming"
+            },
+            "by" : {
+              "type" : "knn_vector",
+              "dimension" : 2,
+              "data_type" : "byte"
+            },
+            "n" : {
+              "type" : "integer"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-e"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"l2\":[1,2],\"cos\":[1,2],\"ip\":[1,2],\"luc\":[1,2],\"lip\":[1,2],\"ham\":[5],\"by\":[1,2],\"n\":1}\n{\"index\":{\"_id\":\"2\"}}\n{\"l2\":[2,2],\"cos\":[2,2],\"ip\":[2,2],\"luc\":[2,2],\"lip\":[2,2],\"ham\":[7],\"by\":[2,2],\"n\":2}\n{\"index\":{\"_id\":\"3\"}}\n{\"l2\":[-1,0.5],\"cos\":[-1,0.5],\"ip\":[-1,0.5],\"luc\":[-1,0.5],\"lip\":[-1,0.5],\"ham\":[-7],\"by\":[-3,1],\"n\":2}\n",
+      "headers" : {
+        "content-type" : "application/x-ndjson"
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 58,
+        "errors" : false,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-e",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "l2" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 2
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_explanation" : {
+                "value" : 0.5,
+                "description" : "the type of knn search executed was Approximate-NN",
+                "details" : [
+                  {
+                    "value" : 0.5,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = l2 where score is computed as `1 / (1 + rawScore)` from:",
+                    "details" : [
+                      {
+                        "value" : 1.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_explanation" : {
+                "value" : 0.33333334,
+                "description" : "the type of knn search executed was Approximate-NN",
+                "details" : [
+                  {
+                    "value" : 0.33333334,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = l2 where score is computed as `1 / (1 + rawScore)` from:",
+                    "details" : [
+                      {
+                        "value" : 2.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "cos" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 2
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_score" : 1.0,
+              "_explanation" : {
+                "value" : 1.0,
+                "description" : "the type of knn search executed was Approximate-NN",
+                "details" : [
+                  {
+                    "value" : 1.0,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = cosinesimil where score is computed as `Math.max((2.0F - rawScore) / 2.0F, 0.0F)` from:",
+                    "details" : [
+                      {
+                        "value" : 0.99999994,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.97434163,
+              "_explanation" : {
+                "value" : 0.97434163,
+                "description" : "the type of knn search executed was Approximate-NN",
+                "details" : [
+                  {
+                    "value" : 0.97434163,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = cosinesimil where score is computed as `Math.max((2.0F - rawScore) / 2.0F, 0.0F)` from:",
+                    "details" : [
+                      {
+                        "value" : 0.94868326,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "ip" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 3
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 5.0,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_score" : 5.0,
+              "_explanation" : {
+                "value" : 5.0,
+                "description" : "the type of knn search executed was Approximate-NN",
+                "details" : [
+                  {
+                    "value" : 5.0,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = innerproduct where score is computed as `-rawScore + 1` from:",
+                    "details" : [
+                      {
+                        "value" : -4.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 4.0,
+              "_explanation" : {
+                "value" : 4.0,
+                "description" : "the type of knn search executed was Approximate-NN",
+                "details" : [
+                  {
+                    "value" : 4.0,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = innerproduct where score is computed as `-rawScore + 1` from:",
+                    "details" : [
+                      {
+                        "value" : -3.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "3",
+              "_score" : 0.6666667,
+              "_explanation" : {
+                "value" : 0.6666667,
+                "description" : "the type of knn search executed was Approximate-NN",
+                "details" : [
+                  {
+                    "value" : 0.6666667,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = innerproduct where score is computed as `1 / (1 + rawScore)` from:",
+                    "details" : [
+                      {
+                        "value" : 0.5,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "luc" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 2
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_explanation" : {
+                "value" : 0.5,
+                "description" : "within top 2 docs",
+                "details" : [ ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_explanation" : {
+                "value" : 0.33333334,
+                "description" : "within top 2 docs",
+                "details" : [ ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "lip" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 6,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 5.0,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_score" : 5.0,
+              "_explanation" : {
+                "value" : 5.0,
+                "description" : "within top 1 docs",
+                "details" : [ ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "ham" : {
+              "vector" : [
+                3
+              ],
+              "k" : 2
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_score" : 0.5,
+              "_explanation" : {
+                "value" : 0.5,
+                "description" : "the type of knn search executed was Approximate-NN",
+                "details" : [
+                  {
+                    "value" : 0.5,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = BINARY, spaceType = hamming where score is computed as `1 / (1 + rawScore)` from:",
+                    "details" : [
+                      {
+                        "value" : 1.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.33333334,
+              "_explanation" : {
+                "value" : 0.33333334,
+                "description" : "the type of knn search executed was Approximate-NN",
+                "details" : [
+                  {
+                    "value" : 0.33333334,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = BINARY, spaceType = hamming where score is computed as `1 / (1 + rawScore)` from:",
+                    "details" : [
+                      {
+                        "value" : 2.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "by" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 2
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_explanation" : {
+                "value" : 0.5,
+                "description" : "the type of knn search executed was Approximate-NN",
+                "details" : [
+                  {
+                    "value" : 0.5,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = BYTE, spaceType = l2 where score is computed as `1 / (1 + rawScore)` from:",
+                    "details" : [
+                      {
+                        "value" : 1.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_explanation" : {
+                "value" : 0.33333334,
+                "description" : "the type of knn search executed was Approximate-NN",
+                "details" : [
+                  {
+                    "value" : 0.33333334,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = BYTE, spaceType = l2 where score is computed as `1 / (1 + rawScore)` from:",
+                    "details" : [
+                      {
+                        "value" : 2.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "l2" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 1,
+              "filter" : {
+                "term" : {
+                  "n" : 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_explanation" : {
+                "value" : 0.5,
+                "description" : "the type of knn search executed was Approximate-NN",
+                "details" : [
+                  {
+                    "value" : 0.5,
+                    "description" : "the type of knn search executed at leaf was Exact since filteredIds = 1 is less than or equal to K = 1 with vectorDataType = FLOAT, spaceType = l2",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "l2" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 1,
+              "filter" : {
+                "term" : {
+                  "n" : 2
+                }
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 0.33333334,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_explanation" : {
+                "value" : 0.33333334,
+                "description" : "the type of knn search executed was Approximate-NN",
+                "details" : [
+                  {
+                    "value" : 0.33333334,
+                    "description" : "the type of knn search executed at leaf was Exact since max distance computation = 2048000 is greater than or equal to estimated distance computations = 4 with vectorDataType = FLOAT, spaceType = l2",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "l2" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "max_distance" : 5
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_explanation" : {
+                "value" : 0.5,
+                "description" : "the type of knn search executed was Radial with the radius of 5.0",
+                "details" : [
+                  {
+                    "value" : 0.5,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = l2 where score is computed as `1 / (1 + rawScore)` from:",
+                    "details" : [
+                      {
+                        "value" : 1.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_explanation" : {
+                "value" : 0.33333334,
+                "description" : "the type of knn search executed was Radial with the radius of 5.0",
+                "details" : [
+                  {
+                    "value" : 0.33333334,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = l2 where score is computed as `1 / (1 + rawScore)` from:",
+                    "details" : [
+                      {
+                        "value" : 2.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "3",
+              "_score" : 0.1904762,
+              "_explanation" : {
+                "value" : 0.1904762,
+                "description" : "the type of knn search executed was Radial with the radius of 5.0",
+                "details" : [
+                  {
+                    "value" : 0.1904762,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = l2 where score is computed as `1 / (1 + rawScore)` from:",
+                    "details" : [
+                      {
+                        "value" : 4.25,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "l2" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "min_score" : 0.1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_explanation" : {
+                "value" : 0.5,
+                "description" : "the type of knn search executed was Radial with the radius of 9.0",
+                "details" : [
+                  {
+                    "value" : 0.5,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = l2 where score is computed as `1 / (1 + rawScore)` from:",
+                    "details" : [
+                      {
+                        "value" : 1.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_explanation" : {
+                "value" : 0.33333334,
+                "description" : "the type of knn search executed was Radial with the radius of 9.0",
+                "details" : [
+                  {
+                    "value" : 0.33333334,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = l2 where score is computed as `1 / (1 + rawScore)` from:",
+                    "details" : [
+                      {
+                        "value" : 2.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "3",
+              "_score" : 0.1904762,
+              "_explanation" : {
+                "value" : 0.1904762,
+                "description" : "the type of knn search executed was Radial with the radius of 9.0",
+                "details" : [
+                  {
+                    "value" : 0.1904762,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = l2 where score is computed as `1 / (1 + rawScore)` from:",
+                    "details" : [
+                      {
+                        "value" : 4.25,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "luc" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "max_distance" : 5
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_explanation" : {
+                "value" : 0.5,
+                "description" : "Score above threshold",
+                "details" : [ ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_explanation" : {
+                "value" : 0.33333334,
+                "description" : "Score above threshold",
+                "details" : [ ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "3",
+              "_score" : 0.1904762,
+              "_explanation" : {
+                "value" : 0.1904762,
+                "description" : "Score above threshold",
+                "details" : [ ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "l2" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 1,
+              "rescore" : true
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_explanation" : {
+                "value" : 0.5,
+                "description" : "the type of knn search executed was Disk-based and the first pass k was 100 with vector dimension of 2, over sampling factor of 1.0, shard level rescoring enabled",
+                "details" : [
+                  {
+                    "value" : 0.5,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = l2",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "l2" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 1,
+              "rescore" : false
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_explanation" : {
+                "value" : 0.5,
+                "description" : "the type of knn search executed was Disk-based and the first pass k was 100 with vector dimension of 2, over sampling factor of 1.0, shard level rescoring disabled",
+                "details" : [
+                  {
+                    "value" : 0.5,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = l2",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "l2" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 1,
+              "rescore" : {
+                "oversample_factor" : 2.5
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_explanation" : {
+                "value" : 0.5,
+                "description" : "the type of knn search executed was Disk-based and the first pass k was 100 with vector dimension of 2, over sampling factor of 2.5, shard level rescoring enabled",
+                "details" : [
+                  {
+                    "value" : 0.5,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = l2",
+                    "details" : [ ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "luc" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 1,
+              "filter" : {
+                "term" : {
+                  "n" : 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_explanation" : {
+                "value" : 0.5,
+                "description" : "within top 1 docs",
+                "details" : [ ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "cos" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "min_score" : 0.5
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_score" : 1.0,
+              "_explanation" : {
+                "value" : 1.0,
+                "description" : "the type of knn search executed was Radial with the radius of 0.0",
+                "details" : [
+                  {
+                    "value" : 1.0,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = cosinesimil where score is computed as `Math.max((2.0F - rawScore) / 2.0F, 0.0F)` from:",
+                    "details" : [
+                      {
+                        "value" : 0.99999994,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.97434163,
+              "_explanation" : {
+                "value" : 0.97434163,
+                "description" : "the type of knn search executed was Radial with the radius of 0.0",
+                "details" : [
+                  {
+                    "value" : 0.97434163,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = cosinesimil where score is computed as `Math.max((2.0F - rawScore) / 2.0F, 0.0F)` from:",
+                    "details" : [
+                      {
+                        "value" : 0.94868326,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "ip" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "min_score" : 2
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 5.0,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_score" : 5.0,
+              "_explanation" : {
+                "value" : 5.0,
+                "description" : "the type of knn search executed was Radial with the radius of 1.0",
+                "details" : [
+                  {
+                    "value" : 5.0,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = innerproduct where score is computed as `-rawScore + 1` from:",
+                    "details" : [
+                      {
+                        "value" : -4.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 4.0,
+              "_explanation" : {
+                "value" : 4.0,
+                "description" : "the type of knn search executed was Radial with the radius of 1.0",
+                "details" : [
+                  {
+                    "value" : 4.0,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = innerproduct where score is computed as `-rawScore + 1` from:",
+                    "details" : [
+                      {
+                        "value" : -3.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "ip" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "min_score" : 0.5
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 5.0,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_score" : 5.0,
+              "_explanation" : {
+                "value" : 5.0,
+                "description" : "the type of knn search executed was Radial with the radius of -1.0",
+                "details" : [
+                  {
+                    "value" : 5.0,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = innerproduct where score is computed as `-rawScore + 1` from:",
+                    "details" : [
+                      {
+                        "value" : -4.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 4.0,
+              "_explanation" : {
+                "value" : 4.0,
+                "description" : "the type of knn search executed was Radial with the radius of -1.0",
+                "details" : [
+                  {
+                    "value" : 4.0,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = innerproduct where score is computed as `-rawScore + 1` from:",
+                    "details" : [
+                      {
+                        "value" : -3.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "3",
+              "_score" : 0.6666667,
+              "_explanation" : {
+                "value" : 0.6666667,
+                "description" : "the type of knn search executed was Radial with the radius of -1.0",
+                "details" : [
+                  {
+                    "value" : 0.6666667,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = innerproduct where score is computed as `1 / (1 + rawScore)` from:",
+                    "details" : [
+                      {
+                        "value" : 0.5,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "ip" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "max_distance" : -2
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 5.0,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_score" : 5.0,
+              "_explanation" : {
+                "value" : 5.0,
+                "description" : "the type of knn search executed was Radial with the radius of 2.0",
+                "details" : [
+                  {
+                    "value" : 5.0,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = innerproduct where score is computed as `-rawScore + 1` from:",
+                    "details" : [
+                      {
+                        "value" : -4.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 4.0,
+              "_explanation" : {
+                "value" : 4.0,
+                "description" : "the type of knn search executed was Radial with the radius of 2.0",
+                "details" : [
+                  {
+                    "value" : 4.0,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = FLOAT, spaceType = innerproduct where score is computed as `-rawScore + 1` from:",
+                    "details" : [
+                      {
+                        "value" : -3.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 3,
+        "_source" : false,
+        "explain" : true,
+        "query" : {
+          "knn" : {
+            "by" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "max_distance" : 3
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_explanation" : {
+                "value" : 0.5,
+                "description" : "the type of knn search executed was Radial with the radius of 3.0",
+                "details" : [
+                  {
+                    "value" : 0.5,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = BYTE, spaceType = l2 where score is computed as `1 / (1 + rawScore)` from:",
+                    "details" : [
+                      {
+                        "value" : 1.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "_shard" : "[esm-e][0]",
+              "_node" : "oGxQA16kS6mP_v1xgHiLLQ",
+              "_index" : "esm-e",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_explanation" : {
+                "value" : 0.33333334,
+                "description" : "the type of knn search executed was Radial with the radius of 3.0",
+                "details" : [
+                  {
+                    "value" : 0.33333334,
+                    "description" : "the type of knn search executed at leaf was Approximate-NN with vectorDataType = BYTE, spaceType = l2 where score is computed as `1 / (1 + rawScore)` from:",
+                    "details" : [
+                      {
+                        "value" : 2.0,
+                        "description" : "rawScore, returned from FAISS library",
+                        "details" : [ ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_validate/query?explain=true",
+      "body" : {
+        "query" : {
+          "knn" : {
+            "l2" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-e",
+            "valid" : true,
+            "explanation" : ""
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 1,
+        "_source" : false,
+        "profile" : true,
+        "query" : {
+          "knn" : {
+            "l2" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "time_in_nanos",
+        "breakdown",
+        "rewrite_time",
+        "reduce_time_in_nanos",
+        "max_slice_time_in_nanos",
+        "min_slice_time_in_nanos",
+        "avg_slice_time_in_nanos",
+        "fetch",
+        "id",
+        "slice_count"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.5
+            }
+          ]
+        },
+        "profile" : {
+          "shards" : [
+            {
+              "id" : "[oGxQA16kS6mP_v1xgHiLLQ][esm-e][0]",
+              "inbound_network_time_in_millis" : 0,
+              "outbound_network_time_in_millis" : 0,
+              "searches" : [
+                {
+                  "query" : [
+                    {
+                      "type" : "KNNQuery",
+                      "description" : "",
+                      "time_in_nanos" : 395512,
+                      "max_slice_time_in_nanos" : 295950,
+                      "min_slice_time_in_nanos" : 295950,
+                      "avg_slice_time_in_nanos" : 295950,
+                      "breakdown" : {
+                        "advance" : 0,
+                        "advance_count" : 0,
+                        "ann_search" : 192768,
+                        "ann_search_count" : 1,
+                        "avg_advance" : 0,
+                        "avg_advance_count" : 0,
+                        "avg_ann_search" : 192768,
+                        "avg_ann_search_count" : 1,
+                        "avg_bitset_creation" : 1562,
+                        "avg_bitset_creation_count" : 1,
+                        "avg_build_scorer" : 232964,
+                        "avg_build_scorer_count" : 2,
+                        "avg_cardinality" : 0,
+                        "avg_compute_max_score" : 0,
+                        "avg_compute_max_score_count" : 0,
+                        "avg_exact_search" : 0,
+                        "avg_exact_search_count" : 0,
+                        "avg_graph_load" : 38216,
+                        "avg_graph_load_count" : 1,
+                        "avg_match" : 0,
+                        "avg_match_count" : 0,
+                        "avg_next_doc" : 456,
+                        "avg_next_doc_count" : 2,
+                        "avg_score" : 830,
+                        "avg_score_count" : 1,
+                        "avg_set_min_competitive_score" : 0,
+                        "avg_set_min_competitive_score_count" : 0,
+                        "avg_shallow_advance" : 0,
+                        "avg_shallow_advance_count" : 0,
+                        "bitset_creation" : 1562,
+                        "bitset_creation_count" : 1,
+                        "build_scorer" : 232964,
+                        "build_scorer_count" : 2,
+                        "cardinality" : 0,
+                        "compute_max_score" : 0,
+                        "compute_max_score_count" : 0,
+                        "create_weight" : 14148,
+                        "create_weight_count" : 1,
+                        "exact_search" : 0,
+                        "exact_search_count" : 0,
+                        "graph_load" : 38216,
+                        "graph_load_count" : 1,
+                        "match" : 0,
+                        "match_count" : 0,
+                        "max_advance" : 0,
+                        "max_advance_count" : 0,
+                        "max_ann_search" : 192768,
+                        "max_ann_search_count" : 1,
+                        "max_bitset_creation" : 1562,
+                        "max_bitset_creation_count" : 1,
+                        "max_build_scorer" : 232964,
+                        "max_build_scorer_count" : 2,
+                        "max_cardinality" : 0,
+                        "max_compute_max_score" : 0,
+                        "max_compute_max_score_count" : 0,
+                        "max_exact_search" : 0,
+                        "max_exact_search_count" : 0,
+                        "max_graph_load" : 38216,
+                        "max_graph_load_count" : 1,
+                        "max_match" : 0,
+                        "max_match_count" : 0,
+                        "max_next_doc" : 456,
+                        "max_next_doc_count" : 2,
+                        "max_score" : 830,
+                        "max_score_count" : 1,
+                        "max_set_min_competitive_score" : 0,
+                        "max_set_min_competitive_score_count" : 0,
+                        "max_shallow_advance" : 0,
+                        "max_shallow_advance_count" : 0,
+                        "min_advance" : 0,
+                        "min_advance_count" : 0,
+                        "min_ann_search" : 192768,
+                        "min_ann_search_count" : 1,
+                        "min_bitset_creation" : 1562,
+                        "min_bitset_creation_count" : 1,
+                        "min_build_scorer" : 232964,
+                        "min_build_scorer_count" : 2,
+                        "min_cardinality" : 0,
+                        "min_compute_max_score" : 0,
+                        "min_compute_max_score_count" : 0,
+                        "min_exact_search" : 0,
+                        "min_exact_search_count" : 0,
+                        "min_graph_load" : 38216,
+                        "min_graph_load_count" : 1,
+                        "min_match" : 0,
+                        "min_match_count" : 0,
+                        "min_next_doc" : 456,
+                        "min_next_doc_count" : 2,
+                        "min_score" : 830,
+                        "min_score_count" : 1,
+                        "min_set_min_competitive_score" : 0,
+                        "min_set_min_competitive_score_count" : 0,
+                        "min_shallow_advance" : 0,
+                        "min_shallow_advance_count" : 0,
+                        "next_doc" : 456,
+                        "next_doc_count" : 2,
+                        "score" : 830,
+                        "score_count" : 1,
+                        "set_min_competitive_score" : 0,
+                        "set_min_competitive_score_count" : 0,
+                        "shallow_advance" : 0,
+                        "shallow_advance_count" : 0
+                      }
+                    }
+                  ],
+                  "rewrite_time" : 8010,
+                  "collector" : [
+                    {
+                      "name" : "SimpleTopDocsCollectorManager",
+                      "reason" : "search_top_hits",
+                      "time_in_nanos" : 18452,
+                      "reduce_time_in_nanos" : 43121,
+                      "max_slice_time_in_nanos" : 18452,
+                      "min_slice_time_in_nanos" : 18452,
+                      "avg_slice_time_in_nanos" : 18452,
+                      "slice_count" : 1
+                    }
+                  ]
+                }
+              ],
+              "aggregations" : [ ],
+              "fetch" : [
+                {
+                  "type" : "fetch",
+                  "description" : "fetch",
+                  "time_in_nanos" : 53072,
+                  "breakdown" : {
+                    "build_sub_phase_processors" : 16328,
+                    "build_sub_phase_processors_count" : 1,
+                    "create_stored_fields_visitor" : 6778,
+                    "create_stored_fields_visitor_count" : 1,
+                    "get_next_reader" : 947,
+                    "get_next_reader_count" : 1,
+                    "load_source" : 0,
+                    "load_source_count" : 0,
+                    "load_stored_fields" : 29019,
+                    "load_stored_fields_count" : 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_validate/query?explain=true",
+      "body" : {
+        "query" : {
+          "knn" : {
+            "luc" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-e",
+            "valid" : true,
+            "explanation" : "OSKnnFloatVectorQuery:luc[1.0,...][100]"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 1,
+        "_source" : false,
+        "profile" : true,
+        "query" : {
+          "knn" : {
+            "luc" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "time_in_nanos",
+        "breakdown",
+        "rewrite_time",
+        "reduce_time_in_nanos",
+        "max_slice_time_in_nanos",
+        "min_slice_time_in_nanos",
+        "avg_slice_time_in_nanos",
+        "fetch",
+        "id",
+        "slice_count"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.5
+            }
+          ]
+        },
+        "profile" : {
+          "shards" : [
+            {
+              "id" : "[oGxQA16kS6mP_v1xgHiLLQ][esm-e][0]",
+              "inbound_network_time_in_millis" : 0,
+              "outbound_network_time_in_millis" : 0,
+              "searches" : [
+                {
+                  "query" : [
+                    {
+                      "type" : "LuceneEngineKnnVectorQuery",
+                      "description" : "OSKnnFloatVectorQuery:luc[1.0,...][100]",
+                      "time_in_nanos" : 425620,
+                      "max_slice_time_in_nanos" : 62261,
+                      "min_slice_time_in_nanos" : 62261,
+                      "avg_slice_time_in_nanos" : 62261,
+                      "breakdown" : {
+                        "advance" : 0,
+                        "advance_count" : 0,
+                        "avg_advance" : 0,
+                        "avg_advance_count" : 0,
+                        "avg_build_scorer" : 10070,
+                        "avg_build_scorer_count" : 2,
+                        "avg_compute_max_score" : 0,
+                        "avg_compute_max_score_count" : 0,
+                        "avg_match" : 0,
+                        "avg_match_count" : 0,
+                        "avg_next_doc" : 1416,
+                        "avg_next_doc_count" : 2,
+                        "avg_score" : 905,
+                        "avg_score_count" : 1,
+                        "avg_set_min_competitive_score" : 0,
+                        "avg_set_min_competitive_score_count" : 0,
+                        "avg_shallow_advance" : 0,
+                        "avg_shallow_advance_count" : 0,
+                        "build_scorer" : 10070,
+                        "build_scorer_count" : 2,
+                        "compute_max_score" : 0,
+                        "compute_max_score_count" : 0,
+                        "create_weight" : 240668,
+                        "create_weight_count" : 1,
+                        "match" : 0,
+                        "match_count" : 0,
+                        "max_advance" : 0,
+                        "max_advance_count" : 0,
+                        "max_build_scorer" : 10070,
+                        "max_build_scorer_count" : 2,
+                        "max_compute_max_score" : 0,
+                        "max_compute_max_score_count" : 0,
+                        "max_match" : 0,
+                        "max_match_count" : 0,
+                        "max_next_doc" : 1416,
+                        "max_next_doc_count" : 2,
+                        "max_score" : 905,
+                        "max_score_count" : 1,
+                        "max_set_min_competitive_score" : 0,
+                        "max_set_min_competitive_score_count" : 0,
+                        "max_shallow_advance" : 0,
+                        "max_shallow_advance_count" : 0,
+                        "min_advance" : 0,
+                        "min_advance_count" : 0,
+                        "min_build_scorer" : 10070,
+                        "min_build_scorer_count" : 2,
+                        "min_compute_max_score" : 0,
+                        "min_compute_max_score_count" : 0,
+                        "min_match" : 0,
+                        "min_match_count" : 0,
+                        "min_next_doc" : 1416,
+                        "min_next_doc_count" : 2,
+                        "min_score" : 905,
+                        "min_score_count" : 1,
+                        "min_set_min_competitive_score" : 0,
+                        "min_set_min_competitive_score_count" : 0,
+                        "min_shallow_advance" : 0,
+                        "min_shallow_advance_count" : 0,
+                        "next_doc" : 1416,
+                        "next_doc_count" : 2,
+                        "score" : 905,
+                        "score_count" : 1,
+                        "set_min_competitive_score" : 0,
+                        "set_min_competitive_score_count" : 0,
+                        "shallow_advance" : 0,
+                        "shallow_advance_count" : 0
+                      },
+                      "children" : [
+                        {
+                          "type" : "OSKnnFloatVectorQuery",
+                          "description" : "OSKnnFloatVectorQuery:luc[1.0,...][100]",
+                          "time_in_nanos" : 0,
+                          "max_slice_time_in_nanos" : 0,
+                          "min_slice_time_in_nanos" : 0,
+                          "avg_slice_time_in_nanos" : 0,
+                          "breakdown" : {
+                            "advance" : 0,
+                            "advance_count" : 0,
+                            "avg_advance" : 0,
+                            "avg_advance_count" : 0,
+                            "avg_build_scorer" : 0,
+                            "avg_build_scorer_count" : 0,
+                            "avg_compute_max_score" : 0,
+                            "avg_compute_max_score_count" : 0,
+                            "avg_match" : 0,
+                            "avg_match_count" : 0,
+                            "avg_next_doc" : 0,
+                            "avg_next_doc_count" : 0,
+                            "avg_score" : 0,
+                            "avg_score_count" : 0,
+                            "avg_set_min_competitive_score" : 0,
+                            "avg_set_min_competitive_score_count" : 0,
+                            "avg_shallow_advance" : 0,
+                            "avg_shallow_advance_count" : 0,
+                            "build_scorer" : 0,
+                            "build_scorer_count" : 0,
+                            "compute_max_score" : 0,
+                            "compute_max_score_count" : 0,
+                            "create_weight" : 0,
+                            "create_weight_count" : 1,
+                            "match" : 0,
+                            "match_count" : 0,
+                            "max_advance" : 0,
+                            "max_advance_count" : 0,
+                            "max_build_scorer" : 0,
+                            "max_build_scorer_count" : 0,
+                            "max_compute_max_score" : 0,
+                            "max_compute_max_score_count" : 0,
+                            "max_match" : 0,
+                            "max_match_count" : 0,
+                            "max_next_doc" : 0,
+                            "max_next_doc_count" : 0,
+                            "max_score" : 0,
+                            "max_score_count" : 0,
+                            "max_set_min_competitive_score" : 0,
+                            "max_set_min_competitive_score_count" : 0,
+                            "max_shallow_advance" : 0,
+                            "max_shallow_advance_count" : 0,
+                            "min_advance" : 0,
+                            "min_advance_count" : 0,
+                            "min_build_scorer" : 0,
+                            "min_build_scorer_count" : 0,
+                            "min_compute_max_score" : 0,
+                            "min_compute_max_score_count" : 0,
+                            "min_match" : 0,
+                            "min_match_count" : 0,
+                            "min_next_doc" : 0,
+                            "min_next_doc_count" : 0,
+                            "min_score" : 0,
+                            "min_score_count" : 0,
+                            "min_set_min_competitive_score" : 0,
+                            "min_set_min_competitive_score_count" : 0,
+                            "min_shallow_advance" : 0,
+                            "min_shallow_advance_count" : 0,
+                            "next_doc" : 0,
+                            "next_doc_count" : 0,
+                            "score" : 0,
+                            "score_count" : 0,
+                            "set_min_competitive_score" : 0,
+                            "set_min_competitive_score_count" : 0,
+                            "shallow_advance" : 0,
+                            "shallow_advance_count" : 0
+                          }
+                        }
+                      ]
+                    }
+                  ],
+                  "rewrite_time" : 7363,
+                  "collector" : [
+                    {
+                      "name" : "SimpleTopDocsCollectorManager",
+                      "reason" : "search_top_hits",
+                      "time_in_nanos" : 15787,
+                      "reduce_time_in_nanos" : 33091,
+                      "max_slice_time_in_nanos" : 15787,
+                      "min_slice_time_in_nanos" : 15787,
+                      "avg_slice_time_in_nanos" : 15787,
+                      "slice_count" : 1
+                    }
+                  ]
+                }
+              ],
+              "aggregations" : [ ],
+              "fetch" : [
+                {
+                  "type" : "fetch",
+                  "description" : "fetch",
+                  "time_in_nanos" : 80578,
+                  "breakdown" : {
+                    "build_sub_phase_processors" : 25706,
+                    "build_sub_phase_processors_count" : 1,
+                    "create_stored_fields_visitor" : 6540,
+                    "create_stored_fields_visitor_count" : 1,
+                    "get_next_reader" : 1781,
+                    "get_next_reader_count" : 1,
+                    "load_source" : 0,
+                    "load_source_count" : 0,
+                    "load_stored_fields" : 46551,
+                    "load_stored_fields_count" : 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_validate/query?explain=true",
+      "body" : {
+        "query" : {
+          "knn" : {
+            "by" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-e",
+            "valid" : true,
+            "explanation" : ""
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 1,
+        "_source" : false,
+        "profile" : true,
+        "query" : {
+          "knn" : {
+            "by" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "time_in_nanos",
+        "breakdown",
+        "rewrite_time",
+        "reduce_time_in_nanos",
+        "max_slice_time_in_nanos",
+        "min_slice_time_in_nanos",
+        "avg_slice_time_in_nanos",
+        "fetch",
+        "id",
+        "slice_count"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.5
+            }
+          ]
+        },
+        "profile" : {
+          "shards" : [
+            {
+              "id" : "[oGxQA16kS6mP_v1xgHiLLQ][esm-e][0]",
+              "inbound_network_time_in_millis" : 0,
+              "outbound_network_time_in_millis" : 0,
+              "searches" : [
+                {
+                  "query" : [
+                    {
+                      "type" : "KNNQuery",
+                      "description" : "",
+                      "time_in_nanos" : 365443,
+                      "max_slice_time_in_nanos" : 269946,
+                      "min_slice_time_in_nanos" : 269946,
+                      "avg_slice_time_in_nanos" : 269946,
+                      "breakdown" : {
+                        "advance" : 0,
+                        "advance_count" : 0,
+                        "ann_search" : 198708,
+                        "ann_search_count" : 1,
+                        "avg_advance" : 0,
+                        "avg_advance_count" : 0,
+                        "avg_ann_search" : 198708,
+                        "avg_ann_search_count" : 1,
+                        "avg_bitset_creation" : 1549,
+                        "avg_bitset_creation_count" : 1,
+                        "avg_build_scorer" : 237070,
+                        "avg_build_scorer_count" : 2,
+                        "avg_cardinality" : 0,
+                        "avg_compute_max_score" : 0,
+                        "avg_compute_max_score_count" : 0,
+                        "avg_exact_search" : 0,
+                        "avg_exact_search_count" : 0,
+                        "avg_graph_load" : 38461,
+                        "avg_graph_load_count" : 1,
+                        "avg_match" : 0,
+                        "avg_match_count" : 0,
+                        "avg_next_doc" : 582,
+                        "avg_next_doc_count" : 2,
+                        "avg_score" : 1077,
+                        "avg_score_count" : 1,
+                        "avg_set_min_competitive_score" : 0,
+                        "avg_set_min_competitive_score_count" : 0,
+                        "avg_shallow_advance" : 0,
+                        "avg_shallow_advance_count" : 0,
+                        "bitset_creation" : 1549,
+                        "bitset_creation_count" : 1,
+                        "build_scorer" : 237070,
+                        "build_scorer_count" : 2,
+                        "cardinality" : 0,
+                        "compute_max_score" : 0,
+                        "compute_max_score_count" : 0,
+                        "create_weight" : 13166,
+                        "create_weight_count" : 1,
+                        "exact_search" : 0,
+                        "exact_search_count" : 0,
+                        "graph_load" : 38461,
+                        "graph_load_count" : 1,
+                        "match" : 0,
+                        "match_count" : 0,
+                        "max_advance" : 0,
+                        "max_advance_count" : 0,
+                        "max_ann_search" : 198708,
+                        "max_ann_search_count" : 1,
+                        "max_bitset_creation" : 1549,
+                        "max_bitset_creation_count" : 1,
+                        "max_build_scorer" : 237070,
+                        "max_build_scorer_count" : 2,
+                        "max_cardinality" : 0,
+                        "max_compute_max_score" : 0,
+                        "max_compute_max_score_count" : 0,
+                        "max_exact_search" : 0,
+                        "max_exact_search_count" : 0,
+                        "max_graph_load" : 38461,
+                        "max_graph_load_count" : 1,
+                        "max_match" : 0,
+                        "max_match_count" : 0,
+                        "max_next_doc" : 582,
+                        "max_next_doc_count" : 2,
+                        "max_score" : 1077,
+                        "max_score_count" : 1,
+                        "max_set_min_competitive_score" : 0,
+                        "max_set_min_competitive_score_count" : 0,
+                        "max_shallow_advance" : 0,
+                        "max_shallow_advance_count" : 0,
+                        "min_advance" : 0,
+                        "min_advance_count" : 0,
+                        "min_ann_search" : 198708,
+                        "min_ann_search_count" : 1,
+                        "min_bitset_creation" : 1549,
+                        "min_bitset_creation_count" : 1,
+                        "min_build_scorer" : 237070,
+                        "min_build_scorer_count" : 2,
+                        "min_cardinality" : 0,
+                        "min_compute_max_score" : 0,
+                        "min_compute_max_score_count" : 0,
+                        "min_exact_search" : 0,
+                        "min_exact_search_count" : 0,
+                        "min_graph_load" : 38461,
+                        "min_graph_load_count" : 1,
+                        "min_match" : 0,
+                        "min_match_count" : 0,
+                        "min_next_doc" : 582,
+                        "min_next_doc_count" : 2,
+                        "min_score" : 1077,
+                        "min_score_count" : 1,
+                        "min_set_min_competitive_score" : 0,
+                        "min_set_min_competitive_score_count" : 0,
+                        "min_shallow_advance" : 0,
+                        "min_shallow_advance_count" : 0,
+                        "next_doc" : 582,
+                        "next_doc_count" : 2,
+                        "score" : 1077,
+                        "score_count" : 1,
+                        "set_min_competitive_score" : 0,
+                        "set_min_competitive_score_count" : 0,
+                        "shallow_advance" : 0,
+                        "shallow_advance_count" : 0
+                      }
+                    }
+                  ],
+                  "rewrite_time" : 6950,
+                  "collector" : [
+                    {
+                      "name" : "SimpleTopDocsCollectorManager",
+                      "reason" : "search_top_hits",
+                      "time_in_nanos" : 20113,
+                      "reduce_time_in_nanos" : 40888,
+                      "max_slice_time_in_nanos" : 20113,
+                      "min_slice_time_in_nanos" : 20113,
+                      "avg_slice_time_in_nanos" : 20113,
+                      "slice_count" : 1
+                    }
+                  ]
+                }
+              ],
+              "aggregations" : [ ],
+              "fetch" : [
+                {
+                  "type" : "fetch",
+                  "description" : "fetch",
+                  "time_in_nanos" : 75156,
+                  "breakdown" : {
+                    "build_sub_phase_processors" : 25575,
+                    "build_sub_phase_processors_count" : 1,
+                    "create_stored_fields_visitor" : 7411,
+                    "create_stored_fields_visitor_count" : 1,
+                    "get_next_reader" : 1113,
+                    "get_next_reader_count" : 1,
+                    "load_source" : 0,
+                    "load_source_count" : 0,
+                    "load_stored_fields" : 41057,
+                    "load_stored_fields_count" : 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_validate/query?explain=true",
+      "body" : {
+        "query" : {
+          "knn" : {
+            "l2" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "max_distance" : 3
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-e",
+            "valid" : true,
+            "explanation" : ""
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 1,
+        "_source" : false,
+        "profile" : true,
+        "query" : {
+          "knn" : {
+            "l2" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "max_distance" : 3
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "time_in_nanos",
+        "breakdown",
+        "rewrite_time",
+        "reduce_time_in_nanos",
+        "max_slice_time_in_nanos",
+        "min_slice_time_in_nanos",
+        "avg_slice_time_in_nanos",
+        "fetch",
+        "id",
+        "slice_count"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 0.5
+            }
+          ]
+        },
+        "profile" : {
+          "shards" : [
+            {
+              "id" : "[oGxQA16kS6mP_v1xgHiLLQ][esm-e][0]",
+              "inbound_network_time_in_millis" : 0,
+              "outbound_network_time_in_millis" : 0,
+              "searches" : [
+                {
+                  "query" : [
+                    {
+                      "type" : "KNNQuery",
+                      "description" : "",
+                      "time_in_nanos" : 373971,
+                      "max_slice_time_in_nanos" : 281332,
+                      "min_slice_time_in_nanos" : 281332,
+                      "avg_slice_time_in_nanos" : 281332,
+                      "breakdown" : {
+                        "advance" : 0,
+                        "advance_count" : 0,
+                        "ann_search" : 212443,
+                        "ann_search_count" : 1,
+                        "avg_advance" : 0,
+                        "avg_advance_count" : 0,
+                        "avg_ann_search" : 212443,
+                        "avg_ann_search_count" : 1,
+                        "avg_bitset_creation" : 1800,
+                        "avg_bitset_creation_count" : 1,
+                        "avg_build_scorer" : 248625,
+                        "avg_build_scorer_count" : 2,
+                        "avg_cardinality" : 0,
+                        "avg_compute_max_score" : 0,
+                        "avg_compute_max_score_count" : 0,
+                        "avg_exact_search" : 0,
+                        "avg_exact_search_count" : 0,
+                        "avg_graph_load" : 37729,
+                        "avg_graph_load_count" : 1,
+                        "avg_match" : 0,
+                        "avg_match_count" : 0,
+                        "avg_next_doc" : 909,
+                        "avg_next_doc_count" : 3,
+                        "avg_score" : 667,
+                        "avg_score_count" : 2,
+                        "avg_set_min_competitive_score" : 0,
+                        "avg_set_min_competitive_score_count" : 0,
+                        "avg_shallow_advance" : 0,
+                        "avg_shallow_advance_count" : 0,
+                        "bitset_creation" : 1800,
+                        "bitset_creation_count" : 1,
+                        "build_scorer" : 248625,
+                        "build_scorer_count" : 2,
+                        "cardinality" : 0,
+                        "compute_max_score" : 0,
+                        "compute_max_score_count" : 0,
+                        "create_weight" : 13786,
+                        "create_weight_count" : 1,
+                        "exact_search" : 0,
+                        "exact_search_count" : 0,
+                        "graph_load" : 37729,
+                        "graph_load_count" : 1,
+                        "match" : 0,
+                        "match_count" : 0,
+                        "max_advance" : 0,
+                        "max_advance_count" : 0,
+                        "max_ann_search" : 212443,
+                        "max_ann_search_count" : 1,
+                        "max_bitset_creation" : 1800,
+                        "max_bitset_creation_count" : 1,
+                        "max_build_scorer" : 248625,
+                        "max_build_scorer_count" : 2,
+                        "max_cardinality" : 0,
+                        "max_compute_max_score" : 0,
+                        "max_compute_max_score_count" : 0,
+                        "max_exact_search" : 0,
+                        "max_exact_search_count" : 0,
+                        "max_graph_load" : 37729,
+                        "max_graph_load_count" : 1,
+                        "max_match" : 0,
+                        "max_match_count" : 0,
+                        "max_next_doc" : 909,
+                        "max_next_doc_count" : 3,
+                        "max_score" : 667,
+                        "max_score_count" : 2,
+                        "max_set_min_competitive_score" : 0,
+                        "max_set_min_competitive_score_count" : 0,
+                        "max_shallow_advance" : 0,
+                        "max_shallow_advance_count" : 0,
+                        "min_advance" : 0,
+                        "min_advance_count" : 0,
+                        "min_ann_search" : 212443,
+                        "min_ann_search_count" : 1,
+                        "min_bitset_creation" : 1800,
+                        "min_bitset_creation_count" : 1,
+                        "min_build_scorer" : 248625,
+                        "min_build_scorer_count" : 2,
+                        "min_cardinality" : 0,
+                        "min_compute_max_score" : 0,
+                        "min_compute_max_score_count" : 0,
+                        "min_exact_search" : 0,
+                        "min_exact_search_count" : 0,
+                        "min_graph_load" : 37729,
+                        "min_graph_load_count" : 1,
+                        "min_match" : 0,
+                        "min_match_count" : 0,
+                        "min_next_doc" : 909,
+                        "min_next_doc_count" : 3,
+                        "min_score" : 667,
+                        "min_score_count" : 2,
+                        "min_set_min_competitive_score" : 0,
+                        "min_set_min_competitive_score_count" : 0,
+                        "min_shallow_advance" : 0,
+                        "min_shallow_advance_count" : 0,
+                        "next_doc" : 909,
+                        "next_doc_count" : 3,
+                        "score" : 667,
+                        "score_count" : 2,
+                        "set_min_competitive_score" : 0,
+                        "set_min_competitive_score_count" : 0,
+                        "shallow_advance" : 0,
+                        "shallow_advance_count" : 0
+                      }
+                    }
+                  ],
+                  "rewrite_time" : 5838,
+                  "collector" : [
+                    {
+                      "name" : "SimpleTopDocsCollectorManager",
+                      "reason" : "search_top_hits",
+                      "time_in_nanos" : 19487,
+                      "reduce_time_in_nanos" : 38249,
+                      "max_slice_time_in_nanos" : 19487,
+                      "min_slice_time_in_nanos" : 19487,
+                      "avg_slice_time_in_nanos" : 19487,
+                      "slice_count" : 1
+                    }
+                  ]
+                }
+              ],
+              "aggregations" : [ ],
+              "fetch" : [
+                {
+                  "type" : "fetch",
+                  "description" : "fetch",
+                  "time_in_nanos" : 73912,
+                  "breakdown" : {
+                    "build_sub_phase_processors" : 25208,
+                    "build_sub_phase_processors_count" : 1,
+                    "create_stored_fields_visitor" : 8047,
+                    "create_stored_fields_visitor_count" : 1,
+                    "get_next_reader" : 956,
+                    "get_next_reader_count" : 1,
+                    "load_source" : 0,
+                    "load_source_count" : 0,
+                    "load_stored_fields" : 39701,
+                    "load_stored_fields_count" : 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_validate/query?explain=true",
+      "body" : {
+        "query" : {
+          "bool" : {
+            "should" : [
+              {
+                "knn" : {
+                  "l2" : {
+                    "vector" : [
+                      1,
+                      1
+                    ],
+                    "k" : 1
+                  }
+                }
+              },
+              {
+                "match_all" : { }
+              }
+            ]
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-e",
+            "valid" : true,
+            "explanation" : " ApproximateScoreQuery(originalQuery=*:*, approximationQuery=Approximate(*:*))"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-e/_search",
+      "body" : {
+        "size" : 1,
+        "_source" : false,
+        "profile" : true,
+        "query" : {
+          "bool" : {
+            "should" : [
+              {
+                "knn" : {
+                  "l2" : {
+                    "vector" : [
+                      1,
+                      1
+                    ],
+                    "k" : 1
+                  }
+                }
+              },
+              {
+                "match_all" : { }
+              }
+            ]
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "time_in_nanos",
+        "breakdown",
+        "rewrite_time",
+        "reduce_time_in_nanos",
+        "max_slice_time_in_nanos",
+        "min_slice_time_in_nanos",
+        "avg_slice_time_in_nanos",
+        "fetch",
+        "id",
+        "slice_count"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 1.5,
+          "hits" : [
+            {
+              "_index" : "esm-e",
+              "_id" : "1",
+              "_score" : 1.5
+            }
+          ]
+        },
+        "profile" : {
+          "shards" : [
+            {
+              "id" : "[oGxQA16kS6mP_v1xgHiLLQ][esm-e][0]",
+              "inbound_network_time_in_millis" : 0,
+              "outbound_network_time_in_millis" : 0,
+              "searches" : [
+                {
+                  "query" : [
+                    {
+                      "type" : "BooleanQuery",
+                      "description" : " *:*",
+                      "time_in_nanos" : 441421,
+                      "breakdown" : {
+                        "advance" : 0,
+                        "advance_count" : 0,
+                        "build_scorer" : 356923,
+                        "build_scorer_count" : 2,
+                        "compute_max_score" : 0,
+                        "compute_max_score_count" : 0,
+                        "create_weight" : 74289,
+                        "create_weight_count" : 1,
+                        "match" : 0,
+                        "match_count" : 0,
+                        "next_doc" : 3615,
+                        "next_doc_count" : 4,
+                        "score" : 6594,
+                        "score_count" : 3,
+                        "set_min_competitive_score" : 0,
+                        "set_min_competitive_score_count" : 0,
+                        "shallow_advance" : 0,
+                        "shallow_advance_count" : 0
+                      },
+                      "children" : [
+                        {
+                          "type" : "KNNQuery",
+                          "description" : "",
+                          "time_in_nanos" : 464892,
+                          "breakdown" : {
+                            "advance" : 0,
+                            "advance_count" : 0,
+                            "ann_search" : 186997,
+                            "ann_search_count" : 1,
+                            "bitset_creation" : 2081,
+                            "bitset_creation_count" : 1,
+                            "build_scorer" : 225168,
+                            "build_scorer_count" : 3,
+                            "cardinality" : 0,
+                            "compute_max_score" : 0,
+                            "compute_max_score_count" : 0,
+                            "create_weight" : 13691,
+                            "create_weight_count" : 1,
+                            "exact_search" : 0,
+                            "exact_search_count" : 0,
+                            "graph_load" : 35982,
+                            "graph_load_count" : 1,
+                            "match" : 0,
+                            "match_count" : 0,
+                            "next_doc" : 419,
+                            "next_doc_count" : 2,
+                            "score" : 554,
+                            "score_count" : 1,
+                            "set_min_competitive_score" : 0,
+                            "set_min_competitive_score_count" : 0,
+                            "shallow_advance" : 0,
+                            "shallow_advance_count" : 0
+                          }
+                        },
+                        {
+                          "type" : "MatchAllDocsQuery",
+                          "description" : "*:*",
+                          "time_in_nanos" : 19702,
+                          "breakdown" : {
+                            "advance" : 0,
+                            "advance_count" : 0,
+                            "build_scorer" : 14607,
+                            "build_scorer_count" : 3,
+                            "compute_max_score" : 0,
+                            "compute_max_score_count" : 0,
+                            "create_weight" : 3028,
+                            "create_weight_count" : 1,
+                            "match" : 0,
+                            "match_count" : 0,
+                            "next_doc" : 1639,
+                            "next_doc_count" : 4,
+                            "score" : 428,
+                            "score_count" : 3,
+                            "set_min_competitive_score" : 0,
+                            "set_min_competitive_score_count" : 0,
+                            "shallow_advance" : 0,
+                            "shallow_advance_count" : 0
+                          }
+                        }
+                      ]
+                    }
+                  ],
+                  "rewrite_time" : 55899,
+                  "collector" : [
+                    {
+                      "name" : "TopScoreDocCollector",
+                      "reason" : "search_top_hits",
+                      "time_in_nanos" : 24364
+                    }
+                  ]
+                }
+              ],
+              "aggregations" : [ ],
+              "fetch" : [
+                {
+                  "type" : "fetch",
+                  "description" : "fetch",
+                  "time_in_nanos" : 76405,
+                  "breakdown" : {
+                    "build_sub_phase_processors" : 33329,
+                    "build_sub_phase_processors_count" : 1,
+                    "create_stored_fields_visitor" : 6700,
+                    "create_stored_fields_visitor_count" : 1,
+                    "get_next_reader" : 1054,
+                    "get_next_reader_count" : 1,
+                    "load_source" : 0,
+                    "load_source_count" : 0,
+                    "load_stored_fields" : 35322,
+                    "load_stored_fields_count" : 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    }
+  ]
+}

@@ -1,0 +1,1495 @@
+[
+ {
+  "mappings": {
+   "_doc": {
+    "properties": {
+     "a": {
+      "type": "keyword"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "The mapping definition cannot be nested under a type [_doc]."
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "The mapping definition cannot be nested under a type [_doc]."
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "mytype": {
+    "properties": {
+     "a": {
+      "type": "keyword"
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Root mapping definition has unsupported parameters:  [mytype : {properties={a={type=keyword}}}]"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: Root mapping definition has unsupported parameters:  [mytype : {properties={a={type=keyword}}}]",
+    "caused_by": {
+     "type": "mapper_parsing_exception",
+     "reason": "Root mapping definition has unsupported parameters:  [mytype : {properties={a={type=keyword}}}]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "_id": {
+    "foo": 1
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "unknown parameter [foo] on metadata field [_id]"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: unknown parameter [foo] on metadata field [_id]",
+    "caused_by": {
+     "type": "mapper_parsing_exception",
+     "reason": "unknown parameter [foo] on metadata field [_id]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "_index": {}
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "_index is not configurable"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: _index is not configurable",
+    "caused_by": {
+     "type": "mapper_parsing_exception",
+     "reason": "_index is not configurable"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "_data_stream_timestamp": {
+    "enabled": true
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "data stream timestamp field [@timestamp] does not exist"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "data stream timestamp field [@timestamp] does not exist"
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "_doc_count": {}
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "_doc_count is not configurable"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: _doc_count is not configurable",
+    "caused_by": {
+     "type": "mapper_parsing_exception",
+     "reason": "_doc_count is not configurable"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "_source": {
+    "enabled": true,
+    "foo": 1
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "unknown parameter [foo] on metadata field [_source]"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: unknown parameter [foo] on metadata field [_source]",
+    "caused_by": {
+     "type": "mapper_parsing_exception",
+     "reason": "unknown parameter [foo] on metadata field [_source]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "_source": {
+    "mode": "bogus"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Failed to parse mapping: No enum constant org.elasticsearch.index.mapper.SourceFieldMapper.Mode.BOGUS"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: No enum constant org.elasticsearch.index.mapper.SourceFieldMapper.Mode.BOGUS",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "No enum constant org.elasticsearch.index.mapper.SourceFieldMapper.Mode.BOGUS"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "_source": {
+    "includes": "a"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Failed to parse mapping: class java.lang.String cannot be cast to class java.util.List (java.lang.String and java.util.List are in module java.base of loader 'bootstrap')"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: class java.lang.String cannot be cast to class java.util.List (java.lang.String and java.util.List are in module java.base of loader 'bootstrap')",
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "class java.lang.String cannot be cast to class java.util.List (java.lang.String and java.util.List are in module java.base of loader 'bootstrap')"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "_routing": {
+    "required": "yes"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Failed to parse mapping: Failed to parse value [yes] as only [true] or [false] are allowed."
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: Failed to parse value [yes] as only [true] or [false] are allowed.",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse value [yes] as only [true] or [false] are allowed."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "_meta": "x"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Failed to parse mapping: class java.lang.String cannot be cast to class java.util.Map (java.lang.String and java.util.Map are in module java.base of loader 'bootstrap')"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: class java.lang.String cannot be cast to class java.util.Map (java.lang.String and java.util.Map are in module java.base of loader 'bootstrap')",
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "class java.lang.String cannot be cast to class java.util.Map (java.lang.String and java.util.Map are in module java.base of loader 'bootstrap')"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "_meta": null
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {}
+   }
+  }
+ },
+ {
+  "mappings": {
+   "date_detection": "x"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Failed to parse mapping: Could not convert [date_detection] to boolean"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: Could not convert [date_detection] to boolean",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Could not convert [date_detection] to boolean",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "Failed to parse value [x] as only [true] or [false] are allowed."
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "dynamic_date_formats": "yyyy"
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "dynamic_date_formats": [
+      "yyyy"
+     ]
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "dynamic_date_formats": [
+    "epoch_millis"
+   ]
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Epoch [epoch_millis] is not supported as dynamic date format"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: Epoch [epoch_millis] is not supported as dynamic date format",
+    "caused_by": {
+     "type": "mapper_parsing_exception",
+     "reason": "Epoch [epoch_millis] is not supported as dynamic date format"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "dynamic_date_formats": "none"
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "dynamic_date_formats": []
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "text",
+     "copy_to": "o"
+    },
+    "o": {
+     "type": "object"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Cannot copy to field [o] since it is mapped as an object"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Cannot copy to field [o] since it is mapped as an object"
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "text",
+     "copy_to": "g.raw"
+    },
+    "g": {
+     "type": "text",
+     "fields": {
+      "raw": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "[copy_to] may not be used to copy to a multi-field: [g.raw]"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "[copy_to] may not be used to copy to a multi-field: [g.raw]"
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "n": {
+     "type": "nested",
+     "properties": {
+      "a": {
+       "type": "keyword"
+      }
+     }
+    },
+    "b": {
+     "type": "keyword",
+     "copy_to": "n.a"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "Illegal combination of [copy_to] and [nested] mappings: [copy_to] may only copy data to the current nested document or any of its parents, however one [copy_to] directive is trying to copy data from nested object [null] to [n]"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "Illegal combination of [copy_to] and [nested] mappings: [copy_to] may only copy data to the current nested document or any of its parents, however one [copy_to] directive is trying to copy data from nested object [null] to [n]"
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "copy_to": "nope"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "keyword",
+       "copy_to": [
+        "nope"
+       ]
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "a": {
+     "type": "keyword"
+    },
+    "a.b": {
+     "type": "keyword"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Failed to parse mapping: can't merge a non object mapping [a] with an object mapping"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: can't merge a non object mapping [a] with an object mapping",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "can't merge a non object mapping [a] with an object mapping"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "a": {
+     "properties": {
+      "b": {
+       "type": "keyword"
+      }
+     }
+    },
+    "a.b": {
+     "type": "long"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "a": {
+       "properties": {
+        "b": {
+         "type": "long"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "a": {
+     "type": "text",
+     "fields": {
+      "b": {
+       "type": "keyword"
+      }
+     }
+    },
+    "a.b": {
+     "type": "long"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Failed to parse mapping: can't merge a non object mapping [a] with an object mapping"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: can't merge a non object mapping [a] with an object mapping",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "can't merge a non object mapping [a] with an object mapping"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "alias",
+     "path": "o"
+    },
+    "o": {
+     "properties": {
+      "x": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Invalid [path] value [o] for field alias [f]: an alias must refer to an existing field in the mappings."
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Invalid [path] value [o] for field alias [f]: an alias must refer to an existing field in the mappings."
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "alias",
+     "path": "g",
+     "foo": 1
+    },
+    "g": {
+     "type": "keyword"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Mapping definition for [f] has unsupported parameters:  [foo : 1]"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: Mapping definition for [f] has unsupported parameters:  [foo : 1]",
+    "caused_by": {
+     "type": "mapper_parsing_exception",
+     "reason": "Mapping definition for [f] has unsupported parameters:  [foo : 1]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "_id": {
+     "type": "keyword"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Field [_id] is defined more than once"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Field [_id] is defined more than once"
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "_source": {
+     "type": "keyword"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Field [_source] is defined more than once"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Field [_source] is defined more than once"
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "_foo": {
+     "type": "keyword"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "_foo": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "fields": {
+      "raw": {
+       "type": "keyword",
+       "copy_to": "g"
+      }
+     }
+    },
+    "g": {
+     "type": "keyword"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "[copy_to] may not be used to copy from a multi-field: [f.raw]"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "[copy_to] may not be used to copy from a multi-field: [f.raw]"
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "long",
+     "fields": {
+      "s": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "long",
+       "fields": {
+        "s": {
+         "type": "keyword"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "completion",
+     "fields": {
+      "s": {
+       "type": "keyword"
+      }
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "completion",
+       "analyzer": "simple",
+       "preserve_separators": true,
+       "preserve_position_increments": true,
+       "max_input_length": 50,
+       "fields": {
+        "s": {
+         "type": "keyword"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "fields": {
+      "s": {
+       "type": "completion"
+      }
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "keyword",
+       "fields": {
+        "s": {
+         "type": "completion",
+         "analyzer": "simple",
+         "preserve_separators": true,
+         "preserve_position_increments": true,
+         "max_input_length": 50
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "fields": {
+      "s": {
+       "type": "dense_vector",
+       "dims": 3
+      }
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Field [s] of type [dense_vector] can't be used in multifields"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: Field [s] of type [dense_vector] can't be used in multifields",
+    "caused_by": {
+     "type": "mapper_parsing_exception",
+     "reason": "Field [s] of type [dense_vector] can't be used in multifields"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "keyword",
+     "fields": {
+      "s": {
+       "type": "join"
+      }
+     }
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Failed to parse mapping: join field [f.s] cannot be added inside an object or in a multi-field"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: join field [f.s] cannot be added inside an object or in a multi-field",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "join field [f.s] cannot be added inside an object or in a multi-field"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "text",
+     "index": false,
+     "index_phrases": true
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Failed to parse mapping: Cannot set index_phrases on unindexed field [f]"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: Cannot set index_phrases on unindexed field [f]",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Cannot set index_phrases on unindexed field [f]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "semantic_text"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "semantic_text",
+       "inference_id": ".elser-2-elasticsearch"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "murmur3"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "The mapper type [murmur3] declared on field [f] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation."
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: The mapper type [murmur3] declared on field [f] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation.",
+    "caused_by": {
+     "type": "mapper_parsing_exception",
+     "reason": "The mapper type [murmur3] declared on field [f] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "date",
+     "null_value": "notadate"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Error parsing [null_value] on field [f]: failed to parse date field [notadate] with format [strict_date_optional_time||epoch_millis]"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: Error parsing [null_value] on field [f]: failed to parse date field [notadate] with format [strict_date_optional_time||epoch_millis]",
+    "caused_by": {
+     "type": "mapper_parsing_exception",
+     "reason": "Error parsing [null_value] on field [f]: failed to parse date field [notadate] with format [strict_date_optional_time||epoch_millis]",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "failed to parse date field [notadate] with format [strict_date_optional_time||epoch_millis]",
+      "caused_by": {
+       "type": "date_time_parse_exception",
+       "reason": "Failed to parse with all enclosed parsers"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "ip",
+     "null_value": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Error parsing [null_value] on field [f]: 'x' is not an IP string literal."
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: Error parsing [null_value] on field [f]: 'x' is not an IP string literal.",
+    "caused_by": {
+     "type": "mapper_parsing_exception",
+     "reason": "Error parsing [null_value] on field [f]: 'x' is not an IP string literal.",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "'x' is not an IP string literal."
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "join",
+     "relations": {
+      "a": "a"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "join",
+       "eager_global_ordinals": true,
+       "relations": {
+        "a": "a"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "aggregate_metric_double",
+     "metrics": [
+      "min",
+      "max"
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "aggregate_metric_double",
+       "metrics": [
+        "min",
+        "max"
+       ]
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "constant_keyword",
+     "value": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "constant_keyword",
+       "value": "x"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "dense_vector",
+     "dims": 3,
+     "index": false
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "dense_vector",
+       "dims": 3,
+       "index": false
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "dense_vector",
+     "dims": 3,
+     "index": false,
+     "similarity": "cosine"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Failed to parse mapping: Field [similarity] can only be specified for a field of type [dense_vector] when it is indexed"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: Field [similarity] can only be specified for a field of type [dense_vector] when it is indexed",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Field [similarity] can only be specified for a field of type [dense_vector] when it is indexed"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "dense_vector",
+     "dims": 512
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "dense_vector",
+       "dims": 512,
+       "index": true,
+       "similarity": "cosine",
+       "index_options": {
+        "type": "bbq_hnsw",
+        "m": 16,
+        "ef_construction": 100,
+        "rescore_vector": {
+         "oversample": 3.0
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "dense_vector",
+     "dims": 3,
+     "element_type": "byte"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "dense_vector",
+       "element_type": "byte",
+       "dims": 3,
+       "index": true,
+       "similarity": "cosine"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "dense_vector"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "dense_vector",
+       "index": true,
+       "similarity": "cosine"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "geo_point",
+     "null_value": "1,2"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "geo_point",
+       "null_value": {
+        "lat": 1.0,
+        "lon": 2.0
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "f": {
+     "type": "nested",
+     "include_in_parent": true,
+     "properties": {
+      "n": {
+       "type": "nested",
+       "include_in_root": true
+      }
+     }
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "f": {
+       "type": "nested",
+       "include_in_parent": true,
+       "properties": {
+        "n": {
+         "type": "nested",
+         "include_in_root": true
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "o": {
+     "type": "object",
+     "properties": {
+      "f": {
+       "type": "keyword"
+      }
+     },
+     "foo": 1
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "mapper_parsing_exception",
+      "reason": "Mapping definition for [o] has unsupported parameters:  [foo : 1]"
+     }
+    ],
+    "type": "mapper_parsing_exception",
+    "reason": "Failed to parse mapping: Mapping definition for [o] has unsupported parameters:  [foo : 1]",
+    "caused_by": {
+     "type": "mapper_parsing_exception",
+     "reason": "Mapping definition for [o] has unsupported parameters:  [foo : 1]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "mappings": {
+   "properties": {
+    "o": {
+     "properties": {
+      "f": {
+       "type": "keyword"
+      }
+     },
+     "type": "nested",
+     "dynamic": "false"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "mt"
+  },
+  "get": {
+   "mt": {
+    "mappings": {
+     "properties": {
+      "o": {
+       "type": "nested",
+       "dynamic": "false",
+       "properties": {
+        "f": {
+         "type": "keyword"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ }
+]

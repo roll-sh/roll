@@ -1,0 +1,159 @@
+return String.format('%s %S %10s|%-10s|%.2s', new def[] {'abc', 'abc', 'abc', 'abc', 'abc'})
+----
+return String.format('%b %B %b %b', new def[] {true, null, 'x', false})
+----
+return String.format('%h %H', new def[] {'hello', null})
+----
+return String.format('%c %C %c %c', new def[] {(char)97, (char)98, 65, 0x1F600})
+----
+return String.format('%d %5d %-5d| %05d %+d % d %,d %(d %(d', new def[] {42, 42, 42, 42, 42, 42, 1234567, -42, 42})
+----
+return String.format('%,d %,d %,015d %+,d', new def[] {-1234567, 1234567890123L, 1234567, 1234})
+----
+return String.format('%o %x %X %#o %#x %#X %08x %#010x', new def[] {8, 255, 255, 8, 255, 255, 255, 255})
+----
+return String.format('%x %x %x %o', new def[] {-1, (byte)-1, (short)-1, -8L})
+----
+return String.format('%d %x', new def[] {new BigInteger('-123456789012345678901234567890'), new BigInteger('255')})
+----
+return String.format('%f %.2f %.0f %10.3f %-10.1f| %010.2f %+.1f %(.2f %,.2f', new def[] {3.14159, 3.14159, 2.5, 3.14159, 3.14159, -3.14159, 3.0, -3.14159, 1234567.891})
+----
+return String.format('%.3f %.3f %.1f %.1f %.2f', new def[] {0.0005, 0.0015, 0.05, 0.15, 1.005})
+----
+return String.format('%e %.2e %E %.0e %#.0e %10.2e', new def[] {12345.678, 0.000123, 12345.678, 5e10, 5e10, -1.5})
+----
+return String.format('%g %g %g %g %.3g %G %g %g', new def[] {12345.678, 0.0001234, 123456789.0, 0.0, 1234.5, 1e-10, 100000.0, 1000000.0})
+----
+return String.format('%a %A %.2a %a %a', new def[] {1.0, -0.5, 0.1, Double.MIN_VALUE, 1e300})
+----
+return String.format('%f %e %g %a', new def[] {Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.NaN})
+----
+return String.format('%+f %(f % f', new def[] {Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.NEGATIVE_INFINITY})
+----
+return String.format('%f %.10f %e', new def[] {0.1f, 0.1f, 1.0f/3})
+----
+return String.format('%2$s %1$s %<s %s', new def[] {'a', 'b'})
+----
+return String.format('%% %n %-5%|', new def[] {})
+----
+return String.format('%s', new def[] {[1, 2]})
+----
+return String.format('%s %s', new def[] {null, ['a': 1]})
+----
+return String.format('%10.4s|', new def[] {'abcdefg'})
+----
+return String.format(Locale.GERMANY, '%,.3f', new def[] {1234567.8915})
+----
+return String.format(Locale.FRANCE, '%,d %.2f', new def[] {1234567, 1.5})
+----
+return String.format(Locale.ROOT, '%,d %.2f', new def[] {1234567, 1.5})
+----
+return String.format('%tY-%<tm-%<td %<tH:%<tM:%<tS.%<tL %<tz %<tZ', new def[] {ZonedDateTime.parse('2020-01-02T03:04:05.678Z')})
+----
+return String.format('%tF %<tT %<tD %<tR %<tr %<tc', new def[] {ZonedDateTime.parse('2020-01-02T15:04:05Z')})
+----
+return String.format('%tA %<ta %<tB %<tb %<th %<tC %<ty %<tj %<te %<tk %<tl %<tI %<tp %<tN %<ts %<tQ', new def[] {ZonedDateTime.parse('2020-01-02T15:04:05.123456789Z')})
+----
+return String.format('%tF %<tT', new def[] {1577934245000L})
+----
+return String.format('%TA %<TB %<Tp', new def[] {ZonedDateTime.parse('2020-01-02T15:04:05Z')})
+----
+return String.format('%tH', new def[] {LocalDate.of(2020, 1, 1)})
+----
+return String.format('%tF', new def[] {LocalTime.of(1, 2)})
+----
+return String.format('%tZ', new def[] {LocalDateTime.of(2020, 1, 1, 1, 1)})
+----
+return String.format('%tZ %<tz', new def[] {ZonedDateTime.parse('2020-07-02T15:04:05+02:00[Europe/Paris]')})
+----
+return String.format('%tc', new def[] {OffsetDateTime.parse('2020-07-02T15:04:05+02:00')})
+----
+return String.format('%tF', new def[] {new Date(0L)})
+----
+return String.format('%tQ', new def[] {'x'})
+----
+return String.format('%tq', new def[] {1L})
+----
+return String.format('%10tY|%-10tY|', new def[] {LocalDate.of(2020,1,1), LocalDate.of(2020,1,1)})
+----
+return String.format('%q', new def[] {1})
+----
+return String.format('%s', new def[] {})
+----
+return String.format('%d', new def[] {'x'})
+----
+return String.format('%-s', new def[] {'x'})
+----
+return String.format('%#s', new def[] {'x'})
+----
+return String.format('%.2d', new def[] {1})
+----
+return String.format('%--5d', new def[] {1})
+----
+return String.format('%-05d', new def[] {1})
+----
+return String.format('%c', new def[] {0x110000})
+----
+return String.format('%c', new def[] {-1})
+----
+return String.format('%,x', new def[] {1})
+----
+return String.format('%2$s', new def[] {'a'})
+----
+return String.format('%<s', new def[] {'a'})
+----
+return String.format('%-%', new def[] {})
+----
+return String.format('%5.2%', new def[] {})
+----
+return String.format('%(d', new def[] {'x'})
+----
+return String.format('%+s', new def[] {'x'})
+----
+return String.format('%0s', new def[] {'x'})
+----
+return String.format('%-d', new def[] {1})
+----
+return String.format('%', new def[] {})
+----
+return String.format('%5', new def[] {})
+----
+return String.format('%.x', new def[] {1})
+----
+return String.format('%0$s', new def[] {'a'})
+----
+return String.format('%99999999999s', new def[] {'a'})
+----
+return String.format('%f', new def[] {1})
+----
+return String.format('%e', new def[] {'x'})
+----
+return String.format('%#g', new def[] {1.0})
+----
+return String.format('%+ d', new def[] {1})
+----
+return String.format('%5n', new def[] {})
+----
+return String.format('%-n', new def[] {})
+----
+return String.format('%#b', new def[] {true})
+----
+return String.format('%,c', new def[] {'x'})
+----
+return String.format('%.2c', new def[] {'x'})
+----
+return String.format('%1$<s', new def[] {'a'})
+----
+return String.format('%c', new def[] {'ab'})
+----
+return String.format('%#e', new def[] {1.0})
+----
+return String.format('%,e', new def[] {1.0})
+----
+return String.format('%(a', new def[] {1.0})
+----
+return String.format('%x', new def[] {1.5})
+----
+return String.format('%tH', new def[] {null})
+----
+return String.format('%s %s', new def[] {1})

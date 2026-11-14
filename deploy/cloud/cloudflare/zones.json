@@ -37,6 +37,7 @@
         { "name": "*.redis.{region}.roll.sh", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": false },
         { "name": "*.kafka.{region}.roll.sh", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": false },
         { "name": "*.nosql.{region}.roll.sh", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": false },
+        { "name": "*.search.{region}.roll.sh", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": false },
         { "name": "*.mq.{region}.roll.sh", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": false },
         { "name": "tasks.{region}.roll.sh", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": false }
       ]

@@ -1,0 +1,747 @@
+#defaults: {"doc": {"a": 1, "s": "x", "tags": ["t1", "t2"], "o": {"k": 2, "l": [1, 2]}, "n": null, "d": 1.5}, "meta": {"_index": "painless-ingest", "_id": "1"}}
+----
+ctx.r = Processors.bytes('1kb')
+----
+ctx.r = Processors.bytes('1k')
+----
+ctx.r = Processors.bytes('1.5k')
+----
+ctx.r = Processors.bytes('1.5KB')
+----
+ctx.r = Processors.bytes(' 2 mb ')
+----
+ctx.r = Processors.bytes('0')
+----
+ctx.r = Processors.bytes('0b')
+----
+ctx.r = Processors.bytes('-1')
+----
+ctx.r = Processors.bytes('-1b')
+----
+ctx.r = Processors.bytes('1b')
+----
+ctx.r = Processors.bytes('1B')
+----
+ctx.r = Processors.bytes('1')
+----
+ctx.r = Processors.bytes('abc')
+----
+ctx.r = Processors.bytes('1.555k')
+----
+ctx.r = Processors.bytes('-1k')
+----
+ctx.r = Processors.bytes('-2b')
+----
+ctx.r = Processors.bytes('1e2k')
+----
+ctx.r = Processors.bytes('9223372036854775807b')
+----
+ctx.r = Processors.bytes('9223372036854775807k')
+----
+ctx.r = Processors.bytes('9999999999999999999b')
+----
+ctx.r = Processors.bytes('1.1kb')
+----
+ctx.r = Processors.bytes('10.5pb')
+----
+ctx.r = Processors.bytes('')
+----
+ctx.r = Processors.bytes('1 b')
+----
+ctx.r = Processors.bytes('+5b')
+----
+ctx.r = Processors.bytes('0.001k')
+----
+ctx.r = Processors.bytes('5gb')
+----
+ctx.r = Processors.bytes('3t')
+----
+ctx.r = Processors.bytes('2P')
+----
+ctx.r = Processors.bytes('1.25tb')
+----
+ctx.r = Processors.bytes('-1.5k')
+----
+ctx.r = Processors.bytes('1.12345678901234567890k')
+----
+ctx.r = Processors.bytes('9007199254740993.5k')
+----
+ctx.r = Processors.bytes('1kib')
+----
+ctx.r = Processors.bytes('kb')
+----
+ctx.r = Processors.bytes('k')
+----
+ctx.r = Processors.bytes('b')
+----
+ctx.r = Processors.bytes(' 7B')
+----
+ctx.r = Processors.bytes('0.5b')
+----
+ctx.r = Processors.bytes('1.0b')
+----
+ctx.r = Processors.bytes('08k')
+----
+ctx.r = Processors.bytes('0x10k')
+----
+ctx.r = Processors.bytes('1_000k')
+----
+ctx.r = Processors.bytes('9223372036854775807.99b')
+----
+ctx.r = Processors.bytes('8388608.5tb')
+----
+ctx.r = Processors.bytes('9223372036854775806.9b')
+----
+ctx.r = Processors.bytes('1.5mb')
+----
+ctx.r = Processors.bytes('100.25gb')
+----
+ctx.r = Processors.bytes('１kb')
+----
+ctx.r = Processors.bytes(null)
+----
+ctx.r = Processors.bytes(ctx.s)
+----
+ctx.r = Processors.lowercase('AbC')
+----
+ctx.r = Processors.lowercase('ÀÉÎ')
+----
+ctx.r = Processors.lowercase('İstanbul')
+----
+ctx.r = Processors.lowercase('ß')
+----
+ctx.r = Processors.lowercase('ǅ')
+----
+ctx.r = Processors.lowercase('Σ ΑΣ')
+----
+ctx.r = Processors.lowercase('ﬁ')
+----
+ctx.r = Processors.lowercase('')
+----
+ctx.r = Processors.lowercase(null)
+----
+ctx.r = Processors.uppercase('AbC')
+----
+ctx.r = Processors.uppercase('ÀÉÎ')
+----
+ctx.r = Processors.uppercase('İstanbul')
+----
+ctx.r = Processors.uppercase('ß')
+----
+ctx.r = Processors.uppercase('ǅ')
+----
+ctx.r = Processors.uppercase('Σ ΑΣ')
+----
+ctx.r = Processors.uppercase('ﬁ')
+----
+ctx.r = Processors.uppercase('')
+----
+ctx.r = Processors.uppercase(null)
+----
+ctx.r = Processors.json('{"a":1}')
+----
+ctx.r = Processors.json('[1,2,{"b":null}]')
+----
+ctx.r = Processors.json('"s"')
+----
+ctx.r = Processors.json('1')
+----
+ctx.r = Processors.json('1.5')
+----
+ctx.r = Processors.json('-0')
+----
+ctx.r = Processors.json('1e400')
+----
+ctx.r = Processors.json('12345678901234567890')
+----
+ctx.r = Processors.json('true')
+----
+ctx.r = Processors.json('null')
+----
+ctx.r = Processors.json('{"a":')
+----
+ctx.r = Processors.json('abc')
+----
+ctx.r = Processors.json(' {"a": {"b": [1, {"c": null}]}} ')
+----
+ctx.r = Processors.json('{"a":1} trailing')
+----
+ctx.r = Processors.json('{"a":1}{"b":2}')
+----
+ctx.r = Processors.json('{"a":1,"a":2}')
+----
+ctx.r = Processors.json('')
+----
+ctx.r = Processors.json(' ')
+----
+ctx.r = Processors.json('{"a":1}  ')
+----
+ctx.r = Processors.json('[1,]')
+----
+ctx.r = Processors.json('{"a":1,}')
+----
+ctx.r = Processors.json('tru')
+----
+ctx.r = Processors.json('nul')
+----
+ctx.r = Processors.json('{a:1}')
+----
+ctx.r = Processors.json('{\'a\':1}')
+----
+ctx.r = Processors.json('"\\u00e9"')
+----
+ctx.r = Processors.json('1 2')
+----
+ctx.r = Processors.json('{"x":{"y":1,"y":2}}')
+----
+ctx.r = Processors.json('01')
+----
+ctx.r = Processors.json('[1] ]')
+----
+ctx.r = Processors.json('// c
+1')
+----
+ctx.r = Processors.json('{"a":1.0}')
+----
+ctx.r = Processors.json('{"a":1.25e2}')
+----
+ctx.r = Processors.json('2147483648')
+----
+ctx.r = Processors.json('-2147483649')
+----
+ctx.r = Processors.json('{"z":1,"b":2,"a":3,"c":4}')
+----
+ctx.r = Processors.json('NaN')
+----
+ctx.r = Processors.json('"unterminated')
+----
+ctx.r = Processors.json('	[]
+')
+----
+ctx.r = Processors.json(null)
+----
+ctx.r = Processors.json(5)
+----
+ctx.r = Processors.json(['a': 1])
+----
+ctx.r = Processors.json([1, 2])
+----
+ctx.r = Processors.json(new StringBuilder('{"q":1}'))
+----
+ctx.j = '{"a":1,"s":"new"}'; Processors.json(ctx, 'j')
+----
+ctx.j = '[1]'; Processors.json(ctx, 'j')
+----
+ctx.j = '{"a":1} x'; Processors.json(ctx, 'j')
+----
+Processors.json(ctx, 'missing')
+----
+def m = ['j': '{"k":{"n":2}}', 'k': ['m': 1]]; Processors.json(m, 'j'); ctx.r = m
+----
+Processors.json(null, 'j')
+----
+ctx.r = Processors.jsonLenient('{"a":1}')
+----
+ctx.r = Processors.jsonLenient('[1,2,{"b":null}]')
+----
+ctx.r = Processors.jsonLenient('"s"')
+----
+ctx.r = Processors.jsonLenient('1')
+----
+ctx.r = Processors.jsonLenient('1.5')
+----
+ctx.r = Processors.jsonLenient('-0')
+----
+ctx.r = Processors.jsonLenient('1e400')
+----
+ctx.r = Processors.jsonLenient('12345678901234567890')
+----
+ctx.r = Processors.jsonLenient('true')
+----
+ctx.r = Processors.jsonLenient('null')
+----
+ctx.r = Processors.jsonLenient('{"a":')
+----
+ctx.r = Processors.jsonLenient('abc')
+----
+ctx.r = Processors.jsonLenient(' {"a": {"b": [1, {"c": null}]}} ')
+----
+ctx.r = Processors.jsonLenient('{"a":1} trailing')
+----
+ctx.r = Processors.jsonLenient('{"a":1}{"b":2}')
+----
+ctx.r = Processors.jsonLenient('{"a":1,"a":2}')
+----
+ctx.r = Processors.jsonLenient('')
+----
+ctx.r = Processors.jsonLenient(' ')
+----
+ctx.r = Processors.jsonLenient('{"a":1}  ')
+----
+ctx.r = Processors.jsonLenient('[1,]')
+----
+ctx.r = Processors.jsonLenient('{"a":1,}')
+----
+ctx.r = Processors.jsonLenient('tru')
+----
+ctx.r = Processors.jsonLenient('nul')
+----
+ctx.r = Processors.jsonLenient('{a:1}')
+----
+ctx.r = Processors.jsonLenient('{\'a\':1}')
+----
+ctx.r = Processors.jsonLenient('"\\u00e9"')
+----
+ctx.r = Processors.jsonLenient('1 2')
+----
+ctx.r = Processors.jsonLenient('{"x":{"y":1,"y":2}}')
+----
+ctx.r = Processors.jsonLenient('01')
+----
+ctx.r = Processors.jsonLenient('[1] ]')
+----
+ctx.r = Processors.jsonLenient('// c
+1')
+----
+ctx.r = Processors.jsonLenient('{"a":1.0}')
+----
+ctx.r = Processors.jsonLenient('{"a":1.25e2}')
+----
+ctx.r = Processors.jsonLenient('2147483648')
+----
+ctx.r = Processors.jsonLenient('-2147483649')
+----
+ctx.r = Processors.jsonLenient('{"z":1,"b":2,"a":3,"c":4}')
+----
+ctx.r = Processors.jsonLenient('NaN')
+----
+ctx.r = Processors.jsonLenient('"unterminated')
+----
+ctx.r = Processors.jsonLenient('	[]
+')
+----
+ctx.r = Processors.jsonLenient(null)
+----
+ctx.r = Processors.jsonLenient(5)
+----
+ctx.r = Processors.jsonLenient(['a': 1])
+----
+ctx.r = Processors.jsonLenient([1, 2])
+----
+ctx.r = Processors.jsonLenient(new StringBuilder('{"q":1}'))
+----
+ctx.j = '{"a":1,"s":"new"}'; Processors.jsonLenient(ctx, 'j')
+----
+ctx.j = '[1]'; Processors.jsonLenient(ctx, 'j')
+----
+ctx.j = '{"a":1} x'; Processors.jsonLenient(ctx, 'j')
+----
+Processors.jsonLenient(ctx, 'missing')
+----
+def m = ['j': '{"k":{"n":2}}', 'k': ['m': 1]]; Processors.jsonLenient(m, 'j'); ctx.r = m
+----
+Processors.jsonLenient(null, 'j')
+----
+ctx.r = Processors.urlDecode('a%20b')
+----
+ctx.r = Processors.urlDecode('a+b')
+----
+ctx.r = Processors.urlDecode('%E2%82%AC')
+----
+ctx.r = Processors.urlDecode('%zz')
+----
+ctx.r = Processors.urlDecode('%')
+----
+ctx.r = Processors.urlDecode('%2')
+----
+ctx.r = Processors.urlDecode('100%')
+----
+ctx.r = Processors.urlDecode('a%2Bb%2fc')
+----
+ctx.r = Processors.urlDecode('%C3')
+----
+ctx.r = Processors.urlDecode('%FF')
+----
+ctx.r = Processors.urlDecode('plain')
+----
+ctx.r = Processors.urlDecode('%e2%82%ac?x=1&y=%20#f')
+----
+ctx.r = Processors.urlDecode('')
+----
+ctx.r = Processors.urlDecode(null)
+----
+ctx.r = Processors.uriParts('http://user:pw@www.example.com:8080/a/b/c.txt?q=1&r=%20#frag')
+----
+ctx.r = Processors.uriParts('https://example.com')
+----
+ctx.r = Processors.uriParts('http://example.com/')
+----
+ctx.r = Processors.uriParts('http://example.com/a.b/c')
+----
+ctx.r = Processors.uriParts('http://example.com/a/b.tar.gz')
+----
+ctx.r = Processors.uriParts('http://[::1]:9200/_search')
+----
+ctx.r = Processors.uriParts('mailto:someone@example.com')
+----
+ctx.r = Processors.uriParts('urn:isbn:096139210x')
+----
+ctx.r = Processors.uriParts('ftp://ftp.is.co.za/rfc/rfc1808.txt')
+----
+ctx.r = Processors.uriParts('file:///etc/hosts')
+----
+ctx.r = Processors.uriParts('/relative/path.html?x')
+----
+ctx.r = Processors.uriParts('relative')
+----
+ctx.r = Processors.uriParts('http://exa mple.com/')
+----
+ctx.r = Processors.uriParts('http://example.com/a b')
+----
+ctx.r = Processors.uriParts('http://example.com/%41%20b?%41#%42')
+----
+ctx.r = Processors.uriParts('http://user@host')
+----
+ctx.r = Processors.uriParts('http://user:@host/')
+----
+ctx.r = Processors.uriParts('http://:pw@host/')
+----
+ctx.r = Processors.uriParts('http://host:/p')
+----
+ctx.r = Processors.uriParts('http://host:99999/')
+----
+ctx.r = Processors.uriParts('http://ho_st/p')
+----
+ctx.r = Processors.uriParts('http://-host-/')
+----
+ctx.r = Processors.uriParts('http://1.2.3.4/')
+----
+ctx.r = Processors.uriParts('http://1.2.3/')
+----
+ctx.r = Processors.uriParts('http://256.1.1.1/')
+----
+ctx.r = Processors.uriParts('http://host.com.:80')
+----
+ctx.r = Processors.uriParts('http://a..b/')
+----
+ctx.r = Processors.uriParts('http://example.com?q')
+----
+ctx.r = Processors.uriParts('http://example.com#')
+----
+ctx.r = Processors.uriParts('foo://bar')
+----
+ctx.r = Processors.uriParts('//authority/path')
+----
+ctx.r = Processors.uriParts('http://')
+----
+ctx.r = Processors.uriParts('http:')
+----
+ctx.r = Processors.uriParts('::')
+----
+ctx.r = Processors.uriParts('')
+----
+ctx.r = Processors.uriParts('http://example.com/über')
+----
+ctx.r = Processors.uriParts('http://例え.jp/')
+----
+ctx.r = Processors.uriParts('http://example.com/%zz')
+----
+ctx.r = Processors.uriParts('news:comp.lang.java')
+----
+ctx.r = Processors.uriParts('http://host/p;params')
+----
+ctx.r = Processors.uriParts('http://h/a/.hidden')
+----
+ctx.r = Processors.uriParts('http://h/a.')
+----
+ctx.r = Processors.uriParts('https://h/a/b/')
+----
+ctx.r = Processors.uriParts('s3://bucket/key.json')
+----
+ctx.r = Processors.uriParts('jar:file:/x.jar!/a.class')
+----
+ctx.r = Processors.uriParts('http://[fe80::1%25eth0]/')
+----
+ctx.r = Processors.uriParts('http://[::1/')
+----
+ctx.r = Processors.uriParts('HTTP://EXAMPLE.COM/A')
+----
+ctx.r = Processors.uriParts('http://host/?#')
+----
+ctx.r = Processors.uriParts('http://host/p?q#f#g')
+----
+ctx.r = Processors.uriParts('http://u:p:x@h/')
+----
+ctx.r = Processors.uriParts('http://h:8a/')
+----
+ctx.r = Processors.uriParts('http://exa%20mple.com/')
+----
+ctx.r = Processors.uriParts('http://host/a^b')
+----
+ctx.r = Processors.uriParts('unknown://a b/')
+----
+ctx.r = Processors.uriParts('http:// host/')
+----
+ctx.r = Processors.uriParts('x')
+----
+ctx.r = Processors.uriParts(null)
+----
+ctx.r = Processors.communityId('192.168.1.1', '10.0.0.1', null, 6, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('192.168.1.1', '10.0.0.1', null, 'tcp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('192.168.1.1', '10.0.0.1', null, 'UDP', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('192.168.1.1', '10.0.0.1', null, 17, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('192.168.1.1', '10.0.0.1', null, 'sctp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('192.168.1.1', '10.0.0.1', null, 1, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('192.168.1.1', '10.0.0.1', null, 'icmp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('192.168.1.1', '10.0.0.1', null, 58, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('192.168.1.1', '10.0.0.1', null, 'ipv6-icmp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('192.168.1.1', '10.0.0.1', null, 'gre', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('192.168.1.1', '10.0.0.1', null, 47, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('192.168.1.1', '10.0.0.1', null, 200, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('192.168.1.1', '10.0.0.1', null, null, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('10.0.0.1', '192.168.1.1', null, 6, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('10.0.0.1', '192.168.1.1', null, 'tcp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('10.0.0.1', '192.168.1.1', null, 'UDP', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('10.0.0.1', '192.168.1.1', null, 17, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('10.0.0.1', '192.168.1.1', null, 'sctp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('10.0.0.1', '192.168.1.1', null, 1, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('10.0.0.1', '192.168.1.1', null, 'icmp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('10.0.0.1', '192.168.1.1', null, 58, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('10.0.0.1', '192.168.1.1', null, 'ipv6-icmp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('10.0.0.1', '192.168.1.1', null, 'gre', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('10.0.0.1', '192.168.1.1', null, 47, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('10.0.0.1', '192.168.1.1', null, 200, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('10.0.0.1', '192.168.1.1', null, null, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('2001:db8::1', '2001:db8::2', null, 6, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('2001:db8::1', '2001:db8::2', null, 'tcp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('2001:db8::1', '2001:db8::2', null, 'UDP', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('2001:db8::1', '2001:db8::2', null, 17, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('2001:db8::1', '2001:db8::2', null, 'sctp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('2001:db8::1', '2001:db8::2', null, 1, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('2001:db8::1', '2001:db8::2', null, 'icmp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('2001:db8::1', '2001:db8::2', null, 58, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('2001:db8::1', '2001:db8::2', null, 'ipv6-icmp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('2001:db8::1', '2001:db8::2', null, 'gre', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('2001:db8::1', '2001:db8::2', null, 47, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('2001:db8::1', '2001:db8::2', null, 200, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('2001:db8::1', '2001:db8::2', null, null, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('::ffff:1.2.3.4', '5.6.7.8', null, 6, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('::ffff:1.2.3.4', '5.6.7.8', null, 'tcp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('::ffff:1.2.3.4', '5.6.7.8', null, 'UDP', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('::ffff:1.2.3.4', '5.6.7.8', null, 17, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('::ffff:1.2.3.4', '5.6.7.8', null, 'sctp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('::ffff:1.2.3.4', '5.6.7.8', null, 1, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('::ffff:1.2.3.4', '5.6.7.8', null, 'icmp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('::ffff:1.2.3.4', '5.6.7.8', null, 58, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('::ffff:1.2.3.4', '5.6.7.8', null, 'ipv6-icmp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('::ffff:1.2.3.4', '5.6.7.8', null, 'gre', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('::ffff:1.2.3.4', '5.6.7.8', null, 47, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('::ffff:1.2.3.4', '5.6.7.8', null, 200, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('::ffff:1.2.3.4', '5.6.7.8', null, null, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '1.2.3.4', null, 6, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '1.2.3.4', null, 'tcp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '1.2.3.4', null, 'UDP', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '1.2.3.4', null, 17, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '1.2.3.4', null, 'sctp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '1.2.3.4', null, 1, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '1.2.3.4', null, 'icmp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '1.2.3.4', null, 58, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '1.2.3.4', null, 'ipv6-icmp', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '1.2.3.4', null, 'gre', 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '1.2.3.4', null, 47, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '1.2.3.4', null, 200, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '1.2.3.4', null, null, 34855, 80, 8, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 6, null, 1000, 2000, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 6, 17, 1000, 2000, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', '6', null, '1000', '2000', null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', null, 'tcp', 1000, 2000, null, null, 1)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', null, 'tcp', 1000, 2000, null, null, 65535)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', null, 'tcp', 1000, 2000, null, null, 65536)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', null, 'tcp', 1000, 2000, null, null, -1)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', null, 'tcp', 0, 2000, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', null, 'tcp', 1000, 65536, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', null, 'tcp', 'x', 2000, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', null, 'tcp', null, 2000, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', null, 'tcp', 1000.9, 2000L, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', null, 'bogus', 1000, 2000, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', null, 255, 1000, 2000, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', null, -1, 1000, 2000, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', null, true, 1000, 2000, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', null, ['tcp'], 1000, 2000, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', null, null, 1000, 2000, null, null)
+----
+ctx.r = Processors.communityId(null, '5.6.7.8', 6, null, 1000, 2000, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', null, 6, null, 1000, 2000, null, null)
+----
+ctx.r = Processors.communityId('1.2.3', '5.6.7.8', 6, null, 1000, 2000, null, null)
+----
+ctx.r = Processors.communityId('example.com', '5.6.7.8', 6, null, 1000, 2000, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 1, null, null, null, 'x', 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 1, null, null, null, 8, 0)
+----
+ctx.r = Processors.communityId('5.6.7.8', '1.2.3.4', 'icmp', null, null, null, 8, 0)
+----
+ctx.r = Processors.communityId('2001:db8::2', '2001:db8::1', 58, null, null, null, 8, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 1, null, null, null, 0, 0)
+----
+ctx.r = Processors.communityId('5.6.7.8', '1.2.3.4', 'icmp', null, null, null, 0, 0)
+----
+ctx.r = Processors.communityId('2001:db8::2', '2001:db8::1', 58, null, null, null, 0, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 1, null, null, null, 13, 0)
+----
+ctx.r = Processors.communityId('5.6.7.8', '1.2.3.4', 'icmp', null, null, null, 13, 0)
+----
+ctx.r = Processors.communityId('2001:db8::2', '2001:db8::1', 58, null, null, null, 13, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 1, null, null, null, 3, 1)
+----
+ctx.r = Processors.communityId('5.6.7.8', '1.2.3.4', 'icmp', null, null, null, 3, 1)
+----
+ctx.r = Processors.communityId('2001:db8::2', '2001:db8::1', 58, null, null, null, 3, 1)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 1, null, null, null, 128, 0)
+----
+ctx.r = Processors.communityId('5.6.7.8', '1.2.3.4', 'icmp', null, null, null, 128, 0)
+----
+ctx.r = Processors.communityId('2001:db8::2', '2001:db8::1', 58, null, null, null, 128, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 1, null, null, null, 135, 0)
+----
+ctx.r = Processors.communityId('5.6.7.8', '1.2.3.4', 'icmp', null, null, null, 135, 0)
+----
+ctx.r = Processors.communityId('2001:db8::2', '2001:db8::1', 58, null, null, null, 135, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 1, null, null, null, 300, 5)
+----
+ctx.r = Processors.communityId('5.6.7.8', '1.2.3.4', 'icmp', null, null, null, 300, 5)
+----
+ctx.r = Processors.communityId('2001:db8::2', '2001:db8::1', 58, null, null, null, 300, 5)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 1, null, null, null, null, null)
+----
+ctx.r = Processors.communityId('5.6.7.8', '1.2.3.4', 'icmp', null, null, null, null, null)
+----
+ctx.r = Processors.communityId('2001:db8::2', '2001:db8::1', 58, null, null, null, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 1, null, null, null, 70000, 0)
+----
+ctx.r = Processors.communityId('5.6.7.8', '1.2.3.4', 'icmp', null, null, null, 70000, 0)
+----
+ctx.r = Processors.communityId('2001:db8::2', '2001:db8::1', 58, null, null, null, 70000, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 1, null, null, null, -5, 0)
+----
+ctx.r = Processors.communityId('5.6.7.8', '1.2.3.4', 'icmp', null, null, null, -5, 0)
+----
+ctx.r = Processors.communityId('2001:db8::2', '2001:db8::1', 58, null, null, null, -5, 0)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 6, null, 80, 80, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 6, null, 81, 80, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '::1', 6, null, 81, 80, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 2, null, 81, 80, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 2147483647, null, 81, 80, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', '254', null, 81, 80, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 6L, null, 81, 80, null, null)
+----
+ctx.r = Processors.communityId('1.2.3.4', '5.6.7.8', 6.7, null, 81, 80, null, null)
+----
+ctx.r = Processors.bytes('1kb') + Processors.bytes('1mb')
+----
+ctx.r = Processors.lowercase(ctx.s.toUpperCase()) + Processors.uppercase('q')
+----
+ctx.c = Processors.uriParts('http://x/y.z').getClass().getName()
+----
+ctx.c = Processors.json('{"a":[1]}').getClass().getName() + ' ' + Processors.json('{"a":[1]}').a.getClass().getName() + ' ' + Processors.json('2147483648').getClass().getName() + ' ' + Processors.json('1.5').getClass().getName() + ' ' + Processors.json('123456789012345678901234567890').getClass().getName()

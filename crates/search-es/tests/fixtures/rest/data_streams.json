@@ -1,0 +1,2148 @@
+{
+ "description": "data streams: create/get/delete, templates with data_stream, naming and conflicts, rollover, lifecycle, options, modify, data stream aliases, resolve",
+ "steps": [
+  {
+   "req": "PUT /_index_template/esm-ds-t",
+   "body": {
+    "index_patterns": [
+     "esm-ds*"
+    ],
+    "data_stream": {},
+    "template": {
+     "settings": {
+      "number_of_replicas": 0
+     },
+     "mappings": {
+      "properties": {
+       "msg": {
+        "type": "keyword"
+       }
+      }
+     }
+    },
+    "priority": 500
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-ds1",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-ds1",
+   "mask": [
+    "index_uuid",
+    "index_name",
+    "indices",
+    "backing_indices"
+   ],
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-ds1",
+      "timestamp_field": {
+       "name": "@timestamp"
+      },
+      "indices": [
+       {
+        "index_name": ".ds-esm-ds1-2026.10.20-000001",
+        "index_uuid": "38kOvL3sQpeHyitQeqVxJQ",
+        "managed_by": "Unmanaged",
+        "prefer_ilm": true,
+        "index_mode": "standard"
+       }
+      ],
+      "generation": 1,
+      "status": "GREEN",
+      "template": "esm-ds-t",
+      "next_generation_managed_by": "Unmanaged",
+      "prefer_ilm": true,
+      "hidden": false,
+      "system": false,
+      "allow_custom_routing": false,
+      "replicated": false,
+      "rollover_on_write": false,
+      "index_mode": "standard",
+      "settings": {},
+      "mappings": {},
+      "failure_store": {
+       "enabled": false,
+       "rollover_on_write": true,
+       "indices": []
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-ds1?verbose=true",
+   "mask": [
+    "index_uuid",
+    "index_name",
+    "indices",
+    "backing_indices"
+   ],
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-ds1",
+      "timestamp_field": {
+       "name": "@timestamp"
+      },
+      "indices": [
+       {
+        "index_name": ".ds-esm-ds1-2026.10.20-000001",
+        "index_uuid": "38kOvL3sQpeHyitQeqVxJQ",
+        "managed_by": "Unmanaged",
+        "prefer_ilm": true,
+        "index_mode": "standard"
+       }
+      ],
+      "generation": 1,
+      "status": "GREEN",
+      "template": "esm-ds-t",
+      "next_generation_managed_by": "Unmanaged",
+      "prefer_ilm": true,
+      "hidden": false,
+      "system": false,
+      "allow_custom_routing": false,
+      "replicated": false,
+      "rollover_on_write": false,
+      "maximum_timestamp": 0,
+      "index_mode": "standard",
+      "settings": {},
+      "mappings": {},
+      "failure_store": {
+       "enabled": false,
+       "rollover_on_write": true,
+       "indices": []
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-ds1/_mapping",
+   "status": 200,
+   "response": {
+    ".ds-esm-ds1-2026.10.20-000001": {
+     "mappings": {
+      "_data_stream_timestamp": {
+       "enabled": true
+      },
+      "properties": {
+       "@timestamp": {
+        "type": "date"
+       },
+       "msg": {
+        "type": "keyword"
+       }
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-ds1",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "resource_already_exists_exception",
+       "reason": "data_stream [esm-ds1] already exists"
+      }
+     ],
+     "type": "resource_already_exists_exception",
+     "reason": "data_stream [esm-ds1] already exists"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-DS",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "data_stream [esm-DS] must be lowercase"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "data_stream [esm-DS] must be lowercase"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/.ds-x",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "data_stream [.ds-x] must not start with '.ds-'"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "data_stream [.ds-x] must not start with '.ds-'"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/_x",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "data_stream [_x] must not start with '_', '-', or '+'"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "data_stream [_x] must not start with '_', '-', or '+'"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-nomatch-x",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "no matching index template found for data stream [esm-nomatch-x]"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "no matching index template found for data stream [esm-nomatch-x]"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-nope",
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "index_not_found_exception",
+       "reason": "no such index [esm-nope]",
+       "resource.type": "index_or_alias",
+       "resource.id": "esm-nope",
+       "index_uuid": "_na_",
+       "index": "esm-nope"
+      }
+     ],
+     "type": "index_not_found_exception",
+     "reason": "no such index [esm-nope]",
+     "resource.type": "index_or_alias",
+     "resource.id": "esm-nope",
+     "index_uuid": "_na_",
+     "index": "esm-nope"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-nope*",
+   "status": 200,
+   "response": {
+    "data_streams": []
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /_data_stream/esm-nope",
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "index_not_found_exception",
+       "reason": "no such index [esm-nope]",
+       "resource.type": "index_or_alias",
+       "resource.id": "esm-nope",
+       "index_uuid": "_na_",
+       "index": "esm-nope"
+      }
+     ],
+     "type": "index_not_found_exception",
+     "reason": "no such index [esm-nope]",
+     "resource.type": "index_or_alias",
+     "resource.id": "esm-nope",
+     "index_uuid": "_na_",
+     "index": "esm-nope"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /esm-ds1",
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "index_not_found_exception",
+       "reason": "no such index [esm-ds1]",
+       "resource.type": "index_or_alias",
+       "excluded_ds": "true",
+       "resource.id": "esm-ds1",
+       "index_uuid": "_na_",
+       "index": "esm-ds1"
+      }
+     ],
+     "type": "index_not_found_exception",
+     "reason": "no such index [esm-ds1]",
+     "resource.type": "index_or_alias",
+     "excluded_ds": "true",
+     "resource.id": "esm-ds1",
+     "index_uuid": "_na_",
+     "index": "esm-ds1"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-ds1/_close",
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "index_not_found_exception",
+       "reason": "no such index [esm-ds1]",
+       "resource.type": "index_or_alias",
+       "excluded_ds": "true",
+       "resource.id": "esm-ds1",
+       "index_uuid": "_na_",
+       "index": "esm-ds1"
+      }
+     ],
+     "type": "index_not_found_exception",
+     "reason": "no such index [esm-ds1]",
+     "resource.type": "index_or_alias",
+     "excluded_ds": "true",
+     "resource.id": "esm-ds1",
+     "index_uuid": "_na_",
+     "index": "esm-ds1"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-ds1",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "cannot create index with name [esm-ds1], because it matches with template [esm-ds-t] that creates data streams only, use create data stream api instead"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "cannot create index with name [esm-ds1], because it matches with template [esm-ds-t] that creates data streams only, use create data stream api instead"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-ds1/_rollover?dry_run",
+   "body": {
+    "conditions": {
+     "max_docs": 1,
+     "max_age": "1d",
+     "min_docs": 0
+    }
+   },
+   "mask": [
+    "old_index",
+    "new_index"
+   ],
+   "status": 200,
+   "response": {
+    "acknowledged": false,
+    "shards_acknowledged": false,
+    "old_index": ".ds-esm-ds1-2026.10.20-000001",
+    "new_index": ".ds-esm-ds1-2026.10.20-000002",
+    "rolled_over": false,
+    "dry_run": true,
+    "lazy": false,
+    "conditions": {
+     "[max_age: 1d]": false,
+     "[min_docs: 0]": true,
+     "[max_docs: 1]": false
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-ds1/_rollover",
+   "body": {
+    "conditions": {
+     "max_docs": 1
+    }
+   },
+   "mask": [
+    "old_index",
+    "new_index"
+   ],
+   "status": 200,
+   "response": {
+    "acknowledged": false,
+    "shards_acknowledged": false,
+    "old_index": ".ds-esm-ds1-2026.10.20-000001",
+    "new_index": ".ds-esm-ds1-2026.10.20-000002",
+    "rolled_over": false,
+    "dry_run": false,
+    "lazy": false,
+    "conditions": {
+     "[max_docs: 1]": false
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-ds1/_rollover",
+   "mask": [
+    "old_index",
+    "new_index"
+   ],
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "old_index": ".ds-esm-ds1-2026.10.20-000001",
+    "new_index": ".ds-esm-ds1-2026.10.20-000002",
+    "rolled_over": true,
+    "dry_run": false,
+    "lazy": false,
+    "conditions": {}
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-ds1/_rollover/x",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "new index name may not be specified when rolling over a data stream"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "new index name may not be specified when rolling over a data stream"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-ds1/_rollover",
+   "body": {
+    "settings": {
+     "number_of_shards": 2
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "aliases, mappings, and index settings may not be specified when rolling over a data stream"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "aliases, mappings, and index settings may not be specified when rolling over a data stream"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-ds1/_rollover?lazy",
+   "body": {
+    "conditions": {
+     "max_docs": 1
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "Lazy rollover can be used only without any conditions. Please remove the conditions from the request body or the query parameter 'lazy'."
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "Lazy rollover can be used only without any conditions. Please remove the conditions from the request body or the query parameter 'lazy'."
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-ds1/_rollover?lazy&dry_run",
+   "mask": [
+    "old_index",
+    "new_index"
+   ],
+   "status": 200,
+   "response": {
+    "acknowledged": false,
+    "shards_acknowledged": false,
+    "old_index": ".ds-esm-ds1-2026.10.20-000002",
+    "new_index": ".ds-esm-ds1-2026.10.20-000003",
+    "rolled_over": false,
+    "dry_run": true,
+    "lazy": true,
+    "conditions": {}
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-ds1?filter_path=data_streams.generation,data_streams.indices.index_mode,data_streams.rollover_on_write",
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "indices": [
+       {
+        "index_mode": "standard"
+       },
+       {
+        "index_mode": "standard"
+       }
+      ],
+      "generation": 2,
+      "rollover_on_write": false
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-ds1/_stats",
+   "status": 200,
+   "response": {
+    "_shards": {
+     "total": 2,
+     "successful": 2,
+     "failed": 0
+    },
+    "data_stream_count": 1,
+    "backing_indices": 2,
+    "total_store_size_bytes": 454,
+    "data_streams": [
+     {
+      "data_stream": "esm-ds1",
+      "backing_indices": 2,
+      "store_size_bytes": 454,
+      "maximum_timestamp": 0
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   },
+   "mask": [
+    "store_size",
+    "store_size_bytes",
+    "total_store_size",
+    "total_store_size_bytes"
+   ]
+  },
+  {
+   "req": "GET /_data_stream/_stats?human",
+   "status": 200,
+   "response": {
+    "_shards": {
+     "total": 2,
+     "successful": 2,
+     "failed": 0
+    },
+    "data_stream_count": 1,
+    "backing_indices": 2,
+    "total_store_size": "454b",
+    "total_store_size_bytes": 454,
+    "data_streams": [
+     {
+      "data_stream": "esm-ds1",
+      "backing_indices": 2,
+      "store_size": "454b",
+      "store_size_bytes": 454,
+      "maximum_timestamp": 0
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   },
+   "mask": [
+    "store_size",
+    "store_size_bytes",
+    "total_store_size",
+    "total_store_size_bytes"
+   ]
+  },
+  {
+   "req": "GET /_resolve/index/esm-ds*",
+   "mask": [
+    "index_uuid",
+    "index_name",
+    "indices",
+    "backing_indices"
+   ],
+   "status": 200,
+   "response": {
+    "indices": [],
+    "aliases": [],
+    "data_streams": [
+     {
+      "name": "esm-ds1",
+      "backing_indices": [
+       ".ds-esm-ds1-2026.10.20-000001",
+       ".ds-esm-ds1-2026.10.20-000002"
+      ],
+      "timestamp_field": "@timestamp"
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-ds1/_lifecycle",
+   "body": {
+    "data_retention": "7d"
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-ds1/_lifecycle",
+   "status": 200,
+   "response": {
+    "global_retention": {},
+    "data_streams": [
+     {
+      "name": "esm-ds1",
+      "lifecycle": {
+       "enabled": true,
+       "data_retention": "7d",
+       "effective_retention": "7d",
+       "retention_determined_by": "data_stream_configuration"
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-ds1/_lifecycle?include_defaults",
+   "status": 200,
+   "response": {
+    "global_retention": {},
+    "data_streams": [
+     {
+      "name": "esm-ds1",
+      "lifecycle": {
+       "enabled": true,
+       "data_retention": "7d",
+       "effective_retention": "7d",
+       "retention_determined_by": "data_stream_configuration",
+       "rollover": {
+        "min_docs": 1,
+        "max_primary_shard_docs": 200000000,
+        "max_primary_shard_size": "50gb",
+        "max_age": "1d [automatic]"
+       }
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-ds1/_lifecycle",
+   "body": {
+    "data_retention": "7x"
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "x_content_parse_exception",
+       "reason": "[1:19] [lifecycle] failed to parse field [data_retention]"
+      }
+     ],
+     "type": "x_content_parse_exception",
+     "reason": "[1:19] [lifecycle] failed to parse field [data_retention]",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "failed to parse setting [data_retention] with value [7x] as a time value: unit is missing or unrecognized"
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-ds1/_lifecycle",
+   "body": {
+    "foo": 1
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "x_content_parse_exception",
+       "reason": "[1:2] [lifecycle] unknown field [foo]"
+      }
+     ],
+     "type": "x_content_parse_exception",
+     "reason": "[1:2] [lifecycle] unknown field [foo]"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-nope/_lifecycle",
+   "body": {},
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "index_not_found_exception",
+       "reason": "no such index [esm-nope]",
+       "resource.type": "index_or_alias",
+       "resource.id": "esm-nope",
+       "index_uuid": "_na_",
+       "index": "esm-nope"
+      }
+     ],
+     "type": "index_not_found_exception",
+     "reason": "no such index [esm-nope]",
+     "resource.type": "index_or_alias",
+     "resource.id": "esm-nope",
+     "index_uuid": "_na_",
+     "index": "esm-nope"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-ds1",
+   "mask": [
+    "index_uuid",
+    "index_name",
+    "indices",
+    "backing_indices"
+   ],
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-ds1",
+      "timestamp_field": {
+       "name": "@timestamp"
+      },
+      "indices": [
+       {
+        "index_name": ".ds-esm-ds1-2026.10.20-000001",
+        "index_uuid": "38kOvL3sQpeHyitQeqVxJQ",
+        "managed_by": "Data stream lifecycle",
+        "prefer_ilm": true,
+        "index_mode": "standard"
+       },
+       {
+        "index_name": ".ds-esm-ds1-2026.10.20-000002",
+        "index_uuid": "uE8VY3HcQRa0Tl342Thjtg",
+        "managed_by": "Data stream lifecycle",
+        "prefer_ilm": true,
+        "index_mode": "standard"
+       }
+      ],
+      "generation": 2,
+      "status": "GREEN",
+      "template": "esm-ds-t",
+      "lifecycle": {
+       "enabled": true,
+       "data_retention": "7d",
+       "effective_retention": "7d",
+       "retention_determined_by": "data_stream_configuration"
+      },
+      "next_generation_managed_by": "Data stream lifecycle",
+      "prefer_ilm": true,
+      "hidden": false,
+      "system": false,
+      "allow_custom_routing": false,
+      "replicated": false,
+      "rollover_on_write": false,
+      "index_mode": "standard",
+      "settings": {},
+      "mappings": {},
+      "failure_store": {
+       "enabled": false,
+       "rollover_on_write": true,
+       "indices": []
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /_data_stream/esm-ds1/_lifecycle",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-ds1/_options",
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-ds1"
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-ds1/_options",
+   "body": {
+    "failure_store": {
+     "enabled": true
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-ds1/_options",
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-ds1",
+      "options": {
+       "failure_store": {
+        "enabled": true
+       }
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-ds1",
+   "mask": [
+    "index_uuid",
+    "index_name",
+    "indices",
+    "backing_indices"
+   ],
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-ds1",
+      "timestamp_field": {
+       "name": "@timestamp"
+      },
+      "indices": [
+       {
+        "index_name": ".ds-esm-ds1-2026.10.20-000001",
+        "index_uuid": "38kOvL3sQpeHyitQeqVxJQ",
+        "managed_by": "Unmanaged",
+        "prefer_ilm": true,
+        "index_mode": "standard"
+       },
+       {
+        "index_name": ".ds-esm-ds1-2026.10.20-000002",
+        "index_uuid": "uE8VY3HcQRa0Tl342Thjtg",
+        "managed_by": "Unmanaged",
+        "prefer_ilm": true,
+        "index_mode": "standard"
+       }
+      ],
+      "generation": 2,
+      "status": "GREEN",
+      "template": "esm-ds-t",
+      "next_generation_managed_by": "Unmanaged",
+      "prefer_ilm": true,
+      "hidden": false,
+      "system": false,
+      "allow_custom_routing": false,
+      "replicated": false,
+      "rollover_on_write": false,
+      "index_mode": "standard",
+      "settings": {},
+      "mappings": {},
+      "failure_store": {
+       "enabled": true,
+       "rollover_on_write": true,
+       "indices": [],
+       "lifecycle": {
+        "enabled": true,
+        "effective_retention": "30d",
+        "retention_determined_by": "default_failures_retention"
+       }
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /_data_stream/esm-ds1/_options",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-ds1/_mappings",
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-ds1",
+      "mappings": {},
+      "effective_mappings": {
+       "_data_stream_timestamp": {
+        "enabled": true
+       },
+       "properties": {
+        "@timestamp": {
+         "type": "date"
+        },
+        "msg": {
+         "type": "keyword"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-dsx",
+   "body": {
+    "settings": {
+     "number_of_replicas": 0
+    },
+    "mappings": {
+     "properties": {
+      "@timestamp": {
+       "type": "date"
+      }
+     }
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "cannot create index with name [esm-dsx], because it matches with template [esm-ds-t] that creates data streams only, use create data stream api instead"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "cannot create index with name [esm-dsx], because it matches with template [esm-ds-t] that creates data streams only, use create data stream api instead"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-dsx2",
+   "body": {
+    "aliases": {
+     "esm-dsxa": {}
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "cannot create index with name [esm-dsx2], because it matches with template [esm-ds-t] that creates data streams only, use create data stream api instead"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "cannot create index with name [esm-dsx2], because it matches with template [esm-ds-t] that creates data streams only, use create data stream api instead"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_data_stream/_modify",
+   "body": {
+    "actions": [
+     {
+      "add_backing_index": {
+       "data_stream": "esm-ds1",
+       "index": "esm-dsx2"
+      }
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "index [esm-dsx2] not found"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "index [esm-dsx2] not found"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_data_stream/_modify",
+   "body": {
+    "actions": [
+     {
+      "add_backing_index": {
+       "data_stream": "esm-nope",
+       "index": "esm-dsx"
+      }
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "data stream [esm-nope] not found"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "data stream [esm-nope] not found"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_data_stream/_modify",
+   "body": {
+    "actions": [
+     {
+      "add_backing_index": {
+       "data_stream": "esm-ds1",
+       "index": "esm-nope"
+      }
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "index [esm-nope] not found"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "index [esm-nope] not found"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_data_stream/_modify",
+   "body": {
+    "actions": [
+     {
+      "add_backing_index": {
+       "data_stream": "esm-ds1",
+       "index": "esm-dsx"
+      }
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "index [esm-dsx] not found"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "index [esm-dsx] not found"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-ds1?filter_path=data_streams.generation,data_streams.indices.index_name",
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "indices": [
+       {
+        "index_name": ".ds-esm-ds1-2026.10.20-000001"
+       },
+       {
+        "index_name": ".ds-esm-ds1-2026.10.20-000002"
+       }
+      ],
+      "generation": 2
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_data_stream/_modify",
+   "body": {
+    "actions": [
+     {
+      "remove_backing_index": {
+       "data_stream": "esm-ds1",
+       "index": "esm-dsx"
+      }
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "index [esm-dsx] not found in data stream [esm-ds1]"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "index [esm-dsx] not found in data stream [esm-ds1]"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_data_stream/_modify",
+   "body": {
+    "actions": [
+     {
+      "remove_backing_index": {
+       "data_stream": "esm-ds1",
+       "index": "esm-dsx"
+      }
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "index [esm-dsx] not found in data stream [esm-ds1]"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "index [esm-dsx] not found in data stream [esm-ds1]"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-dsx/_settings?filter_path=*.settings.index.hidden",
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "index_not_found_exception",
+       "reason": "no such index [esm-dsx]",
+       "resource.type": "index_or_alias",
+       "resource.id": "esm-dsx",
+       "index_uuid": "_na_",
+       "index": "esm-dsx"
+      }
+     ],
+     "type": "index_not_found_exception",
+     "reason": "no such index [esm-dsx]",
+     "resource.type": "index_or_alias",
+     "resource.id": "esm-dsx",
+     "index_uuid": "_na_",
+     "index": "esm-dsx"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-ds2",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_aliases",
+   "body": {
+    "actions": [
+     {
+      "add": {
+       "index": "esm-ds*",
+       "alias": "esm-dsa"
+      }
+     }
+    ]
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "errors": false
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_aliases",
+   "body": {
+    "actions": [
+     {
+      "add": {
+       "index": "esm-ds1",
+       "alias": "esm-dsb",
+       "is_write_index": true,
+       "filter": {
+        "term": {
+         "msg": "x"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "errors": false
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_aliases",
+   "body": {
+    "actions": [
+     {
+      "add": {
+       "index": "esm-ds1",
+       "alias": "esm-dsc",
+       "routing": "1"
+      }
+     }
+    ]
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "aliases that point to data streams don't support routing"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "aliases that point to data streams don't support routing"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_aliases",
+   "body": {
+    "actions": [
+     {
+      "add": {
+       "index": "esm-ds*,esm-dsx",
+       "alias": "esm-dsc"
+      }
+     }
+    ]
+   },
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "index_not_found_exception",
+       "reason": "no such index [esm-ds*,esm-dsx]",
+       "resource.type": "index_or_alias",
+       "resource.id": "esm-ds*,esm-dsx",
+       "index_uuid": "_na_",
+       "index": "esm-ds*,esm-dsx"
+      }
+     ],
+     "type": "index_not_found_exception",
+     "reason": "no such index [esm-ds*,esm-dsx]",
+     "resource.type": "index_or_alias",
+     "resource.id": "esm-ds*,esm-dsx",
+     "index_uuid": "_na_",
+     "index": "esm-ds*,esm-dsx"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_alias/esm-dsa",
+   "status": 200,
+   "response": {
+    "esm-ds1": {
+     "aliases": {
+      "esm-dsa": {}
+     }
+    },
+    "esm-ds2": {
+     "aliases": {
+      "esm-dsa": {}
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_alias/esm-dsb",
+   "status": 200,
+   "response": {
+    "esm-ds1": {
+     "aliases": {
+      "esm-dsb": {
+       "is_write_index": true,
+       "filter": {
+        "term": {
+         "msg": "x"
+        }
+       }
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-ds1/_alias",
+   "status": 200,
+   "response": {
+    "esm-ds1": {
+     "aliases": {
+      "esm-dsa": {},
+      "esm-dsb": {
+       "is_write_index": true,
+       "filter": {
+        "term": {
+         "msg": "x"
+        }
+       }
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-dsa/_alias",
+   "status": 200,
+   "response": {},
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-dsa",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "The provided expression [esm-dsa] matches an alias, specify the corresponding concrete indices instead."
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "The provided expression [esm-dsa] matches an alias, specify the corresponding concrete indices instead."
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-dsa/_rollover",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "rollover target [esm-dsa] does not point to a write index"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "rollover target [esm-dsa] does not point to a write index"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-dsa",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "invalid_index_name_exception",
+       "reason": "Invalid index name [esm-dsa], already exists as alias",
+       "index_uuid": "_na_",
+       "index": "esm-dsa"
+      }
+     ],
+     "type": "invalid_index_name_exception",
+     "reason": "Invalid index name [esm-dsa], already exists as alias",
+     "index_uuid": "_na_",
+     "index": "esm-dsa"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_aliases",
+   "body": {
+    "actions": [
+     {
+      "remove": {
+       "index": "esm-ds1",
+       "alias": "esm-dsa"
+      }
+     }
+    ]
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "errors": false
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_alias/esm-dsa",
+   "status": 200,
+   "response": {
+    "esm-ds2": {
+     "aliases": {
+      "esm-dsa": {}
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_aliases",
+   "body": {
+    "actions": [
+     {
+      "remove": {
+       "index": "esm-ds2",
+       "alias": "esm-zz"
+      }
+     }
+    ]
+   },
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "aliases_not_found_exception",
+       "reason": "aliases [] missing",
+       "resource.type": "aliases"
+      }
+     ],
+     "type": "aliases_not_found_exception",
+     "reason": "aliases [] missing",
+     "resource.type": "aliases"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_index_template/esm-dsh-t",
+   "body": {
+    "index_patterns": [
+     "esm-dsh*"
+    ],
+    "data_stream": {
+     "hidden": true,
+     "allow_custom_routing": true
+    },
+    "priority": 600,
+    "_meta": {
+     "a": 1
+    },
+    "template": {
+     "settings": {
+      "number_of_replicas": 0,
+      "index.lifecycle.name": "pol"
+     },
+     "mappings": {
+      "properties": {
+       "@timestamp": {
+        "type": "date_nanos",
+        "format": "strict_date_optional_time"
+       }
+      }
+     },
+     "aliases": {
+      "esm-dsha": {}
+     },
+     "lifecycle": {
+      "data_retention": "7d"
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_index_template/esm-dsk-t",
+   "body": {
+    "index_patterns": [
+     "esm-dsk*"
+    ],
+    "data_stream": {},
+    "priority": 600,
+    "template": {
+     "mappings": {
+      "properties": {
+       "@timestamp": {
+        "type": "keyword"
+       }
+      }
+     }
+    }
+   },
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "composable template [esm-dsk-t] template after composition is invalid"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "composable template [esm-dsk-t] template after composition is invalid",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "invalid composite mappings for [esm-dsk-t]",
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "data stream timestamp field [@timestamp] is of type [keyword], but [date,date_nanos] is expected"
+      }
+     }
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-dsh1",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-dsh1",
+   "mask": [
+    "index_uuid",
+    "index_name",
+    "indices",
+    "backing_indices"
+   ],
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dsh1",
+      "timestamp_field": {
+       "name": "@timestamp"
+      },
+      "indices": [
+       {
+        "index_name": ".ds-esm-dsh1-2026.10.20-000001",
+        "index_uuid": "5s7fJRj9R8mlFl1q6enxBA",
+        "managed_by": "Index Lifecycle Management",
+        "prefer_ilm": true,
+        "ilm_policy": "pol",
+        "index_mode": "standard"
+       }
+      ],
+      "generation": 1,
+      "_meta": {
+       "a": 1
+      },
+      "status": "GREEN",
+      "template": "esm-dsh-t",
+      "lifecycle": {
+       "enabled": true,
+       "data_retention": "7d",
+       "effective_retention": "7d",
+       "retention_determined_by": "data_stream_configuration"
+      },
+      "ilm_policy": "pol",
+      "next_generation_managed_by": "Index Lifecycle Management",
+      "prefer_ilm": true,
+      "hidden": true,
+      "system": false,
+      "allow_custom_routing": true,
+      "replicated": false,
+      "rollover_on_write": false,
+      "index_mode": "standard",
+      "settings": {},
+      "mappings": {},
+      "failure_store": {
+       "enabled": false,
+       "rollover_on_write": true,
+       "indices": []
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-dsh*",
+   "status": 200,
+   "response": {
+    "data_streams": []
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-dsh*?expand_wildcards=all&include_defaults",
+   "mask": [
+    "index_uuid",
+    "index_name",
+    "indices",
+    "backing_indices"
+   ],
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dsh1",
+      "timestamp_field": {
+       "name": "@timestamp"
+      },
+      "indices": [
+       {
+        "index_name": ".ds-esm-dsh1-2026.10.20-000001",
+        "index_uuid": "5s7fJRj9R8mlFl1q6enxBA",
+        "managed_by": "Index Lifecycle Management",
+        "prefer_ilm": true,
+        "ilm_policy": "pol",
+        "index_mode": "standard"
+       }
+      ],
+      "generation": 1,
+      "_meta": {
+       "a": 1
+      },
+      "status": "GREEN",
+      "template": "esm-dsh-t",
+      "lifecycle": {
+       "enabled": true,
+       "data_retention": "7d",
+       "effective_retention": "7d",
+       "retention_determined_by": "data_stream_configuration",
+       "rollover": {
+        "min_docs": 1,
+        "max_primary_shard_docs": 200000000,
+        "max_primary_shard_size": "50gb",
+        "max_age": "1d [automatic]"
+       }
+      },
+      "ilm_policy": "pol",
+      "next_generation_managed_by": "Index Lifecycle Management",
+      "prefer_ilm": true,
+      "hidden": true,
+      "system": false,
+      "allow_custom_routing": true,
+      "replicated": false,
+      "rollover_on_write": false,
+      "index_mode": "standard",
+      "settings": {},
+      "mappings": {},
+      "failure_store": {
+       "enabled": false,
+       "rollover_on_write": true,
+       "indices": []
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_alias/esm-dsha",
+   "status": 200,
+   "response": {
+    "esm-dsh1": {
+     "aliases": {
+      "esm-dsha": {}
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /.ds-esm-dsh1*/_mapping?expand_wildcards=all",
+   "status": 200,
+   "response": {
+    ".ds-esm-dsh1-2026.10.20-000001": {
+     "mappings": {
+      "_data_stream_timestamp": {
+       "enabled": true
+      },
+      "_routing": {
+       "required": true
+      },
+      "properties": {
+       "@timestamp": {
+        "type": "date_nanos",
+        "format": "strict_date_optional_time"
+       }
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-dsh1/_settings?flat_settings",
+   "mask": [
+    "index.provided_name"
+   ],
+   "status": 200,
+   "response": {
+    ".ds-esm-dsh1-2026.10.20-000001": {
+     "settings": {
+      "index.creation_date": "1792527512521",
+      "index.hidden": "true",
+      "index.lifecycle.name": "pol",
+      "index.number_of_replicas": "0",
+      "index.number_of_shards": "1",
+      "index.provided_name": ".ds-esm-dsh1-2026.10.20-000001",
+      "index.routing.allocation.include._tier_preference": "data_hot",
+      "index.uuid": "5s7fJRj9R8mlFl1q6enxBA",
+      "index.version.created": "9111000"
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-dsh1/_lifecycle/explain",
+   "mask": [
+    "index",
+    "index_creation_date_millis",
+    "time_since_index_creation"
+   ],
+   "status": 200,
+   "response": {
+    "indices": {
+     ".ds-esm-dsh1-2026.10.20-000001": {
+      "index": ".ds-esm-dsh1-2026.10.20-000001",
+      "managed_by_lifecycle": false
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-q1",
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-q1"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-q2",
+   "body": {
+    "aliases": {
+     "esm-q3": {}
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-q2"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_index_template/esm-q-t",
+   "body": {
+    "index_patterns": [
+     "esm-q*"
+    ],
+    "data_stream": {},
+    "priority": 600
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-q1",
+   "status": 500,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_state_exception",
+       "reason": "index, alias, data stream, view, and dataset names need to be unique, but the following duplicates were found [data stream [esm-q1] conflicts with index]"
+      }
+     ],
+     "type": "illegal_state_exception",
+     "reason": "index, alias, data stream, view, and dataset names need to be unique, but the following duplicates were found [data stream [esm-q1] conflicts with index]"
+    },
+    "status": 500
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-q3",
+   "status": 500,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_state_exception",
+       "reason": "index, alias, data stream, view, and dataset names need to be unique, but the following duplicates were found [esm-q3 (alias of [esm-q2/xTkUPKZTRD6L0RIa9p9F_Q]) conflicts with data stream]"
+      }
+     ],
+     "type": "illegal_state_exception",
+     "reason": "index, alias, data stream, view, and dataset names need to be unique, but the following duplicates were found [esm-q3 (alias of [esm-q2/xTkUPKZTRD6L0RIa9p9F_Q]) conflicts with data stream]"
+    },
+    "status": 500
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_index_template/esm-qn-t",
+   "body": {
+    "index_patterns": [
+     "esm-qn*"
+    ],
+    "priority": 700
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-qn1",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "matching index template [esm-qn-t] for data stream [esm-qn1] has no data stream template"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "matching index template [esm-qn-t] for data stream [esm-qn1] has no data stream template"
+    },
+    "status": 400
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /_data_stream/esm-dsh1",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /_data_stream/esm-ds*",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-ds*",
+   "status": 200,
+   "response": {
+    "data_streams": []
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  }
+ ]
+}

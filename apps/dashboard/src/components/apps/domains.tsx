@@ -4,6 +4,9 @@ import { appsApi, type Domain, type Environment } from "@/lib/apps-api";
 import { btn, CopyButton, input, panel, primary, useCopy } from "../ui";
 import { SureButton, type Runner } from "./shared";
 
+/** Where a domain's TXT challenge goes: a wildcard's on the name under it (as the server checks). */
+const challengeName = (host: string) => `_roll-challenge.${host.replace(/^\*\./, "")}`;
+
 const STATUS: Record<Domain["status"], { label: string; dot: string }> = {
   pending: { label: "Waiting for DNS", dot: "bg-accent pulse-dot" },
   issuing: { label: "Issuing certificate", dot: "bg-accent pulse-dot" },
@@ -139,7 +142,7 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
                       <tbody>
                         {d.record !== "txt" && <Record type="CNAME" name={d.hostname} value={d.target} copied={copied} copy={copy} />}
                         {d.record !== "cname" && d.token && (
-                          <Record type="TXT" name={`_roll-challenge.${d.hostname}`} value={d.token} copied={copied} copy={copy} />
+                          <Record type="TXT" name={challengeName(d.hostname)} value={d.token} copied={copied} copy={copy} />
                         )}
                       </tbody>
                     </table>
@@ -163,7 +166,7 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
             if (valid) void add();
           }}
         >
-          <input value={host} onChange={(e) => setHost(e.target.value.toLowerCase())} placeholder="www.example.com" className={`${input} min-w-0 flex-1 font-mono text-[12px]`} spellCheck={false} />
+          <input value={host} onChange={(e) => setHost(e.target.value.toLowerCase())} placeholder="www.example.com or *.example.com" className={`${input} min-w-0 flex-1 font-mono text-[12px]`} spellCheck={false} />
           <button type="submit" className={primary} disabled={!valid || runner.busy !== null}>
             Add domain
           </button>

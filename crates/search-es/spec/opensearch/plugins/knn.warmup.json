@@ -1,0 +1,26 @@
+{
+  "knn.warmup": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/vector-search/api/knn/",
+      "description": "Loads the native k-NN graphs of indices into memory."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_knn/warmup/{index}",
+          "methods": [
+            "GET"
+          ],
+          "parts": {
+            "index": {
+              "type": "list",
+              "description": "index"
+            }
+          }
+        }
+      ]
+    },
+    "params": {}
+  }
+}

@@ -1,0 +1,11 @@
+---
+requires:
+  serverless: true
+  stack: true
+---
+"cat.help":
+
+  - do:
+      cat.help: {}
+  - match:
+      $body: "/=\\^.\\^=/"

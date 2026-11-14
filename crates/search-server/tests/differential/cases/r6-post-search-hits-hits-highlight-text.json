@@ -1,0 +1,121 @@
+{
+ "found": {
+  "case": 110,
+  "case_seed": 109000437,
+  "seed": 109
+ },
+ "signature": "POST _search .hits.hits[].highlight.text[]",
+ "steps": [
+  {
+   "body": {
+    "settings": {
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m19-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m19-a"
+  },
+  {
+   "body": {
+    "text1": "quick running cats cherry engine fox"
+   },
+   "es": {
+    "body": {
+     "_id": "13",
+     "_index": "diff-m19-a",
+     "_primary_term": 1,
+     "_seq_no": 0,
+     "_shards": {
+      "failed": 0,
+      "successful": 1,
+      "total": 2
+     },
+     "_version": 1,
+     "forced_refresh": true,
+     "result": "created"
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 201
+   },
+   "method": "PUT",
+   "path": "/diff-m19-a/_doc/13?refresh=true"
+  },
+  {
+   "body": {
+    "highlight": {
+     "fields": {
+      "text1": {
+       "no_match_size": 12
+      }
+     }
+    },
+    "query": {
+     "more_like_this": {
+      "fields": [
+       "text1"
+      ],
+      "like": "brown cherry brown",
+      "min_doc_freq": 1,
+      "min_term_freq": 1
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "13",
+        "_index": "diff-m19-a",
+        "_score": 0.2876821,
+        "_source": {
+         "text1": "quick running cats cherry engine fox"
+        },
+        "highlight": {
+         "text1": [
+          "quick running cats <em>cherry</em> engine fox"
+         ]
+        }
+       }
+      ],
+      "max_score": 0.2876821,
+      "total": {
+       "relation": "eq",
+       "value": 1
+      }
+     },
+     "timed_out": false,
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m19-a/_search?typed_keys=true"
+  }
+ ]
+}

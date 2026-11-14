@@ -1,0 +1,705 @@
+{
+  "description" : "Data stream APIs on plain index names, index mode migration, simulate with data stream overrides",
+  "steps" : [
+    {
+      "req" : "PUT /esm-mds",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-mds"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-mds/_lifecycle",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "body" : {
+        "data_retention" : "7d"
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-mds/_lifecycle?include_defaults=true",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 200,
+      "response" : {
+        "global_retention" : { },
+        "data_streams" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-mds/_lifecycle/explain",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-mds" : {
+            "index" : "esm-mds",
+            "managed_by_lifecycle" : false
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-nope/_lifecycle",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "body" : {
+        "data_retention" : "7d"
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-nope",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-nope",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-mds",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 200,
+      "response" : {
+        "data_streams" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-mds/_options",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 200,
+      "response" : {
+        "data_streams" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-mds/_settings",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 200,
+      "response" : {
+        "data_streams" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-mds/_mappings",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 200,
+      "response" : {
+        "data_streams" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-mds/_stats",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 0,
+          "successful" : 0,
+          "failed" : 0
+        },
+        "data_stream_count" : 0,
+        "backing_indices" : 0,
+        "total_store_size_bytes" : 0,
+        "data_streams" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/esm-mds",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "data streams [esm-mds] not found"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "data streams [esm-mds] not found"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/esm-mds,esm-nope",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-nope",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-nope",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/esm-nope",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-nope",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-nope",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/esm-mds/_lifecycle",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-tmpl",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "body" : {
+        "index_patterns" : [
+          "esm-dsm*"
+        ],
+        "data_stream" : { },
+        "template" : {
+          "settings" : {
+            "number_of_replicas" : 0
+          },
+          "mappings" : {
+            "properties" : {
+              "field1" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-dsm1",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-tmpl",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "body" : {
+        "index_patterns" : [
+          "esm-dsm*"
+        ],
+        "data_stream" : { },
+        "template" : {
+          "settings" : {
+            "number_of_replicas" : 0,
+            "mode" : "time_series"
+          },
+          "mappings" : {
+            "properties" : {
+              "field1" : {
+                "type" : "keyword",
+                "time_series_dimension" : true
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-dsm1?filter_path=**.index_mode,**.time_series",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "indices" : [
+              {
+                "index_mode" : "standard"
+              }
+            ],
+            "index_mode" : "time_series"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-dsm1/_mappings",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "name" : "esm-dsm1",
+            "mappings" : { },
+            "effective_mappings" : {
+              "_data_stream_timestamp" : {
+                "enabled" : true
+              },
+              "properties" : {
+                "@timestamp" : {
+                  "type" : "date"
+                },
+                "field1" : {
+                  "type" : "keyword",
+                  "time_series_dimension" : true
+                }
+              }
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-dsm1/_rollover",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "old_index" : ".ds-esm-dsm1-2026.10.21-000001",
+        "new_index" : ".ds-esm-dsm1-2026.10.21-000002",
+        "rolled_over" : true,
+        "dry_run" : false,
+        "lazy" : false,
+        "conditions" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-dsm1?filter_path=**.index_mode,**.indices.index_mode",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "indices" : [
+              {
+                "index_mode" : "standard"
+              },
+              {
+                "index_mode" : "time_series"
+              }
+            ],
+            "index_mode" : "time_series"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-t2",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "body" : {
+        "index_patterns" : [
+          "esm-sim*"
+        ],
+        "template" : {
+          "lifecycle" : {
+            "data_retention" : "7d"
+          }
+        },
+        "data_stream" : { }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-sim",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-sim/_mappings",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "body" : {
+        "properties" : {
+          "foo" : {
+            "type" : "keyword"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "name" : "esm-sim",
+            "applied_to_data_stream" : true,
+            "mappings" : {
+              "properties" : {
+                "foo" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "effective_mappings" : {
+              "_data_stream_timestamp" : {
+                "enabled" : true
+              },
+              "properties" : {
+                "@timestamp" : {
+                  "type" : "date"
+                },
+                "foo" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-sim/_settings",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "body" : {
+        "index" : {
+          "refresh_interval" : "47s"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "name" : "esm-sim",
+            "applied_to_data_stream" : true,
+            "settings" : {
+              "index" : {
+                "refresh_interval" : "47s"
+              }
+            },
+            "effective_settings" : {
+              "index" : {
+                "routing" : {
+                  "allocation" : {
+                    "include" : {
+                      "_tier_preference" : "data_hot"
+                    }
+                  }
+                },
+                "refresh_interval" : "47s"
+              }
+            },
+            "index_settings_results" : {
+              "applied_to_data_stream_only" : [ ],
+              "applied_to_data_stream_and_write_indices" : [ ],
+              "applied_to_data_stream_and_backing_indices" : [
+                "index.refresh_interval"
+              ]
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate_index/esm-sim?include_defaults=true",
+      "mask" : [
+        "start",
+        "end"
+      ],
+      "status" : 200,
+      "response" : {
+        "template" : {
+          "settings" : {
+            "index" : {
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_hot"
+                  }
+                }
+              },
+              "refresh_interval" : "47s"
+            }
+          },
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date"
+              },
+              "foo" : {
+                "type" : "keyword"
+              }
+            }
+          },
+          "aliases" : { },
+          "lifecycle" : {
+            "enabled" : true,
+            "data_retention" : "7d",
+            "rollover" : {
+              "min_docs" : 1,
+              "max_primary_shard_docs" : 200000000,
+              "max_primary_shard_size" : "50gb",
+              "max_age" : "1d [automatic]"
+            }
+          }
+        },
+        "overlapping" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/esm-dsm1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/esm-sim",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-mds",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-tmpl",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-t2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

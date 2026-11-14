@@ -1,0 +1,92 @@
+# Tests of Elasticsearch 9.5.5's `watcher` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain setting=xpack.ml.enabled=false).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+watcher:mustache/10_webhook/Test webhook action with mustache integration
+watcher:mustache/20_array_access/Test array access
+watcher:mustache/25_array_compare/Basic array_compare watch
+watcher:mustache/30_search_input/Test search input mustache integration (using request body and rest_total_hits_as_int)
+watcher:mustache/30_search_input/Test search input mustache integration (using request body)
+watcher:mustache/30_search_input/Test search input mustache integration (using request template and rest_total_hits_as_int)
+watcher:mustache/30_search_input/Test search input mustache integration (using request template)
+watcher:mustache/40_search_transform/Test search transform mustache integration (using request body)
+watcher:mustache/40_search_transform/Test search transform mustache integration (using request template)
+watcher:mustache/50_webhook_url_escaping/Test url escaping with url mustache function
+watcher:mustache/60_template_with_params/Test executing logging action using template with params
+watcher:painless/10_basic/Test execute watch api
+watcher:painless/10_basic/Test execute watch api with rest_total_hits_as_int
+watcher:painless/10_basic/Test executing logging action using scripts with params
+watcher:painless/20_minimal_body/Test execute watch api with minimal body
+watcher:painless/30_inline_watch/Test execute watch api with an inline watch
+watcher:painless/40_exception/Test awesome painless exceptions are returned including the script_stack field
+watcher:painless/40_exception/Test painless exceptions are returned when logging a broken response
+watcher:painless/50_update_scripts/Test condition scripts are updated on execution
+watcher:painless/50_update_scripts/Test transform scripts are updated on execution
+watcher:painless/60_chain_input_with_transform/Test chained input with transform
+watcher:painless/70_json_in_watch/Test json in watch
+watcher:watcher/ack_watch/10_basic/Non existent watch returns 404
+watcher:watcher/ack_watch/10_basic/Test ack watch api
+watcher:watcher/ack_watch/20_ack_individual_action/Test ack watch api on an individual action
+watcher:watcher/ack_watch/30_reset_ack_after_unmet_condition/Ensure that ack status is reset after unsuccessful execution
+watcher:watcher/ack_watch/40_reset_ack_after_unmet_action_condition/Ensure that ack status is reset after unmet action condition
+watcher:watcher/activate_watch/10_basic/Non existent watch returns 404
+watcher:watcher/activate_watch/10_basic/Test activate watch api
+watcher:watcher/delete_watch/10_basic/Non existent watch returns 404
+watcher:watcher/delete_watch/10_basic/Test delete watch api
+watcher:watcher/execute_watch/10_basic/Execute unknown watch results in 404
+watcher:watcher/execute_watch/10_basic/Test execute watch API with user supplied watch
+watcher:watcher/execute_watch/10_basic/Test execute watch api with configured trigger data timestamps
+watcher:watcher/execute_watch/10_basic/Test execute watch with alternative input
+watcher:watcher/execute_watch/20_transform/Test execute watch api with configured search transform
+watcher:watcher/execute_watch/20_transform/Test execute watch api with configured search transform using DFS_QUERY_THEN_FETCH
+watcher:watcher/execute_watch/20_transform/Test execute watch api with misconfigured search transform on failure
+watcher:watcher/execute_watch/30_throttled/Test execute watch api works with throttling
+watcher:watcher/execute_watch/40_ignore_condition/Test execute watch api can ignore conditions
+watcher:watcher/execute_watch/50_action_mode/Test execute watch api supports action modes
+watcher:watcher/execute_watch/50_action_mode/Test simulate index action
+watcher:watcher/execute_watch/60_http_input/HTTP input redacts sensitive info
+watcher:watcher/execute_watch/60_http_input/HTTP input supports extracting of keys
+watcher:watcher/execute_watch/70_invalid/Test execute watch api returns proper error message with watch directly in the body
+watcher:watcher/execute_watch/80_foreach/Test execute watch api with foreach action
+watcher:watcher/execute_watch/80_foreach/Test execute watch api with foreach action using an array
+watcher:watcher/execute_watch/80_foreach/Test execute watch api with foreach action using an array of arrays
+watcher:watcher/execute_watch/90_painless_sha/Test String MessageDigest augmentation
+watcher:watcher/get_watch/10_basic/Test get watch api
+watcher:watcher/get_watch/20_missing/Test get watch api with missing watch on existing index
+watcher:watcher/get_watch/20_missing/Test get watch api with missing watch on missing index
+watcher:watcher/get_watch/30_with_chain_input/Test get watch api with chained input and basic auth
+watcher:watcher/put_watch/10_basic/Test put watch api
+watcher:watcher/put_watch/11_timezoned_schedules/Reject put watch with invalid timezone
+watcher:watcher/put_watch/11_timezoned_schedules/Test put watch api with timezone
+watcher:watcher/put_watch/11_timezoned_schedules/Test put watch api without timezone
+watcher:watcher/put_watch/20_put_watch_with_throttle_period/Test put watch api with watch level throttle
+watcher:watcher/put_watch/30_put_watch_with_action_throttle_period/Test put watch api with action level throttle period
+watcher:watcher/put_watch/40_put_watch_as_inactive/Test put inactive watch
+watcher:watcher/put_watch/50_email_attachment_validation/Test invalid urls in email attachments reject put watch
+watcher:watcher/put_watch/60_put_watch_with_action_condition/Test put watch api with action level condition
+watcher:watcher/put_watch/70_put_watch_with_index_action_using_id/Test put watch api with bulk index action using _id field
+watcher:watcher/put_watch/70_put_watch_with_index_action_using_id/Test put watch api with bulk index action using _id field in one document
+watcher:watcher/put_watch/70_put_watch_with_index_action_using_id/Test put watch api with index action using _id field
+watcher:watcher/put_watch/70_put_watch_with_index_action_using_id/Test put watch api with index action using doc_id
+watcher:watcher/put_watch/80_put_get_watch_with_passwords/Test getting a watch does not contain the original password
+watcher:watcher/put_watch/80_put_get_watch_with_passwords/Test putting a watch with a redacted password with old seq no returns an error
+watcher:watcher/put_watch/80_put_get_watch_with_passwords/Test putting a watch with a redacted password without version returns an error
+watcher:watcher/put_watch/90_auto_create_index/Ensure watch is created even when auto_create_index is disabled
+watcher:watcher/put_watch/90_ensure_watch_gets_overwritten_without_version/Test put watch api without version overwrites watch
+watcher:watcher/put_watch/91_search_total_hits_as_int/Test persist rest_total_hits_as_int
+watcher:watcher/put_watch/91_search_total_hits_as_int/Test search input includes hits by default
+watcher:watcher/put_watch/91_search_total_hits_as_int/Test search transform includes hits by default
+watcher:watcher/put_watch/92_put_watch_with_indices_options/Test put watch with allow no indices
+watcher:watcher/put_watch/92_put_watch_with_indices_options/Test put watch with expand wildcards
+watcher:watcher/put_watch/92_put_watch_with_indices_options/Test put watch with ignore unavailable
+watcher:watcher/put_watch/93_put_watch_with_reporting_interval/Test put watch with a reporting interval
+watcher:watcher/query_watches/10_basic/Test query watches api
+watcher:watcher/settings_endpoints/10_watcher_settings/Test allowed prefix setting name
+watcher:watcher/settings_endpoints/10_watcher_settings/Test update and get watch settings api
+watcher:watcher/start_watcher/10_basic/Test start watcher api
+watcher:watcher/stats/10_basic/Test watcher stats all watches
+watcher:watcher/stats/10_basic/Test watcher stats current watches
+watcher:watcher/stats/10_basic/Test watcher stats output
+watcher:watcher/stats/10_basic/Test watcher stats queued watches
+watcher:watcher/stats/10_basic/Test watcher stats queued watches using pending_watches
+watcher:watcher/stats/10_basic/Test watcher stats supports emit_stacktraces parameter
+watcher:watcher/stop_watcher/10_basic/Test stop watcher api

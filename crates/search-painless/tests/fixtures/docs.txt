@@ -1,0 +1,494 @@
+#defaults: {"context": "keyword_field", "setup": {"index": "painless-docs", "document": {"l": [5, 3], "i": 7, "sh": 3, "by": 2, "d": 1.5, "f": 0.1, "hf": 0.1, "sf": 1.234, "ul": 18446744073709551615, "ver": "1.2.3", "v": [1, 2, 3], "ip": "10.0.0.1", "bin": "aGVsbG8=", "g": "41.12,-71.34", "k": ["b", "a"], "dt": "2020-01-02T03:04:05.678Z", "dn": "2020-01-02T03:04:05.123456789Z", "b": [true, false], "t": "hello world", "obj": {"x": 9}, "tag": "x"}}}
+----
+emit(String.valueOf(doc['l']))
+----
+emit(String.valueOf(doc['l'].value))
+----
+emit(String.valueOf(doc['l'][1]))
+----
+emit(String.valueOf(doc['l'].size()))
+----
+emit(String.valueOf(doc['l'].empty))
+----
+emit(String.valueOf(doc['l'].length))
+----
+emit(String.valueOf(doc['l'].get(0)))
+----
+emit(String.valueOf(doc['l'].get(2)))
+----
+emit(String.valueOf(doc['l'].get(-1)))
+----
+emit(String.valueOf(doc['l'].values))
+----
+emit(String.valueOf(doc['i'].value))
+----
+emit(String.valueOf(doc['sh'].value))
+----
+emit(String.valueOf(doc['by'].value))
+----
+emit(String.valueOf(doc['d'].value))
+----
+emit(String.valueOf(doc['f'].value))
+----
+emit(String.valueOf(doc['hf'].value))
+----
+emit(String.valueOf(doc['sf'].value))
+----
+emit(String.valueOf(doc['ul']))
+----
+emit(String.valueOf(doc['ul'].value))
+----
+emit(String.valueOf(doc['ver']))
+----
+emit(String.valueOf(doc['ver'].get(0)))
+----
+emit(String.valueOf(doc['ver'].value))
+----
+emit(String.valueOf(doc['ip'].value))
+----
+emit(String.valueOf(doc['ip']))
+----
+emit(String.valueOf(doc['bin'].value))
+----
+emit(String.valueOf(doc['bin'].value.utf8ToString()))
+----
+emit(String.valueOf(doc['bin'].value.length))
+----
+emit(String.valueOf(doc['g'].value))
+----
+emit(String.valueOf(doc['g'].lat))
+----
+emit(String.valueOf(doc['g'].lon))
+----
+emit(String.valueOf(doc['g'].lats[0]))
+----
+emit(String.valueOf(doc['g'].value.lat))
+----
+emit(String.valueOf(doc['k']))
+----
+emit(String.valueOf(doc['k'].value))
+----
+emit(String.valueOf(doc['k'][1]))
+----
+emit(String.valueOf(doc['dt'].value))
+----
+emit(String.valueOf(doc['dt'].value.year))
+----
+emit(String.valueOf(doc['dt'].get(3)))
+----
+emit(String.valueOf(doc['dn'].value))
+----
+emit(String.valueOf(doc['dn'].value.nano))
+----
+emit(String.valueOf(doc['b']))
+----
+emit(String.valueOf(doc['b'].value))
+----
+emit(String.valueOf(doc['obj.x'].value))
+----
+emit(String.valueOf(doc['tag'].value))
+----
+emit(String.valueOf(doc['v'].vectorValue[0]))
+----
+emit(String.valueOf(doc['v'].magnitude))
+----
+emit(String.valueOf(doc['v'].size()))
+----
+emit(String.valueOf(doc['v'].value))
+----
+emit(String.valueOf(doc['v'].get(0)))
+----
+emit(String.valueOf(doc['t'].value))
+----
+emit(String.valueOf(doc['zz'].value))
+----
+emit(String.valueOf(doc['zz'].size()))
+----
+emit(String.valueOf(doc.containsKey('l')))
+----
+emit(String.valueOf(doc.containsKey('zz')))
+----
+emit(String.valueOf(doc.get('l')))
+----
+emit(String.valueOf(doc['l'].contains(5L)))
+----
+emit(String.valueOf(doc['l'].indexOf(5L)))
+----
+emit(String.valueOf(doc['l'].stream().mapToLong(x -> x).sum()))
+----
+emit(String.valueOf(doc['k'].add('x')))
+----
+emit(String.valueOf(doc['k'].set(0,'x')))
+----
+emit(String.valueOf(doc['k'].remove(0)))
+----
+emit(String.valueOf(doc.size()))
+----
+emit(String.valueOf(doc.isEmpty()))
+----
+emit(String.valueOf(doc.keySet()))
+----
+emit(String.valueOf(doc.put('a', 1)))
+----
+emit(String.valueOf(doc['l'] == [3L, 5L]))
+----
+emit(String.valueOf(doc['l'].equals([3L, 5L])))
+----
+emit(String.valueOf(doc['l'].hashCode()))
+----
+emit(String.valueOf(doc['k'].toString()))
+----
+emit(String.valueOf(doc['dt'][0].toInstant().toEpochMilli()))
+----
+emit(String.valueOf(doc['g'].arcDistance(40, -70)))
+----
+emit(String.valueOf(doc['g'].planeDistance(40, -70)))
+----
+emit(String.valueOf(doc['g'].geohashDistance('drm3btev3e86')))
+----
+emit(String.valueOf(doc['g'].getDimensionalType()))
+----
+emit(String.valueOf(doc['g'].centroid))
+----
+emit(String.valueOf(doc['g'].boundingBox.topLeft()))
+----
+emit(String.valueOf(field('l').get(0)))
+----
+emit(String.valueOf(field('l').get(1,0)))
+----
+emit(String.valueOf(field('l').get(5,9)))
+----
+emit(String.valueOf(field('l').size()))
+----
+emit(String.valueOf(field('l').isEmpty()))
+----
+emit(String.valueOf(field('l').getName()))
+----
+emit(String.valueOf(field('i').get(0)))
+----
+emit(String.valueOf(field('sh').get(0)))
+----
+emit(String.valueOf(field('by').get(0)))
+----
+emit(String.valueOf(field('d').get(0.0)))
+----
+emit(String.valueOf(field('f').get(0.0f)))
+----
+emit(String.valueOf(field('sf').get(0.0)))
+----
+emit(String.valueOf(field('hf').get(0.0)))
+----
+emit(String.valueOf(field('hf').asDouble(0.0)))
+----
+emit(String.valueOf(field('hf').asDoubles()))
+----
+emit(String.valueOf(field('dt').get(null)))
+----
+emit(String.valueOf(field('dn').get(null)))
+----
+emit(String.valueOf(field('k').get('')))
+----
+emit(String.valueOf(field('k').get(1,'')))
+----
+emit(String.valueOf(field('ip').get(null)))
+----
+emit(String.valueOf(field('ip').asString('')))
+----
+emit(String.valueOf(field('ip').asStrings()))
+----
+emit(String.valueOf(field('ip').get(null).isV4()))
+----
+emit(String.valueOf(field('g').get(null)))
+----
+emit(String.valueOf(field('b').get(false)))
+----
+emit(String.valueOf(field('v').get().getVector()[2]))
+----
+emit(String.valueOf(field('v').get().magnitude))
+----
+emit(String.valueOf(field('v').get().dims))
+----
+emit(String.valueOf(field('v').get().cosineSimilarity([1.0,0.5,0.25])))
+----
+emit(String.valueOf(field('v').get().dotProduct([1,0.5,0.25])))
+----
+emit(String.valueOf(field('v').get().l1Norm([1,0.5,0.25])))
+----
+emit(String.valueOf(field('v').get().l2Norm([1,0.5,0.25])))
+----
+emit(String.valueOf(field('v').get().dotProduct([1,2])))
+----
+emit(String.valueOf(field('nope').get(5)))
+----
+emit(String.valueOf(field('nope').size()))
+----
+emit(String.valueOf(field('nope').getName()))
+----
+emit(String.valueOf($('l', 0)))
+----
+emit(String.valueOf($('nope', 7)))
+----
+emit(String.valueOf(field('ul').get(0)))
+----
+emit(String.valueOf(field('bin').get(null)))
+----
+emit(String.valueOf(field('nope').get(1, 2)))
+----
+emit(String.valueOf(field('obj.x').get(9)))
+----
+emit(String.valueOf(params._source.l))
+----
+emit(String.valueOf(params._source.obj.x))
+----
+emit(String.valueOf(params.containsKey('_source')))
+----
+def x = []; for (def v : doc['l']) { x.add(v) } emit(x.toString())
+----
+def x = []; for (def v : field('l')) { x.add(v) } emit(x.toString())
+----
+for (int i = 0; i < 101; i++) { emit('x') }
+----
+emit(null)
+----
+emit('a'); emit('b')
+----
+String s = 'x'; for (int i = 0; i < 20; i++) { s = s + s } emit(s); emit(s)
+----
+#params: {"p": "q"}
+emit(params.p)
+----
+#defaults: {"context": "keyword_field", "setup": {"index": "painless-docs", "document": {"tag": "empty"}}}
+----
+emit(String.valueOf(doc['l'].value))
+----
+emit(String.valueOf(doc['l'].size()))
+----
+emit(String.valueOf(doc['l'].empty))
+----
+emit(String.valueOf(doc['l'].get(0)))
+----
+emit(String.valueOf(doc['d'].value))
+----
+emit(String.valueOf(doc['k'].value))
+----
+emit(String.valueOf(doc['dt'].value))
+----
+emit(String.valueOf(doc['b'].value))
+----
+emit(String.valueOf(doc['g'].value))
+----
+emit(String.valueOf(doc['g'].lat))
+----
+emit(String.valueOf(doc['g'].arcDistance(1,1)))
+----
+emit(String.valueOf(doc['g'].arcDistanceWithDefault(1,1,42)))
+----
+emit(String.valueOf(doc['bin'].value))
+----
+emit(String.valueOf(doc['v'].vectorValue))
+----
+emit(String.valueOf(doc['v'].magnitude))
+----
+emit(String.valueOf(doc['v'].size()))
+----
+emit(String.valueOf(field('l').get(7)))
+----
+emit(String.valueOf(field('v').get().isEmpty()))
+----
+emit(String.valueOf(field('v').get().getVector()))
+----
+emit(String.valueOf($('l', 4)))
+----
+emit(String.valueOf(doc['ip'].value))
+----
+emit(String.valueOf(doc['l']))
+----
+#defaults: {"context": "score", "setup": {"index": "painless-docs", "document": {"l": [5, 3], "i": 7, "sh": 3, "by": 2, "d": 1.5, "f": 0.1, "hf": 0.1, "sf": 1.234, "ul": 18446744073709551615, "ver": "1.2.3", "v": [1, 2, 3], "ip": "10.0.0.1", "bin": "aGVsbG8=", "g": "41.12,-71.34", "k": ["b", "a"], "dt": "2020-01-02T03:04:05.678Z", "dn": "2020-01-02T03:04:05.123456789Z", "b": [true, false], "t": "hello world", "obj": {"x": 9}, "tag": "x"}}}
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return saturation(2, 3)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return sigmoid(2, 3, 0.5)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return randomScore(42)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return randomScore(42, 'nope')
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayNumericLinear(0, 10, 1, 0.5, doc['d'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayNumericExp(0, 10, 1, 0.5, doc['d'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayNumericGauss(0, 10, 1, 0.5, doc['d'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayGeoLinear('40,-70', '100km', '1km', 0.5, doc['g'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayGeoExp('40,-70', '100km', '1km', 0.5, doc['g'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayGeoGauss('40,-70', '100km', '1km', 0.5, doc['g'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayGeoLinear('dr5r', '100km', '1km', 0.5, doc['g'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayGeoLinear('40,-70', '100mi', '1km', 0.5, doc['g'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayGeoLinear('40,-70', 'foo', '1km', 0.5, doc['g'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayGeoGauss('POINT (-70 40)', '50000m', '0', 0.5, doc['g'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayDateLinear('2020-01-01', '1d', '1h', 0.5, doc['dt'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayDateExp('2020-01-01', '2d', '0', 0.5, doc['dt'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayDateGauss('2020-01-01T00:00:00Z', '36h', '1m', 0.5, doc['dt'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayDateLinear('2020-01-01||+1d', '1d', '1h', 0.5, doc['dt'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayDateLinear('2020-01-01', '1x', '1h', 0.5, doc['dt'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayDateLinear('nope', '1d', '1h', 0.5, doc['dt'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return decayDateExp('2020-01-03||/d', '10s', '0', 0.5, doc['dt'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return cosineSimilarity([1,1,1], 'v')
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return dotProduct([1,1,1], 'v')
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return l1norm([1,1,1], 'v')
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return l2norm([1,1,1], 'v')
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return cosineSimilarity([1,1], 'v')
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return cosineSimilarity([1,1,1], 'l')
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return cosineSimilarity([1,1,1], 'nope')
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return hamming([1,1,1], 'v')
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return cosineSimilarity(params.qv, 'v') + 1.0
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return _score
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return _score + 1
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return doc['l'].value * 2
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return doc['d'].value + params.w
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return Math.log(2 + doc['l'].value)
+----
+#params: {"qv": [0.5, 0.25, 1.0], "w": 2.5}
+return params.containsKey('doc')
+----
+#defaults: {"context": "filter", "setup": {"index": "painless-docs", "document": {"l": [5, 3], "i": 7, "sh": 3, "by": 2, "d": 1.5, "f": 0.1, "hf": 0.1, "sf": 1.234, "ul": 18446744073709551615, "ver": "1.2.3", "v": [1, 2, 3], "ip": "10.0.0.1", "bin": "aGVsbG8=", "g": "41.12,-71.34", "k": ["b", "a"], "dt": "2020-01-02T03:04:05.678Z", "dn": "2020-01-02T03:04:05.123456789Z", "b": [true, false], "t": "hello world", "obj": {"x": 9}, "tag": "x"}}}
+----
+return doc['l'].value > 2
+----
+return doc['k'].value == 'a'
+----
+return doc['zz'].value > 2
+----
+return doc['b'].value
+----
+return doc['l'].size() > 1 && doc['dt'].value.year == 2020
+----
+return params._source.tag == 'x'
+----
+#defaults: {"context": "long_field", "setup": {"index": "painless-docs", "document": {"l": [5, 3], "i": 7, "sh": 3, "by": 2, "d": 1.5, "f": 0.1, "hf": 0.1, "sf": 1.234, "ul": 18446744073709551615, "ver": "1.2.3", "v": [1, 2, 3], "ip": "10.0.0.1", "bin": "aGVsbG8=", "g": "41.12,-71.34", "k": ["b", "a"], "dt": "2020-01-02T03:04:05.678Z", "dn": "2020-01-02T03:04:05.123456789Z", "b": [true, false], "t": "hello world", "obj": {"x": 9}, "tag": "x"}}}
+----
+for (long x : doc['l']) { emit(x * 10) }
+----
+emit(doc['i'].value)
+----
+for (int i = 0; i < 101; i++) { emit(i) }
+----
+emit(params._source.obj.x)
+----
+#defaults: {"context": "double_field", "setup": {"index": "painless-docs", "document": {"l": [5, 3], "i": 7, "sh": 3, "by": 2, "d": 1.5, "f": 0.1, "hf": 0.1, "sf": 1.234, "ul": 18446744073709551615, "ver": "1.2.3", "v": [1, 2, 3], "ip": "10.0.0.1", "bin": "aGVsbG8=", "g": "41.12,-71.34", "k": ["b", "a"], "dt": "2020-01-02T03:04:05.678Z", "dn": "2020-01-02T03:04:05.123456789Z", "b": [true, false], "t": "hello world", "obj": {"x": 9}, "tag": "x"}}}
+----
+emit(doc['d'].value); emit(doc['f'].value)
+----
+for (int i = 0; i < 101; i++) { emit(1.0) }
+----
+#defaults: {"context": "boolean_field", "setup": {"index": "painless-docs", "document": {"l": [5, 3], "i": 7, "sh": 3, "by": 2, "d": 1.5, "f": 0.1, "hf": 0.1, "sf": 1.234, "ul": 18446744073709551615, "ver": "1.2.3", "v": [1, 2, 3], "ip": "10.0.0.1", "bin": "aGVsbG8=", "g": "41.12,-71.34", "k": ["b", "a"], "dt": "2020-01-02T03:04:05.678Z", "dn": "2020-01-02T03:04:05.123456789Z", "b": [true, false], "t": "hello world", "obj": {"x": 9}, "tag": "x"}}}
+----
+emit(true); emit(false); emit(doc['b'].value)
+----
+#defaults: {"context": "date_field", "setup": {"index": "painless-docs", "document": {"l": [5, 3], "i": 7, "sh": 3, "by": 2, "d": 1.5, "f": 0.1, "hf": 0.1, "sf": 1.234, "ul": 18446744073709551615, "ver": "1.2.3", "v": [1, 2, 3], "ip": "10.0.0.1", "bin": "aGVsbG8=", "g": "41.12,-71.34", "k": ["b", "a"], "dt": "2020-01-02T03:04:05.678Z", "dn": "2020-01-02T03:04:05.123456789Z", "b": [true, false], "t": "hello world", "obj": {"x": 9}, "tag": "x"}}}
+----
+emit(doc['dt'].value.toInstant().toEpochMilli())
+----
+emit(parse('2020-01-01'))
+----
+emit(parse(1234))
+----
+emit(parse('nope'))
+----
+emit(parse(null))
+----
+emit(parse('2020-01-01T10:00:00+02:00'))
+----
+emit(parse('1600000000000'))
+----
+emit(parse(1.5))
+----
+for (int i = 0; i < 101; i++) { emit(1L) }
+----
+#defaults: {"context": "ip_field", "setup": {"index": "painless-docs", "document": {"l": [5, 3], "i": 7, "sh": 3, "by": 2, "d": 1.5, "f": 0.1, "hf": 0.1, "sf": 1.234, "ul": 18446744073709551615, "ver": "1.2.3", "v": [1, 2, 3], "ip": "10.0.0.1", "bin": "aGVsbG8=", "g": "41.12,-71.34", "k": ["b", "a"], "dt": "2020-01-02T03:04:05.678Z", "dn": "2020-01-02T03:04:05.123456789Z", "b": [true, false], "t": "hello world", "obj": {"x": 9}, "tag": "x"}}}
+----
+emit(doc['ip'].value); emit('::1')
+----
+emit('bad')
+----
+emit(null)
+----
+emit('::ffff:1.2.3.4'); emit('2001:db8:0:0:1:0:0:1')
+----
+#defaults: {"context": "geo_point_field", "setup": {"index": "painless-docs", "document": {"l": [5, 3], "i": 7, "sh": 3, "by": 2, "d": 1.5, "f": 0.1, "hf": 0.1, "sf": 1.234, "ul": 18446744073709551615, "ver": "1.2.3", "v": [1, 2, 3], "ip": "10.0.0.1", "bin": "aGVsbG8=", "g": "41.12,-71.34", "k": ["b", "a"], "dt": "2020-01-02T03:04:05.678Z", "dn": "2020-01-02T03:04:05.123456789Z", "b": [true, false], "t": "hello world", "obj": {"x": 9}, "tag": "x"}}}
+----
+emit(doc['g'].lat, doc['g'].lon)
+----
+emit(41.12, -71.34)
+----
+#defaults: {"context": "composite_field", "setup": {"index": "painless-docs", "document": {"l": [5, 3], "i": 7, "sh": 3, "by": 2, "d": 1.5, "f": 0.1, "hf": 0.1, "sf": 1.234, "ul": 18446744073709551615, "ver": "1.2.3", "v": [1, 2, 3], "ip": "10.0.0.1", "bin": "aGVsbG8=", "g": "41.12,-71.34", "k": ["b", "a"], "dt": "2020-01-02T03:04:05.678Z", "dn": "2020-01-02T03:04:05.123456789Z", "b": [true, false], "t": "hello world", "obj": {"x": 9}, "tag": "x"}}}
+----
+emit('a', 1); emit('b', 'x'); emit('a', 2)
+----
+emit(['a': 1, 'b': [2,3]])
+----
+for (int i = 0; i < 101; i++) { emit('a', i) }
+----
+emit(null, 1)

@@ -1,0 +1,1134 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.max(new double[] {1, 5, 3})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "5.0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.max(new double[0])",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "NaN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.max(new double[] {1, Double.NaN, 3})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "NaN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.min(new double[] {4, -2.5, 3})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-2.5"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.min(new double[] {-0.0, 0.0})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-0.0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.max(new double[] {-0.0, 0.0})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.sum(new double[] {1, Double.NaN, 3.5})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "4.5"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.sum(new double[0])",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.unweightedAvg(new double[] {1, 2, Double.NaN, 6})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "3.0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.unweightedAvg(new double[0])",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "NaN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.stdDev(new double[] {1, 2, 3, 4}, MovingFunctions.unweightedAvg(new double[] {1, 2, 3, 4}))",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.118033988749895"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.stdDev(new double[] {1, 2}, Double.NaN)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "NaN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.stdDev(new double[0], 1)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "NaN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.linearWeightedAvg(new double[] {1, 2, 3, Double.NaN, 10})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "5.4"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.linearWeightedAvg(new double[0])",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "NaN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.ewma(new double[] {1, 2, 3, 4, 5}, 0.3)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "3.2268999999999997"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.ewma(new double[] {Double.NaN, 2, 3}, 0.5)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2.5"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.ewma(new double[0], 0.5)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "NaN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holt(new double[] {1, 2, 4, 8, 16}, 0.5, 0.3)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "11.4335625"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holt(new double[0], 0.5, 0.3)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "NaN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holt(new double[] {Double.NaN}, 0.5, 0.3)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "NaN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holtWinters(new double[] {1, 2, 3, 4, 5, 6, 7, 8}, 0.5, 0.3, 0.2, 2, false)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "8.4828056640625"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holtWinters(new double[] {1, 2, 3, 4, 5, 6, 7, 8}, 0.5, 0.3, 0.2, 2, true)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "7.840398394014743"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holtWinters(new double[] {3, 1, 4, 1, 5, 9, 2, 6, 5, 3}, 0.4, 0.2, 0.6, 3, true)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "7.54413393177637"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holtWinters(new double[] {1, 2, 3}, 0.5, 0.3, 0.2, 2, false)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.holtWinters(MovingFunctions.java:233)",
+       "return MovingFunctions.holtWinters(new double[] {1, 2, 3}, 0.5, 0.3, 0.2, 2, false)",
+       "                                   ^---- HERE"
+      ],
+      "script": "return MovingFunctions.holtWinters(new double[] {1, 2, 3}, 0.5, 0.3, 0.2, 2, false)",
+      "lang": "painless",
+      "position": {
+       "offset": 35,
+       "start": 0,
+       "end": 83
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.holtWinters(MovingFunctions.java:233)",
+     "return MovingFunctions.holtWinters(new double[] {1, 2, 3}, 0.5, 0.3, 0.2, 2, false)",
+     "                                   ^---- HERE"
+    ],
+    "script": "return MovingFunctions.holtWinters(new double[] {1, 2, 3}, 0.5, 0.3, 0.2, 2, false)",
+    "lang": "painless",
+    "position": {
+     "offset": 35,
+     "start": 0,
+     "end": 83
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Holt-Winters aggregation requires at least (2 * period == 2 * 2 == 4) data-points to function.  Only [3] were provided."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holtWinters(new double[0], 0.5, 0.3, 0.2, 2, false)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "NaN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holtWinters(new double[] {0, 0, 0, 0}, 0.5, 0.3, 0.2, 2, false)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holtWinters(new double[] {1, Double.NaN, 3, 4, 5}, 0.5, 0.3, 0.2, 2, false)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2.7181875000000004"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.max(null)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Arrays.stream(Arrays.java:5555)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.max(MovingFunctions.java:24)",
+       "return MovingFunctions.max(null)",
+       "                      ^---- HERE"
+      ],
+      "script": "return MovingFunctions.max(null)",
+      "lang": "painless",
+      "position": {
+       "offset": 22,
+       "start": 0,
+       "end": 32
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Arrays.stream(Arrays.java:5555)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.max(MovingFunctions.java:24)",
+     "return MovingFunctions.max(null)",
+     "                      ^---- HERE"
+    ],
+    "script": "return MovingFunctions.max(null)",
+    "lang": "painless",
+    "position": {
+     "offset": 22,
+     "start": 0,
+     "end": 32
+    },
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot read the array length because \"array\" is null"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.sum(null)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.sum(MovingFunctions.java:40)",
+       "return MovingFunctions.sum(null)",
+       "                      ^---- HERE"
+      ],
+      "script": "return MovingFunctions.sum(null)",
+      "lang": "painless",
+      "position": {
+       "offset": 22,
+       "start": 0,
+       "end": 32
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.sum(MovingFunctions.java:40)",
+     "return MovingFunctions.sum(null)",
+     "                      ^---- HERE"
+    ],
+    "script": "return MovingFunctions.sum(null)",
+    "lang": "painless",
+    "position": {
+     "offset": 22,
+     "start": 0,
+     "end": 32
+    },
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot read the array length because \"values\" is null"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.unweightedAvg(null)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.unweightedAvg(MovingFunctions.java:61)",
+       "return MovingFunctions.unweightedAvg(null)",
+       "                      ^---- HERE"
+      ],
+      "script": "return MovingFunctions.unweightedAvg(null)",
+      "lang": "painless",
+      "position": {
+       "offset": 22,
+       "start": 0,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.unweightedAvg(MovingFunctions.java:61)",
+     "return MovingFunctions.unweightedAvg(null)",
+     "                      ^---- HERE"
+    ],
+    "script": "return MovingFunctions.unweightedAvg(null)",
+    "lang": "painless",
+    "position": {
+     "offset": 22,
+     "start": 0,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot read the array length because \"<local5>\" is null"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def v = new double[] {1, 2}; return MovingFunctions.max(v)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2.0"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.max([1, 2])",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... turn MovingFunctions.max([1, 2])",
+       "                             ^---- HERE"
+      ],
+      "script": "return MovingFunctions.max([1, 2])",
+      "lang": "painless",
+      "position": {
+       "offset": 27,
+       "start": 2,
+       "end": 34
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... turn MovingFunctions.max([1, 2])",
+     "                             ^---- HERE"
+    ],
+    "script": "return MovingFunctions.max([1, 2])",
+    "lang": "painless",
+    "position": {
+     "offset": 27,
+     "start": 2,
+     "end": 34
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.util.ArrayList] to [double[]]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.max(new int[] {1, 2})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... turn MovingFunctions.max(new int[] {1, 2})",
+       "                             ^---- HERE"
+      ],
+      "script": "return MovingFunctions.max(new int[] {1, 2})",
+      "lang": "painless",
+      "position": {
+       "offset": 27,
+       "start": 2,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... turn MovingFunctions.max(new int[] {1, 2})",
+     "                             ^---- HERE"
+    ],
+    "script": "return MovingFunctions.max(new int[] {1, 2})",
+    "lang": "painless",
+    "position": {
+     "offset": 27,
+     "start": 2,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int[]] to [double[]]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.foo(new double[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return MovingFunctions.foo(new double[] {1})",
+       "                      ^---- HERE"
+      ],
+      "script": "return MovingFunctions.foo(new double[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 22,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return MovingFunctions.foo(new double[] {1})",
+     "                      ^---- HERE"
+    ],
+    "script": "return MovingFunctions.foo(new double[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 22,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "static method [org.elasticsearch.search.aggregations.pipeline.MovingFunctions, foo/1] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.min(null)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Arrays.stream(Arrays.java:5555)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.min(MovingFunctions.java:32)",
+       "return MovingFunctions.min(null)",
+       "                      ^---- HERE"
+      ],
+      "script": "return MovingFunctions.min(null)",
+      "lang": "painless",
+      "position": {
+       "offset": 22,
+       "start": 0,
+       "end": 32
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Arrays.stream(Arrays.java:5555)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.min(MovingFunctions.java:32)",
+     "return MovingFunctions.min(null)",
+     "                      ^---- HERE"
+    ],
+    "script": "return MovingFunctions.min(null)",
+    "lang": "painless",
+    "position": {
+     "offset": 22,
+     "start": 0,
+     "end": 32
+    },
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot read the array length because \"array\" is null"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.stdDev(null, 1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.stdDev(MovingFunctions.java:83)",
+       "return MovingFunctions.stdDev(null, 1)",
+       "                      ^---- HERE"
+      ],
+      "script": "return MovingFunctions.stdDev(null, 1)",
+      "lang": "painless",
+      "position": {
+       "offset": 22,
+       "start": 0,
+       "end": 38
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.stdDev(MovingFunctions.java:83)",
+     "return MovingFunctions.stdDev(null, 1)",
+     "                      ^---- HERE"
+    ],
+    "script": "return MovingFunctions.stdDev(null, 1)",
+    "lang": "painless",
+    "position": {
+     "offset": 22,
+     "start": 0,
+     "end": 38
+    },
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot read the array length because \"<local7>\" is null"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.stdDev(null, Double.NaN)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "NaN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.linearWeightedAvg(null)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.linearWeightedAvg(MovingFunctions.java:106)",
+       "return MovingFunctions.linearWeightedAvg(null)",
+       "                      ^---- HERE"
+      ],
+      "script": "return MovingFunctions.linearWeightedAvg(null)",
+      "lang": "painless",
+      "position": {
+       "offset": 22,
+       "start": 0,
+       "end": 46
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.linearWeightedAvg(MovingFunctions.java:106)",
+     "return MovingFunctions.linearWeightedAvg(null)",
+     "                      ^---- HERE"
+    ],
+    "script": "return MovingFunctions.linearWeightedAvg(null)",
+    "lang": "painless",
+    "position": {
+     "offset": 22,
+     "start": 0,
+     "end": 46
+    },
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot read the array length because \"<local7>\" is null"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.ewma(null, 0.5)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.ewma(MovingFunctions.java:134)",
+       "return MovingFunctions.ewma(null, 0.5)",
+       "                      ^---- HERE"
+      ],
+      "script": "return MovingFunctions.ewma(null, 0.5)",
+      "lang": "painless",
+      "position": {
+       "offset": 22,
+       "start": 0,
+       "end": 38
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.ewma(MovingFunctions.java:134)",
+     "return MovingFunctions.ewma(null, 0.5)",
+     "                      ^---- HERE"
+    ],
+    "script": "return MovingFunctions.ewma(null, 0.5)",
+    "lang": "painless",
+    "position": {
+     "offset": 22,
+     "start": 0,
+     "end": 38
+    },
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot read the array length because \"<local6>\" is null"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holt(null, 0.5, 0.5)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.holt(MovingFunctions.java:164)",
+       "return MovingFunctions.holt(null, 0.5, 0.5)",
+       "                      ^---- HERE"
+      ],
+      "script": "return MovingFunctions.holt(null, 0.5, 0.5)",
+      "lang": "painless",
+      "position": {
+       "offset": 22,
+       "start": 0,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.holt(MovingFunctions.java:164)",
+     "return MovingFunctions.holt(null, 0.5, 0.5)",
+     "                      ^---- HERE"
+    ],
+    "script": "return MovingFunctions.holt(null, 0.5, 0.5)",
+    "lang": "painless",
+    "position": {
+     "offset": 22,
+     "start": 0,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot read the array length because \"values\" is null"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holtWinters(null, 0.5, 0.5, 0.5, 2, false)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.holtWinters(MovingFunctions.java:225)",
+       "return MovingFunctions.holtWinters(null, 0.5, 0.5, 0.5, 2, false)",
+       "                      ^---- HERE"
+      ],
+      "script": "return MovingFunctions.holtWinters(null, 0.5, 0.5, 0.5, 2, false)",
+      "lang": "painless",
+      "position": {
+       "offset": 22,
+       "start": 0,
+       "end": 65
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.holtWinters(MovingFunctions.java:225)",
+     "return MovingFunctions.holtWinters(null, 0.5, 0.5, 0.5, 2, false)",
+     "                      ^---- HERE"
+    ],
+    "script": "return MovingFunctions.holtWinters(null, 0.5, 0.5, 0.5, 2, false)",
+    "lang": "painless",
+    "position": {
+     "offset": 22,
+     "start": 0,
+     "end": 65
+    },
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot read the array length because \"values\" is null"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holtWinters(new double[] {1, 2, 3, 4}, 0.5, 0.5, 0.5, 0, false)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.holtWinters(MovingFunctions.java:311)",
+       "return MovingFunctions.holtWinters(new double[] {1, 2, 3, 4}, 0.5, 0.5, 0.5, 0, false)",
+       "                                   ^---- HERE"
+      ],
+      "script": "return MovingFunctions.holtWinters(new double[] {1, 2, 3, 4}, 0.5, 0.5, 0.5, 0, false)",
+      "lang": "painless",
+      "position": {
+       "offset": 35,
+       "start": 0,
+       "end": 86
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.holtWinters(MovingFunctions.java:311)",
+     "return MovingFunctions.holtWinters(new double[] {1, 2, 3, 4}, 0.5, 0.5, 0.5, 0, false)",
+     "                                   ^---- HERE"
+    ],
+    "script": "return MovingFunctions.holtWinters(new double[] {1, 2, 3, 4}, 0.5, 0.5, 0.5, 0, false)",
+    "lang": "painless",
+    "position": {
+     "offset": 35,
+     "start": 0,
+     "end": 86
+    },
+    "caused_by": {
+     "type": "array_index_out_of_bounds_exception",
+     "reason": "Index 4 out of bounds for length 4"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holtWinters(new double[] {1, 2, 3, 4}, 0.5, 0.5, 0.5, -1, false)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.holtWinters(MovingFunctions.java:292)",
+       "return MovingFunctions.holtWinters(new double[] {1, 2, 3, 4}, 0.5, 0.5, 0.5, -1, false)",
+       "                                   ^---- HERE"
+      ],
+      "script": "return MovingFunctions.holtWinters(new double[] {1, 2, 3, 4}, 0.5, 0.5, 0.5, -1, false)",
+      "lang": "painless",
+      "position": {
+       "offset": 35,
+       "start": 0,
+       "end": 87
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.aggregations.pipeline.MovingFunctions.holtWinters(MovingFunctions.java:292)",
+     "return MovingFunctions.holtWinters(new double[] {1, 2, 3, 4}, 0.5, 0.5, 0.5, -1, false)",
+     "                                   ^---- HERE"
+    ],
+    "script": "return MovingFunctions.holtWinters(new double[] {1, 2, 3, 4}, 0.5, 0.5, 0.5, -1, false)",
+    "lang": "painless",
+    "position": {
+     "offset": 35,
+     "start": 0,
+     "end": 87
+    },
+    "caused_by": {
+     "type": "array_index_out_of_bounds_exception",
+     "reason": "Index -1 out of bounds for length 4"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holtWinters(new double[] {Double.NaN, Double.NaN, Double.NaN, Double.NaN}, 0.5, 0.5, 0.5, 2, false)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "NaN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holtWinters(new double[] {1, 2, 3, 4, 5}, 0.5, 0.5, 0.5, 2, true)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "5.231250000140437"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MovingFunctions.holtWinters(new double[] {0, 0, 0, 0}, 0.5, 0.5, 0.5, 2, true)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.0E-10"
+  }
+ }
+]

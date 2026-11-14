@@ -1,0 +1,1415 @@
+# Tests of Elasticsearch 9.5.5's `platinum` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (security setting=xpack.ml.enabled=true setting=xpack.watcher.enabled=false setting=xpack.security.audit.enabled=true setting=xpack.searchable.snapshot.shared_cache.size=16MB setting=xpack.searchable.snapshot.shared_cache.region_size=256KB setting=node.name=yamlRestTest-0 config=service_tokens:suites/es-config/service_tokens memory=4g heap=1g).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+platinum:aggregate-metrics/100_synthetic_source/aggregate_metric_double
+platinum:aggregate-metrics/100_synthetic_source/aggregate_metric_double with ignore_malformed
+platinum:aggregate-metrics/10_basic/Sort
+platinum:aggregate-metrics/10_basic/Sort on multi-metric field without sum and value_count returns 400
+platinum:aggregate-metrics/10_basic/Test exists query on aggregate metric field
+platinum:aggregate-metrics/10_basic/Test fields api
+platinum:aggregate-metrics/10_basic/Test range query on aggregate metric field
+platinum:aggregate-metrics/10_basic/Test term query on aggregate metric field
+platinum:aggregate-metrics/10_basic/deprecated use of default metric
+platinum:aggregate-metrics/10_basic/deprecated use of multi-fields
+platinum:aggregate-metrics/110_field_caps/aggregate_metric on standard index
+platinum:aggregate-metrics/110_field_caps/aggregate_metric on standard index conflict with double
+platinum:aggregate-metrics/110_field_caps/field caps on all indices
+platinum:aggregate-metrics/110_field_caps/field caps on rollup indices
+platinum:aggregate-metrics/110_field_caps/field caps on time series indices
+platinum:aggregate-metrics/20_min_max_agg/Test min_max aggs
+platinum:aggregate-metrics/20_min_max_agg/Test min_max aggs with query
+platinum:aggregate-metrics/30_sum_agg/Test sum agg
+platinum:aggregate-metrics/30_sum_agg/Test sum agg with query
+platinum:aggregate-metrics/40_avg_agg/Test avg agg
+platinum:aggregate-metrics/40_avg_agg/Test avg agg with query
+platinum:aggregate-metrics/50_value_count_agg/Test value_count agg
+platinum:aggregate-metrics/50_value_count_agg/Test value_count agg with query
+platinum:aggregate-metrics/80_raw_agg_metric_aggs/Test mixed aggregations
+platinum:aggregate-metrics/80_raw_agg_metric_aggs/Test mixed aggregations with query
+platinum:aggregate-metrics/90_tsdb_mappings/Field caps with tsdb
+platinum:aggregate-metrics/90_tsdb_mappings/aggregate_double_metric with time series mappings
+platinum:aggregate-metrics/90_tsdb_mappings/aggregate_double_metric with wrong time series mappings
+platinum:analytics/100_tsdb/Auto date histogram on counter
+platinum:analytics/100_tsdb/aggregate multi_terms
+platinum:analytics/100_tsdb/multi_terms aggregation with time_series aggregation
+platinum:analytics/boxplot/Basic Search
+platinum:analytics/boxplot/Counter field
+platinum:analytics/boxplot/Search With Compression
+platinum:analytics/boxplot/Search With Execution Hint
+platinum:analytics/boxplot/Search With Missing
+platinum:analytics/boxplot/Search With Runtime Field
+platinum:analytics/cumulative_cardinality/bad path
+platinum:analytics/cumulative_cardinality/basic
+platinum:analytics/cumulative_cardinality/format
+platinum:analytics/cumulative_cardinality/invalid parent aggregation
+platinum:analytics/cumulative_cardinality/no results
+platinum:analytics/empty_field_metric/Basic test
+platinum:analytics/empty_field_metric/Rate test
+platinum:analytics/histogram/Histogram Aggregations
+platinum:analytics/histogram/Histogram over histograms
+platinum:analytics/histogram/Histogram requires values in increasing order
+platinum:analytics/histogram/Histogram with _doc_count
+platinum:analytics/histogram/Ranges over histogram
+platinum:analytics/histogram/Ranges over histogram with doc_count
+platinum:analytics/histogram/histogram with large count values
+platinum:analytics/histogram/histogram with synthetic source
+platinum:analytics/histogram/histogram with synthetic source and ignore_malformed
+platinum:analytics/histogram/histogram with synthetic source and zero counts
+platinum:analytics/matrix_stats/Counter field
+platinum:analytics/matrix_stats/matrix stats all fields available with one field
+platinum:analytics/matrix_stats/matrix stats all fields available with two fields
+platinum:analytics/matrix_stats/matrix stats field not in all indices bad request
+platinum:analytics/matrix_stats/matrix stats with bucket_selector
+platinum:analytics/moving_percentiles/Bad window
+platinum:analytics/moving_percentiles/Not under date histo
+platinum:analytics/moving_percentiles/bad path
+platinum:analytics/moving_percentiles/default choses tdigest
+platinum:analytics/moving_percentiles/hdr
+platinum:analytics/moving_percentiles/invalid parent aggregation
+platinum:analytics/moving_percentiles/shift
+platinum:analytics/moving_percentiles/tdigest explicitly
+platinum:analytics/multi_terms/addr and uval
+platinum:analytics/multi_terms/addr and val
+platinum:analytics/multi_terms/aggs with children
+platinum:analytics/multi_terms/collect_mode parameter
+platinum:analytics/multi_terms/min_doc_count parameter
+platinum:analytics/multi_terms/mix and match
+platinum:analytics/multi_terms/order parameter
+platinum:analytics/multi_terms/shard_min_doc_count parameter
+platinum:analytics/multi_terms/shard_size parameter
+platinum:analytics/multi_terms/show_term_doc_count_error parameter
+platinum:analytics/multi_terms/size parameter
+platinum:analytics/multi_terms/val and uval
+platinum:analytics/nested_top_metrics_sort/sort on top metrics keyword asc
+platinum:analytics/nested_top_metrics_sort/sort on top metrics keyword desc
+platinum:analytics/nested_top_metrics_sort/sort on top metrics keyword same version
+platinum:analytics/nested_top_metrics_sort/sort on top metrics non-existing field
+platinum:analytics/nested_top_metrics_sort/sort on top metrics numeric asc
+platinum:analytics/nested_top_metrics_sort/sort on top metrics numeric desc
+platinum:analytics/nested_top_metrics_sort/terms order by top metrics date not null values
+platinum:analytics/nested_top_metrics_sort/terms order by top metrics equal values sorted on term
+platinum:analytics/nested_top_metrics_sort/terms order by top metrics missing metric rewrite_to_filter_by_filter false
+platinum:analytics/nested_top_metrics_sort/terms order by top metrics missing metric rewrite_to_filter_by_filter true
+platinum:analytics/nested_top_metrics_sort/terms order by top metrics null values
+platinum:analytics/nested_top_metrics_sort/terms order by top metrics numeric not null double values
+platinum:analytics/nested_top_metrics_sort/terms order by top metrics numeric not null integer values
+platinum:analytics/nested_top_metrics_sort/terms order by top metrics size greater than 1 rewrite_to_filter_by_filter false
+platinum:analytics/nested_top_metrics_sort/terms order by top metrics size greater than 1 rewrite_to_filter_by_filter true
+platinum:analytics/normalize/bad path
+platinum:analytics/normalize/format
+platinum:analytics/normalize/invalid parent aggregation
+platinum:analytics/normalize/mean
+platinum:analytics/normalize/percent_of_sum
+platinum:analytics/normalize/rescale_0_1
+platinum:analytics/normalize/rescale_0_100
+platinum:analytics/normalize/softmax
+platinum:analytics/normalize/zscore
+platinum:analytics/rate/composite aggregation
+platinum:analytics/rate/rate aggregation on counter field
+platinum:analytics/rate/rate aggregation on counter field partial bucket
+platinum:analytics/rate/rate aggregation on counter field with unit
+platinum:analytics/rate/rate with doc_count
+platinum:analytics/rate/runtime field with script
+platinum:analytics/rate/value count mode
+platinum:analytics/rate/value rate
+platinum:analytics/reset_tracking_rate/test resets do not lead to negative rate
+platinum:analytics/string_stats/basic
+platinum:analytics/string_stats/show_distribution
+platinum:analytics/t_digest_fieldtype/TDigest get
+platinum:analytics/t_digest_fieldtype/TDigest requires values in increasing order
+platinum:analytics/t_digest_fieldtype/TDigest with synthetic source
+platinum:analytics/t_digest_fieldtype/TDigest with synthetic source and empty digest
+platinum:analytics/t_digest_fieldtype/TDigest with synthetic source and explicit summary fields
+platinum:analytics/t_digest_fieldtype/TDigest with synthetic source and zero counts
+platinum:analytics/t_digest_fieldtype/histogram with synthetic source and ignore_malformed
+platinum:analytics/t_test/heteroscedastic t-test
+platinum:analytics/t_test/homoscedastic t-test with filters
+platinum:analytics/t_test/paired t-test
+platinum:analytics/top_metrics/Counter field
+platinum:analytics/top_metrics/fetch keyword
+platinum:analytics/top_metrics/fetch keyword fields with some missing
+platinum:analytics/top_metrics/fetch runtime keyword fails with nice error message
+platinum:analytics/top_metrics/having
+platinum:analytics/top_metrics/inside terms
+platinum:analytics/top_metrics/size is index setting
+platinum:analytics/top_metrics/sort by double field
+platinum:analytics/top_metrics/sort by geo_distance
+platinum:analytics/top_metrics/sort by keyword field fails
+platinum:analytics/top_metrics/sort by long field
+platinum:analytics/top_metrics/sort by numeric script
+platinum:analytics/top_metrics/sort by scaled float field
+platinum:analytics/top_metrics/sort by score
+platinum:analytics/top_metrics/sort by string script fails
+platinum:analytics/top_metrics/with flattened
+platinum:analytics/top_metrics/with sum_buckets
+platinum:analytics/usage/Usage stats on analytics indices
+platinum:api_key/10_basic/Test create api key
+platinum:api_key/10_basic/Test get api key
+platinum:api_key/10_basic/Test has privileges API for api key
+platinum:api_key/10_basic/Test invalidate api keys
+platinum:api_key/11_invalidation/Test invalidate api key by realm name
+platinum:api_key/11_invalidation/Test invalidate api key by username
+platinum:api_key/12_grant/Test grant api key forbidden
+platinum:api_key/12_grant/Test grant api key forbidden with manage_own_api_key privilege
+platinum:api_key/12_grant/Test grant api key with access token and run_as
+platinum:api_key/12_grant/Test grant api key with non-JWT token and client authentication fails
+platinum:api_key/12_grant/Test grant api key with password
+platinum:api_key/12_grant/Test grant api key with password and run_as
+platinum:api_key/12_grant/Test grant api key with token
+platinum:api_key/20_query/Test query api key
+platinum:api_key/21_query_with_aggs/Test composite aggs api key
+platinum:api_key/30_update/Test bulk update api key with empty request fields
+platinum:api_key/30_update/Test bulk update api key without explicit field updates
+platinum:api_key/30_update/Test bulk update api keys
+platinum:api_key/30_update/Test update api key
+platinum:api_key/30_update/Test update api key with empty request fields
+platinum:api_key/30_update/Test update api key without explicit field updates
+platinum:api_key/40_view_role_descriptors/Test API key limited-by role descriptors in Get and Query responses
+platinum:api_key/40_view_role_descriptors/Test API key role descriptors in Get and Query responses
+platinum:api_key/50_cross_cluster/Test create a cross-cluster API key
+platinum:api_key/50_cross_cluster/Test invalidate a cross-cluster API Key
+platinum:api_key/50_cross_cluster/Test update a cross-cluster API Key
+platinum:api_key/60_admin_user/Test create api key
+platinum:api_key/60_admin_user/Test get api key (with role descriptors + metadata)
+platinum:api_key/60_admin_user/Test has privileges API for api key
+platinum:api_key/60_admin_user/Test invalidate api keys
+platinum:api_key/60_admin_user/Test query api keys
+platinum:api_key/60_admin_user/Test update api keys
+platinum:async_search/10_basic/Async search
+platinum:async_search/10_basic/Auto date histogram interval is saved
+platinum:async_search/10_basic/With typed keys
+platinum:async_search/20-with-poin-in-time/Async search with point in time
+platinum:async_search/30_profile/Profiling includes shard results and coordinator request metadata
+platinum:authenticate/10_basic/Test authenticate api
+platinum:authenticate/10_field_level_security/Test doc level security against alias with different users
+platinum:authenticate/11_admin_user/Test authenticate as admin user
+platinum:authenticate/11_admin_user/Test authenticate with token
+platinum:change_password/10_basic/Test changing users password
+platinum:change_password/10_basic/Test changing users password with prehashed password
+platinum:change_password/10_basic/Test unauthorized user changing anothers password
+platinum:change_password/10_basic/Test user changing their own password
+platinum:change_password/11_token/Test user changing their password authenticating with token not allowed
+platinum:change_password/12_custom_hash/Test changing users password with pre-hashed password
+platinum:change_password/12_custom_hash/Test creating users and changing passwords with clear text as hash
+platinum:change_password/12_custom_hash/Test creating users with pre-hashed password
+platinum:constant_keyword/10_basic/Cardinality agg
+platinum:constant_keyword/10_basic/Exist query
+platinum:constant_keyword/10_basic/Field retrieval
+platinum:constant_keyword/10_basic/Filter with histogram
+platinum:constant_keyword/10_basic/Prefix query
+platinum:constant_keyword/10_basic/Simple filter
+platinum:constant_keyword/10_basic/Sort
+platinum:constant_keyword/10_basic/Term query
+platinum:constant_keyword/10_basic/Terms agg
+platinum:constant_keyword/10_basic/Terms query
+platinum:constant_keyword/10_basic/Wildcard query
+platinum:constant_keyword/10_basic/deprecated use of multi-fields
+platinum:constant_keyword/20_dynamic_mapping/Dynamic mappings
+platinum:counted_keyword/10_basic/Counted Terms agg
+platinum:counted_keyword/10_basic/Counted keyword is searchable by default
+platinum:counted_keyword/10_basic/Sampled Counted Terms agg
+platinum:counted_keyword/20_no_index/Counted Terms agg only relies on doc values
+platinum:counted_keyword/20_no_index/Counted keyword with index false is searchable via doc values
+platinum:counted_keyword/30_synthetic_source/Index-level synthetic_source_keep value is respected
+platinum:counted_keyword/30_synthetic_source/Source values are mutated as expected
+platinum:counted_keyword/30_synthetic_source/synthetic source arrays moved to leaf fields
+platinum:counted_keyword/30_synthetic_source/synthetic_source_keep value is not inherited
+platinum:counted_keyword/30_synthetic_source/synthetic_source_keep value is respected
+platinum:counted_keyword/40_multiple_subobjects/multiple subobjects
+platinum:data_streams/10_data_stream_resolvability/Verify data stream resolvability for graph explore API
+platinum:data_streams/10_data_stream_resolvability/Verify data stream resolvability for xpack apis
+platinum:data_streams/10_data_stream_resolvability/Verify data stream resolvability in EQL search API with no sequences
+platinum:data_streams/10_data_stream_resolvability/Verify data stream resolvability in EQL search API with sequences
+platinum:data_streams/10_data_stream_resolvability/Verify data stream resolvability in ILM remove policy API
+platinum:data_streams/10_data_stream_resolvability/Verify data stream resolvability in PIT searches
+platinum:data_streams/10_data_stream_resolvability/Verify data stream resolvability in async search
+platinum:data_streams/10_data_stream_resolvability/Verify data stream resolvability in ilm explain api
+platinum:data_streams/10_data_stream_resolvability/Verify data stream resolvability in migrations API
+platinum:data_streams/10_data_stream_resolvability/Verify data stream resolvability in rollup search
+platinum:data_streams/10_data_stream_resolvability/Verify data stream resolvability rollup
+platinum:deprecation/10_basic/Test Deprecations
+platinum:dlm/10_usage/Test DLM validates downsampling correctly
+platinum:dlm/10_usage/Test data stream lifecycle usage stats
+platinum:dlm/10_usage/Test frozen_after telemetry
+platinum:enrich/10_basic/Test enrich crud apis
+platinum:enrich/10_basic/Test using the deprecated elasticsearch_version field results in a warning
+platinum:enrich/20_standard_index/enrich documents over _bulk
+platinum:enrich/20_standard_index/enrich documents over _bulk via an alias
+platinum:enrich/30_tsdb_index/enrich documents over _bulk
+platinum:enrich/40_synthetic_source/enrich documents over _bulk
+platinum:enrich/50_data_stream/enrich documents over _bulk via a data stream
+platinum:exponential_histogram/10_synthetic_source/Aggregates estimation
+platinum:exponential_histogram/10_synthetic_source/Dense histogram
+platinum:exponential_histogram/10_synthetic_source/Empty Zero Bucket but with custom threshold
+platinum:exponential_histogram/10_synthetic_source/Empty histogram
+platinum:exponential_histogram/10_synthetic_source/Empty histogram with sum
+platinum:exponential_histogram/10_synthetic_source/Non-empty zero bucket with default zero threshold
+platinum:exponential_histogram/10_synthetic_source/Numeric Limits
+platinum:exponential_histogram/10_synthetic_source/Only negative buckets
+platinum:exponential_histogram/10_synthetic_source/Only positive buckets
+platinum:exponential_histogram/10_synthetic_source/Positive infinity aggregates
+platinum:exponential_histogram/10_synthetic_source/Sparse unsorted histogram
+platinum:exponential_histogram/10_synthetic_source/negative infinity aggregates
+platinum:exponential_histogram/20_aggregations/Avg aggregation
+platinum:exponential_histogram/20_aggregations/Boxplot aggregation
+platinum:exponential_histogram/20_aggregations/Exists query
+platinum:exponential_histogram/20_aggregations/Histogram aggregation
+platinum:exponential_histogram/20_aggregations/Max aggregation
+platinum:exponential_histogram/20_aggregations/Min aggregation
+platinum:exponential_histogram/20_aggregations/Percentile ranks aggregation
+platinum:exponential_histogram/20_aggregations/Percentiles aggregation
+platinum:exponential_histogram/20_aggregations/Range aggregation
+platinum:exponential_histogram/20_aggregations/Sum aggregation
+platinum:exponential_histogram/20_aggregations/Value count aggregation
+platinum:exponential_histogram/30_aggregate_metric_aggregations_compatibility/Average aggregation over aggregate_metric_double and exponential_histogram
+platinum:exponential_histogram/30_aggregate_metric_aggregations_compatibility/Exists query over aggregate_metric_double and exponential_histogram
+platinum:exponential_histogram/30_aggregate_metric_aggregations_compatibility/Max aggregation over aggregate_metric_double and exponential_histogram
+platinum:exponential_histogram/30_aggregate_metric_aggregations_compatibility/Min aggregation over aggregate_metric_double and exponential_histogram
+platinum:exponential_histogram/30_aggregate_metric_aggregations_compatibility/Sum aggregation over aggregate_metric_double and exponential_histogram
+platinum:exponential_histogram/30_aggregate_metric_aggregations_compatibility/Value count aggregation over aggregate_metric_double and exponential_histogram
+platinum:exponential_histogram/40_tdigest_histogram_aggregations_compatibility/Average aggregation over tdigest and exponential_histogram
+platinum:exponential_histogram/40_tdigest_histogram_aggregations_compatibility/Boxplot aggregation over tdigest and exponential_histogram
+platinum:exponential_histogram/40_tdigest_histogram_aggregations_compatibility/Exists query over tdigest and exponential_histogram
+platinum:exponential_histogram/40_tdigest_histogram_aggregations_compatibility/Histogram aggregation over tdigest and exponential_histogram
+platinum:exponential_histogram/40_tdigest_histogram_aggregations_compatibility/Max aggregation over tdigest and exponential_histogram
+platinum:exponential_histogram/40_tdigest_histogram_aggregations_compatibility/Min aggregation over tdigest and exponential_histogram
+platinum:exponential_histogram/40_tdigest_histogram_aggregations_compatibility/Percentile ranks aggregation over tdigest and exponential_histogram
+platinum:exponential_histogram/40_tdigest_histogram_aggregations_compatibility/Percentiles aggregation over tdigest and exponential_histogram
+platinum:exponential_histogram/40_tdigest_histogram_aggregations_compatibility/Range aggregation over tdigest and exponential_histogram
+platinum:exponential_histogram/40_tdigest_histogram_aggregations_compatibility/Sum aggregation over tdigest and exponential_histogram
+platinum:exponential_histogram/40_tdigest_histogram_aggregations_compatibility/Value count aggregation over tdigest and exponential_histogram
+platinum:exponential_histogram/50_time_series_metric/Create time series metric with exponential histogram
+platinum:exponential_histogram/50_time_series_metric/Exponential histogram cannot be a counter
+platinum:exponential_histogram/50_time_series_metric/Exponential histogram cannot be a gauge
+platinum:exponential_histogram/50_time_series_metric/Merging templates with time series metric
+platinum:graph/10_basic/Test basic graph explore
+platinum:health/10_usage/Usage stats on the health API
+platinum:inference/170_region_policy_crud/Delete region policy
+platinum:inference/170_region_policy_crud/Delete region policy when none exists
+platinum:inference/170_region_policy_crud/Get region policy when none exists
+platinum:inference/170_region_policy_crud/Put region policy rejects both allowed_geos and allowed_regions
+platinum:inference/170_region_policy_crud/Put region policy rejects empty allowed_geos
+platinum:inference/170_region_policy_crud/Put region policy rejects empty allowed_regions
+platinum:inference/170_region_policy_crud/Put region policy rejects unknown top-level field
+platinum:inference/170_region_policy_crud/Put region policy with force=false behaves like the default
+platinum:inference/170_region_policy_crud/Putting a region policy does not break the get inference api
+platinum:inference/20_semantic_text_field_mapping_incompatible_field_mapping/Fails for missing dense vector inference results in chunks
+platinum:inference/20_semantic_text_field_mapping_incompatible_field_mapping/Fails for missing offsets in chunks
+platinum:inference/20_semantic_text_field_mapping_incompatible_field_mapping/Fails for missing sparse vector inference results in chunks
+platinum:inference/20_semantic_text_field_mapping_incompatible_field_mapping/Fails for non-compatible dimensions
+platinum:inference/20_semantic_text_field_mapping_incompatible_field_mapping/Fails for non-compatible element type
+platinum:inference/20_semantic_text_field_mapping_incompatible_field_mapping/Fails for non-compatible inference id
+platinum:inference/20_semantic_text_field_mapping_incompatible_field_mapping/Fails for non-compatible similarity
+platinum:inference/20_semantic_text_field_mapping_incompatible_field_mapping/Fails for non-compatible task type for dense vectors
+platinum:inference/20_semantic_text_field_mapping_incompatible_field_mapping/Fails for non-compatible task type for sparse vectors
+platinum:inference/80_random_rerank_retriever/Random rerank retriever predictably shuffles results
+platinum:inference/inference_crud/Test get missing model
+platinum:inference/inference_crud/Test put inference with bad task type
+platinum:inference/inference_usage/Test usage given default endpoints
+platinum:inference/inference_usage/Test usage given default endpoints and semantic_text fields
+platinum:logging/10_usage/Logging section is present in xpack usage with default settings
+platinum:logging/10_usage/Logging usage reflects persisted querylog and ES|QL querylog settings
+platinum:logsdb/10_usage/logsdb usage
+platinum:logsdb/20_synthetic_source/synthetic_source match_only_text with number as parent field
+platinum:logsdb/20_synthetic_source/synthetic_source match_only_text with scaled_float as parent field
+platinum:logsdb/20_synthetic_source/synthetic_source match_only_text with wildcard as parent field
+platinum:migrate/10_reindex/Test Reindex With Bad Data Stream Name
+platinum:migrate/10_reindex/Test Reindex With Existing Data Stream
+platinum:migrate/10_reindex/Test Reindex With Nonexistent Data Stream
+platinum:migrate/10_reindex/Test Reindex With Unsupported Mode
+platinum:migrate/20_reindex_status/Test Reindex With Existing Data Stream
+platinum:migrate/20_reindex_status/Test get reindex status with nonexistent task id
+platinum:migrate/30_create_from/Test create from with nonexistent source index
+platinum:migrate/30_create_from/Test create_from with existing source index
+platinum:migrate/30_create_from/Test create_from with existing source index and overrides
+platinum:migrate/30_create_from/Test create_from with remove_index_blocks default of true
+platinum:migrate/30_create_from/Test create_from with remove_index_blocks set to false
+platinum:migration/10_get_feature_upgrade_status/Get feature upgrade status
+platinum:migration/20_post_feature_upgrade/Start feature upgrade
+platinum:ml/3rd_party_deployment/Test cannot create model with a deployment Id
+platinum:ml/3rd_party_deployment/Test cannot start 2 deployments with the same Id
+platinum:ml/3rd_party_deployment/Test cannot start when deployment Id matches a different model
+platinum:ml/3rd_party_deployment/Test clear deployment cache
+platinum:ml/3rd_party_deployment/Test getting and putting Fill Mask with two mask tokens, as well as exceptions caused by requests with the wrong token
+platinum:ml/3rd_party_deployment/Test include model definition status
+platinum:ml/3rd_party_deployment/Test put model alias on pytorch model
+platinum:ml/3rd_party_deployment/Test put model config with Japanese tokenizer
+platinum:ml/3rd_party_deployment/Test put model config with prefix strings
+platinum:ml/3rd_party_deployment/Test start and stop deployment with cache
+platinum:ml/3rd_party_deployment/Test start and stop deployment with low priority
+platinum:ml/3rd_party_deployment/Test start and stop deployment with no cache
+platinum:ml/3rd_party_deployment/Test start and stop multiple deployments
+platinum:ml/3rd_party_deployment/Test start deployment fails while model download in progress
+platinum:ml/3rd_party_deployment/Test start deployment fails with missing model definition
+platinum:ml/3rd_party_deployment/Test start deployment with default Id
+platinum:ml/3rd_party_deployment/Test start deployment with low priority and max allocations more than one
+platinum:ml/3rd_party_deployment/Test start deployment with low priority and multiple allocations
+platinum:ml/3rd_party_deployment/Test start deployment with low priority and multiple threads per allocation
+platinum:ml/3rd_party_deployment/Test stop deployments with allow_no_match
+platinum:ml/3rd_party_deployment/Test update deployment
+platinum:ml/3rd_party_deployment/Test update deployment with low priority and max allocations more than one
+platinum:ml/3rd_party_deployment/Test update deployment with low priority to multiple allocations
+platinum:ml/3rd_party_deployment/Test update model alias on pytorch model to undeployed model
+platinum:ml/bucket_correlation_agg/Test correlation bucket agg simple
+platinum:ml/bucket_correlation_agg/Test correlation with missing buckets_path
+platinum:ml/bucket_correlation_agg/Test correlation with missing function
+platinum:ml/bucket_correlation_agg/Test correlation with pointing to mismatched lengths
+platinum:ml/bucket_correlation_agg/Test correlation with pointing to missing agg
+platinum:ml/bucket_count_ks_test_agg/Test bucket count ks test bucket agg simple
+platinum:ml/bucket_count_ks_test_agg/Test bucket count ks test bucket agg simple with fractions
+platinum:ml/bucket_count_ks_test_agg/Test bucket count ks test with empty alternatives
+platinum:ml/bucket_count_ks_test_agg/Test bucket count ks test with missing buckets_path
+platinum:ml/bucket_count_ks_test_agg/Test correlation with pointing to missing agg
+platinum:ml/calendar_crud/Test PageParams
+platinum:ml/calendar_crud/Test PageParams with ID is invalid
+platinum:ml/calendar_crud/Test calendar CRUD
+platinum:ml/calendar_crud/Test calendar actions with new job group
+platinum:ml/calendar_crud/Test calendar get events
+platinum:ml/calendar_crud/Test cannot create calendar with name _all
+platinum:ml/calendar_crud/Test cannot overwrite an exisiting calendar
+platinum:ml/calendar_crud/Test delete calendar deletes events
+platinum:ml/calendar_crud/Test delete event from non existing calendar
+platinum:ml/calendar_crud/Test delete job from non existing calendar
+platinum:ml/calendar_crud/Test deleted job is removed from calendar
+platinum:ml/calendar_crud/Test get all calendar events
+platinum:ml/calendar_crud/Test get calendar events for job
+platinum:ml/calendar_crud/Test get calendar events with job groups
+platinum:ml/calendar_crud/Test get calendar given missing
+platinum:ml/calendar_crud/Test list of job Ids
+platinum:ml/calendar_crud/Test post calendar events given empty events
+platinum:ml/calendar_crud/Test put calendar given id contains invalid chars
+platinum:ml/calendar_crud/Test update calendar job ids
+platinum:ml/categorization_agg/Test categorization agg simple
+platinum:ml/categorization_agg/Test categorization aggregation against unsupported field
+platinum:ml/categorization_agg/Test categorization aggregation with poor settings
+platinum:ml/change_point_agg/Test change_point agg simple
+platinum:ml/change_point_agg/Test change_point with bad buckets_path
+platinum:ml/change_point_agg/Test change_point with missing buckets_path
+platinum:ml/change_point_agg/Test change_point with terms
+platinum:ml/change_point_agg/Test change_point with too few buckets
+platinum:ml/custom_all_field/Test querying custom all field
+platinum:ml/custom_all_field/Test wildcard job id
+platinum:ml/data_frame_analytics_cat_apis/Test cat data frame analytics all jobs with header
+platinum:ml/data_frame_analytics_cat_apis/Test cat data frame analytics all jobs with header and column selection
+platinum:ml/data_frame_analytics_cat_apis/Test cat data frame analytics single job
+platinum:ml/data_frame_analytics_cat_apis/Test cat data frame analytics single job with header
+platinum:ml/data_frame_analytics_crud/Test GET config for export
+platinum:ml/data_frame_analytics_crud/Test delete given missing config
+platinum:ml/data_frame_analytics_crud/Test delete given stopped config
+platinum:ml/data_frame_analytics_crud/Test get given expression without matches and allow_no_match is false
+platinum:ml/data_frame_analytics_crud/Test get given expression without matches and allow_no_match is true
+platinum:ml/data_frame_analytics_crud/Test get given missing analytics
+platinum:ml/data_frame_analytics_crud/Test get given missing analytics and allow_no_match is false
+platinum:ml/data_frame_analytics_crud/Test get given multiple analytics
+platinum:ml/data_frame_analytics_crud/Test get stats given expression without matches and allow_no_match is false
+platinum:ml/data_frame_analytics_crud/Test get stats given expression without matches and allow_no_match is true
+platinum:ml/data_frame_analytics_crud/Test get stats given missing analytics
+platinum:ml/data_frame_analytics_crud/Test get stats given missing analytics and allow_no_match is false
+platinum:ml/data_frame_analytics_crud/Test get stats given multiple analytics
+platinum:ml/data_frame_analytics_crud/Test get stats on newly created config
+platinum:ml/data_frame_analytics_crud/Test get-all and get-all-stats given no analytics exist
+platinum:ml/data_frame_analytics_crud/Test max model memory limit
+platinum:ml/data_frame_analytics_crud/Test put classification given dependent_variable is not defined
+platinum:ml/data_frame_analytics_crud/Test put classification given deprecated maximum_number_trees
+platinum:ml/data_frame_analytics_crud/Test put classification given eta greater than one
+platinum:ml/data_frame_analytics_crud/Test put classification given eta less than 1e-3
+platinum:ml/data_frame_analytics_crud/Test put classification given feature_bag_fraction is greater than one
+platinum:ml/data_frame_analytics_crud/Test put classification given feature_bag_fraction is negative
+platinum:ml/data_frame_analytics_crud/Test put classification given max_trees is greater than 2k
+platinum:ml/data_frame_analytics_crud/Test put classification given max_trees is zero
+platinum:ml/data_frame_analytics_crud/Test put classification given negative gamma
+platinum:ml/data_frame_analytics_crud/Test put classification given negative lambda
+platinum:ml/data_frame_analytics_crud/Test put classification given num_top_classes is greater than 1k
+platinum:ml/data_frame_analytics_crud/Test put classification given num_top_classes is less than minus one
+platinum:ml/data_frame_analytics_crud/Test put classification given training_percent is greater than hundred
+platinum:ml/data_frame_analytics_crud/Test put classification given training_percent is less than zero
+platinum:ml/data_frame_analytics_crud/Test put classification given valid
+platinum:ml/data_frame_analytics_crud/Test put config given analyzed_fields include field excluded by source
+platinum:ml/data_frame_analytics_crud/Test put config given dest index contains uppercase chars
+platinum:ml/data_frame_analytics_crud/Test put config given dest with empty index
+platinum:ml/data_frame_analytics_crud/Test put config given dest without index
+platinum:ml/data_frame_analytics_crud/Test put config given empty analysis
+platinum:ml/data_frame_analytics_crud/Test put config given missing analysis
+platinum:ml/data_frame_analytics_crud/Test put config given missing dest
+platinum:ml/data_frame_analytics_crud/Test put config given missing source
+platinum:ml/data_frame_analytics_crud/Test put config given source with empty index array
+platinum:ml/data_frame_analytics_crud/Test put config given source with empty string in index array
+platinum:ml/data_frame_analytics_crud/Test put config given source without index
+platinum:ml/data_frame_analytics_crud/Test put config with create_time in the body
+platinum:ml/data_frame_analytics_crud/Test put config with dest index included in source via alias
+platinum:ml/data_frame_analytics_crud/Test put config with dest index matching multiple indices
+platinum:ml/data_frame_analytics_crud/Test put config with dest index same as source index
+platinum:ml/data_frame_analytics_crud/Test put config with inconsistent body/param ids
+platinum:ml/data_frame_analytics_crud/Test put config with invalid dest index name
+platinum:ml/data_frame_analytics_crud/Test put config with invalid id
+platinum:ml/data_frame_analytics_crud/Test put config with missing concrete source index
+platinum:ml/data_frame_analytics_crud/Test put config with missing wildcard source index
+platinum:ml/data_frame_analytics_crud/Test put config with pattern dest index name
+platinum:ml/data_frame_analytics_crud/Test put config with remote source index
+platinum:ml/data_frame_analytics_crud/Test put config with security headers in the body
+platinum:ml/data_frame_analytics_crud/Test put config with unknown field in outlier detection analysis
+platinum:ml/data_frame_analytics_crud/Test put config with unknown top level field
+platinum:ml/data_frame_analytics_crud/Test put config with version in the body
+platinum:ml/data_frame_analytics_crud/Test put outlier_detection given feature_influence_threshold is greater than one
+platinum:ml/data_frame_analytics_crud/Test put outlier_detection given feature_influence_threshold is negative
+platinum:ml/data_frame_analytics_crud/Test put outlier_detection given n_neighbors is negative
+platinum:ml/data_frame_analytics_crud/Test put outlier_detection given n_neighbors is zero
+platinum:ml/data_frame_analytics_crud/Test put outlier_detection given outlier_fraction is greater than one
+platinum:ml/data_frame_analytics_crud/Test put outlier_detection given outlier_fraction is negative
+platinum:ml/data_frame_analytics_crud/Test put regression given dependent_variable is not defined
+platinum:ml/data_frame_analytics_crud/Test put regression given eta greater than one
+platinum:ml/data_frame_analytics_crud/Test put regression given eta less than 1e-3
+platinum:ml/data_frame_analytics_crud/Test put regression given feature_bag_fraction is greater than one
+platinum:ml/data_frame_analytics_crud/Test put regression given feature_bag_fraction is negative
+platinum:ml/data_frame_analytics_crud/Test put regression given loss_function_parameter is negative
+platinum:ml/data_frame_analytics_crud/Test put regression given loss_function_parameter is zero
+platinum:ml/data_frame_analytics_crud/Test put regression given max_trees is greater than 2k
+platinum:ml/data_frame_analytics_crud/Test put regression given max_trees is zero
+platinum:ml/data_frame_analytics_crud/Test put regression given negative gamma
+platinum:ml/data_frame_analytics_crud/Test put regression given negative lambda
+platinum:ml/data_frame_analytics_crud/Test put regression given training_percent is greater than hundred
+platinum:ml/data_frame_analytics_crud/Test put regression given training_percent is less than zero
+platinum:ml/data_frame_analytics_crud/Test put regression given valid
+platinum:ml/data_frame_analytics_crud/Test put valid config with custom outlier detection
+platinum:ml/data_frame_analytics_crud/Test put valid config with default outlier detection
+platinum:ml/data_frame_analytics_crud/Test put valid config with default outlier detection, query, and filter
+platinum:ml/data_frame_analytics_crud/Test put with description
+platinum:ml/data_frame_analytics_crud/Test put with runtime mappings
+platinum:ml/data_frame_analytics_crud/Test update given all updatable settings
+platinum:ml/data_frame_analytics_crud/Test update given missing analytics
+platinum:ml/datafeed_cat_apis/Test cat datafeeds
+platinum:ml/datafeeds_crud/Test delete datafeed
+platinum:ml/datafeeds_crud/Test delete datafeed with missing id
+platinum:ml/datafeeds_crud/Test force delete datafeed
+platinum:ml/datafeeds_crud/Test get all datafeeds and stats given no datafeed exists
+platinum:ml/datafeeds_crud/Test get datafeed for export
+platinum:ml/datafeeds_crud/Test get datafeed with expression that does not match and allow_no_match
+platinum:ml/datafeeds_crud/Test get datafeed with expression that does not match and not allow_no_match
+platinum:ml/datafeeds_crud/Test put and update datafeed with indices options
+platinum:ml/datafeeds_crud/Test put and update datafeed with indices options in params
+platinum:ml/datafeeds_crud/Test put datafeed referring to existing job_id
+platinum:ml/datafeeds_crud/Test put datafeed referring to missing job_id
+platinum:ml/datafeeds_crud/Test put datafeed whose id is already taken
+platinum:ml/datafeeds_crud/Test put datafeed with aggregations
+platinum:ml/datafeeds_crud/Test put datafeed with chunking_config
+platinum:ml/datafeeds_crud/Test put datafeed with invalid query
+platinum:ml/datafeeds_crud/Test put datafeed with job_id that is already used by another datafeed
+platinum:ml/datafeeds_crud/Test put datafeed with security headers in the body
+platinum:ml/datafeeds_crud/Test update datafeed
+platinum:ml/datafeeds_crud/Test update datafeed to point to different job
+platinum:ml/datafeeds_crud/Test update datafeed to point to job already attached to another datafeed
+platinum:ml/datafeeds_crud/Test update datafeed to point to missing job
+platinum:ml/datafeeds_crud/Test update datafeed with missing id
+platinum:ml/delete_expired_data/Test delete expired data with body parameters
+platinum:ml/delete_expired_data/Test delete expired data with no body
+platinum:ml/delete_expired_data/Test delete expired data with path parameters
+platinum:ml/delete_expired_data/Test delete expired data with unknown job id
+platinum:ml/delete_forecast/Test delete all where no forecast_id is set
+platinum:ml/delete_forecast/Test delete forecast on missing forecast
+platinum:ml/delete_forecast/Test delete on _all forecasts
+platinum:ml/delete_forecast/Test delete on _all forecasts not allow no forecasts
+platinum:ml/delete_job_force/Test cannot force delete a non-existent job
+platinum:ml/delete_job_force/Test force delete a closed job
+platinum:ml/delete_job_force/Test force delete an open job
+platinum:ml/delete_job_force/Test force delete an open job that is referred by a started datafeed
+platinum:ml/delete_job_force/Test force delete job that is referred by a datafeed
+platinum:ml/delete_model_snapshot/Test delete snapshot missing job_id
+platinum:ml/delete_model_snapshot/Test delete snapshot missing snapshotId
+platinum:ml/delete_model_snapshot/Test with unknown job id
+platinum:ml/estimate_model_memory/Test by and partition field
+platinum:ml/estimate_model_memory/Test by and partition fields also influencers
+platinum:ml/estimate_model_memory/Test by and partition fields with independent influencer
+platinum:ml/estimate_model_memory/Test by field
+platinum:ml/estimate_model_memory/Test by field also influencer
+platinum:ml/estimate_model_memory/Test by field with independent influencer
+platinum:ml/estimate_model_memory/Test missing max bucket cardinality
+platinum:ml/estimate_model_memory/Test missing overall cardinality
+platinum:ml/estimate_model_memory/Test over and partition field
+platinum:ml/estimate_model_memory/Test over and partition fields also influencers
+platinum:ml/estimate_model_memory/Test over and partition fields with independent influencer
+platinum:ml/estimate_model_memory/Test over field
+platinum:ml/estimate_model_memory/Test over field also influencer
+platinum:ml/estimate_model_memory/Test over field with independent influencer
+platinum:ml/estimate_model_memory/Test partition field
+platinum:ml/estimate_model_memory/Test partition field also influencer
+platinum:ml/estimate_model_memory/Test partition field with independent influencer
+platinum:ml/evaluate_data_frame/Test classification accuracy
+platinum:ml/evaluate_data_frame/Test classification accuracy with missing predicted_field
+platinum:ml/evaluate_data_frame/Test classification auc_roc
+platinum:ml/evaluate_data_frame/Test classification auc_roc given actual_field is never equal to fish
+platinum:ml/evaluate_data_frame/Test classification auc_roc given predicted_class_field is never equal to mouse
+platinum:ml/evaluate_data_frame/Test classification auc_roc with default top_classes_field
+platinum:ml/evaluate_data_frame/Test classification auc_roc with missing class_name
+platinum:ml/evaluate_data_frame/Test classification given evaluation with empty metrics
+platinum:ml/evaluate_data_frame/Test classification given missing actual_field
+platinum:ml/evaluate_data_frame/Test classification given missing predicted_field
+platinum:ml/evaluate_data_frame/Test classification given missing top_classes_field
+platinum:ml/evaluate_data_frame/Test classification multiclass_confusion_matrix
+platinum:ml/evaluate_data_frame/Test classification multiclass_confusion_matrix with explicit size
+platinum:ml/evaluate_data_frame/Test classification precision
+platinum:ml/evaluate_data_frame/Test classification recall
+platinum:ml/evaluate_data_frame/Test classification with null metrics
+platinum:ml/evaluate_data_frame/Test given index does not exist
+platinum:ml/evaluate_data_frame/Test given missing evaluation
+platinum:ml/evaluate_data_frame/Test given missing index
+platinum:ml/evaluate_data_frame/Test outlier_detection auc_roc
+platinum:ml/evaluate_data_frame/Test outlier_detection auc_roc given actual_field is always false
+platinum:ml/evaluate_data_frame/Test outlier_detection auc_roc given actual_field is always true
+platinum:ml/evaluate_data_frame/Test outlier_detection auc_roc given actual_field is int
+platinum:ml/evaluate_data_frame/Test outlier_detection auc_roc include curve
+platinum:ml/evaluate_data_frame/Test outlier_detection confusion_matrix
+platinum:ml/evaluate_data_frame/Test outlier_detection default metrics
+platinum:ml/evaluate_data_frame/Test outlier_detection given confusion_matrix with empty thresholds
+platinum:ml/evaluate_data_frame/Test outlier_detection given confusion_matrix with threshold less than zero
+platinum:ml/evaluate_data_frame/Test outlier_detection given evaluation with empty metrics
+platinum:ml/evaluate_data_frame/Test outlier_detection given missing actual_field
+platinum:ml/evaluate_data_frame/Test outlier_detection given missing predicted_probability_field
+platinum:ml/evaluate_data_frame/Test outlier_detection given precision with empty thresholds
+platinum:ml/evaluate_data_frame/Test outlier_detection given precision with threshold less than zero
+platinum:ml/evaluate_data_frame/Test outlier_detection given recall with empty thresholds
+platinum:ml/evaluate_data_frame/Test outlier_detection given recall with threshold less than zero
+platinum:ml/evaluate_data_frame/Test outlier_detection precision
+platinum:ml/evaluate_data_frame/Test outlier_detection recall
+platinum:ml/evaluate_data_frame/Test outlier_detection with query
+platinum:ml/evaluate_data_frame/Test regression given evaluation with empty metrics
+platinum:ml/evaluate_data_frame/Test regression given missing actual_field
+platinum:ml/evaluate_data_frame/Test regression given missing predicted_field
+platinum:ml/evaluate_data_frame/Test regression huber
+platinum:ml/evaluate_data_frame/Test regression mean_squared_error
+platinum:ml/evaluate_data_frame/Test regression mean_squared_logarithmic_error
+platinum:ml/evaluate_data_frame/Test regression r_squared
+platinum:ml/evaluate_data_frame/Test regression with null metrics
+platinum:ml/explain_data_frame_analytics/Test both job id and body
+platinum:ml/explain_data_frame_analytics/Test empty data frame given body
+platinum:ml/explain_data_frame_analytics/Test field_selection given body
+platinum:ml/explain_data_frame_analytics/Test field_selection given job
+platinum:ml/explain_data_frame_analytics/Test given no included field
+platinum:ml/explain_data_frame_analytics/Test id that matches multiple jobs
+platinum:ml/explain_data_frame_analytics/Test missing job
+platinum:ml/explain_data_frame_analytics/Test neither job id nor body
+platinum:ml/explain_data_frame_analytics/Test non-empty data frame given body
+platinum:ml/filter_crud/Test create filter api
+platinum:ml/filter_crud/Test create filter api with mismatching body ID
+platinum:ml/filter_crud/Test create filter given invalid filter_id
+platinum:ml/filter_crud/Test delete in-use filter
+platinum:ml/filter_crud/Test get all filter given no filter exists
+platinum:ml/filter_crud/Test get filter API
+platinum:ml/filter_crud/Test get filter API with bad ID
+platinum:ml/filter_crud/Test get filters API
+platinum:ml/filter_crud/Test get filters API with expression ID
+platinum:ml/filter_crud/Test non-existing filter
+platinum:ml/filter_crud/Test update filter
+platinum:ml/filter_crud/Test update filter given no filter matches filter_id
+platinum:ml/filter_crud/Test update filter given remove item is not present
+platinum:ml/filter_crud/Test valid delete filter
+platinum:ml/forecast/Test forecast given duration is negative
+platinum:ml/forecast/Test forecast given duration is too large
+platinum:ml/forecast/Test forecast given duration is zero
+platinum:ml/forecast/Test forecast given expires_in is negative
+platinum:ml/forecast/Test forecast given max_model_memory is too large
+platinum:ml/forecast/Test forecast on closed job
+platinum:ml/frequent_item_sets_agg/Test deprecated frequent items
+platinum:ml/frequent_item_sets_agg/Test frequent item sets array fields
+platinum:ml/frequent_item_sets_agg/Test frequent item sets array fields profile
+platinum:ml/frequent_item_sets_agg/Test frequent item sets as multi-bucket subagg
+platinum:ml/frequent_item_sets_agg/Test frequent item sets as subagg
+platinum:ml/frequent_item_sets_agg/Test frequent item sets date format
+platinum:ml/frequent_item_sets_agg/Test frequent item sets date format 2
+platinum:ml/frequent_item_sets_agg/Test frequent item sets exclude
+platinum:ml/frequent_item_sets_agg/Test frequent item sets filter
+platinum:ml/frequent_item_sets_agg/Test frequent item sets flattened fields
+platinum:ml/frequent_item_sets_agg/Test frequent item sets include
+platinum:ml/frequent_item_sets_agg/Test frequent item sets unsupported subaggs
+platinum:ml/frequent_item_sets_agg/Test frequent item sets unsupported types
+platinum:ml/frequent_item_sets_agg/Test frequent items on empty index
+platinum:ml/get_datafeed_stats/Test explicit get all datafeed stats given stopped datafeeds
+platinum:ml/get_datafeed_stats/Test get datafeed stats given missing datafeed_id
+platinum:ml/get_datafeed_stats/Test get datafeed stats when total_search_time_ms mapping is missing
+platinum:ml/get_datafeed_stats/Test get datafeed stats with expression that does not match and allow_no_match
+platinum:ml/get_datafeed_stats/Test get datafeed stats with expression that does not match and not allow_no_match
+platinum:ml/get_datafeed_stats/Test get single datafeed stats
+platinum:ml/get_datafeed_stats/Test get stats for started datafeed
+platinum:ml/get_datafeed_stats/Test get stats for started datafeed contains timing stats
+platinum:ml/get_datafeed_stats/Test implicit get all datafeed stats given started datafeeds
+platinum:ml/get_datafeed_stats/Test implicit get all datafeed stats given stopped datafeeds
+platinum:ml/get_datafeed_stats/Test remote_cluster_stats absent for running non-CPS datafeed
+platinum:ml/get_datafeed_stats/Test remote_cluster_stats absent for stopped non-CPS datafeed
+platinum:ml/get_datafeeds/Test explicit get all datafeeds
+platinum:ml/get_datafeeds/Test get datafeed given missing datafeed_id
+platinum:ml/get_datafeeds/Test get single datafeed
+platinum:ml/get_datafeeds/Test implicit get all datafeeds
+platinum:ml/get_memory_stats/ML memory all nodes
+platinum:ml/get_memory_stats/ML memory for ML nodes
+platinum:ml/get_memory_stats/ML memory for specific node
+platinum:ml/get_model_snapshots/Test get model snapshots API with _all
+platinum:ml/get_model_snapshots/Test get model snapshots API with ascending
+platinum:ml/get_model_snapshots/Test get model snapshots API with from
+platinum:ml/get_model_snapshots/Test get model snapshots API with no params
+platinum:ml/get_model_snapshots/Test get model snapshots API with size
+platinum:ml/get_model_snapshots/Test get model snapshots API with start/end
+platinum:ml/get_model_snapshots/Test get specific model snapshot
+platinum:ml/get_model_snapshots/Test with unknown job id
+platinum:ml/get_trained_model_stats/Test get stats given expression without matches and allow_no_match is false
+platinum:ml/get_trained_model_stats/Test get stats given expression without matches and allow_no_match is true
+platinum:ml/get_trained_model_stats/Test get stats given missing trained model
+platinum:ml/get_trained_model_stats/Test get stats given trained models
+platinum:ml/inference_crud/Test PUT model where target type and inference config mismatch
+platinum:ml/inference_crud/Test delete already-deleted model returns 404 not 409
+platinum:ml/inference_crud/Test delete given model referenced by pipeline
+platinum:ml/inference_crud/Test delete given model with alias referenced by pipeline
+platinum:ml/inference_crud/Test delete given unused trained model
+platinum:ml/inference_crud/Test delete model alias
+platinum:ml/inference_crud/Test delete model alias where alias points to different model
+platinum:ml/inference_crud/Test delete model alias with missing alias
+platinum:ml/inference_crud/Test delete with missing model
+platinum:ml/inference_crud/Test exclude_generated flag
+platinum:ml/inference_crud/Test force delete given model referenced by pipeline
+platinum:ml/inference_crud/Test force delete given model with alias referenced by pipeline
+platinum:ml/inference_crud/Test get given expression without matches and allow_no_match is false
+platinum:ml/inference_crud/Test get given expression without matches and allow_no_match is true
+platinum:ml/inference_crud/Test get given missing trained model
+platinum:ml/inference_crud/Test get models
+platinum:ml/inference_crud/Test get models with tags
+platinum:ml/inference_crud/Test get pre-packaged trained models
+platinum:ml/inference_crud/Test include model definition status
+platinum:ml/inference_crud/Test include model platform architecture
+platinum:ml/inference_crud/Test put ensemble with empty models
+platinum:ml/inference_crud/Test put ensemble with single node and empty feature_names
+platinum:ml/inference_crud/Test put ensemble with tree where tree has out of bounds feature_names index
+platinum:ml/inference_crud/Test put model
+platinum:ml/inference_crud/Test put model model aliases
+platinum:ml/inference_crud/Test put model with empty input.field_names
+platinum:ml/inference_crud/Test put nlp model config with vocabulary set
+platinum:ml/inference_crud/Test put with defer_definition_decompression with invalid compressed definition
+platinum:ml/inference_crud/Test put with defer_definition_decompression with invalid compression definition and no memory estimate
+platinum:ml/inference_crud/Test put with defer_definition_decompression with invalid definition and no memory estimate
+platinum:ml/inference_crud/Test update model alias where alias exists but old model id is different inference type
+platinum:ml/inference_crud/Test update model alias where alias exists but reassign is false
+platinum:ml/inference_crud/Test update model alias with bad alias
+platinum:ml/inference_crud/Test update model alias with model id referring to missing model
+platinum:ml/inference_processor/Test create processor with missing mandatory fields
+platinum:ml/job_cat_apis/Test cat anomaly detector jobs
+platinum:ml/job_groups/Test close job API
+platinum:ml/job_groups/Test get job API
+platinum:ml/job_groups/Test get job stats API
+platinum:ml/job_groups/Test put job with empty group
+platinum:ml/job_groups/Test put job with group that matches an job id
+platinum:ml/job_groups/Test put job with group that matches its id
+platinum:ml/job_groups/Test put job with id that matches an existing group
+platinum:ml/job_groups/Test put job with invalid group
+platinum:ml/jobs_crud/Test cannot create job with model snapshot id set
+platinum:ml/jobs_crud/Test close all jobs
+platinum:ml/jobs_crud/Test close job
+platinum:ml/jobs_crud/Test close job with body params
+platinum:ml/jobs_crud/Test close jobs with expression that does not match and allow_no_match
+platinum:ml/jobs_crud/Test close jobs with expression that does not match and not allow_no_match
+platinum:ml/jobs_crud/Test close jobs with expression that matches
+platinum:ml/jobs_crud/Test closing a closed job isn't an error
+platinum:ml/jobs_crud/Test delete job that does not exist
+platinum:ml/jobs_crud/Test delete job that is opened
+platinum:ml/jobs_crud/Test delete job that is referred by a datafeed
+platinum:ml/jobs_crud/Test force close job
+platinum:ml/jobs_crud/Test force closing a closed job isn't an error
+platinum:ml/jobs_crud/Test function shortcut expansion
+platinum:ml/jobs_crud/Test get all jobs and stats given no job exists
+platinum:ml/jobs_crud/Test get job API with non existing job id
+platinum:ml/jobs_crud/Test get job with datafeed
+platinum:ml/jobs_crud/Test get jobs with expression that does not match and allow_no_match
+platinum:ml/jobs_crud/Test get jobs with expression that does not match and not allow_no_match
+platinum:ml/jobs_crud/Test job crud apis
+platinum:ml/jobs_crud/Test job with categorization_analyzer and categorization_filters
+platinum:ml/jobs_crud/Test job with rule referencing missing filter
+platinum:ml/jobs_crud/Test job with rules
+platinum:ml/jobs_crud/Test jobs with named and custom categorization_analyzer
+platinum:ml/jobs_crud/Test max model memory limit
+platinum:ml/jobs_crud/Test open and close an unknown job is resource not found
+platinum:ml/jobs_crud/Test open job when persistent task allocation disabled
+platinum:ml/jobs_crud/Test put job deprecated bucket span
+platinum:ml/jobs_crud/Test put job with datafeed
+platinum:ml/jobs_crud/Test put job with datafeed with indices options in params
+platinum:ml/jobs_crud/Test put job with duplicate detector configurations
+platinum:ml/jobs_crud/Test put job with id that is already taken
+platinum:ml/jobs_crud/Test put job with inconsistent body/param ids
+platinum:ml/jobs_crud/Test put job with inconsistent model snapshot settings
+platinum:ml/jobs_crud/Test put job with model_memory_limit as number
+platinum:ml/jobs_crud/Test put job with model_memory_limit as string and lazy open
+platinum:ml/jobs_crud/Test put job with model_prune_window
+platinum:ml/jobs_crud/Test put job with time field in analysis_config
+platinum:ml/jobs_crud/Test reopen job resets the finished time
+platinum:ml/jobs_crud/Test update job
+platinum:ml/jobs_get/Test explicit get all jobs
+platinum:ml/jobs_get/Test get job for export
+platinum:ml/jobs_get/Test get job given missing job_id
+platinum:ml/jobs_get/Test get single job
+platinum:ml/jobs_get/Test implicit get all jobs
+platinum:ml/jobs_get_result_buckets/Test get buckets given exclude_interim is false
+platinum:ml/jobs_get_result_buckets/Test get buckets given exclude_interim is true
+platinum:ml/jobs_get_result_buckets/Test get buckets with paging
+platinum:ml/jobs_get_result_buckets/Test get buckets with paging in body
+platinum:ml/jobs_get_result_buckets/Test get buckets with sort field and secondary sort by time
+platinum:ml/jobs_get_result_buckets/Test mutually-exclusive params
+platinum:ml/jobs_get_result_buckets/Test mutually-exclusive params via body
+platinum:ml/jobs_get_result_buckets/Test result buckets api
+platinum:ml/jobs_get_result_buckets/Test result buckets api with time range
+platinum:ml/jobs_get_result_buckets/Test result single bucket api
+platinum:ml/jobs_get_result_buckets/Test result single bucket api with empty body
+platinum:ml/jobs_get_result_buckets/Test with unknown job id
+platinum:ml/jobs_get_result_categories/Test get categories with pagination
+platinum:ml/jobs_get_result_categories/Test get category by id
+platinum:ml/jobs_get_result_categories/Test get category by partition
+platinum:ml/jobs_get_result_categories/Test post get categories with pagination
+platinum:ml/jobs_get_result_categories/Test result categories api
+platinum:ml/jobs_get_result_categories/Test with invalid param combinations
+platinum:ml/jobs_get_result_categories/Test with invalid param combinations via body
+platinum:ml/jobs_get_result_categories/Test with unknown job id
+platinum:ml/jobs_get_result_influencers/Test get influencers api sort
+platinum:ml/jobs_get_result_influencers/Test get influencers api with influencer score filter
+platinum:ml/jobs_get_result_influencers/Test get influencers given exclude_interim false
+platinum:ml/jobs_get_result_influencers/Test get influencers given exclude_interim true
+platinum:ml/jobs_get_result_influencers/Test get influencers with paging
+platinum:ml/jobs_get_result_influencers/Test get influencers with paging in body
+platinum:ml/jobs_get_result_influencers/Test result influencers api
+platinum:ml/jobs_get_result_influencers/Test result influencers api with time range
+platinum:ml/jobs_get_result_influencers/Test with unknown job id
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given bucket_span
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given bucket_span and overall_score filter
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given bucket_span and top_n is 2
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given bucket_span is smaller than max job bucket_span
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given default
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given epoch start and end params
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given exclude_interim
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given invalid end param
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given invalid start param
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given missing job
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given no matching jobs
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given non-matching expression and allow_no_match
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given non-matching expression and not allow_no_match
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given overall_score filter
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given string start and end params
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given top_n is 0
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given top_n is 2
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given top_n is 3
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given top_n is greater than the job count
+platinum:ml/jobs_get_result_overall_buckets/Test overall buckets given top_n is negative
+platinum:ml/jobs_get_result_records/Test get records given exclude_interim is false
+platinum:ml/jobs_get_result_records/Test get records given exclude_interim is true
+platinum:ml/jobs_get_result_records/Test get records with paging
+platinum:ml/jobs_get_result_records/Test get records with paging in body
+platinum:ml/jobs_get_result_records/Test result records api
+platinum:ml/jobs_get_result_records/Test result records api with time range
+platinum:ml/jobs_get_result_records/Test with unknown job id
+platinum:ml/jobs_get_stats/Test closed results index
+platinum:ml/jobs_get_stats/Test get all job stats implicitly
+platinum:ml/jobs_get_stats/Test get all job stats with _all
+platinum:ml/jobs_get_stats/Test get all job stats with wildcard
+platinum:ml/jobs_get_stats/Test get job stats after uploading data prompting the creation of some stats
+platinum:ml/jobs_get_stats/Test get job stats for closed job
+platinum:ml/jobs_get_stats/Test get job stats given missing job
+platinum:ml/jobs_get_stats/Test get job stats given pattern and allow_no_match
+platinum:ml/jobs_get_stats/Test get job stats given pattern and not allow_no_match
+platinum:ml/jobs_get_stats/Test get job stats of datafeed job that has not received any data
+platinum:ml/jobs_get_stats/Test no exception on get job stats with missing index
+platinum:ml/ml_anomalies_default_mappings/Test _meta exists when two jobs share an index
+platinum:ml/ml_anomalies_default_mappings/Test new fields are mapped as keyword
+platinum:ml/ml_classic_analyze/Test analyze API with an analyzer that does what we used to do in native code
+platinum:ml/ml_info/Test ml info
+platinum:ml/ml_info/Test ml info model_platform_variant
+platinum:ml/ml_standard_analyze/Test 7.16 analyzer with blank lines
+platinum:ml/ml_standard_analyze/Test 7.16 analyzer with multiple multiline messages
+platinum:ml/ml_standard_analyze/Test 7.16 analyzer with stop words in messages
+platinum:ml/ml_standard_analyze/Test 7.16 analyzer with stop words in messages and strange lines without letters
+platinum:ml/ml_standard_analyze/Test analyze API with the standard 7.16 ML analyzer
+platinum:ml/p_value_significant_term_score/Test p_value significant terms score
+platinum:ml/pipeline_inference/Test setting results field is invalid
+platinum:ml/pipeline_inference/invalid parent aggregation
+platinum:ml/post_data/Test POST data job api, flush, close and verify DataCounts doc
+platinum:ml/post_data/Test flush and close job WITHOUT sending any data
+platinum:ml/post_data/Test flush with skip_time
+platinum:ml/post_data/Test flushing and posting a closed job
+platinum:ml/post_data/Test open and close with non-existent job id
+platinum:ml/preview_data_frame_analytics/Test both job id and body
+platinum:ml/preview_data_frame_analytics/Test feature preview given body
+platinum:ml/preview_data_frame_analytics/Test feature preview given job
+platinum:ml/preview_data_frame_analytics/Test id that matches multiple jobs
+platinum:ml/preview_data_frame_analytics/Test missing job
+platinum:ml/preview_data_frame_analytics/Test neither job id nor body
+platinum:ml/preview_datafeed/Test preview aggregation datafeed with doc_count
+platinum:ml/preview_datafeed/Test preview aggregation with runtime fields
+platinum:ml/preview_datafeed/Test preview datafeed where time field is data_nanos
+platinum:ml/preview_datafeed/Test preview datafeed with query that matches nothing
+platinum:ml/preview_datafeed/Test preview datafeed with start and end
+platinum:ml/preview_datafeed/Test preview datafeed with unavailable index
+platinum:ml/preview_datafeed/Test preview missing datafeed
+platinum:ml/preview_datafeed/Test preview multi metric aggregation datafeed with different summary count field
+platinum:ml/preview_datafeed/Test preview scroll datafeed
+platinum:ml/preview_datafeed/Test preview single metric aggregation datafeed with different summary count field
+platinum:ml/preview_datafeed/Test preview with datafeed config and job config with datafeed config
+platinum:ml/preview_datafeed/Test preview with datafeed id and config
+platinum:ml/preview_datafeed/Test preview with datafeed_id and job config
+platinum:ml/reset_job/Test reset
+platinum:ml/reset_job/Test reset given job is open
+platinum:ml/reset_job/Test reset given unknown job id
+platinum:ml/revert_model_snapshot/Test revert model with invalid snapshotId
+platinum:ml/revert_model_snapshot/Test with unknown job id
+platinum:ml/search_knn_query_vector_builder/Test vector search with query_vector_builder
+platinum:ml/search_knn_query_vector_builder/nested kNN search with inner_hits size
+platinum:ml/set_upgrade_mode/Attempt to open job when upgrade_mode is enabled
+platinum:ml/set_upgrade_mode/Setting upgrade mode to disabled from enabled
+platinum:ml/set_upgrade_mode/Setting upgrade_mode to enabled
+platinum:ml/set_upgrade_mode/Test setting upgrade_mode to false when it is already false
+platinum:ml/sparse_vector_search/Check sparse_vector should prune by default
+platinum:ml/sparse_vector_search/Check sparse_vector token pruning index_options in query
+platinum:ml/sparse_vector_search/Check sparse_vector token pruning index_options mappings
+platinum:ml/sparse_vector_search/Check sparse_vector token pruning index_options mappings defaults
+platinum:ml/sparse_vector_search/Check sparse_vector token pruning index_options prune false do not allow config
+platinum:ml/sparse_vector_search/Check sparse_vector token pruning index_options prune missing do not allow config
+platinum:ml/sparse_vector_search/Check sparse_vector token pruning index_options tokens freq out of bounds
+platinum:ml/sparse_vector_search/Check sparse_vector token pruning index_options tokens weight out of bounds
+platinum:ml/sparse_vector_search/Search on a nested sparse_vector field with dots in the field names and conflicting child fields
+platinum:ml/sparse_vector_search/Search on a sparse_vector field with dots in the field names
+platinum:ml/sparse_vector_search/Test named, boosted sparse_vector search with pruning config - note this will not change returned results due to model limitations
+platinum:ml/sparse_vector_search/Test sparse_vector displays error for invalid queried field type
+platinum:ml/sparse_vector_search/Test sparse_vector only allows one of query or query_vector (note the error message is misleading)
+platinum:ml/sparse_vector_search/Test sparse_vector requires an inference ID to be specified on sparse_vector fields
+platinum:ml/sparse_vector_search/Test sparse_vector requires one of query or query_vector
+platinum:ml/sparse_vector_search/Test sparse_vector returns an error if inference ID not specified with query
+platinum:ml/sparse_vector_search/Test sparse_vector search
+platinum:ml/sparse_vector_search/Test sparse_vector search with a pruning configuration that only keeps pruned tokens
+platinum:ml/sparse_vector_search/Test sparse_vector search with default pruning config specified - note this will not change returned results due to model limitations
+platinum:ml/sparse_vector_search/Test sparse_vector search with pruning config - note this will not change returned results due to model limitations
+platinum:ml/sparse_vector_search/Test sparse_vector search with query vector
+platinum:ml/sparse_vector_search/Test sparse_vector search with query vector and pruning config
+platinum:ml/sparse_vector_search/Test sparse_vector search with query vector and pruning config with only score pruned tokens
+platinum:ml/sparse_vector_search/Test sparse_vector search with specified pruning config - note default values will not change returned results due to model limitations
+platinum:ml/start_data_frame_analytics/Test start classification analysis when the dependent variable cardinality is too low
+platinum:ml/start_data_frame_analytics/Test start classification analysis when the dependent variable is missing
+platinum:ml/start_data_frame_analytics/Test start given dest index is not empty
+platinum:ml/start_data_frame_analytics/Test start given missing config
+platinum:ml/start_data_frame_analytics/Test start given missing source index
+platinum:ml/start_data_frame_analytics/Test start outlier_detection given source index has no fields
+platinum:ml/start_data_frame_analytics/Test start regression given source index only has dependent variable
+platinum:ml/start_data_frame_analytics/Test start with compatible fields but no data
+platinum:ml/start_data_frame_analytics/Test start with inconsistent body/param ids
+platinum:ml/start_stop_datafeed/Test force stop datafeed
+platinum:ml/start_stop_datafeed/Test start already started datafeed job
+platinum:ml/start_stop_datafeed/Test start and stop datafeed happy path
+platinum:ml/start_stop_datafeed/Test start datafeed given concrete index that does not exist
+platinum:ml/start_stop_datafeed/Test start datafeed given index pattern with no matching indices
+platinum:ml/start_stop_datafeed/Test start datafeed given start is now
+platinum:ml/start_stop_datafeed/Test start datafeed job, but not open
+platinum:ml/start_stop_datafeed/Test start datafeed when persistent task allocation disabled
+platinum:ml/start_stop_datafeed/Test start given end earlier than start
+platinum:ml/start_stop_datafeed/Test start given end same as start
+platinum:ml/start_stop_datafeed/Test start given field without mappings
+platinum:ml/start_stop_datafeed/Test start non existing datafeed
+platinum:ml/start_stop_datafeed/Test stop already stopped datafeed job is not an error
+platinum:ml/start_stop_datafeed/Test stop given expression
+platinum:ml/start_stop_datafeed/Test stop non existing datafeed
+platinum:ml/start_stop_datafeed/Test stop with body params
+platinum:ml/start_stop_datafeed/Test stop with expression that does not match and allow_no_match
+platinum:ml/start_stop_datafeed/Test stop with expression that does not match and not allow_no_match
+platinum:ml/stop_data_frame_analytics/Test stop given missing config and allow_no_match is false
+platinum:ml/stop_data_frame_analytics/Test stop given missing config and allow_no_match is true
+platinum:ml/stop_data_frame_analytics/Test stop given stopped
+platinum:ml/stop_data_frame_analytics/Test stop with expression that does not match and allow_no_match is false
+platinum:ml/stop_data_frame_analytics/Test stop with expression that does not match and allow_no_match is true
+platinum:ml/stop_data_frame_analytics/Test stop with inconsistent body/param ids
+platinum:ml/text_embedding_search/Test text embedding search
+platinum:ml/text_expansion_search/Test named, boosted text expansion search with pruning config
+platinum:ml/text_expansion_search/Test text expansion search
+platinum:ml/text_expansion_search/Test text expansion search with default pruning config
+platinum:ml/text_expansion_search/Test text expansion search with pruning config
+platinum:ml/text_expansion_search/Test text expansion search with weighted tokens rescoring only pruned tokens
+platinum:ml/text_expansion_search/Test text-expansion that displays error for invalid queried field type
+platinum:ml/text_expansion_search/Test weighted tokens search
+platinum:ml/text_expansion_search/Test weighted tokens search only scoring pruned tokens
+platinum:ml/text_expansion_search/Test weighted tokens search that prunes tokens based on frequency
+platinum:ml/text_expansion_search/Test weighted tokens search with default pruning config
+platinum:ml/text_expansion_search_rank_features/Test text expansion search
+platinum:ml/text_expansion_search_sparse_vector/Test text expansion search
+platinum:ml/trained_model_cat_apis/Test cat trained models
+platinum:ml/update_model_snapshot/Test with unknown job id
+platinum:ml/update_model_snapshot/Test with unknown snapshot id
+platinum:ml/update_trained_model_deployment/Test with unknown model id
+platinum:ml/upgrade_job_snapshot/Test existing but corrupt snapshot
+platinum:ml/upgrade_job_snapshot/Test stats all snapshots
+platinum:ml/upgrade_job_snapshot/Test stats one snapshot
+platinum:ml/upgrade_job_snapshot/Test with unknown job id
+platinum:ml/upgrade_job_snapshot/Test with unknown snapshot id
+platinum:ml/validate/Test invalid job config
+platinum:ml/validate/Test job config is invalid because model snapshot id set
+platinum:ml/validate/Test job config that is invalid only because of the job ID
+platinum:ml/validate/Test job config with duplicate detector configurations
+platinum:ml/validate/Test valid job config
+platinum:ml/validate/Test valid job config with job ID
+platinum:ml/validate_detector/Test invalid detector
+platinum:ml/validate_detector/Test valid detector
+platinum:monitoring/bulk/10_basic/Bulk indexing of monitoring data
+platinum:monitoring/bulk/10_basic/Bulk indexing of monitoring data on closed indices should throw an export exception
+platinum:monitoring/bulk/20_privileges/Monitoring Bulk API
+platinum:privileges/10_basic/Test clear privileges cache
+platinum:privileges/10_basic/Test put and delete privileges
+platinum:privileges/10_basic/Test put and get privileges
+platinum:privileges/20_has_application_privs/Test has_privileges with application-privileges
+platinum:privileges/30_superuser/Test superuser has all application-privileges
+platinum:privileges/40_get_user_privs/Test get_user_privileges for merged roles
+platinum:privileges/40_get_user_privs/Test get_user_privileges for single role
+platinum:profiling/10_basic/Test Status
+platinum:profiling/10_basic/Test flamegraph from profiling-events
+platinum:profiling/10_basic/Test flamegraph from test-events
+platinum:profiling/10_basic/Test get stacktraces
+platinum:profiling/10_basic/Test stacktraces agg
+platinum:profiling/10_basic/Test topN functions from profiling-events
+platinum:profiling/10_basic/Test topN functions from test-events
+platinum:rank_vectors/rank_vectors/Test create dynamic dim multi-vector field
+platinum:rank_vectors/rank_vectors/Test create multi-vector field
+platinum:rank_vectors/rank_vectors/Test dynamic dim mismatch fails multi-vector field
+platinum:rank_vectors/rank_vectors/Test poorly formatted multi-vector field
+platinum:rank_vectors/rank_vectors/Test static dim mismatch fails multi-vector field
+platinum:rank_vectors/rank_vectors/Updating dim to null is not allowed
+platinum:rank_vectors/rank_vectors_dv_fields_api/Test doc value vector access
+platinum:rank_vectors/rank_vectors_dv_fields_api/Test vector magnitude equality
+platinum:rank_vectors/rank_vectors_dv_fields_api/Test vector value scoring
+platinum:rank_vectors/rank_vectors_max_sim/Test max-sim dot product scoring
+platinum:rank_vectors/rank_vectors_max_sim/Test max-sim inv hamming scoring
+platinum:rank_vectors/rank_vectors_synthetic_vectors/Bulk partial update with synthetic vectors
+platinum:rank_vectors/rank_vectors_synthetic_vectors/Partial update with synthetic vectors
+platinum:rank_vectors/rank_vectors_synthetic_vectors/exclude synthetic vectors
+platinum:rank_vectors/rank_vectors_synthetic_vectors/include synthetic vectors
+platinum:redact/10_redact_processor/Test custom start and end tokens
+platinum:redact/10_redact_processor/Test ignore missing
+platinum:redact/10_redact_processor/Test put redact pipeline
+platinum:redact/10_redact_processor/Test redact
+platinum:redact/10_redact_processor/Test redact with trace_redact
+platinum:role_mapping/10_basic/Test put role_mapping api
+platinum:role_mapping/20_get_missing/Get missing (multiple) role-mappings
+platinum:role_mapping/20_get_missing/Get missing role-mapping
+platinum:role_mapping/30_delete/Test delete role_mapping api
+platinum:roles/10_basic/Test put role api
+platinum:roles/11_idx_arrays/Test put role api using as array of index names
+platinum:roles/20_get_missing/Get missing (multiple) roles
+platinum:roles/20_get_missing/Get missing role
+platinum:roles/30_prohibited_role_query/Test use prohibited query inside role query
+platinum:roles/40_global_privileges/Test put role with conditional security privileges
+platinum:roles/50_remote_only/Test put remote role api
+platinum:roles/60_bulk_roles/Test bulk put and delete roles api
+platinum:rollup/delete_job/Test basic delete_job
+platinum:rollup/delete_job/Test delete job twice
+platinum:rollup/delete_job/Test delete non-existent job
+platinum:rollup/delete_job/Test delete running job
+platinum:rollup/get_jobs/Test basic get_jobs
+platinum:rollup/get_jobs/Test get missing job
+platinum:rollup/get_jobs/Test get with no jobs
+platinum:rollup/get_rollup_caps/Verify all caps
+platinum:rollup/get_rollup_caps/Verify one job caps
+platinum:rollup/get_rollup_caps/Verify two job caps
+platinum:rollup/get_rollup_index_caps/Verify all job caps by rollup index
+platinum:rollup/get_rollup_index_caps/Verify index pattern
+platinum:rollup/get_rollup_index_caps/Verify job caps by rollup index comma delimited list
+platinum:rollup/get_rollup_index_caps/Verify one job caps by rollup index
+platinum:rollup/get_rollup_index_caps/Verify two different job caps by rollup index
+platinum:rollup/get_rollup_index_caps/Verify two job caps by rollup index
+platinum:rollup/put_job/Deprecation validation failure
+platinum:rollup/put_job/Test basic put_job
+platinum:rollup/put_job/Test put job with templates
+platinum:rollup/put_job/Test put_job in non-rollup index
+platinum:rollup/put_job/Test put_job with comma-delimited index pattern
+platinum:rollup/put_job/Test put_job with existing name
+platinum:rollup/put_job/Try to include headers
+platinum:rollup/put_job/Unknown Metric
+platinum:rollup/put_job/Validation failures
+platinum:rollup/rollup_search/Basic Search
+platinum:rollup/rollup_search/Basic Search with rest_total_hits_as_int
+platinum:rollup/rollup_search/Empty aggregation
+platinum:rollup/rollup_search/Empty aggregation with new response format
+platinum:rollup/rollup_search/Formatted Date Histo
+platinum:rollup/rollup_search/Obsolete BWC Timezone
+platinum:rollup/rollup_search/Obsolete Timezone
+platinum:rollup/rollup_search/Rollup search via alias
+platinum:rollup/rollup_search/Rollup search via alias, multiple rollup indices match
+platinum:rollup/rollup_search/Search error against live index
+platinum:rollup/rollup_search/Search error against rollup and live index
+platinum:rollup/rollup_search/Search error no matching indices
+platinum:rollup/rollup_search/Search with MatchAll and Second Job
+platinum:rollup/rollup_search/Search with Metric
+platinum:rollup/rollup_search/Search with Query
+platinum:rollup/rollup_search/Search with Query and Second Job
+platinum:rollup/rollup_search/Search with Query and Second Job different intervals
+platinum:rollup/rollup_search/Search with typed_keys
+platinum:rollup/rollup_search/Wildcards matching single rollup index
+platinum:rollup/rollup_search/Wildcards matching two rollup indices
+platinum:rollup/start_job/Test start job twice
+platinum:rollup/start_job/Test start nonexistent job
+platinum:rollup/stop_job/Test stop job twice
+platinum:rollup/stop_job/Test stop non-started job
+platinum:rollup/stop_job/Test stop nonexistent job
+platinum:rollup/stop_job/Test wait_for_completion default timeout
+platinum:rollup/stop_job/Test wait_for_completion with custom timeout
+platinum:search-business-rules/10_pinned_query/Test pinned query with ID and index
+platinum:search-business-rules/10_pinned_query/Test pinned query with IDs
+platinum:search-business-rules/10_pinned_query/Test pinned query with docs
+platinum:search-business-rules/10_pinned_query/Test pinned query with knn query
+platinum:search.vectors/135_knn_query_nested_search_ivf/nested kNN search post-filtered on top level fields
+platinum:search.vectors/135_knn_query_nested_search_ivf/nested kNN search pre-filtered on alias with filter on top level fields
+platinum:search.vectors/135_knn_query_nested_search_ivf/nested kNN search that returns diverse parents docs
+platinum:search.vectors/135_knn_query_nested_search_ivf/nested kNN search works with visit_percentage
+platinum:search.vectors/180_update_dense_vector_bbq_disk_type/Allowed dense vector updates on same type but different other index_options, bbq_disk
+platinum:search.vectors/220_dense_vector_node_bbq_disk_index_stats/index node stats bbq_disk quantized
+platinum:search.vectors/46_knn_search_bbq_ivf/Test bad quantization parameters
+platinum:search.vectors/46_knn_search_bbq_ivf/Test index configured rescore vector
+platinum:search.vectors/46_knn_search_bbq_ivf/Test index configured rescore vector score consistency
+platinum:search.vectors/46_knn_search_bbq_ivf/Test index configured rescore vector updateable and settable to 0
+platinum:search.vectors/46_knn_search_bbq_ivf/Test index configured rescore vector with on-disk rescore
+platinum:search.vectors/46_knn_search_bbq_ivf/Test knn search
+platinum:search.vectors/46_knn_search_bbq_ivf/Test knn search with visit_percentage
+platinum:search.vectors/46_knn_search_bbq_ivf/Vector rescoring has same scoring as exact search for kNN section
+platinum:search.vectors/46_knn_search_bbq_ivf/default oversample value
+platinum:search.vectors/46_knn_search_bbq_ivf_bfloat16/Test index configured rescore vector
+platinum:search.vectors/46_knn_search_bbq_ivf_bfloat16/Test index configured rescore vector score consistency
+platinum:search.vectors/46_knn_search_bbq_ivf_bfloat16/Test index configured rescore vector updateable and settable to 0
+platinum:search.vectors/46_knn_search_bbq_ivf_bfloat16/Test index configured rescore vector with on-disk rescore
+platinum:search.vectors/46_knn_search_bbq_ivf_bfloat16/Test knn search
+platinum:search.vectors/46_knn_search_bbq_ivf_bfloat16/Test knn search with visit_percentage
+platinum:search.vectors/46_knn_search_bbq_ivf_bfloat16/Vector rescoring has same scoring as exact search for kNN section
+platinum:search.vectors/46_knn_search_bbq_ivf_bfloat16/default oversample value
+platinum:searchable_snapshots/10_usage/Tests searchable snapshots usage stats
+platinum:searchable_snapshots/10_usage/Tests searchable snapshots usage stats with full_copy and shared_cache indices
+platinum:searchable_snapshots/20_synthetic_source/Tests searchable snapshots usage stats
+platinum:security/10_forbidden/Test basic response with invalid credentials
+platinum:security/10_forbidden/Test bulk response with invalid credentials
+platinum:security/authz/10_index_doc/Test bulk indexing documents when only some are allowed
+platinum:security/authz/10_index_doc/Test indexing a document when allowed
+platinum:security/authz/10_index_doc/Test indexing a document when not allowed
+platinum:security/authz/11_delete_doc/Test bulk delete and index documents when only some are allowed
+platinum:security/authz/11_delete_doc/Test bulk delete documents when only some are allowed
+platinum:security/authz/11_delete_doc/Test deleting a document when allowed
+platinum:security/authz/11_delete_doc/Test deleting a document when not allowed
+platinum:security/authz/12_index_alias/Test bulk indexing into an alias when only some are allowed
+platinum:security/authz/12_index_alias/Test bulk indexing into an alias when resolved to write index
+platinum:security/authz/12_index_alias/Test indexing documents into an alias, when forbidden
+platinum:security/authz/12_index_alias/Test indexing documents into an alias, when permitted
+platinum:security/authz/13_index_datemath/Test bulk indexing with datemath when only some are allowed
+platinum:security/authz/13_index_datemath/Test indexing documents with datemath, when forbidden
+platinum:security/authz/13_index_datemath/Test indexing documents with datemath, when permitted
+platinum:security/authz/14_cat_indices/Test empty request while no-authorized index
+platinum:security/authz/14_cat_indices/Test empty request while single authorized closed index
+platinum:security/authz/14_cat_indices/Test empty request while single authorized index
+platinum:security/authz/14_cat_indices/Test explicit request while multiple authorized indices
+platinum:security/authz/14_cat_indices/Test explicit request while multiple opened/closed authorized indices
+platinum:security/authz/14_cat_indices/Test wildcard request with multiple authorized indices
+platinum:security/authz/15_auto_create/Test auto index creation
+platinum:security/authz/20_get_doc/Test get a document when authorized
+platinum:security/authz/20_get_doc/Test get a document when not allowed
+platinum:security/authz/20_get_doc/Test mget documents when only some are allowed
+platinum:security/authz/21_search_doc/Test search documents when only some are allowed
+platinum:security/authz/21_search_doc/Test search for document when authorized
+platinum:security/authz/21_search_doc/Test search for documents when not allowed
+platinum:security/authz/21_search_doc/filters agg exists doesn't count invisible docs: exists
+platinum:security/authz/21_search_doc/filters agg match_all doesn't count invisible docs: match_all
+platinum:security/authz/30_dynamic_put_mapping/Test indexing documents into an alias with dynamic mappings
+platinum:security/authz/31_rollover_using_alias/Test rollover, index via write alias of index
+platinum:security/authz/40_condtional_cluster_priv/Test get application privileges when allowed
+platinum:security/authz/40_condtional_cluster_priv/Test get application privileges when not allowed
+platinum:security/authz/40_condtional_cluster_priv/Test put application privileges when allowed
+platinum:security/authz/40_condtional_cluster_priv/Test put application privileges when not allowed
+platinum:security/authz/50_data_streams/Test auto mapping updates unauthorized for create_doc privilege
+platinum:security/authz/50_data_streams/Test backing indices inherit parent data stream privileges
+platinum:security/authz/50_data_streams/Test that create data stream is limited to authorized namespace
+platinum:security/authz/50_data_streams/Test that data streams stats is limited to authorized namespace
+platinum:security/authz/50_data_streams/Test that delete data stream is limited to authorized namespace
+platinum:security/authz/50_data_streams/Test that get data stream is limited to authorized namespace
+platinum:security/authz/50_data_streams/Test that requests not supporting data streams do not include data streams among authorized indices
+platinum:security/authz/50_data_streams/auto_configure privilege permits auto-create of data streams
+platinum:security/authz/51_data_stream_aliases/Basic read authorization test
+platinum:security/authz/55_auto_configure/auto_configure privilege permits auto-create of indices
+platinum:security/authz/60_resolve_index/resolve index respects view_index_metadata privilege
+platinum:security/authz/70_tsdb/create_doc permission can create
+platinum:security/authz/70_tsdb/create_doc permission can't overwrite
+platinum:security/authz/70_tsdb/document level security on dimension
+platinum:security/authz/70_tsdb/document level security on tag
+platinum:security/authz/70_tsdb/document level security on tsid is not possible
+platinum:security/authz/70_tsdb/index permission can create
+platinum:security/authz/70_tsdb/index permission can overwrite
+platinum:security/authz/80_downsample/Downsample admin user with document level security settings defined on the source index
+platinum:security/authz/80_downsample/Downsample admin user with field level security settings defined on the source index
+platinum:security/authz/80_downsample/Downsample admin user without document level or field level security settings defined on the source index
+platinum:security/authz/80_downsample/Downsample user missing admin permissions to run the downsample operation
+platinum:security/authz_api_keys/10_index_authz/Test indexing documents with API Key
+platinum:security/authz_api_keys/20_field_level_security/Retrieve documents with FLS
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/Dynamic fields beyond limit - uses _ignored_source
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/Field with ignored_malformed
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/Fields under a disabled object - uses _ignored_source
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/Fields with copy_to and skip_ignored_source_read workaround
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/Fields with copy_to, field level security and synthetic source
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/Fields without index or doc values in logsdb - nothing filtered out
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/Fields without index or doc values in logsdb - uses _ignored_source doc values
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/Filter fields in object
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/Filter single field
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/METRICS_INFO with field level security excluding specific metrics
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/METRICS_INFO with field level security granting specific fields
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/TS_INFO with field level security excluding specific metrics
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/TS_INFO with field level security granting specific fields
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/keyword field type with ignore_above
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/long field type with ignore_malformed
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/match_only_text field type grant all except secret field
+platinum:security/authz_api_keys/30_field_level_security_synthetic_source/match_only_text field type grant name field
+platinum:security/authz_api_keys/40_document_level_security_synthetic_source/Filter on field with ignored_malformed
+platinum:security/authz_api_keys/40_document_level_security_synthetic_source/Filter on field within a disabled object
+platinum:security/authz_api_keys/40_document_level_security_synthetic_source/Filter on nested field
+platinum:security/authz_api_keys/40_document_level_security_synthetic_source/Filter on object with stored source
+platinum:security/authz_api_keys/40_document_level_security_synthetic_source/Filter on single field
+platinum:security/hidden-index/10_security_read/Test get security document
+platinum:security/hidden-index/10_security_read/Test get security index metadata
+platinum:security/hidden-index/10_security_read/Test search security index
+platinum:security/hidden-index/11_security-6_read/Test get security document
+platinum:security/hidden-index/11_security-6_read/Test get security index metadata
+platinum:security/hidden-index/11_security-6_read/Test search security index
+platinum:security/hidden-index/12_security-7_read/Test get security document
+platinum:security/hidden-index/12_security-7_read/Test get security index metadata
+platinum:security/hidden-index/12_security-7_read/Test search security index
+platinum:security/hidden-index/13_security-tokens_read/Test get security document
+platinum:security/hidden-index/13_security-tokens_read/Test get security tokens index metadata
+platinum:security/hidden-index/13_security-tokens_read/Test search security tokens index
+platinum:security/hidden-index/14_security-tokens-7_read/Test get security document
+platinum:security/hidden-index/14_security-tokens-7_read/Test get security tokens index metadata
+platinum:security/hidden-index/14_security-tokens-7_read/Test search security tokens index
+platinum:security/settings/10_update_security_settings/Test update and get security settings API
+platinum:security/stats/10_skeleton/Security stats returns a number of stats
+platinum:security/stats/20_roles_stats/Security stats return just DLS stats
+platinum:service_accounts/10_basic/Test get service accounts
+platinum:service_accounts/10_basic/Test service account tokens
+platinum:set_security_user/10_small_users_one_index/Test shared index separating user by using DLS
+platinum:set_security_user/20_api_key/Test set security user ingest processor works for API keys
+platinum:snapshot/10_basic/Create a source only snapshot and then restore it
+platinum:snapshot/10_basic/Failed to snapshot indices with synthetic source
+platinum:snapshot/20_operator_privileges_disabled/Operator only settings can be set and restored by non-operator user when operator privileges is disabled
+platinum:spatial/100_geo_grid_ingest/Test geo_grid on geohash using WKT
+platinum:spatial/100_geo_grid_ingest/Test geo_grid on geohash with advanced pipeline and cell hierarchy using WKT
+platinum:spatial/100_geo_grid_ingest/Test geo_grid on geohex using WKT
+platinum:spatial/100_geo_grid_ingest/Test geo_grid on geohex with advanced pipeline and cell hierarchy using WKT
+platinum:spatial/100_geo_grid_ingest/Test geo_grid on geotile using WKT
+platinum:spatial/100_geo_grid_ingest/Test geo_grid on geotile using default target format
+platinum:spatial/100_geo_grid_ingest/Test geo_grid on geotile with advanced pipeline and cell hierarchy using WKT
+platinum:spatial/10_cartesian_bounds/Test cartesian_bounds aggregation on point field with point
+platinum:spatial/10_cartesian_bounds/Test cartesian_bounds aggregation on point field with points
+platinum:spatial/10_cartesian_bounds/Test cartesian_bounds aggregation on shape field with point
+platinum:spatial/10_cartesian_bounds/Test cartesian_bounds aggregation on shape field with points
+platinum:spatial/10_cartesian_bounds/Test cartesian_bounds aggregation on shape field with polygon
+platinum:spatial/10_geo_bounds/Test geo_bounds aggregation on geo_point field with point
+platinum:spatial/10_geo_bounds/Test geo_bounds aggregation on geo_point field with points
+platinum:spatial/10_geo_bounds/Test geo_bounds aggregation on geo_shape crossing dateline
+platinum:spatial/10_geo_bounds/Test geo_bounds aggregation on geo_shape crossing dateline without wrap_longitude
+platinum:spatial/10_geo_bounds/Test geo_bounds aggregation on geo_shape field with geo_points
+platinum:spatial/10_geo_bounds/Test geo_bounds aggregation on geo_shape field with point
+platinum:spatial/10_geo_bounds/Test geo_bounds aggregation on geo_shape field with polygon
+platinum:spatial/110_geo_shape_parameters/Test field mapping
+platinum:spatial/110_geo_shape_parameters/Test query default field
+platinum:spatial/110_geo_shape_parameters/Test query no_doc_values field
+platinum:spatial/110_geo_shape_parameters/Test query no_doc_values_no_index field
+platinum:spatial/110_geo_shape_parameters/Test query no_index field
+platinum:spatial/120_position_geo_line/geo_line on position field ASC
+platinum:spatial/120_position_geo_line/geo_line on position field DESC
+platinum:spatial/120_position_geo_line/geo_line on position field multi-terms aggregation on combined dimension and non-dimension fields
+platinum:spatial/120_position_geo_line/geo_line on position field no sort field or sort order specified
+platinum:spatial/120_position_geo_line/geo_line on position field same grouping as time-series with time-series
+platinum:spatial/120_position_geo_line/geo_line on position field same grouping as time-series without time-series
+platinum:spatial/120_position_geo_line/geo_line on position field time time-series with invalid sort specified
+platinum:spatial/120_position_geo_line/geo_line on position field with terms aggregation on non-dimension field
+platinum:spatial/120_position_geo_line/geo_line on position field with terms aggregation on non-dimension field and time-series on dimension field
+platinum:spatial/130_geo_shape_runtime/Def lambda loop cancelled in geo_shape (geometry_field) runtime script
+platinum:spatial/130_geo_shape_runtime/Search timeout aborts a long-running geo_shape (geometry_field) runtime script loop
+platinum:spatial/130_geo_shape_runtime/Static lambda loop cancelled in geo_shape (geometry_field) runtime script
+platinum:spatial/130_geo_shape_runtime/bounds agg
+platinum:spatial/130_geo_shape_runtime/centroid agg
+platinum:spatial/130_geo_shape_runtime/exists query
+platinum:spatial/130_geo_shape_runtime/fetch fields
+platinum:spatial/130_geo_shape_runtime/geo bounding box query
+platinum:spatial/130_geo_shape_runtime/geo distance query
+platinum:spatial/130_geo_shape_runtime/geo_tile agg"
+platinum:spatial/130_geo_shape_runtime/get mapping
+platinum:spatial/140_synthetic_source/geo_point
+platinum:spatial/140_synthetic_source/geo_point with ignore_malformed
+platinum:spatial/140_synthetic_source/geo_shape
+platinum:spatial/140_synthetic_source/geo_shape with ignore_malformed
+platinum:spatial/140_synthetic_source/point
+platinum:spatial/140_synthetic_source/point with ignore_malformed
+platinum:spatial/140_synthetic_source/shape
+platinum:spatial/140_synthetic_source/shape with ignore_malformed
+platinum:spatial/20_cartesian_centroid/Test cartesian_centroid aggregation on cartesian shape points
+platinum:spatial/20_cartesian_centroid/Test cartesian_centroid aggregation on cartesian shape points with filter
+platinum:spatial/20_cartesian_centroid/Test cartesian_centroid aggregation on cartesian shape points with grouping
+platinum:spatial/20_cartesian_centroid/Test cartesian_centroid aggregation on cartesian shape shapes
+platinum:spatial/20_cartesian_centroid/Test cartesian_centroid aggregation on cartesian shape shapes with filter
+platinum:spatial/20_cartesian_centroid/Test cartesian_centroid aggregation on cartesian shape shapes with grouping
+platinum:spatial/20_cartesian_centroid/Test cartesian_centroid aggregation on cartesian shape shapes with grouping and filter
+platinum:spatial/20_geo_centroid/Test geo_centroid aggregation on geo_shape points
+platinum:spatial/20_geo_centroid/Test geo_centroid aggregation on geo_shape points with filter
+platinum:spatial/20_geo_centroid/Test geo_centroid aggregation on geo_shape points with grouping
+platinum:spatial/20_geo_centroid/Test geo_centroid aggregation on geo_shape shapes
+platinum:spatial/20_geo_centroid/Test geo_centroid aggregation on geo_shape shapes with filter
+platinum:spatial/20_geo_centroid/Test geo_centroid aggregation on geo_shape shapes with grouping and filter
+platinum:spatial/30_geotile_grid/Test geotile_grid on geo_shape field with bounds
+platinum:spatial/30_geotile_grid/Test geotile_grid on geo_shape field with defaults
+platinum:spatial/30_geotile_grid/Test geotile_grid on geo_shape field with precision
+platinum:spatial/30_geotile_grid/Test geotile_grid on geo_shape field with shard_size
+platinum:spatial/30_geotile_grid/Test geotile_grid on geo_shape field with size
+platinum:spatial/40_geohash_grid/Test geohash_grid on geo_shape field with bounds
+platinum:spatial/40_geohash_grid/Test geohash_grid on geo_shape field with defaults
+platinum:spatial/40_geohash_grid/Test geohash_grid on geo_shape field with precision
+platinum:spatial/40_geohash_grid/Test geohash_grid on geo_shape field with shard_size
+platinum:spatial/40_geohash_grid/Test geohash_grid on geo_shape field with size
+platinum:spatial/50_feature_usage/Basic test of xpack info of spatial features
+platinum:spatial/50_feature_usage/Basic test of xpack usage of spatial features
+platinum:spatial/60_geo_line/Test empty buckets on multiple indices by grouping with filters
+platinum:spatial/60_geo_line/Test geo_line aggregation on geo points limit and sort
+platinum:spatial/60_geo_line/Test geo_line aggregation on geo points limit size
+platinum:spatial/60_geo_line/Test geo_line aggregation on geo points reverse sort by double and include_sort
+platinum:spatial/60_geo_line/Test geo_line aggregation on geo points sort by double and include_sort
+platinum:spatial/60_geo_line/Test geo_line aggregation on geo points with no grouping
+platinum:spatial/60_geo_line/Test geo_line on multiple indices by grouping with filters
+platinum:spatial/60_geo_line/Test geo_line on multiple indices by grouping with terms
+platinum:spatial/70_script_doc_values/bounding box
+platinum:spatial/70_script_doc_values/bounding box points
+platinum:spatial/70_script_doc_values/centroid
+platinum:spatial/70_script_doc_values/diagonal length
+platinum:spatial/70_script_doc_values/dimensional type
+platinum:spatial/70_script_doc_values/geoshape value
+platinum:spatial/70_script_doc_values/label position
+platinum:spatial/80_geohex_grid/Test geohex_grid on geo_point field with bounds
+platinum:spatial/80_geohex_grid/Test geohex_grid on geo_point field with defaults
+platinum:spatial/80_geohex_grid/Test geohex_grid on geo_point field with precision
+platinum:spatial/80_geohex_grid/Test geohex_grid on geo_point field with shard size
+platinum:spatial/80_geohex_grid/Test geohex_grid on geo_point field with size
+platinum:spatial/80_geohex_grid_geo_shape/Test geohex_grid on geo_shape field with bounds
+platinum:spatial/80_geohex_grid_geo_shape/Test geohex_grid on geo_shape field with defaults
+platinum:spatial/80_geohex_grid_geo_shape/Test geohex_grid on geo_shape field with precision
+platinum:spatial/80_geohex_grid_geo_shape/Test geohex_grid on geo_shape field with shard size
+platinum:spatial/80_geohex_grid_geo_shape/Test geohex_grid on geo_shape field with size
+platinum:spatial/90_geo_grid_query/Test geohash
+platinum:spatial/90_geo_grid_query/Test geohex
+platinum:spatial/90_geo_grid_query/Test geotile
+platinum:sql/sql/Clean cursor
+platinum:sql/sql/Execute some SQL
+platinum:sql/sql/Getting textual representation
+platinum:sql/sql/Paging through results with PIT cursor
+platinum:sql/translate/Translate SQL
+platinum:terms_enum/10_basic/Test basic term enumeration
+platinum:terms_enum/10_basic/Test basic term enumeration on doc value only field
+platinum:terms_enum/10_basic/Test basic term enumeration on version field
+platinum:terms_enum/10_basic/Test case insensitivity
+platinum:terms_enum/10_basic/Test case insensitivity on doc value only field
+platinum:terms_enum/10_basic/Test illegal timeout
+platinum:terms_enum/10_basic/Test index filtering
+platinum:terms_enum/10_basic/Test legal timeout
+platinum:terms_enum/10_basic/Test null search string allowed
+platinum:terms_enum/10_basic/Test search after constant keyword field
+platinum:terms_enum/10_basic/Test search after flattened field
+platinum:terms_enum/10_basic/Test search after keyword field
+platinum:terms_enum/10_basic/Test search after on doc value only keyword field
+platinum:terms_enum/10_basic/Test search after on unconfigured constant keyword field
+platinum:terms_enum/10_basic/Test security
+platinum:terms_enum/10_basic/Test security with API keys
+platinum:terms_enum/20_fieldtypes/Test terms enumeration constant keyword field
+platinum:terms_enum/20_fieldtypes/Test terms enumeration flattened field
+platinum:terms_enum/20_fieldtypes/Test terms enumeration keyword field
+platinum:terms_enum/20_fieldtypes/Test terms enumeration version field
+platinum:text_structure/find_field_structure/Field structure finder with JSON messages
+platinum:text_structure/find_message_structure/Messages structure finder with JSON messages
+platinum:text_structure/find_message_structure/Messages structure finder with log messages
+platinum:text_structure/find_structure/Test NDJSON file structure analysis with overrides
+platinum:text_structure/find_structure/Test NDJSON file structure analysis without overrides
+platinum:text_structure/find_structure/Test invalid charset
+platinum:text_structure/test_grok_pattern/Grok pattern with two identically named fields
+platinum:text_structure/test_grok_pattern/Grok pattern with two named fields
+platinum:token/10_basic/Test get and use token
+platinum:token/10_basic/Test invalidate realm's tokens
+platinum:token/10_basic/Test invalidate token
+platinum:token/10_basic/Test invalidate user's tokens
+platinum:token/11_invalidation/Test invalidate access token return statuses
+platinum:token/11_invalidation/Test invalidate refresh token return statuses
+platinum:user_profile/10_basic/Test enable disable user profile
+platinum:user_profile/10_basic/Test get user profiles
+platinum:user_profile/10_basic/Test suggest user profile
+platinum:user_profile/10_basic/Test user profile apis
+platinum:user_profile/40_has_privileges/Test profile has privileges api
+platinum:users/10_basic/Test put user api
+platinum:users/10_basic/Test put user with different username in body
+platinum:users/10_basic/Test put user with password hash
+platinum:users/10_basic/Test put user with username in body
+platinum:users/15_overwrite_user/Test overwriting a user
+platinum:users/16_update_user/Test create user and update without and with password
+platinum:users/16_update_user/Test creating a user without password
+platinum:users/20_get_missing/Get missing (multiple) users
+platinum:users/20_get_missing/Get missing user
+platinum:users/30_enable_disable/Test disable then enable user
+platinum:users/30_enable_disable/Test disabling already disabled user
+platinum:users/30_enable_disable/Test disabling yourself
+platinum:users/30_enable_disable/Test enabling already enabled user
+platinum:users/31_create_disabled/Test disable then enable user
+platinum:users/40_query/Test query user
+platinum:vector-tile/10_basic/aggs field
+platinum:vector-tile/10_basic/buffer param
+platinum:vector-tile/10_basic/exact bounds
+platinum:vector-tile/10_basic/extent param
+platinum:vector-tile/10_basic/field field
+platinum:vector-tile/10_basic/grid agg geohex
+platinum:vector-tile/10_basic/grid agg geohex with labels
+platinum:vector-tile/10_basic/grid agg geotile
+platinum:vector-tile/10_basic/grid agg geotile with labels
+platinum:vector-tile/10_basic/grid precision
+platinum:vector-tile/10_basic/grid type centroid
+platinum:vector-tile/10_basic/grid type grid
+platinum:vector-tile/10_basic/grid type point
+platinum:vector-tile/10_basic/no body
+platinum:vector-tile/10_basic/query field
+platinum:vector-tile/10_basic/runtime_fields field
+platinum:vector-tile/10_basic/runtime_fields label position
+platinum:vector-tile/10_basic/size param
+platinum:vector-tile/10_basic/sort field
+platinum:vector-tile/10_basic/track_total_hits as boolean
+platinum:vector-tile/10_basic/track_total_hits as integer
+platinum:vector-tile/10_basic/with labels
+platinum:vector-tile/20_aggregations/avg agg
+platinum:vector-tile/20_aggregations/boxplot deviation agg
+platinum:vector-tile/20_aggregations/cardinality agg
+platinum:vector-tile/20_aggregations/extended stats agg
+platinum:vector-tile/20_aggregations/max agg
+platinum:vector-tile/20_aggregations/median absolute deviation agg
+platinum:vector-tile/20_aggregations/min agg
+platinum:vector-tile/20_aggregations/percentile agg
+platinum:vector-tile/20_aggregations/percentile rank agg
+platinum:vector-tile/20_aggregations/stats agg
+platinum:vector-tile/20_aggregations/sum agg
+platinum:vector-tile/20_aggregations/value count agg
+platinum:vectordb_document/10_usage/vectordb_document usage
+platinum:versionfield/10_basic/Basic ranges
+platinum:versionfield/10_basic/Store malformed
+platinum:versionfield/20_scripts/Filter script
+platinum:versionfield/20_scripts/Sort script
+platinum:versionfield/20_scripts/Sort script returning version value
+platinum:versionfield/20_scripts/Sort script with field() returning version value
+platinum:voting_only_node/10_basic/cluster stats with voting only node stats
+platinum:wildcard/10_wildcard_basic/Aggs work
+platinum:wildcard/10_wildcard_basic/Case insensitive query
+platinum:wildcard/10_wildcard_basic/Case sensitive query
+platinum:wildcard/10_wildcard_basic/Long prefix query
+platinum:wildcard/10_wildcard_basic/Long suffix query
+platinum:wildcard/10_wildcard_basic/Long unrooted query
+platinum:wildcard/10_wildcard_basic/No wildcard wildcard query
+platinum:wildcard/10_wildcard_basic/Prefix query on wildcard field
+platinum:wildcard/10_wildcard_basic/Query_string prefix query
+platinum:wildcard/10_wildcard_basic/Query_string regex query
+platinum:wildcard/10_wildcard_basic/Query_string wildcard query
+platinum:wildcard/10_wildcard_basic/Scripted Aggs work
+platinum:wildcard/10_wildcard_basic/Sequence fail
+platinum:wildcard/10_wildcard_basic/Short prefix query
+platinum:wildcard/10_wildcard_basic/Short suffix query
+platinum:wildcard/10_wildcard_basic/Short unrooted query
+platinum:wildcard/10_wildcard_basic/Sort works
+platinum:wildcard/10_wildcard_basic/Term query on wildcard field
+platinum:wildcard/10_wildcard_basic/Terms query on wildcard field
+platinum:wildcard/10_wildcard_basic/null query
+platinum:wildcard/20_ignore_above_stored_source/wildcard field type ignore_above
+platinum:wildcard/30_ignore_above_synthetic_source/wildcard field type ignore_above
+platinum:xpack/10_basic/X-Pack loaded
+platinum:xpack/20_info/XPack Info API

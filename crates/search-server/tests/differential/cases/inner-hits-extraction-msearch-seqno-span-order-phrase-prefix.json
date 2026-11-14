@@ -1,0 +1,1287 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "PUT",
+      "path": "/batch3-a",
+      "body": {
+        "settings": {
+          "number_of_shards": 3,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "t": {
+              "type": "text",
+              "analyzer": "stop"
+            },
+            "t2": {
+              "type": "text"
+            },
+            "half": {
+              "type": "half_float"
+            },
+            "d": {
+              "type": "date"
+            },
+            "kw": {
+              "type": "keyword"
+            },
+            "dbl": {
+              "type": "double"
+            },
+            "n": {
+              "type": "nested",
+              "properties": {
+                "x": {
+                  "type": "keyword"
+                },
+                "tt": {
+                  "type": "text"
+                }
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "batch3-a"
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/batch3-b",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "t": {
+              "type": "text",
+              "analyzer": "stop"
+            },
+            "t2": {
+              "type": "text"
+            },
+            "half": {
+              "type": "half_float"
+            },
+            "d": {
+              "type": "date"
+            },
+            "kw": {
+              "type": "keyword"
+            },
+            "dbl": {
+              "type": "double"
+            },
+            "n": {
+              "type": "nested",
+              "properties": {
+                "x": {
+                  "type": "keyword"
+                },
+                "tt": {
+                  "type": "text"
+                }
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "batch3-b"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "batch3-a",
+            "_id": "1"
+          }
+        },
+        {
+          "t": "banana query red dog of quick",
+          "t2": "red dog the end shard running",
+          "half": 6.05078125,
+          "kw": "a",
+          "dbl": [
+            1,
+            2
+          ],
+          "n": [
+            {
+              "x": "u",
+              "tt": "engine cats"
+            }
+          ]
+        },
+        {
+          "index": {
+            "_index": "batch3-a",
+            "_id": "2"
+          }
+        },
+        {
+          "t": "shard engine running",
+          "t2": "cats engine",
+          "half": -6.66015625,
+          "kw": "b",
+          "dbl": 3,
+          "n": [
+            {
+              "x": "v",
+              "tt": "cats engine"
+            }
+          ]
+        },
+        {
+          "index": {
+            "_index": "batch3-a",
+            "_id": "3"
+          }
+        },
+        {
+          "t2": "running dog",
+          "half": 20,
+          "dbl": [
+            4,
+            5
+          ]
+        },
+        {
+          "index": {
+            "_index": "batch3-b",
+            "_id": "4"
+          }
+        },
+        {
+          "t2": "red",
+          "dbl": [
+            6,
+            7
+          ],
+          "d": "2024-01-01"
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "batch3-a",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "batch3-a",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "batch3-a",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "batch3-b",
+                "_id": "4",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/batch3-a/_search",
+      "body": {
+        "sort": [
+          {
+            "half": {}
+          }
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 3,
+            "successful": 3,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "batch3-a",
+                "_id": "2",
+                "_score": null,
+                "_source": {
+                  "t": "shard engine running",
+                  "t2": "cats engine",
+                  "half": -6.66015625,
+                  "kw": "b",
+                  "dbl": 3,
+                  "n": [
+                    {
+                      "x": "v",
+                      "tt": "cats engine"
+                    }
+                  ]
+                },
+                "sort": [
+                  -6.6601562
+                ]
+              },
+              {
+                "_index": "batch3-a",
+                "_id": "1",
+                "_score": null,
+                "_source": {
+                  "t": "banana query red dog of quick",
+                  "t2": "red dog the end shard running",
+                  "half": 6.05078125,
+                  "kw": "a",
+                  "dbl": [
+                    1,
+                    2
+                  ],
+                  "n": [
+                    {
+                      "x": "u",
+                      "tt": "engine cats"
+                    }
+                  ]
+                },
+                "sort": [
+                  6.0507812
+                ]
+              },
+              {
+                "_index": "batch3-a",
+                "_id": "3",
+                "_score": null,
+                "_source": {
+                  "t2": "running dog",
+                  "half": 20,
+                  "dbl": [
+                    4,
+                    5
+                  ]
+                },
+                "sort": [
+                  20.0
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/batch3-a/_search",
+      "body": {
+        "highlight": {
+          "fields": {
+            "t": {},
+            "t2": {}
+          }
+        },
+        "query": {
+          "multi_match": {
+            "query": "red dog th",
+            "type": "phrase_prefix"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 3,
+            "successful": 3,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.302247,
+            "hits": [
+              {
+                "_index": "batch3-a",
+                "_id": "1",
+                "_score": 1.302247,
+                "_source": {
+                  "t": "banana query red dog of quick",
+                  "t2": "red dog the end shard running",
+                  "half": 6.05078125,
+                  "kw": "a",
+                  "dbl": [
+                    1,
+                    2
+                  ],
+                  "n": [
+                    {
+                      "x": "u",
+                      "tt": "engine cats"
+                    }
+                  ]
+                },
+                "highlight": {
+                  "t2": [
+                    "<em>red dog the</em> end shard running"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/batch3-a/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "span_near": {
+            "clauses": [
+              {
+                "span_term": {
+                  "t2": "shard"
+                }
+              },
+              {
+                "span_term": {
+                  "t2": "running"
+                }
+              }
+            ],
+            "in_order": false,
+            "slop": 2
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 3,
+            "successful": 3,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.3237027,
+            "hits": [
+              {
+                "_shard": "[batch3-a][2]",
+                "_node": "t0qXa8wrQoWNhUNlwV-1Mw",
+                "_index": "batch3-a",
+                "_id": "1",
+                "_score": 0.3237027,
+                "_source": {
+                  "t": "banana query red dog of quick",
+                  "t2": "red dog the end shard running",
+                  "half": 6.05078125,
+                  "kw": "a",
+                  "dbl": [
+                    1,
+                    2
+                  ],
+                  "n": [
+                    {
+                      "x": "u",
+                      "tt": "engine cats"
+                    }
+                  ]
+                },
+                "_explanation": {
+                  "value": 0.3237027,
+                  "description": "sum of:",
+                  "details": [
+                    {
+                      "value": 0.3237027,
+                      "description": "weight(spanNear([t2:shard, t2:running], 2, false) in 1) [PerFieldSimilarity], result of:",
+                      "details": [
+                        {
+                          "value": 0.3237027,
+                          "description": "score(freq=0.33333334), computed as boost * idf * tf from:",
+                          "details": [
+                            {
+                              "value": 2.2,
+                              "description": "boost",
+                              "details": []
+                            },
+                            {
+                              "value": 0.87546873,
+                              "description": "idf, sum of:",
+                              "details": [
+                                {
+                                  "value": 0.18232156,
+                                  "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                  "details": [
+                                    {
+                                      "value": 2,
+                                      "description": "n, number of documents containing term",
+                                      "details": []
+                                    },
+                                    {
+                                      "value": 2,
+                                      "description": "N, total number of documents with field",
+                                      "details": []
+                                    }
+                                  ]
+                                },
+                                {
+                                  "value": 0.6931472,
+                                  "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                  "details": [
+                                    {
+                                      "value": 1,
+                                      "description": "n, number of documents containing term",
+                                      "details": []
+                                    },
+                                    {
+                                      "value": 2,
+                                      "description": "N, total number of documents with field",
+                                      "details": []
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "value": 0.16806722,
+                              "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                              "details": [
+                                {
+                                  "value": 0.33333334,
+                                  "description": "phraseFreq=0.33333334",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.2,
+                                  "description": "k1, term saturation parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 0.75,
+                                  "description": "b, length normalization parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 6.0,
+                                  "description": "dl, length of field",
+                                  "details": []
+                                },
+                                {
+                                  "value": 4.0,
+                                  "description": "avgdl, average length of field",
+                                  "details": []
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "value": 0.0,
+                      "description": "match on required clause, product of:",
+                      "details": [
+                        {
+                          "value": 0.0,
+                          "description": "# clause",
+                          "details": []
+                        },
+                        {
+                          "value": 1.0,
+                          "description": "FieldExistsQuery [field=_primary_term]",
+                          "details": []
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/batch3-a/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "must_not": [
+              {
+                "nested": {
+                  "inner_hits": {},
+                  "path": "n",
+                  "query": {
+                    "term": {
+                      "n.x": "zz"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 3,
+            "successful": 3,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 0.0,
+            "hits": [
+              {
+                "_index": "batch3-a",
+                "_id": "2",
+                "_score": 0.0,
+                "_source": {
+                  "t": "shard engine running",
+                  "t2": "cats engine",
+                  "half": -6.66015625,
+                  "kw": "b",
+                  "dbl": 3,
+                  "n": [
+                    {
+                      "x": "v",
+                      "tt": "cats engine"
+                    }
+                  ]
+                }
+              },
+              {
+                "_index": "batch3-a",
+                "_id": "1",
+                "_score": 0.0,
+                "_source": {
+                  "t": "banana query red dog of quick",
+                  "t2": "red dog the end shard running",
+                  "half": 6.05078125,
+                  "kw": "a",
+                  "dbl": [
+                    1,
+                    2
+                  ],
+                  "n": [
+                    {
+                      "x": "u",
+                      "tt": "engine cats"
+                    }
+                  ]
+                }
+              },
+              {
+                "_index": "batch3-a",
+                "_id": "3",
+                "_score": 0.0,
+                "_source": {
+                  "t2": "running dog",
+                  "half": 20,
+                  "dbl": [
+                    4,
+                    5
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/batch3-a/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "must_not": [
+              {
+                "nested": {
+                  "inner_hits": {},
+                  "path": "n",
+                  "query": {
+                    "term": {
+                      "n.x": "u"
+                    }
+                  }
+                }
+              },
+              {
+                "nested": {
+                  "inner_hits": {},
+                  "path": "n",
+                  "query": {
+                    "term": {
+                      "n.x": "v"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 3,
+            "successful": 3,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.0,
+            "hits": [
+              {
+                "_index": "batch3-a",
+                "_id": "3",
+                "_score": 0.0,
+                "_source": {
+                  "t2": "running dog",
+                  "half": 20,
+                  "dbl": [
+                    4,
+                    5
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/batch3-a/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "must": [
+              {
+                "combined_fields": {
+                  "query": "x"
+                }
+              }
+            ],
+            "should": [
+              {
+                "nested": {
+                  "inner_hits": {},
+                  "path": "n",
+                  "query": {
+                    "match_all": {}
+                  }
+                }
+              },
+              {
+                "nested": {
+                  "inner_hits": {},
+                  "path": "n",
+                  "query": {
+                    "term": {
+                      "n.x": "u"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "illegal_argument_exception",
+                "reason": "[inner_hits] already contains an entry for key [n]"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "batch3-a",
+                "node": "t0qXa8wrQoWNhUNlwV-1Mw",
+                "reason": {
+                  "type": "illegal_argument_exception",
+                  "reason": "[inner_hits] already contains an entry for key [n]"
+                }
+              }
+            ],
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "[inner_hits] already contains an entry for key [n]",
+              "caused_by": {
+                "type": "illegal_argument_exception",
+                "reason": "[inner_hits] already contains an entry for key [n]"
+              }
+            }
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_msearch",
+      "lines": [
+        {
+          "index": "batch3-a"
+        },
+        {
+          "seq_no_primary_term": true,
+          "size": 1,
+          "sort": [
+            "kw"
+          ],
+          "aggs": {
+            "t": {
+              "top_hits": {
+                "size": 1,
+                "sort": [
+                  "kw"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 3,
+          "responses": [
+            {
+              "took": 3,
+              "timed_out": false,
+              "_shards": {
+                "total": 3,
+                "successful": 3,
+                "skipped": 0,
+                "failed": 0
+              },
+              "hits": {
+                "total": {
+                  "value": 3,
+                  "relation": "eq"
+                },
+                "max_score": null,
+                "hits": [
+                  {
+                    "_index": "batch3-a",
+                    "_id": "1",
+                    "_seq_no": 0,
+                    "_primary_term": 1,
+                    "_score": null,
+                    "_source": {
+                      "t": "banana query red dog of quick",
+                      "t2": "red dog the end shard running",
+                      "half": 6.05078125,
+                      "kw": "a",
+                      "dbl": [
+                        1,
+                        2
+                      ],
+                      "n": [
+                        {
+                          "x": "u",
+                          "tt": "engine cats"
+                        }
+                      ]
+                    },
+                    "sort": [
+                      "a"
+                    ]
+                  }
+                ]
+              },
+              "aggregations": {
+                "t": {
+                  "hits": {
+                    "total": {
+                      "value": 3,
+                      "relation": "eq"
+                    },
+                    "max_score": null,
+                    "hits": [
+                      {
+                        "_index": "batch3-a",
+                        "_id": "1",
+                        "_score": null,
+                        "_source": {
+                          "t": "banana query red dog of quick",
+                          "t2": "red dog the end shard running",
+                          "half": 6.05078125,
+                          "kw": "a",
+                          "dbl": [
+                            1,
+                            2
+                          ],
+                          "n": [
+                            {
+                              "x": "u",
+                              "tt": "engine cats"
+                            }
+                          ]
+                        },
+                        "sort": [
+                          "a"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              },
+              "status": 200
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/batch3-a/_search",
+      "body": {
+        "seq_no_primary_term": true,
+        "size": 1,
+        "sort": [
+          "kw"
+        ],
+        "aggs": {
+          "t": {
+            "top_hits": {
+              "size": 1,
+              "sort": [
+                "kw"
+              ]
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 3,
+            "successful": 3,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "batch3-a",
+                "_id": "1",
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "_score": null,
+                "_source": {
+                  "t": "banana query red dog of quick",
+                  "t2": "red dog the end shard running",
+                  "half": 6.05078125,
+                  "kw": "a",
+                  "dbl": [
+                    1,
+                    2
+                  ],
+                  "n": [
+                    {
+                      "x": "u",
+                      "tt": "engine cats"
+                    }
+                  ]
+                },
+                "sort": [
+                  "a"
+                ]
+              }
+            ]
+          },
+          "aggregations": {
+            "t": {
+              "hits": {
+                "total": {
+                  "value": 3,
+                  "relation": "eq"
+                },
+                "max_score": null,
+                "hits": [
+                  {
+                    "_index": "batch3-a",
+                    "_id": "1",
+                    "_seq_no": -2,
+                    "_primary_term": 0,
+                    "_score": null,
+                    "_source": {
+                      "t": "banana query red dog of quick",
+                      "t2": "red dog the end shard running",
+                      "half": 6.05078125,
+                      "kw": "a",
+                      "dbl": [
+                        1,
+                        2
+                      ],
+                      "n": [
+                        {
+                          "x": "u",
+                          "tt": "engine cats"
+                        }
+                      ]
+                    },
+                    "sort": [
+                      "a"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/batch3-a,batch3-b/_search",
+      "body": {
+        "aggs": {
+          "w": {
+            "weighted_avg": {
+              "value": {
+                "field": "dbl"
+              },
+              "weight": {
+                "field": "dbl"
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 4,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 2,
+            "failures": [
+              {
+                "shard": 0,
+                "index": "batch3-b",
+                "node": "t0qXa8wrQoWNhUNlwV-1Mw",
+                "reason": {
+                  "type": "illegal_argument_exception",
+                  "reason": "Encountered more than one weight for a single document. Use a script to combine multiple weights-per-doc into a single value."
+                }
+              },
+              {
+                "shard": 2,
+                "index": "batch3-a",
+                "node": "t0qXa8wrQoWNhUNlwV-1Mw",
+                "reason": {
+                  "type": "illegal_argument_exception",
+                  "reason": "Encountered more than one weight for a single document. Use a script to combine multiple weights-per-doc into a single value."
+                }
+              }
+            ]
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_index": "batch3-a",
+                "_id": "2",
+                "_score": 1.0,
+                "_source": {
+                  "t": "shard engine running",
+                  "t2": "cats engine",
+                  "half": -6.66015625,
+                  "kw": "b",
+                  "dbl": 3,
+                  "n": [
+                    {
+                      "x": "v",
+                      "tt": "cats engine"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "aggregations": {
+            "w": {
+              "value": 3.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/batch3-*/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "filter": [
+              {
+                "combined_fields": {
+                  "query": "cat"
+                }
+              }
+            ],
+            "must": [
+              {
+                "range": {
+                  "d": {
+                    "lt": "2024-10-22"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "sort": [
+          {
+            "kw": {
+              "order": "desc"
+            }
+          }
+        ],
+        "track_total_hits": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 4,
+            "successful": 3,
+            "skipped": 3,
+            "failed": 1,
+            "failures": [
+              {
+                "shard": 0,
+                "index": "batch3-b",
+                "node": "t0qXa8wrQoWNhUNlwV-1Mw",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "failed to create query: In [combined_fields] query, at least one field must be provided",
+                  "index_uuid": "USbLdZeHQgq6MVIPXLA05w",
+                  "index": "batch3-b",
+                  "caused_by": {
+                    "type": "illegal_argument_exception",
+                    "reason": "In [combined_fields] query, at least one field must be provided"
+                  }
+                }
+              }
+            ]
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": 0.0,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/batch3-a,batch3-b",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

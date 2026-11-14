@@ -1,0 +1,428 @@
+{
+  "diff": {
+    "es": 0,
+    "path": ".suggest.c[0].options.length",
+    "roll": 1
+  },
+  "found": {
+    "case": 55,
+    "case_seed": 1000058,
+    "seed": 1
+  },
+  "roll": {
+    "body": {
+      "_shards": {
+        "failed": 1,
+        "failures": [
+          {
+            "index": "diff-m0-b",
+            "node": "0Zr0L-l4THmSU_MWbe51EQ",
+            "reason": {
+              "reason": "field value function must not produce negative scores, but got: [-228.0] for field value: [-228.0]",
+              "type": "illegal_argument_exception"
+            },
+            "shard": 0
+          }
+        ],
+        "skipped": 0,
+        "successful": 5,
+        "total": 6
+      },
+      "hits": {
+        "hits": [],
+        "max_score": null,
+        "total": {
+          "relation": "eq",
+          "value": 0
+        }
+      },
+      "suggest": {
+        "c": [
+          {
+            "length": 2,
+            "offset": 0,
+            "options": [
+              {
+                "_id": "32",
+                "_ignored": [
+                  "text0.raw"
+                ],
+                "_index": "diff-m0-b",
+                "_score": 2.0,
+                "_source": {
+                  "comp0": "jumps cherry",
+                  "date0": "2024-05-25",
+                  "kw0": "Alpha",
+                  "kw1": "x-1",
+                  "long0": 56,
+                  "text0": [
+                    "cat cherry of and quick quick apple quick",
+                    "cats dog"
+                  ],
+                  "wild0": "pi"
+                },
+                "text": "jumps cherry"
+              }
+            ],
+            "text": "ju"
+          }
+        ],
+        "t": [
+          {
+            "length": 3,
+            "offset": 0,
+            "options": [],
+            "text": "dog"
+          }
+        ]
+      },
+      "timed_out": false,
+      "took": 1
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+  },
+  "signature": "POST _search .suggest.c[].options.length",
+  "steps": [
+    {
+      "body": {
+        "mappings": {
+          "properties": {
+            "comp0": {
+              "type": "completion"
+            },
+            "date0": {
+              "format": "strict_date_optional_time||epoch_millis",
+              "type": "date"
+            },
+            "geo0": {
+              "type": "geo_point"
+            },
+            "kw0": {
+              "type": "keyword"
+            },
+            "kw1": {
+              "type": "keyword"
+            },
+            "long0": {
+              "type": "long"
+            },
+            "short0": {
+              "type": "short"
+            },
+            "text0": {
+              "analyzer": "simple",
+              "fields": {
+                "raw": {
+                  "ignore_above": 32,
+                  "type": "keyword"
+                }
+              },
+              "term_vector": "with_positions_offsets",
+              "type": "text"
+            },
+            "wild0": {
+              "type": "wildcard"
+            }
+          }
+        },
+        "settings": {
+          "number_of_replicas": 0,
+          "number_of_shards": 5,
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m0-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m0-a"
+    },
+    {
+      "body": {
+        "mappings": {
+          "properties": {
+            "comp0": {
+              "type": "completion"
+            },
+            "date0": {
+              "format": "strict_date_optional_time||epoch_millis",
+              "type": "date"
+            },
+            "geo0": {
+              "type": "geo_point"
+            },
+            "kw0": {
+              "type": "keyword"
+            },
+            "kw1": {
+              "type": "keyword"
+            },
+            "long0": {
+              "type": "long"
+            },
+            "short0": {
+              "type": "short"
+            },
+            "text0": {
+              "analyzer": "simple",
+              "fields": {
+                "raw": {
+                  "ignore_above": 32,
+                  "type": "keyword"
+                }
+              },
+              "term_vector": "with_positions_offsets",
+              "type": "text"
+            },
+            "wild0": {
+              "type": "wildcard"
+            }
+          }
+        },
+        "settings": {
+          "number_of_replicas": 0,
+          "number_of_shards": 1,
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m0-b",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m0-b"
+    },
+    {
+      "es": {
+        "body": {
+          "errors": false,
+          "items": [
+            {
+              "index": {
+                "_id": "14",
+                "_index": "diff-m0-b",
+                "_primary_term": 1,
+                "_seq_no": 0,
+                "_shards": {
+                  "failed": 0,
+                  "successful": 1,
+                  "total": 1
+                },
+                "_version": 1,
+                "result": "created",
+                "status": 201
+              }
+            }
+          ],
+          "took": 0
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "lines": [
+        {
+          "index": {
+            "_id": "14",
+            "_index": "diff-m0-b"
+          }
+        },
+        {
+          "comp0": "quick cherry runs",
+          "date0": 1736985600000,
+          "geo0": "-34.59,75.24",
+          "kw1": "x-2",
+          "long0": -2561582926,
+          "short0": -228,
+          "text0": "brown running and over engine Dogs data the",
+          "wild0": ""
+        }
+      ],
+      "method": "POST",
+      "path": "/_bulk"
+    },
+    {
+      "es": {
+        "body": {
+          "errors": false,
+          "items": [
+            {
+              "index": {
+                "_id": "32",
+                "_index": "diff-m0-b",
+                "_primary_term": 1,
+                "_seq_no": 1,
+                "_shards": {
+                  "failed": 0,
+                  "successful": 1,
+                  "total": 1
+                },
+                "_version": 1,
+                "result": "created",
+                "status": 201
+              }
+            }
+          ],
+          "took": 0
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "lines": [
+        {
+          "index": {
+            "_id": "32",
+            "_index": "diff-m0-b"
+          }
+        },
+        {
+          "comp0": "jumps cherry",
+          "date0": "2024-05-25",
+          "kw0": "Alpha",
+          "kw1": "x-1",
+          "long0": 56,
+          "text0": [
+            "cat cherry of and quick quick apple quick",
+            "cats dog"
+          ],
+          "wild0": "pi"
+        }
+      ],
+      "method": "POST",
+      "path": "/_bulk"
+    },
+    {
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "successful": 1,
+            "total": 1
+          }
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m0-b/_refresh"
+    },
+    {
+      "body": {
+        "query": {
+          "function_score": {
+            "functions": [
+              {
+                "field_value_factor": {
+                  "field": "short0"
+                }
+              }
+            ]
+          }
+        },
+        "suggest": {
+          "c": {
+            "completion": {
+              "field": "comp0",
+              "fuzzy": {
+                "fuzziness": 1
+              }
+            },
+            "prefix": "ju"
+          },
+          "t": {
+            "term": {
+              "field": "text0",
+              "suggest_mode": "missing"
+            },
+            "text": "dog"
+          }
+        }
+      },
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 1,
+            "failures": [
+              {
+                "index": "diff-m0-b",
+                "node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "reason": {
+                  "reason": "field value function must not produce negative scores, but got: [-228.0] for field value: [-228.0]",
+                  "type": "illegal_argument_exception"
+                },
+                "shard": 0
+              }
+            ],
+            "skipped": 0,
+            "successful": 5,
+            "total": 6
+          },
+          "hits": {
+            "hits": [],
+            "max_score": null,
+            "total": {
+              "relation": "eq",
+              "value": 0
+            }
+          },
+          "suggest": {
+            "c": [
+              {
+                "length": 2,
+                "offset": 0,
+                "options": [],
+                "text": "ju"
+              }
+            ],
+            "t": [
+              {
+                "length": 3,
+                "offset": 0,
+                "options": [],
+                "text": "dog"
+              }
+            ]
+          },
+          "timed_out": false,
+          "took": 1
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m0-*/_search"
+    }
+  ]
+}

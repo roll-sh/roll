@@ -1,0 +1,947 @@
+{
+  "description" : "Aliases: put/get/exists/delete, _aliases actions and errors.",
+  "steps" : [
+    {
+      "req" : "PUT /esm-i1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-i1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-i2",
+      "body" : {
+        "settings" : {
+          "number_of_replicas" : 0
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-i2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-i1/_alias/esm-al1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-i1/_alias/esm-al2",
+      "body" : {
+        "routing" : "1",
+        "filter" : {
+          "term" : {
+            "f" : "v"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-i2/_alias/esm-al2",
+      "body" : {
+        "index_routing" : "a",
+        "search_routing" : "b,c",
+        "is_write_index" : true
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_alias/esm-al2",
+      "status" : 200,
+      "response" : {
+        "esm-i1" : {
+          "aliases" : {
+            "esm-al2" : {
+              "filter" : {
+                "term" : {
+                  "f" : "v"
+                }
+              },
+              "index_routing" : "1",
+              "search_routing" : "1"
+            }
+          }
+        },
+        "esm-i2" : {
+          "aliases" : {
+            "esm-al2" : {
+              "index_routing" : "a",
+              "search_routing" : "b,c",
+              "is_write_index" : true
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-i1/_alias",
+      "status" : 200,
+      "response" : {
+        "esm-i1" : {
+          "aliases" : {
+            "esm-al1" : { },
+            "esm-al2" : {
+              "filter" : {
+                "term" : {
+                  "f" : "v"
+                }
+              },
+              "index_routing" : "1",
+              "search_routing" : "1"
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-i1/_alias/esm-al*",
+      "status" : 200,
+      "response" : {
+        "esm-i1" : {
+          "aliases" : {
+            "esm-al1" : { },
+            "esm-al2" : {
+              "filter" : {
+                "term" : {
+                  "f" : "v"
+                }
+              },
+              "index_routing" : "1",
+              "search_routing" : "1"
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_alias/esm-al1,esm-nope",
+      "status" : 404,
+      "response" : {
+        "error" : "alias [esm-nope] missing",
+        "status" : 404,
+        "esm-i1" : {
+          "aliases" : {
+            "esm-al1" : { }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_alias/esm-nope",
+      "status" : 404,
+      "response" : {
+        "error" : "alias [esm-nope] missing",
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-i2/_alias/esm-al1",
+      "status" : 404,
+      "response" : {
+        "error" : "alias [esm-al1] missing",
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "HEAD /_alias/esm-al1",
+      "status" : 200,
+      "text" : "",
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "HEAD /_alias/esm-nope",
+      "status" : 404,
+      "text" : "",
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "HEAD /esm-i2/_alias/esm-al1",
+      "status" : 404,
+      "text" : "",
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-al2/_settings/index.number_of_replicas?flat_settings",
+      "status" : 200,
+      "response" : {
+        "esm-i1" : {
+          "settings" : {
+            "index.number_of_replicas" : "1"
+          }
+        },
+        "esm-i2" : {
+          "settings" : {
+            "index.number_of_replicas" : "0"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "add" : {
+              "index" : "esm-i1",
+              "alias" : "esm-al3"
+            }
+          },
+          {
+            "remove" : {
+              "index" : "esm-i1",
+              "alias" : "esm-al1"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-i1/_alias",
+      "status" : 200,
+      "response" : {
+        "esm-i1" : {
+          "aliases" : {
+            "esm-al2" : {
+              "filter" : {
+                "term" : {
+                  "f" : "v"
+                }
+              },
+              "index_routing" : "1",
+              "search_routing" : "1"
+            },
+            "esm-al3" : { }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "remove" : {
+              "index" : "esm-i1",
+              "alias" : "esm-nope"
+            }
+          }
+        ]
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "aliases_not_found_exception",
+              "reason" : "aliases [esm-nope] missing",
+              "resource.type" : "aliases",
+              "resource.id" : "esm-nope"
+            }
+          ],
+          "type" : "aliases_not_found_exception",
+          "reason" : "aliases [esm-nope] missing",
+          "resource.type" : "aliases",
+          "resource.id" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "remove" : {
+              "index" : "esm-i1",
+              "alias" : "esm-nope",
+              "must_exist" : false
+            }
+          }
+        ]
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "aliases_not_found_exception",
+              "reason" : "aliases [esm-nope] missing",
+              "resource.type" : "aliases",
+              "resource.id" : "esm-nope"
+            }
+          ],
+          "type" : "aliases_not_found_exception",
+          "reason" : "aliases [esm-nope] missing",
+          "resource.type" : "aliases",
+          "resource.id" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "add" : {
+              "index" : "esm-i1",
+              "alias" : "esm-al4"
+            }
+          },
+          {
+            "remove" : {
+              "index" : "esm-i1",
+              "alias" : "esm-nope"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "errors" : true,
+        "action_results" : [
+          {
+            "action" : {
+              "type" : "add",
+              "indices" : [
+                "esm-i1"
+              ],
+              "aliases" : [
+                "esm-al4"
+              ]
+            },
+            "status" : 200
+          },
+          {
+            "action" : {
+              "type" : "remove",
+              "indices" : [
+                "esm-i1"
+              ],
+              "aliases" : [
+                "esm-nope"
+              ]
+            },
+            "status" : 404,
+            "error" : {
+              "type" : "aliases_not_found_exception",
+              "reason" : "aliases [esm-nope] missing",
+              "resource.type" : "aliases",
+              "resource.id" : "esm-nope"
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "add" : {
+              "index" : "esm-nope",
+              "alias" : "esm-al5"
+            }
+          }
+        ]
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-nope",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-nope",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "add" : {
+              "index" : "esm-i1",
+              "alias" : "esm-i2"
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "invalid_alias_name_exception",
+              "reason" : "Invalid alias name [esm-i2]: an index, data stream, ESQL view, or ESQL dataset exists with the same name as the alias"
+            }
+          ],
+          "type" : "invalid_alias_name_exception",
+          "reason" : "Invalid alias name [esm-i2]: an index, data stream, ESQL view, or ESQL dataset exists with the same name as the alias"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "add" : {
+              "index" : "esm-i1",
+              "alias" : "esm-al2",
+              "is_write_index" : true
+            }
+          }
+        ]
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_state_exception",
+              "reason" : "alias [esm-al2] has more than one write index [esm-i1,esm-i2]"
+            }
+          ],
+          "type" : "illegal_state_exception",
+          "reason" : "alias [esm-al2] has more than one write index [esm-i1,esm-i2]"
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "bogus" : {
+              "index" : "esm-i1",
+              "alias" : "x"
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:14] [alias_action] unknown field [bogus]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:22] [aliases] failed to parse field [actions]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:14] [alias_action] unknown field [bogus]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "add" : {
+              "index" : "esm-i1",
+              "alias" : "x",
+              "bogus" : 1
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:50] [add] unknown field [bogus]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:58] [aliases] failed to parse field [actions]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:58] [alias_action] failed to parse field [add]",
+            "caused_by" : {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:50] [add] unknown field [bogus]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "add" : {
+              "alias" : "x"
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:34] [aliases] failed to parse field [actions]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:34] [aliases] failed to parse field [actions]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "One of [index] or [indices] is required"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "add" : {
+              "index" : "esm-i1"
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:39] [aliases] failed to parse field [actions]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:39] [aliases] failed to parse field [actions]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "One of [alias] or [aliases] is required"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [ ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No action specified"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No action specified"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "add" : {
+              "index" : "esm-i1",
+              "alias" : "esm-f",
+              "filter" : {
+                "bogus" : { }
+              }
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "failed to parse filter for alias [esm-f]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "failed to parse filter for alias [esm-f]",
+          "caused_by" : {
+            "type" : "parsing_exception",
+            "reason" : "unknown query [bogus]",
+            "line" : 1,
+            "col" : 10,
+            "caused_by" : {
+              "type" : "named_object_not_found_exception",
+              "reason" : "[1:10] unknown field [bogus]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "add" : {
+              "indices" : [
+                "esm-i1",
+                "esm-i2"
+              ],
+              "aliases" : [
+                "esm-m1",
+                "esm-m2"
+              ]
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_alias/esm-m*",
+      "status" : 200,
+      "response" : {
+        "esm-i1" : {
+          "aliases" : {
+            "esm-m1" : { },
+            "esm-m2" : { }
+          }
+        },
+        "esm-i2" : {
+          "aliases" : {
+            "esm-m1" : { },
+            "esm-m2" : { }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-i1/_alias/esm-m1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-i1/_alias/esm-nope",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "aliases_not_found_exception",
+              "reason" : "aliases [esm-nope] missing",
+              "resource.type" : "aliases",
+              "resource.id" : "esm-nope"
+            }
+          ],
+          "type" : "aliases_not_found_exception",
+          "reason" : "aliases [esm-nope] missing",
+          "resource.type" : "aliases",
+          "resource.id" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_all/_alias/esm-m*",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_alias/esm-m*",
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-i1/_alias/_bad",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "invalid_alias_name_exception",
+              "reason" : "Invalid alias name [_bad]: must not start with '_', '-', or '+'"
+            }
+          ],
+          "type" : "invalid_alias_name_exception",
+          "reason" : "Invalid alias name [_bad]: must not start with '_', '-', or '+'"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-i1/_alias/esm-h",
+      "body" : {
+        "is_hidden" : true
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Unsupported field [is_hidden]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Unsupported field [is_hidden]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-i2/_alias/esm-h",
+      "body" : {
+        "is_hidden" : false
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Unsupported field [is_hidden]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Unsupported field [is_hidden]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-i1/_alias/esm-r",
+      "body" : {
+        "index_routing" : "1,2"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "alias [esm-r] has several index routing values associated with it"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "alias [esm-r] has several index routing values associated with it"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "remove_index" : {
+              "index" : "esm-i2"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "HEAD /esm-i2",
+      "status" : 404,
+      "text" : "",
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cat/aliases/esm*?v&s=alias,index&h=alias,index,filter,routing.index,routing.search,is_write_index",
+      "status" : 200,
+      "text" : "alias   index  filter routing.index routing.search is_write_index\nesm-al2 esm-i1 *      1             1              -\nesm-al3 esm-i1 -      -             -              -\nesm-al4 esm-i1 -      -             -              -\n",
+      "response_headers" : {
+        "content-type" : "text/plain; charset=UTF-8"
+      }
+    }
+  ]
+}

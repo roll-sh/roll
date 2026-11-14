@@ -1,0 +1,391 @@
+{
+  "diff": {
+    "es": {
+      "body": {
+        "_shards": {
+          "failed": 0,
+          "skipped": 0,
+          "successful": 7,
+          "total": 7
+        },
+        "hits": {
+          "hits": [],
+          "max_score": null,
+          "total": {
+            "relation": "eq",
+            "value": 0
+          }
+        },
+        "timed_out": false,
+        "took": 0
+      },
+      "error": null,
+      "status": 200
+    },
+    "path": "status 200",
+    "roll": {
+      "body": {
+        "error": {
+          "failed_shards": [
+            {
+              "index": "diff-m6-a",
+              "node": "0Zr0L-l4THmSU_MWbe51EQ",
+              "reason": {
+                "caused_by": {
+                  "reason": "All fields in [combined_fields] query must have the same search analyzer",
+                  "type": "illegal_argument_exception"
+                },
+                "index": "diff-m6-a",
+                "index_uuid": "RbnlgD-STniFRa81iDZt2w",
+                "reason": "failed to create query: All fields in [combined_fields] query must have the same search analyzer",
+                "type": "query_shard_exception"
+              },
+              "shard": 0
+            },
+            {
+              "index": "diff-m6-b",
+              "node": "0Zr0L-l4THmSU_MWbe51EQ",
+              "reason": {
+                "caused_by": {
+                  "reason": "All fields in [combined_fields] query must have the same search analyzer",
+                  "type": "illegal_argument_exception"
+                },
+                "index": "diff-m6-b",
+                "index_uuid": "YAvqYKqoSeGL3Gnj0vWZHA",
+                "reason": "failed to create query: All fields in [combined_fields] query must have the same search analyzer",
+                "type": "query_shard_exception"
+              },
+              "shard": 0
+            }
+          ],
+          "grouped": true,
+          "phase": "dfs",
+          "reason": "all shards failed",
+          "root_cause": [
+            {
+              "index": "diff-m6-a",
+              "index_uuid": "RbnlgD-STniFRa81iDZt2w",
+              "reason": "failed to create query: All fields in [combined_fields] query must have the same search analyzer",
+              "type": "query_shard_exception"
+            },
+            {
+              "index": "diff-m6-b",
+              "index_uuid": "YAvqYKqoSeGL3Gnj0vWZHA",
+              "reason": "failed to create query: All fields in [combined_fields] query must have the same search analyzer",
+              "type": "query_shard_exception"
+            }
+          ],
+          "type": "search_phase_execution_exception"
+        },
+        "status": 400
+      },
+      "error": "search_phase_execution_exception",
+      "status": 400
+    }
+  },
+  "found": {
+    "case": 54,
+    "case_seed": 12000090,
+    "seed": 12
+  },
+  "roll": {
+    "body": {
+      "error": {
+        "failed_shards": [
+          {
+            "index": "diff-m6-a",
+            "node": "0Zr0L-l4THmSU_MWbe51EQ",
+            "reason": {
+              "caused_by": {
+                "reason": "All fields in [combined_fields] query must have the same search analyzer",
+                "type": "illegal_argument_exception"
+              },
+              "index": "diff-m6-a",
+              "index_uuid": "RbnlgD-STniFRa81iDZt2w",
+              "reason": "failed to create query: All fields in [combined_fields] query must have the same search analyzer",
+              "type": "query_shard_exception"
+            },
+            "shard": 0
+          },
+          {
+            "index": "diff-m6-b",
+            "node": "0Zr0L-l4THmSU_MWbe51EQ",
+            "reason": {
+              "caused_by": {
+                "reason": "All fields in [combined_fields] query must have the same search analyzer",
+                "type": "illegal_argument_exception"
+              },
+              "index": "diff-m6-b",
+              "index_uuid": "YAvqYKqoSeGL3Gnj0vWZHA",
+              "reason": "failed to create query: All fields in [combined_fields] query must have the same search analyzer",
+              "type": "query_shard_exception"
+            },
+            "shard": 0
+          }
+        ],
+        "grouped": true,
+        "phase": "dfs",
+        "reason": "all shards failed",
+        "root_cause": [
+          {
+            "index": "diff-m6-a",
+            "index_uuid": "RbnlgD-STniFRa81iDZt2w",
+            "reason": "failed to create query: All fields in [combined_fields] query must have the same search analyzer",
+            "type": "query_shard_exception"
+          },
+          {
+            "index": "diff-m6-b",
+            "index_uuid": "YAvqYKqoSeGL3Gnj0vWZHA",
+            "reason": "failed to create query: All fields in [combined_fields] query must have the same search analyzer",
+            "type": "query_shard_exception"
+          }
+        ],
+        "type": "search_phase_execution_exception"
+      },
+      "status": 400
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+  },
+  "signature": "POST _search status 200:200 vs 400:search_phase_execution_exception",
+  "steps": [
+    {
+      "body": {
+        "mappings": {
+          "properties": {
+            "date0": {
+              "format": "strict_date_optional_time||epoch_millis",
+              "type": "date"
+            },
+            "dbl0": {
+              "type": "double"
+            },
+            "int0": {
+              "type": "integer"
+            },
+            "kw0": {
+              "type": "keyword"
+            },
+            "kw1": {
+              "type": "keyword"
+            },
+            "o": {
+              "properties": {
+                "int0": {
+                  "type": "integer"
+                },
+                "kw0": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "scaled0": {
+              "scaling_factor": 100,
+              "type": "scaled_float"
+            },
+            "short0": {
+              "type": "short"
+            },
+            "text0": {
+              "analyzer": "simple",
+              "fields": {
+                "raw": {
+                  "ignore_above": 32,
+                  "type": "keyword"
+                }
+              },
+              "term_vector": "with_positions_offsets",
+              "type": "text"
+            },
+            "text1": {
+              "analyzer": "stop",
+              "fields": {
+                "raw": {
+                  "ignore_above": 32,
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            }
+          }
+        },
+        "settings": {
+          "number_of_replicas": 0,
+          "number_of_shards": 2,
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m6-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m6-a"
+    },
+    {
+      "body": {
+        "mappings": {
+          "properties": {
+            "date0": {
+              "format": "strict_date_optional_time||epoch_millis",
+              "type": "date"
+            },
+            "dbl0": {
+              "type": "double"
+            },
+            "int0": {
+              "type": "integer"
+            },
+            "kw0": {
+              "type": "keyword"
+            },
+            "kw1": {
+              "type": "keyword"
+            },
+            "o": {
+              "properties": {
+                "int0": {
+                  "type": "integer"
+                },
+                "kw0": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "scaled0": {
+              "scaling_factor": 100,
+              "type": "scaled_float"
+            },
+            "short0": {
+              "type": "short"
+            },
+            "text0": {
+              "analyzer": "simple",
+              "fields": {
+                "raw": {
+                  "ignore_above": 32,
+                  "type": "keyword"
+                }
+              },
+              "term_vector": "with_positions_offsets",
+              "type": "text"
+            },
+            "text1": {
+              "analyzer": "stop",
+              "fields": {
+                "raw": {
+                  "ignore_above": 32,
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            }
+          }
+        },
+        "settings": {
+          "number_of_replicas": 0,
+          "number_of_shards": 5,
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m6-b",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m6-b"
+    },
+    {
+      "body": {
+        "query": {
+          "bool": {
+            "must_not": [
+              {
+                "bool": {
+                  "must_not": [
+                    {
+                      "function_score": {
+                        "functions": [
+                          {
+                            "field_value_factor": {
+                              "field": "int0",
+                              "missing": 1,
+                              "modifier": "none"
+                            },
+                            "filter": {
+                              "combined_fields": {
+                                "fields": [
+                                  "text0",
+                                  "text1"
+                                ],
+                                "query": "roll fast"
+                              }
+                            }
+                          }
+                        ],
+                        "query": {
+                          "range": {
+                            "date0": {
+                              "gte": "2024-09-11",
+                              "lt": "2024-10-04T06:00:00Z"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 7,
+            "total": 7
+          },
+          "hits": {
+            "hits": [],
+            "max_score": null,
+            "total": {
+              "relation": "eq",
+              "value": 0
+            }
+          },
+          "timed_out": false,
+          "took": 0
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m6-*/_search?search_type=dfs_query_then_fetch"
+    }
+  ]
+}

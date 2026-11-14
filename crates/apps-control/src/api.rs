@@ -32,6 +32,7 @@ impl IntoResponse for Error {
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::Conflict(_) => StatusCode::CONFLICT,
             Error::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            Error::Forbidden(_) => StatusCode::FORBIDDEN,
             Error::Db(_) | Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status == StatusCode::INTERNAL_SERVER_ERROR {
@@ -75,6 +76,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}"), get(get_deploy))
         .route(&format!("{env}/deploys/{{dep}}/logs"), get(deploy_logs))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
+        .route(&format!("{env}/rollback"), post(rollback_previous))
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
         .route(&format!("{env}/redeploy"), post(redeploy))
         .route(&format!("{env}/promote"), post(promote))
@@ -85,12 +87,14 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/sleep"), post(sleep))
         .route(&format!("{env}/wake"), post(wake))
         .route(&format!("{env}/variables"), get(variables).patch(change_variables))
+        .route(&format!("{env}/pending"), get(pending))
         .route(&format!("{env}/variables/values"), get(reveal))
         .route(&format!("{env}/logs"), get(env_logs))
         .route(&format!("{env}/metrics"), get(metrics))
         .route(&format!("{env}/usage"), get(usage))
         .route(&format!("{env}/runs"), get(runs).post(run_now))
         .route(&format!("{env}/shell"), get(shell))
+        .route(&format!("{env}/tunnel"), get(tunnel))
         .route(&format!("{env}/shell/sessions"), post(open_session))
         .route(&format!("{env}/shell/sessions/{{sh}}"), axum::routing::delete(close_session))
         .route(&format!("{env}/shell/sessions/{{sh}}/screen"), get(session_screen))
@@ -139,7 +143,9 @@ async fn plan(State(apps): S, b: Bytes) -> R {
         if map.len() > 2000 || map.values().map(String::len).sum::<usize>() > 8 << 20 {
             return Err(Error::BadRequest("files is at most 2000 files and 8 MiB".into()));
         }
-        let p = apps_build::plan(&apps_build::MapTree(map), &overrides.overrides()).map_err(|e| Error::BadRequest(e.to_string()))?;
+        // As a new web service would build (a Procfile's `web:`).
+        let o = apps_build::Overrides { process: Some("web".into()), ..overrides.overrides() };
+        let p = apps_build::plan(&apps_build::MapTree(map), &o).map_err(|e| Error::BadRequest(e.to_string()))?;
         return ok(p);
     }
     let repo = v.get("repo").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("repo or files is required".into()))?.to_string();
@@ -177,7 +183,10 @@ async fn plan(State(apps): S, b: Bytes) -> R {
             build.start = build.start.or(ws.start);
             context = dir.clone();
         }
-        let o = build.overrides();
+        // As a new web service would build (a Procfile's `web:`), but from a workspace's root: its
+        // Procfile is the repo's.
+        let process = (context == root).then(|| "web".to_string());
+        let o = apps_build::Overrides { process, ..build.overrides() };
         let p = tokio::task::spawn_blocking(move || apps_build::plan(&apps_build::DirTree::new(context), &o)).await.map_err(|e| Error::Internal(e.to_string()))?;
         p.map(|mut p| {
             p.notes.splice(0..0, said);
@@ -208,7 +217,14 @@ async fn project_services(State(apps): S, Path(project): Path<String>) -> R {
 }
 
 async fn create_service(State(apps): S, ext: Extensions, b: Bytes) -> R {
-    let s = apps.create_service(body(&b)?, actor(&ext)).await?;
+    let b = body(&b)?;
+    let values: Vec<&str> = b["variables"].as_object().into_iter().flatten().filter_map(|(_, v)| v.as_str()).collect();
+    if let (Some(project), Some(name)) = (b["project"].as_str(), b["name"].as_str())
+        && values.iter().any(|v| v.contains("${{"))
+    {
+        apps.check_references(project, name, crate::model::PRODUCTION, &values, asker(&ext)).await?;
+    }
+    let s = apps.create_service(b, actor(&ext)).await?;
     Ok((StatusCode::CREATED, Json(s)).into_response())
 }
 
@@ -425,7 +441,8 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
         // Percent-encoded UTF-8 (a commit subject isn't ASCII): `roll up` sends it so.
         let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).map(|m| percent_encoding::percent_decode_str(m).decode_utf8_lossy().into_owned()).unwrap_or_default();
         let revision = headers.get("x-roll-revision").and_then(|v| v.to_str().ok()).filter(|r| (7..=64).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_hexdigit()));
-        apps.deploy(&id, &env, json!({ "message": message, "revision": revision }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
+        let no_cache = headers.get("x-roll-no-cache").is_some_and(|v| v == "1");
+        apps.deploy(&id, &env, json!({ "message": message, "revision": revision, "no_cache": no_cache }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
     } else {
         apps.deploy(&id, &env, body(&b)?, By { trigger: Trigger::Manual, actor }, None, key).await?
     };
@@ -619,6 +636,11 @@ async fn env_logs(State(apps): S, Path((id, env)): Path<(String, String)>, Query
 /// `roll_auth::Grant`). Nothing a client sends is believed.
 /// Who acted, for the activity log: a scoped token by its name, a signed-in admin by their user
 /// id, else the operator.
+/// Who asks, for another product's rule (roll secrets' reveal): what rolld's gate put on it.
+fn asker(ext: &Extensions) -> crate::integrations::Asker<'_> {
+    crate::integrations::Asker { operator: roll_auth::Operator::on(ext), user: ext.get::<roll_auth::SignedIn>(), grant: roll_auth::Grant::on(ext) }
+}
+
 fn actor(ext: &Extensions) -> Option<String> {
     if let Some(g) = roll_auth::Grant::on(ext) {
         return Some(format!("token:{}", g.name));
@@ -703,8 +725,15 @@ async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: E
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
-async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions) -> R {
-    let d = apps.rollback(&id, &env, &dep, actor(&ext)).await?;
+async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
+    let keep = body(&b)?.get("keep_variables").and_then(Value::as_bool).unwrap_or(false);
+    let d = apps.rollback(&id, &env, &dep, actor(&ext), keep).await?;
+    Ok((StatusCode::ACCEPTED, Json(d)).into_response())
+}
+
+async fn rollback_previous(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    let keep = body(&b)?.get("keep_variables").and_then(Value::as_bool).unwrap_or(false);
+    let d = apps.rollback_previous(&id, &env, actor(&ext), keep).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
@@ -725,23 +754,34 @@ async fn wake(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     ok(apps.wake(&id, &env).await?)
 }
 
+/// `GET …/pending`: what the next deploy changes (names, never values).
+async fn pending(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    ok(apps.pending(&id, &env).await?)
+}
+
 async fn variables(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
-    ok(apps.variables(&id, &env, false).await?)
+    ok(apps.variables(&id, &env, None).await?)
 }
 
 async fn reveal(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions) -> R {
-    let v = apps.variables(&id, &env, true).await?;
+    let who = asker(&ext);
+    let v = apps.variables(&id, &env, Some(who)).await?;
     apps.audit("variables.revealed", &id, &env, actor(&ext), json!({})).await;
     ok(v)
 }
 
 async fn change_variables(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let change = body(&b)?;
+    let values: Vec<&str> = change["set"].as_object().into_iter().flatten().filter_map(|(_, v)| v.as_str()).collect();
+    if values.iter().any(|v| v.contains("${{")) {
+        let svc = apps.service(&id).await?;
+        apps.check_references(&svc.project, &svc.name, &env, &values, asker(&ext)).await?;
+    }
     let v = apps.change_variables(&id, &env, change.clone()).await?;
     apps.settings_changed();
     // Names only: a value never reaches the trail.
     let set: Vec<String> = change["set"].as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
-    apps.audit("variables", &id, &env, actor(&ext), json!({ "set": set, "unset": change["unset"] })).await;
+    apps.audit("variables", &id, &env, actor(&ext), json!({ "set": set, "unset": change["unset"], "seal": change["seal"] })).await;
     ok(v)
 }
 
@@ -749,9 +789,16 @@ async fn change_variables(State(apps): S, Path((id, env)): Path<(String, String)
 struct Window {
     minutes: Option<i64>,
     days: Option<i64>,
+    /// `prometheus`: the metrics as a scraper reads them.
+    format: Option<String>,
 }
 
 async fn metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
+    // For a scraper (Prometheus, Grafana Agent): the last finished minute as gauges.
+    if w.format.as_deref() == Some("prometheus") {
+        let text = apps.metrics_prometheus(&id, &env).await?;
+        return Ok(([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], text).into_response());
+    }
     ok(apps.metrics(&id, &env, w.minutes.unwrap_or(60)).await?)
 }
 
@@ -768,13 +815,24 @@ struct ShellQuery {
 }
 
 /// `GET …/shell` (a WebSocket): a shell in a running instance; see `crate::shell`.
-async fn shell(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<ShellQuery>, ws: axum::extract::ws::WebSocketUpgrade) -> R {
+async fn shell(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<ShellQuery>, ext: Extensions, ws: axum::extract::ws::WebSocketUpgrade) -> R {
+    // A shell reads every variable: roll secrets' reveal rule, as for their values.
+    apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
     let slot = apps.shell_slot(&id, &env)?;
     let target = apps.shell_target(&id, &env, q.instance.as_deref()).await?;
     let (cols, rows) = (q.cols.unwrap_or(80).clamp(10, 1000), q.rows.unwrap_or(24).clamp(2, 500));
     // Keys and resizes are small: nothing near axum's 64 MiB default is held for a peer.
     let ws = ws.max_message_size(1 << 20).max_frame_size(1 << 20);
     Ok(ws.on_upgrade(move |socket| apps.bridge_shell(socket, target, slot, cols, rows)).into_response())
+}
+
+/// `GET …/tunnel` (a WebSocket): one TCP connection to the service's port; see `crate::tunnel`.
+async fn tunnel(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, ws: axum::extract::ws::WebSocketUpgrade) -> R {
+    let slot = apps.tunnel_slot(&id, &env)?;
+    let lease = apps.tunnel_target(&id, &env).await?;
+    apps.audit("tunnel.opened", &id, &env, actor(&ext), json!({})).await;
+    let ws = ws.max_message_size(1 << 20).max_frame_size(1 << 20);
+    Ok(ws.on_upgrade(move |socket| apps.bridge_tunnel(socket, lease, slot)).into_response())
 }
 
 #[derive(Deserialize)]
@@ -786,7 +844,8 @@ struct OpenSession {
 }
 
 /// `POST …/shell/sessions`: a shell over HTTP (the dashboard's terminal); see `crate::shell`.
-async fn open_session(State(apps): S, Path((id, env)): Path<(String, String)>, b: Bytes) -> R {
+async fn open_session(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
     let o: OpenSession = if b.is_empty() { OpenSession { instance: None, cols: None, rows: None } } else { serde_json::from_slice(&b).map_err(|e| Error::BadRequest(e.to_string()))? };
     let sh = apps.open_session(&id, &env, o.instance.as_deref(), o.cols.unwrap_or(80).clamp(10, 1000), o.rows.unwrap_or(24).clamp(2, 500)).await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": sh }))).into_response())
@@ -859,8 +918,10 @@ async fn cancel_job(State(apps): S, Path((id, env, job)): Path<(String, String, 
 }
 
 /// A job's output; `follow` streams it until the job ends.
-async fn job_logs(State(apps): S, Path((id, env, job)): Path<(String, String, String)>, Query(q): Query<LogQuery>) -> R {
+async fn job_logs(State(apps): S, Path((id, env, job)): Path<(String, String, String)>, Query(q): Query<LogQuery>, ext: Extensions) -> R {
     let j = apps.job(&id, &env, &job).await?;
+    let who = asker(&ext);
+    apps.check_secret_reveal(&id, &env, who).await?;
     let (tx, rx) = tokio::sync::watch::channel(j.status != crate::model::RunStatus::Running);
     if j.status == crate::model::RunStatus::Running {
         let (apps2, id2, env2, job2) = (apps.clone(), id.clone(), env.clone(), job.clone());

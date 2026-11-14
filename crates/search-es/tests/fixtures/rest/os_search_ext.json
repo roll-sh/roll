@@ -1,0 +1,990 @@
+{
+  "description" : "OpenSearch 3.9.0 search request extras: phase_took, cancel_after_time_interval, the plugins' ext sections (rerank, ml_inference, ubi query ids, unknown names), the template query, derived fields (fetch, aggregations, queries) and the absence of runtime_mappings",
+  "dialect" : "opensearch",
+  "steps" : [
+    {
+      "req" : "PUT /esm-o",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 2,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "text"
+            },
+            "n" : {
+              "type" : "integer"
+            },
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-o"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"t\":\"quick brown fox\",\"n\":1,\"k\":\"a\"}\n{\"index\":{\"_id\":\"2\"}}\n{\"t\":\"lazy dog\",\"n\":2,\"k\":\"b\"}\n{\"index\":{\"_id\":\"3\"}}\n{\"t\":\"quick dog\",\"n\":3,\"k\":\"a\"}\n",
+      "headers" : {
+        "content-type" : "application/x-ndjson"
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 14,
+        "errors" : false,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "esm-o",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-o",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-o",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search?phase_took=true",
+      "body" : {
+        "query" : {
+          "match" : {
+            "t" : "quick"
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "phase_took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 8,
+        "phase_took" : {
+          "dfs_pre_query" : 0,
+          "query" : 6,
+          "fetch" : 1,
+          "dfs_query" : 0,
+          "expand" : 0,
+          "can_match" : 0
+        },
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.2268983,
+          "hits" : [
+            {
+              "_index" : "esm-o",
+              "_id" : "3",
+              "_score" : 0.2268983,
+              "_source" : {
+                "t" : "quick dog",
+                "n" : 3,
+                "k" : "a"
+              }
+            },
+            {
+              "_index" : "esm-o",
+              "_id" : "1",
+              "_score" : 0.19128054,
+              "_source" : {
+                "t" : "quick brown fox",
+                "n" : 1,
+                "k" : "a"
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search?phase_took=true",
+      "body" : {
+        "size" : 0
+      },
+      "mask" : [
+        "took",
+        "phase_took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "phase_took" : {
+          "dfs_pre_query" : 0,
+          "query" : 0,
+          "fetch" : 0,
+          "dfs_query" : 0,
+          "expand" : 0,
+          "can_match" : 0
+        },
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search?phase_took=bogus",
+      "body" : {
+        "size" : 0
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [bogus] as only [true] or [false] are allowed."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse value [bogus] as only [true] or [false] are allowed."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search?cancel_after_time_interval=10s",
+      "body" : {
+        "query" : {
+          "match" : {
+            "t" : "quick"
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.2268983,
+          "hits" : [
+            {
+              "_index" : "esm-o",
+              "_id" : "3",
+              "_score" : 0.2268983,
+              "_source" : {
+                "t" : "quick dog",
+                "n" : 3,
+                "k" : "a"
+              }
+            },
+            {
+              "_index" : "esm-o",
+              "_id" : "1",
+              "_score" : 0.19128054,
+              "_source" : {
+                "t" : "quick brown fox",
+                "n" : 1,
+                "k" : "a"
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search?cancel_after_time_interval=bogus",
+      "body" : {
+        "query" : {
+          "match" : {
+            "t" : "quick"
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "failed to parse [bogus]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "failed to parse [bogus]",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"bogu\""
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search",
+      "body" : {
+        "query" : {
+          "match" : {
+            "t" : "quick"
+          }
+        },
+        "ext" : {
+          "foo" : { }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "named_object_not_found_exception",
+              "reason" : "[1:47] unknown field [foo]"
+            }
+          ],
+          "type" : "named_object_not_found_exception",
+          "reason" : "[1:47] unknown field [foo]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search?size=0",
+      "body" : {
+        "ext" : {
+          "rerank" : { }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search?size=0",
+      "body" : {
+        "ext" : {
+          "ml_inference" : { }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search?size=0",
+      "body" : {
+        "ext" : {
+          "ubi" : {
+            "query_id" : "q-1"
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "ext" : {
+          "ubi" : {
+            "query_id" : "q-1"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search?size=0",
+      "body" : {
+        "ext" : {
+          "agent_steps_summary" : { }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "unsupported_operation_exception",
+              "reason" : "AgentStepsSearchExtBuilder should not be parsed from request"
+            }
+          ],
+          "type" : "unsupported_operation_exception",
+          "reason" : "AgentStepsSearchExtBuilder should not be parsed from request"
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search?size=0",
+      "body" : {
+        "ext" : {
+          "rerank" : { },
+          "generative_qa_params" : { }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "named_object_not_found_exception",
+              "reason" : "[1:44] unknown field [generative_qa_params]"
+            }
+          ],
+          "type" : "named_object_not_found_exception",
+          "reason" : "[1:44] unknown field [generative_qa_params]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search",
+      "body" : {
+        "query" : {
+          "template" : {
+            "source" : {
+              "match" : {
+                "t" : "{{q}}"
+              }
+            },
+            "params" : {
+              "q" : "quick"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to rewrite template query: {\"source\":{\"match\":{\"t\":\"{{q}}\"}},\"params\":{\"q\":\"quick\"}}"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to rewrite template query: {\"source\":{\"match\":{\"t\":\"{{q}}\"}},\"params\":{\"q\":\"quick\"}}",
+          "caused_by" : {
+            "type" : "parsing_exception",
+            "reason" : "unknown query [source]",
+            "line" : 1,
+            "col" : 11,
+            "caused_by" : {
+              "type" : "named_object_not_found_exception",
+              "reason" : "[1:11] unknown field [source]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search",
+      "body" : {
+        "query" : {
+          "template" : {
+            "match" : {
+              "t" : "quick"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 5,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.2268983,
+          "hits" : [
+            {
+              "_index" : "esm-o",
+              "_id" : "3",
+              "_score" : 0.2268983,
+              "_source" : {
+                "t" : "quick dog",
+                "n" : 3,
+                "k" : "a"
+              }
+            },
+            {
+              "_index" : "esm-o",
+              "_id" : "1",
+              "_score" : 0.19128054,
+              "_source" : {
+                "t" : "quick brown fox",
+                "n" : 1,
+                "k" : "a"
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search",
+      "body" : {
+        "query" : {
+          "template" : {
+            "match" : {
+              "t" : "{{q}}"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search",
+      "body" : {
+        "runtime_mappings" : {
+          "r" : {
+            "type" : "keyword"
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "Unknown key for a START_OBJECT in [runtime_mappings].",
+              "line" : 1,
+              "col" : 21
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "Unknown key for a START_OBJECT in [runtime_mappings].",
+          "line" : 1,
+          "col" : 21
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search",
+      "body" : {
+        "query" : {
+          "match" : {
+            "t" : "quick"
+          }
+        },
+        "derived" : {
+          "d" : {
+            "type" : "keyword",
+            "script" : {
+              "source" : "emit(doc['k'].value + 'x')"
+            }
+          }
+        },
+        "fields" : [
+          "d"
+        ]
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.2268983,
+          "hits" : [
+            {
+              "_index" : "esm-o",
+              "_id" : "3",
+              "_score" : 0.2268983,
+              "_source" : {
+                "t" : "quick dog",
+                "n" : 3,
+                "k" : "a"
+              },
+              "fields" : {
+                "d" : [
+                  "ax"
+                ]
+              }
+            },
+            {
+              "_index" : "esm-o",
+              "_id" : "1",
+              "_score" : 0.19128054,
+              "_source" : {
+                "t" : "quick brown fox",
+                "n" : 1,
+                "k" : "a"
+              },
+              "fields" : {
+                "d" : [
+                  "ax"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search",
+      "body" : {
+        "size" : 0,
+        "derived" : {
+          "d" : {
+            "type" : "keyword",
+            "script" : {
+              "source" : "emit(doc['k'].value)"
+            }
+          }
+        },
+        "aggs" : {
+          "a" : {
+            "terms" : {
+              "field" : "d"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "terminated_early" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "aggregations" : {
+          "a" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "a",
+                "doc_count" : 2
+              },
+              {
+                "key" : "b",
+                "doc_count" : 1
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search",
+      "body" : {
+        "size" : 2,
+        "derived" : {
+          "d" : {
+            "type" : "long",
+            "script" : {
+              "source" : "emit(doc['n'].value * 10)"
+            }
+          }
+        },
+        "query" : {
+          "range" : {
+            "d" : {
+              "gte" : 20
+            }
+          }
+        },
+        "fields" : [
+          "d"
+        ]
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "esm-o",
+              "_id" : "2",
+              "_score" : 1.0,
+              "_source" : {
+                "t" : "lazy dog",
+                "n" : 2,
+                "k" : "b"
+              },
+              "fields" : {
+                "d" : [
+                  20
+                ]
+              }
+            },
+            {
+              "_index" : "esm-o",
+              "_id" : "3",
+              "_score" : 1.0,
+              "_source" : {
+                "t" : "quick dog",
+                "n" : 3,
+                "k" : "a"
+              },
+              "fields" : {
+                "d" : [
+                  30
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-o/_search",
+      "body" : {
+        "derived" : {
+          "d" : {
+            "type" : "long"
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "esm-o",
+              "_id" : "1",
+              "_score" : 1.0,
+              "_source" : {
+                "t" : "quick brown fox",
+                "n" : 1,
+                "k" : "a"
+              }
+            },
+            {
+              "_index" : "esm-o",
+              "_id" : "2",
+              "_score" : 1.0,
+              "_source" : {
+                "t" : "lazy dog",
+                "n" : 2,
+                "k" : "b"
+              }
+            },
+            {
+              "_index" : "esm-o",
+              "_id" : "3",
+              "_score" : 1.0,
+              "_source" : {
+                "t" : "quick dog",
+                "n" : 3,
+                "k" : "a"
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    }
+  ]
+}

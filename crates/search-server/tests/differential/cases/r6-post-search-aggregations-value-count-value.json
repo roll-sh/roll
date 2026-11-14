@@ -1,0 +1,233 @@
+{
+ "found": {
+  "case": 101,
+  "case_seed": 105000416,
+  "seed": 105
+ },
+ "signature": "POST _search .aggregations.value_count.value",
+ "steps": [
+  {
+   "body": {
+    "settings": {
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m8-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m8-a"
+  },
+  {
+   "es": {
+    "body": {
+     "errors": false,
+     "items": [
+      {
+       "index": {
+        "_id": "8",
+        "_index": "diff-m8-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 2
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "12",
+        "_index": "diff-m8-a",
+        "_primary_term": 1,
+        "_seq_no": 1,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 2
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "14",
+        "_index": "diff-m8-a",
+        "_primary_term": 1,
+        "_seq_no": 2,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 2
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "16",
+        "_index": "diff-m8-a",
+        "_primary_term": 1,
+        "_seq_no": 3,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 2
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      }
+     ],
+     "took": 200
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": {
+      "_id": "8",
+      "_index": "diff-m8-a"
+     }
+    },
+    {},
+    {
+     "index": {
+      "_id": "12",
+      "_index": "diff-m8-a"
+     }
+    },
+    {},
+    {
+     "index": {
+      "_id": "14",
+      "_index": "diff-m8-a"
+     }
+    },
+    {},
+    {
+     "index": {
+      "_id": "16",
+      "_index": "diff-m8-a"
+     }
+    },
+    {
+     "int0": 122,
+     "o": {
+      "int0": 28
+     },
+     "sayt0": "ran ran lazy Quick",
+     "text0": "over fast ran runs search cat",
+     "text1": "query Quick elastic apple apple shard",
+     "wild0": "user@example.com"
+    }
+   ],
+   "method": "POST",
+   "path": "/_bulk"
+  },
+  {
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "successful": 1,
+      "total": 2
+     }
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m8-a/_refresh"
+  },
+  {
+   "body": {
+    "aggs": {
+     "value_count_9": {
+      "value_count": {
+       "field": "int0"
+      }
+     }
+    },
+    "terminate_after": 3
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "aggregations": {
+      "value_count_9": {
+       "value": 0
+      }
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "8",
+        "_index": "diff-m8-a",
+        "_score": 1.0,
+        "_source": {}
+       },
+       {
+        "_id": "12",
+        "_index": "diff-m8-a",
+        "_score": 1.0,
+        "_source": {}
+       },
+       {
+        "_id": "14",
+        "_index": "diff-m8-a",
+        "_score": 1.0,
+        "_source": {}
+       }
+      ],
+      "max_score": 1.0,
+      "total": {
+       "relation": "eq",
+       "value": 4
+      }
+     },
+     "terminated_early": true,
+     "timed_out": false,
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m8-a/_search"
+  }
+ ]
+}

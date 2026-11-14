@@ -1,0 +1,153 @@
+{
+ "description": "Deleting a component template that index templates only list in ignore_missing_component_templates (captured from Elasticsearch 9.5.5).",
+ "steps": [
+  {
+   "req": "PUT /_component_template/esm-ct-im",
+   "body": {
+    "template": {
+     "settings": {
+      "number_of_shards": 1
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   }
+  },
+  {
+   "req": "PUT /_component_template/esm-ct-used",
+   "body": {
+    "template": {
+     "mappings": {
+      "properties": {
+       "a": {
+        "type": "keyword"
+       }
+      }
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   }
+  },
+  {
+   "req": "PUT /_index_template/esm-it-im",
+   "body": {
+    "index_patterns": [
+     "esm-it-im-*"
+    ],
+    "composed_of": [
+     "esm-ct-im",
+     "esm-ct-used"
+    ],
+    "ignore_missing_component_templates": [
+     "esm-ct-im"
+    ]
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   }
+  },
+  {
+   "req": "DELETE /_component_template/esm-ct-used",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "component templates [esm-ct-used] cannot be removed as they are still in use by index templates [esm-it-im]"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "component templates [esm-ct-used] cannot be removed as they are still in use by index templates [esm-it-im]"
+    },
+    "status": 400
+   }
+  },
+  {
+   "req": "DELETE /_component_template/esm-ct-*",
+   "status": 400,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_argument_exception",
+       "reason": "component templates [esm-ct-used] cannot be removed as they are still in use by index templates [esm-it-im]"
+      }
+     ],
+     "type": "illegal_argument_exception",
+     "reason": "component templates [esm-ct-used] cannot be removed as they are still in use by index templates [esm-it-im]"
+    },
+    "status": 400
+   }
+  },
+  {
+   "req": "DELETE /_component_template/esm-ct-im",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   }
+  },
+  {
+   "req": "GET /_component_template/esm-ct-*",
+   "status": 200,
+   "response": {
+    "component_templates": [
+     {
+      "name": "esm-ct-used",
+      "component_template": {
+       "template": {
+        "mappings": {
+         "properties": {
+          "a": {
+           "type": "keyword"
+          }
+         }
+        }
+       },
+       "created_date_millis": 1793136055704,
+       "modified_date_millis": 1793136055704
+      }
+     }
+    ]
+   }
+  },
+  {
+   "req": "PUT /_index_template/esm-it-im2",
+   "body": {
+    "index_patterns": [
+     "esm-it-im2-*"
+    ],
+    "composed_of": [
+     "esm-ct-gone"
+    ],
+    "ignore_missing_component_templates": [
+     "esm-ct-gone"
+    ]
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   }
+  },
+  {
+   "req": "DELETE /_index_template/esm-it-im,esm-it-im2",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   }
+  },
+  {
+   "req": "DELETE /_component_template/esm-ct-used",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   }
+  }
+ ]
+}

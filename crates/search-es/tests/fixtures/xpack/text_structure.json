@@ -1,0 +1,405 @@
+{
+  "description" : "text_structure: find_structure on NDJSON, CSV and log lines; test_grok_pattern; find_field_structure",
+  "steps" : [
+    {
+      "req" : "POST /_text_structure/find_structure?filter_path=-explanation",
+      "raw" : "{\"ts\":\"2024-01-01T00:00:00Z\",\"n\":1,\"msg\":\"a\"}\n{\"ts\":\"2024-01-01T00:01:00Z\",\"n\":2,\"msg\":\"b\"}\n{\"ts\":\"2024-01-01T00:02:00Z\",\"n\":3,\"msg\":\"c\"}\n",
+      "status" : 200,
+      "response" : {
+        "num_lines_analyzed" : 3,
+        "num_messages_analyzed" : 3,
+        "sample_start" : "{\"ts\":\"2024-01-01T00:00:00Z\",\"n\":1,\"msg\":\"a\"}\n{\"ts\":\"2024-01-01T00:01:00Z\",\"n\":2,\"msg\":\"b\"}\n",
+        "charset" : "UTF-8",
+        "has_byte_order_marker" : false,
+        "format" : "ndjson",
+        "ecs_compatibility" : "disabled",
+        "timestamp_field" : "ts",
+        "joda_timestamp_formats" : [
+          "ISO8601"
+        ],
+        "java_timestamp_formats" : [
+          "ISO8601"
+        ],
+        "need_client_timezone" : false,
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "msg" : {
+              "type" : "keyword"
+            },
+            "n" : {
+              "type" : "long"
+            },
+            "ts" : {
+              "type" : "date",
+              "format" : "iso8601"
+            }
+          }
+        },
+        "ingest_pipeline" : {
+          "description" : "Ingest pipeline created by text structure finder",
+          "processors" : [
+            {
+              "date" : {
+                "field" : "ts",
+                "formats" : [
+                  "ISO8601"
+                ]
+              }
+            }
+          ]
+        },
+        "field_stats" : {
+          "msg" : {
+            "count" : 3,
+            "cardinality" : 3,
+            "top_hits" : [
+              {
+                "value" : "a",
+                "count" : 1
+              },
+              {
+                "value" : "b",
+                "count" : 1
+              },
+              {
+                "value" : "c",
+                "count" : 1
+              }
+            ]
+          },
+          "n" : {
+            "count" : 3,
+            "cardinality" : 3,
+            "min_value" : 1,
+            "max_value" : 3,
+            "mean_value" : 2,
+            "median_value" : 2,
+            "top_hits" : [
+              {
+                "value" : 1,
+                "count" : 1
+              },
+              {
+                "value" : 2,
+                "count" : 1
+              },
+              {
+                "value" : 3,
+                "count" : 1
+              }
+            ]
+          },
+          "ts" : {
+            "count" : 3,
+            "cardinality" : 3,
+            "earliest" : "2024-01-01T00:00:00Z",
+            "latest" : "2024-01-01T00:02:00Z",
+            "top_hits" : [
+              {
+                "value" : "2024-01-01T00:00:00Z",
+                "count" : 1
+              },
+              {
+                "value" : "2024-01-01T00:01:00Z",
+                "count" : 1
+              },
+              {
+                "value" : "2024-01-01T00:02:00Z",
+                "count" : 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /_text_structure/find_structure?filter_path=-explanation",
+      "raw" : "name,age,city\nalice,30,Paris\nbob,25,Rome\ncarol,41,Oslo\n",
+      "status" : 200,
+      "response" : {
+        "num_lines_analyzed" : 4,
+        "num_messages_analyzed" : 4,
+        "sample_start" : "name,age,city\nalice,30,Paris\n",
+        "charset" : "UTF-8",
+        "has_byte_order_marker" : false,
+        "format" : "delimited",
+        "column_names" : [
+          "column1",
+          "column2",
+          "column3"
+        ],
+        "has_header_row" : false,
+        "delimiter" : ",",
+        "quote" : "\"",
+        "ecs_compatibility" : "disabled",
+        "need_client_timezone" : false,
+        "mappings" : {
+          "properties" : {
+            "column1" : {
+              "type" : "keyword"
+            },
+            "column2" : {
+              "type" : "keyword"
+            },
+            "column3" : {
+              "type" : "keyword"
+            }
+          }
+        },
+        "ingest_pipeline" : {
+          "description" : "Ingest pipeline created by text structure finder",
+          "processors" : [
+            {
+              "csv" : {
+                "field" : "message",
+                "target_fields" : [
+                  "column1",
+                  "column2",
+                  "column3"
+                ],
+                "ignore_missing" : false
+              }
+            },
+            {
+              "remove" : {
+                "field" : "message"
+              }
+            }
+          ]
+        },
+        "field_stats" : {
+          "column1" : {
+            "count" : 4,
+            "cardinality" : 4,
+            "top_hits" : [
+              {
+                "value" : "alice",
+                "count" : 1
+              },
+              {
+                "value" : "bob",
+                "count" : 1
+              },
+              {
+                "value" : "carol",
+                "count" : 1
+              },
+              {
+                "value" : "name",
+                "count" : 1
+              }
+            ]
+          },
+          "column2" : {
+            "count" : 4,
+            "cardinality" : 4,
+            "top_hits" : [
+              {
+                "value" : "25",
+                "count" : 1
+              },
+              {
+                "value" : "30",
+                "count" : 1
+              },
+              {
+                "value" : "41",
+                "count" : 1
+              },
+              {
+                "value" : "age",
+                "count" : 1
+              }
+            ]
+          },
+          "column3" : {
+            "count" : 4,
+            "cardinality" : 4,
+            "top_hits" : [
+              {
+                "value" : "Oslo",
+                "count" : 1
+              },
+              {
+                "value" : "Paris",
+                "count" : 1
+              },
+              {
+                "value" : "Rome",
+                "count" : 1
+              },
+              {
+                "value" : "city",
+                "count" : 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /_text_structure/find_structure?filter_path=-explanation",
+      "raw" : "[2024-01-01T00:00:00,000][INFO ][o.e.n.Node] starting\n[2024-01-01T00:00:01,000][WARN ][o.e.n.Node] slow\n[2024-01-01T00:00:02,000][INFO ][o.e.n.Node] started\n",
+      "status" : 200,
+      "response" : {
+        "num_lines_analyzed" : 3,
+        "num_messages_analyzed" : 2,
+        "sample_start" : "[2024-01-01T00:00:00,000][INFO ][o.e.n.Node] starting\n[2024-01-01T00:00:01,000][WARN ][o.e.n.Node] slow\n",
+        "charset" : "UTF-8",
+        "has_byte_order_marker" : false,
+        "format" : "delimited",
+        "exclude_lines_pattern" : "^\"?\\[2024-01-01T00:00:00\"?,\"?000\\]\\[INFO \\]\\[o\\.e\\.n\\.Node\\] starting\"?",
+        "column_names" : [
+          "[2024-01-01T00:00:00",
+          "000][INFO ][o_e_n_Node] starting"
+        ],
+        "has_header_row" : true,
+        "delimiter" : ",",
+        "quote" : "\"",
+        "ecs_compatibility" : "disabled",
+        "need_client_timezone" : false,
+        "mappings" : {
+          "properties" : {
+            "000][INFO ][o_e_n_Node] starting" : {
+              "type" : "keyword"
+            },
+            "[2024-01-01T00:00:00" : {
+              "type" : "keyword"
+            }
+          }
+        },
+        "ingest_pipeline" : {
+          "description" : "Ingest pipeline created by text structure finder",
+          "processors" : [
+            {
+              "csv" : {
+                "field" : "message",
+                "target_fields" : [
+                  "[2024-01-01T00:00:00",
+                  "000][INFO ][o_e_n_Node] starting"
+                ],
+                "ignore_missing" : false
+              }
+            },
+            {
+              "remove" : {
+                "field" : "message"
+              }
+            }
+          ]
+        },
+        "field_stats" : {
+          "000][INFO ][o_e_n_Node] starting" : {
+            "count" : 2,
+            "cardinality" : 2,
+            "top_hits" : [
+              {
+                "value" : "000][INFO ][o.e.n.Node] started",
+                "count" : 1
+              },
+              {
+                "value" : "000][WARN ][o.e.n.Node] slow",
+                "count" : 1
+              }
+            ]
+          },
+          "[2024-01-01T00:00:00" : {
+            "count" : 2,
+            "cardinality" : 2,
+            "top_hits" : [
+              {
+                "value" : "[2024-01-01T00:00:01",
+                "count" : 1
+              },
+              {
+                "value" : "[2024-01-01T00:00:02",
+                "count" : 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /_text_structure/find_structure?format=bogus",
+      "raw" : "a\nb\n",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No enum constant org.elasticsearch.xpack.core.textstructure.structurefinder.TextStructure.Format.BOGUS"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No enum constant org.elasticsearch.xpack.core.textstructure.structurefinder.TextStructure.Format.BOGUS"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_text_structure/test_grok_pattern",
+      "body" : {
+        "grok_pattern" : "Hello %{WORD:first_name} %{WORD:last_name}",
+        "text" : [
+          "Hello John Doe",
+          "this does not match"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "matches" : [
+          {
+            "matched" : true,
+            "fields" : {
+              "first_name" : [
+                {
+                  "match" : "John",
+                  "offset" : 6,
+                  "length" : 4
+                }
+              ],
+              "last_name" : [
+                {
+                  "match" : "Doe",
+                  "offset" : 11,
+                  "length" : 3
+                }
+              ]
+            }
+          },
+          {
+            "matched" : false
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_text_structure/test_grok_pattern",
+      "body" : {
+        "grok_pattern" : "%{BOGUS:x}",
+        "text" : [
+          "a"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Unable to find pattern [BOGUS] in Grok's pattern dictionary"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Unable to find pattern [BOGUS] in Grok's pattern dictionary"
+        },
+        "status" : 400
+      }
+    }
+  ]
+}

@@ -1,0 +1,384 @@
+{
+ "found": {
+  "case": 44,
+  "case_seed": 106000362,
+  "seed": 106
+ },
+ "signature": "POST _search .aggregations.missing.terms.buckets[].top_hits.hits.hits[].sort[]",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "comp0": {
+       "type": "completion"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "int0": {
+       "type": "integer"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "sayt0": {
+       "type": "search_as_you_type"
+      },
+      "short0": {
+       "type": "short"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "text1": {
+       "analyzer": "stop",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "term_vector": "with_positions_offsets",
+       "type": "text"
+      },
+      "ulong0": {
+       "type": "unsigned_long"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 1,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m3-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m3-a"
+  },
+  {
+   "es": {
+    "body": {
+     "errors": false,
+     "items": [
+      {
+       "index": {
+        "_id": "40",
+        "_index": "diff-m3-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      }
+     ],
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": {
+      "_id": "40",
+      "_index": "diff-m3-a"
+     }
+    },
+    {
+     "comp0": "fast Dogs",
+     "date0": [
+      1714813200000,
+      "2024-06-25T12:00:00Z",
+      "2024-09-30T10:00:00Z"
+     ],
+     "kw1": [
+      "gamma",
+      "beta",
+      "delta"
+     ],
+     "short0": -250,
+     "text0": "ran query",
+     "text1": "over search fox apple query elastic",
+     "ulong0": 88
+    }
+   ],
+   "method": "POST",
+   "path": "/_bulk"
+  },
+  {
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "successful": 1,
+      "total": 1
+     }
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m3-a/_refresh"
+  },
+  {
+   "body": {
+    "aggs": {
+     "missing_6": {
+      "aggs": {
+       "terms_7": {
+        "aggs": {
+         "top_hits_9": {
+          "top_hits": {
+           "sort": [
+            {
+             "ulong0": {}
+            }
+           ]
+          }
+         }
+        },
+        "terms": {
+         "field": "kw1",
+         "order": {
+          "_count": "asc"
+         }
+        }
+       }
+      },
+      "missing": {
+       "field": "kw0"
+      }
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "aggregations": {
+      "missing_6": {
+       "doc_count": 1,
+       "terms_7": {
+        "buckets": [
+         {
+          "doc_count": 1,
+          "key": "beta",
+          "top_hits_9": {
+           "hits": {
+            "hits": [
+             {
+              "_id": "40",
+              "_ignored": [
+               "text1.raw"
+              ],
+              "_index": "diff-m3-a",
+              "_score": null,
+              "_source": {
+               "comp0": "fast Dogs",
+               "date0": [
+                1714813200000,
+                "2024-06-25T12:00:00Z",
+                "2024-09-30T10:00:00Z"
+               ],
+               "kw1": [
+                "gamma",
+                "beta",
+                "delta"
+               ],
+               "short0": -250,
+               "text0": "ran query",
+               "text1": "over search fox apple query elastic",
+               "ulong0": 88
+              },
+              "sort": [
+               -9223372036854775720
+              ]
+             }
+            ],
+            "max_score": null,
+            "total": {
+             "relation": "eq",
+             "value": 1
+            }
+           }
+          }
+         },
+         {
+          "doc_count": 1,
+          "key": "delta",
+          "top_hits_9": {
+           "hits": {
+            "hits": [
+             {
+              "_id": "40",
+              "_ignored": [
+               "text1.raw"
+              ],
+              "_index": "diff-m3-a",
+              "_score": null,
+              "_source": {
+               "comp0": "fast Dogs",
+               "date0": [
+                1714813200000,
+                "2024-06-25T12:00:00Z",
+                "2024-09-30T10:00:00Z"
+               ],
+               "kw1": [
+                "gamma",
+                "beta",
+                "delta"
+               ],
+               "short0": -250,
+               "text0": "ran query",
+               "text1": "over search fox apple query elastic",
+               "ulong0": 88
+              },
+              "sort": [
+               -9223372036854775720
+              ]
+             }
+            ],
+            "max_score": null,
+            "total": {
+             "relation": "eq",
+             "value": 1
+            }
+           }
+          }
+         },
+         {
+          "doc_count": 1,
+          "key": "gamma",
+          "top_hits_9": {
+           "hits": {
+            "hits": [
+             {
+              "_id": "40",
+              "_ignored": [
+               "text1.raw"
+              ],
+              "_index": "diff-m3-a",
+              "_score": null,
+              "_source": {
+               "comp0": "fast Dogs",
+               "date0": [
+                1714813200000,
+                "2024-06-25T12:00:00Z",
+                "2024-09-30T10:00:00Z"
+               ],
+               "kw1": [
+                "gamma",
+                "beta",
+                "delta"
+               ],
+               "short0": -250,
+               "text0": "ran query",
+               "text1": "over search fox apple query elastic",
+               "ulong0": 88
+              },
+              "sort": [
+               -9223372036854775720
+              ]
+             }
+            ],
+            "max_score": null,
+            "total": {
+             "relation": "eq",
+             "value": 1
+            }
+           }
+          }
+         }
+        ],
+        "doc_count_error_upper_bound": 0,
+        "sum_other_doc_count": 0
+       }
+      }
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "40",
+        "_ignored": [
+         "text1.raw"
+        ],
+        "_index": "diff-m3-a",
+        "_score": 1.0,
+        "_source": {
+         "comp0": "fast Dogs",
+         "date0": [
+          1714813200000,
+          "2024-06-25T12:00:00Z",
+          "2024-09-30T10:00:00Z"
+         ],
+         "kw1": [
+          "gamma",
+          "beta",
+          "delta"
+         ],
+         "short0": -250,
+         "text0": "ran query",
+         "text1": "over search fox apple query elastic",
+         "ulong0": 88
+        }
+       }
+      ],
+      "max_score": 1.0,
+      "total": {
+       "relation": "eq",
+       "value": 1
+      }
+     },
+     "timed_out": false,
+     "took": 1
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m3-a/_search"
+  }
+ ]
+}

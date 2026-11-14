@@ -15,7 +15,7 @@ use object_store::aws::AmazonS3Builder;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjPath;
 use object_store::prefix::PrefixStore;
-use object_store::{ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart};
+use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -24,8 +24,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub enum StorageConfig {
     /// A directory on this machine (zero-setup development).
     Local(PathBuf),
-    /// S3 or an S3-compatible endpoint (MinIO, R2, …). Credentials come from the usual AWS env vars
-    /// or the instance role.
+    /// S3 or an S3-compatible endpoint (MinIO, R2, …). Credentials come from the usual AWS env vars,
+    /// a web identity, the container credentials endpoint (task role; see
+    /// [`crate::container_credentials`]) or the instance role, in the AWS SDKs' order.
     S3 { bucket: String, region: Option<String>, endpoint: Option<String>, prefix: Option<String> },
 }
 
@@ -93,11 +94,19 @@ impl Objects {
             }
             StorageConfig::S3 { bucket, region, endpoint, prefix } => {
                 let mut b = AmazonS3Builder::from_env().with_bucket_name(bucket);
+                // AWS reserves the `--x-s3` suffix for S3 Express One Zone directory buckets,
+                // which need session authentication and zonal endpoints.
+                if bucket.ends_with("--x-s3") {
+                    b = b.with_s3_express(true);
+                }
                 if let Some(r) = region {
                     b = b.with_region(r);
                 }
                 if let Some(e) = endpoint {
                     b = b.with_endpoint(e).with_allow_http(e.starts_with("http://"));
+                }
+                if let Some(c) = crate::container_credentials::ContainerCredentials::from_env()? {
+                    b = b.with_credentials(Arc::new(c));
                 }
                 let s3 = b.build()?;
                 let description = match prefix {
@@ -202,6 +211,30 @@ impl Objects {
     pub async fn size(&self, key: &str) -> anyhow::Result<Option<u64>> {
         match self.store.head(&ObjPath::from(key)).await {
             Ok(m) => Ok(Some(m.size)),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Bytes `range` of an object (clamped to its end) and the object's total size. `None` if it
+    /// doesn't exist. The range must be non-empty and start inside the object.
+    pub async fn get_range_sized(&self, key: &str, range: std::ops::Range<u64>) -> anyhow::Result<Option<(Bytes, u64)>> {
+        self.get_with(key, GetRange::Bounded(range)).await
+    }
+
+    /// The last `n` bytes of an object (all of it when it is shorter) and its total size, in one
+    /// request: how a reader finds a trailer without a HEAD first.
+    pub async fn get_suffix(&self, key: &str, n: u64) -> anyhow::Result<Option<(Bytes, u64)>> {
+        self.get_with(key, GetRange::Suffix(n)).await
+    }
+
+    async fn get_with(&self, key: &str, range: GetRange) -> anyhow::Result<Option<(Bytes, u64)>> {
+        let opts = GetOptions { range: Some(range), ..Default::default() };
+        match self.store.get_opts(&ObjPath::from(key), opts).await {
+            Ok(r) => {
+                let size = r.meta.size;
+                Ok(Some((r.bytes().await?, size)))
+            }
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -391,6 +424,25 @@ pub(crate) mod tests {
         assert_eq!(o.size("r").await.unwrap(), Some(10));
         assert_eq!(o.size("missing").await.unwrap(), None);
         assert!(o.get_range("missing", 0..1).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn ranged_reads() {
+        let (o, _) = temp_objects("range");
+        let data: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        o.put("r", Bytes::from(data.clone())).await.unwrap();
+        let (b, size) = o.get_range_sized("r", 10..20).await.unwrap().unwrap();
+        assert_eq!((&b[..], size), (&data[10..20], 1000));
+        // Clamped to the end.
+        let (b, size) = o.get_range_sized("r", 990..2000).await.unwrap().unwrap();
+        assert_eq!((&b[..], size), (&data[990..], 1000));
+        let (b, size) = o.get_suffix("r", 24).await.unwrap().unwrap();
+        assert_eq!((&b[..], size), (&data[976..], 1000));
+        let (b, _) = o.get_suffix("r", 5000).await.unwrap().unwrap();
+        assert_eq!(&b[..], &data[..]);
+        assert!(o.get_range_sized("missing", 0..10).await.unwrap().is_none());
+        assert!(o.get_suffix("missing", 10).await.unwrap().is_none());
+        assert!(o.get_range_sized("r", 1000..1010).await.is_err(), "a range past the end is an error");
     }
 
     #[tokio::test]

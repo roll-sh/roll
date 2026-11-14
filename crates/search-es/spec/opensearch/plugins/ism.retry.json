@@ -1,0 +1,54 @@
+{
+  "ism.retry": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/im-plugin/ism/api/",
+      "description": "Retries failed ISM actions."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ism/retry/{index}",
+          "methods": [
+            "POST"
+          ],
+          "parts": {
+            "index": {
+              "type": "list",
+              "description": "index"
+            }
+          }
+        },
+        {
+          "path": "/_opendistro/_ism/retry/{index}",
+          "methods": [
+            "POST"
+          ],
+          "parts": {
+            "index": {
+              "type": "list",
+              "description": "index"
+            }
+          }
+        },
+        {
+          "path": "/_plugins/_ism/retry",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/_opendistro/_ism/retry",
+          "methods": [
+            "POST"
+          ]
+        }
+      ]
+    },
+    "params": {},
+    "body": {
+      "description": "The request",
+      "required": false
+    }
+  }
+}

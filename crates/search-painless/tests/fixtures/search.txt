@@ -1,0 +1,1781 @@
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['l'].value"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['l'].size()"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['l']"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['d'].value * 2"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['k'].value"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['k'].empty ? 'none' : doc['k'].value"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['tags']"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['dt'].value"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['dt'].value.getYear()"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['dt'].value.toInstant().toEpochMilli()"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['g'].value"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['g'].lat"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['ip'].value"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['b'].value"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['i'].value + doc['l'].value"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "params._source.k"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "params._source"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "params['_source']['obj']"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "params._source.missing"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['obj.x'].value"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc.containsKey('l')"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['zzz'].value"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['t'].value"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['l'].get(1)"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc.size()"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "field('l').get(-1)"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "field('k').get('none')"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "$('d', -1.0)"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "field('tags').size()"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['v'].vectorValue"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['f'].value"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "new ArrayList(doc['l'])"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['n'].value / 0"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "doc['l'].value / 0"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "params.x * doc['n'].value"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "_score"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "params.x * doc['n'].value",
+    "params": {
+     "x": 10
+    }
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "script_fields": {
+  "x": {
+   "script": {
+    "source": "params.list.size() + doc['n'].value",
+    "params": {
+     "list": [
+      1,
+      2,
+      3
+     ]
+    }
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": [
+  "k"
+ ],
+ "script_fields": {
+  "a": {
+   "script": "doc['n'].value + 1"
+  },
+  "b": {
+   "script": {
+    "source": "params._source.k",
+    "lang": "painless"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "_source": false,
+ "sort": [
+  {
+   "_script": {
+    "type": "number",
+    "script": {
+     "source": "doc['n'].size() == 0 ? 100 : doc['n'].value"
+    },
+    "order": "asc"
+   }
+  }
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "_source": false,
+ "sort": [
+  {
+   "_script": {
+    "type": "number",
+    "script": {
+     "source": "doc['n'].size() == 0 ? 100 : doc['n'].value * -1"
+    },
+    "order": "desc"
+   }
+  }
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "_source": false,
+ "sort": [
+  {
+   "_script": {
+    "type": "string",
+    "script": {
+     "source": "doc['k'].size() == 0 ? 'zz' : doc['k'].value"
+    },
+    "order": "asc"
+   }
+  }
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "_source": false,
+ "sort": [
+  {
+   "_script": {
+    "type": "string",
+    "script": {
+     "source": "doc['k'].value"
+    },
+    "order": "asc"
+   }
+  }
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "_source": false,
+ "sort": [
+  {
+   "_script": {
+    "type": "number",
+    "script": {
+     "source": "doc['d'].size() == 0 ? 0 : doc['d'].value * params.f",
+     "params": {
+      "f": 3
+     }
+    },
+    "order": "asc"
+   }
+  }
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "_source": false,
+ "sort": [
+  {
+   "_script": {
+    "type": "number",
+    "script": {
+     "source": "_score"
+    },
+    "order": "asc"
+   }
+  }
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "_source": false,
+ "sort": [
+  {
+   "_script": {
+    "type": "string",
+    "script": {
+     "source": "doc['k'].size() == 0 ? null : doc['k'].value"
+    },
+    "order": "asc"
+   }
+  }
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "_source": false,
+ "sort": [
+  {
+   "_script": {
+    "type": "string",
+    "script": {
+     "source": "doc['n'].size()"
+    },
+    "order": "asc"
+   }
+  }
+ ]
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "doc['n'].size() == 0 ? 0 : doc['n'].value",
+    "params": {
+     "q": [
+      1,
+      0,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "_score * 2",
+    "params": {
+     "q": [
+      1,
+      0,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "Math.log(2 + (doc['l'].size() == 0 ? 0 : doc['l'].value))",
+    "params": {
+     "q": [
+      1,
+      0,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "doc['d'].size() == 0 ? 0.1 : doc['d'].value",
+    "params": {
+     "q": [
+      1,
+      0,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "saturation(doc['n'].size() == 0 ? 1 : doc['n'].value, 2)",
+    "params": {
+     "q": [
+      1,
+      0,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "sigmoid(doc['n'].size() == 0 ? 1 : doc['n'].value, 2, 3)",
+    "params": {
+     "q": [
+      1,
+      0,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "decayNumericLinear(2, 1, 0, 0.5, doc['n'].size() == 0 ? 0 : doc['n'].value)",
+    "params": {
+     "q": [
+      1,
+      0,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "decayDateGauss('2020-01-01', '30d', '0d', 0.5, doc['dt'].size() == 0 ? ZonedDateTime.parse('2000-01-01T00:00:00Z') : doc['dt'].value)",
+    "params": {
+     "q": [
+      1,
+      0,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "doc['v'].size() == 0 ? 0 : cosineSimilarity(params.q, 'v') + 1.0",
+    "params": {
+     "q": [
+      1,
+      0,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "doc['v'].size() == 0 ? 0 : dotProduct(params.q, 'v')",
+    "params": {
+     "q": [
+      1,
+      0,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "doc['v'].size() == 0 ? 0 : l2norm(params.q, 'v')",
+    "params": {
+     "q": [
+      1,
+      0,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "doc['v'].size() == 0 ? 0 : l1norm(params.q, 'v')",
+    "params": {
+     "q": [
+      1,
+      0,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "-1",
+    "params": {
+     "q": [
+      1,
+      0,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "doc['n'].value",
+    "params": {
+     "q": [
+      1,
+      0,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "Double.NaN",
+    "params": {
+     "q": [
+      1,
+      0,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "params.missing * 2",
+    "params": {
+     "q": [
+      1,
+      0,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match": {
+     "t": "hello"
+    }
+   },
+   "script": {
+    "source": "_score + 1"
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match": {
+     "t": "hello world"
+    }
+   },
+   "script": {
+    "source": "_termStats.termFreq().getAverage()"
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match": {
+     "t": "hello world nothing"
+    }
+   },
+   "script": {
+    "source": "_termStats.uniqueTermsCount() + _termStats.matchedTermsCount()"
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "script_score": {
+   "query": {
+    "match_all": {}
+   },
+   "script": {
+    "source": "randomScore(100, '_seq_no')"
+   }
+  }
+ },
+ "_source": false
+}
+----
+{
+ "query": {
+  "bool": {
+   "filter": {
+    "script": {
+     "script": {
+      "source": "doc['n'].size() > 0 && doc['n'].value > 1",
+      "params": {
+       "x": true
+      }
+     }
+    }
+   }
+  }
+ },
+ "_source": false,
+ "sort": [
+  "_doc"
+ ]
+}
+----
+{
+ "query": {
+  "bool": {
+   "filter": {
+    "script": {
+     "script": {
+      "source": "doc['k'].size() > 0",
+      "params": {
+       "x": true
+      }
+     }
+    }
+   }
+  }
+ },
+ "_source": false,
+ "sort": [
+  "_doc"
+ ]
+}
+----
+{
+ "query": {
+  "bool": {
+   "filter": {
+    "script": {
+     "script": {
+      "source": "doc['tags'].contains('x')",
+      "params": {
+       "x": true
+      }
+     }
+    }
+   }
+  }
+ },
+ "_source": false,
+ "sort": [
+  "_doc"
+ ]
+}
+----
+{
+ "query": {
+  "bool": {
+   "filter": {
+    "script": {
+     "script": {
+      "source": "doc['l'].value > 2",
+      "params": {
+       "x": true
+      }
+     }
+    }
+   }
+  }
+ },
+ "_source": false,
+ "sort": [
+  "_doc"
+ ]
+}
+----
+{
+ "query": {
+  "bool": {
+   "filter": {
+    "script": {
+     "script": {
+      "source": "params.x",
+      "params": {
+       "x": true
+      }
+     }
+    }
+   }
+  }
+ },
+ "_source": false,
+ "sort": [
+  "_doc"
+ ]
+}
+----
+{
+ "query": {
+  "bool": {
+   "filter": {
+    "script": {
+     "script": {
+      "source": "doc['dt'].size() > 0 && doc['dt'].value.getYear() >= 2020",
+      "params": {
+       "x": true
+      }
+     }
+    }
+   }
+  }
+ },
+ "_source": false,
+ "sort": [
+  "_doc"
+ ]
+}
+----
+{
+ "query": {
+  "bool": {
+   "filter": {
+    "script": {
+     "script": {
+      "source": "return 1",
+      "params": {
+       "x": true
+      }
+     }
+    }
+   }
+  }
+ },
+ "_source": false,
+ "sort": [
+  "_doc"
+ ]
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "m": {
+   "scripted_metric": {
+    "map_script": "state.n += doc['n'].size() == 0 ? 0 : doc['n'].value",
+    "init_script": "state.n = 0",
+    "combine_script": "return state.n",
+    "reduce_script": "double t = 0; for (s in states) { t += s } return t"
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "m": {
+   "scripted_metric": {
+    "map_script": "if (doc['k'].size() > 0) { state.list.add(doc['k'].value) }",
+    "init_script": "state.list = []",
+    "combine_script": "return state.list",
+    "reduce_script": "List all = []; for (s in states) { all.addAll(s) } Collections.sort(all); return all"
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "m": {
+   "scripted_metric": {
+    "map_script": "for (t in doc['tags']) { state.m[t] = state.m.getOrDefault(t, 0) + 1 }",
+    "init_script": "state.m = [:]",
+    "combine_script": "return state.m",
+    "reduce_script": "Map r = new TreeMap(); for (s in states) { for (e in s.entrySet()) { r[e.getKey()] = r.getOrDefault(e.getKey(), 0) + e.getValue() } } return r"
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "m": {
+   "scripted_metric": {
+    "map_script": "state.c = (state.c ?: 0) + 1",
+    "combine_script": "return state",
+    "reduce_script": "return states"
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "m": {
+   "scripted_metric": {
+    "map_script": "state.s += _score",
+    "init_script": "state.s = 0.0",
+    "combine_script": "return state.s",
+    "reduce_script": "return states[0]"
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "m": {
+   "scripted_metric": {
+    "map_script": "state.x += 1",
+    "init_script": "state.x = params.base",
+    "combine_script": "return state.x",
+    "reduce_script": "return states.stream().mapToInt(x -> x).sum()",
+    "params": {
+     "base": 100
+    }
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "m": {
+   "scripted_metric": {
+    "map_script": "state.x += 1",
+    "init_script": "state.x = 1"
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "m": {
+   "scripted_metric": {
+    "map_script": "state.x += 1",
+    "init_script": "state.x = 1",
+    "combine_script": "return state.x"
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "m": {
+   "scripted_metric": {
+    "map_script": "state.x.foo()",
+    "init_script": "state.x = 1",
+    "combine_script": "return state.x"
+   }
+  }
+ }
+}
+----
+{
+ "size": 0,
+ "aggs": {
+  "m": {
+   "scripted_metric": {
+    "map_script": "state.d.add(doc['dt'].size() == 0 ? null : doc['dt'].value)",
+    "init_script": "state.d = []",
+    "combine_script": "return state.d",
+    "reduce_script": "return states[0].stream().filter(x -> x != null).map(x -> x.getYear()).collect(Collectors.toList())"
+   }
+  }
+ }
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "runtime_mappings": {
+  "r": {
+   "type": "long",
+   "script": {
+    "source": "if (doc['n'].size() > 0) emit(doc['n'].value * 10)"
+   }
+  }
+ },
+ "fields": [
+  "r"
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "runtime_mappings": {
+  "r": {
+   "type": "long",
+   "script": {
+    "source": "for (v in doc['l']) emit(v)"
+   }
+  }
+ },
+ "fields": [
+  "r"
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "runtime_mappings": {
+  "r": {
+   "type": "double",
+   "script": {
+    "source": "emit(doc['d'].size() == 0 ? -1 : doc['d'].value)"
+   }
+  }
+ },
+ "fields": [
+  "r"
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "runtime_mappings": {
+  "r": {
+   "type": "keyword",
+   "script": {
+    "source": "for (t in doc['tags']) emit(t.toUpperCase())"
+   }
+  }
+ },
+ "fields": [
+  "r"
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "runtime_mappings": {
+  "r": {
+   "type": "keyword",
+   "script": {
+    "source": "emit(params._source.k == null ? 'nil' : params._source.k.toString())"
+   }
+  }
+ },
+ "fields": [
+  "r"
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "runtime_mappings": {
+  "r": {
+   "type": "boolean",
+   "script": {
+    "source": "emit(doc['n'].size() > 0)"
+   }
+  }
+ },
+ "fields": [
+  "r"
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "runtime_mappings": {
+  "r": {
+   "type": "date",
+   "script": {
+    "source": "if (doc['dt'].size() > 0) emit(doc['dt'].value.plusDays(1).toInstant().toEpochMilli())"
+   }
+  }
+ },
+ "fields": [
+  "r"
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "runtime_mappings": {
+  "r": {
+   "type": "ip",
+   "script": {
+    "source": "if (doc['ip'].size() > 0) emit(doc['ip'].value)"
+   }
+  }
+ },
+ "fields": [
+  "r"
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "runtime_mappings": {
+  "r": {
+   "type": "geo_point",
+   "script": {
+    "source": "if (doc['g'].size() > 0) emit(doc['g'].lat + 1, doc['g'].lon - 1)"
+   }
+  }
+ },
+ "fields": [
+  "r"
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "runtime_mappings": {
+  "r": {
+   "type": "composite",
+   "script": {
+    "source": "emit(['a': doc['n'].size(), 'b': 'x'])"
+   }
+  }
+ },
+ "fields": [
+  "r"
+ ]
+}
+----
+{
+ "query": {
+  "match_all": {}
+ },
+ "sort": [
+  "_doc"
+ ],
+ "_source": false,
+ "runtime_mappings": {
+  "r": {
+   "type": "long",
+   "script": {
+    "source": "emit(doc['zzz'].value)"
+   }
+  }
+ },
+ "fields": [
+  "r"
+ ]
+}
+----
+{
+ "query": {
+  "terms_set": {
+   "tags": {
+    "terms": [
+     "x",
+     "y",
+     "z"
+    ],
+    "minimum_should_match_script": {
+     "source": "Math.min(params.num_terms, doc['n'].size() == 0 ? 1 : doc['n'].value)"
+    }
+   }
+  }
+ },
+ "_source": false,
+ "sort": [
+  "_doc"
+ ]
+}
+----
+{
+ "query": {
+  "terms_set": {
+   "tags": {
+    "terms": [
+     "x",
+     "y",
+     "z"
+    ],
+    "minimum_should_match_script": {
+     "source": "2"
+    }
+   }
+  }
+ },
+ "_source": false,
+ "sort": [
+  "_doc"
+ ]
+}

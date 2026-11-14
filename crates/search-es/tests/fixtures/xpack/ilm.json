@@ -1,0 +1,356 @@
+{
+  "description" : "ILM: policies, validation, explain, remove",
+  "steps" : [
+    {
+      "req" : "PUT /_ilm/policy/compat-xpack-ilm",
+      "body" : {
+        "policy" : {
+          "_meta" : {
+            "m" : 1
+          },
+          "phases" : {
+            "hot" : {
+              "actions" : {
+                "rollover" : {
+                  "max_age" : "7d",
+                  "max_primary_shard_size" : "50gb"
+                }
+              }
+            },
+            "warm" : {
+              "min_age" : "10d",
+              "actions" : {
+                "forcemerge" : {
+                  "max_num_segments" : 1
+                },
+                "shrink" : {
+                  "number_of_shards" : 1
+                }
+              }
+            },
+            "delete" : {
+              "min_age" : "30d",
+              "actions" : {
+                "delete" : { }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "GET /_ilm/policy/compat-xpack-ilm",
+      "mask" : [
+        "modified_date",
+        "version"
+      ],
+      "status" : 200,
+      "response" : {
+        "compat-xpack-ilm" : {
+          "version" : 1,
+          "modified_date" : "2026-10-23T09:50:14.175Z",
+          "policy" : {
+            "phases" : {
+              "warm" : {
+                "min_age" : "10d",
+                "actions" : {
+                  "shrink" : {
+                    "number_of_shards" : 1,
+                    "allow_write_after_shrink" : false
+                  },
+                  "forcemerge" : {
+                    "max_num_segments" : 1
+                  }
+                }
+              },
+              "hot" : {
+                "min_age" : "0ms",
+                "actions" : {
+                  "rollover" : {
+                    "max_age" : "7d",
+                    "max_primary_shard_size" : "50gb"
+                  }
+                }
+              },
+              "delete" : {
+                "min_age" : "30d",
+                "actions" : {
+                  "delete" : {
+                    "delete_searchable_snapshot" : true
+                  }
+                }
+              }
+            },
+            "_meta" : {
+              "m" : 1
+            }
+          },
+          "in_use_by" : {
+            "indices" : [ ],
+            "data_streams" : [ ],
+            "composable_templates" : [ ]
+          }
+        }
+      }
+    },
+    {
+      "req" : "GET /_ilm/policy/compat-xpack-nope",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "Lifecycle policy not found: compat-xpack-nope"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "Lifecycle policy not found: compat-xpack-nope"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "PUT /_ilm/policy/compat-xpack-bad",
+      "body" : {
+        "policy" : {
+          "phases" : {
+            "hot" : {
+              "actions" : {
+                "bogus" : { }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "named_object_not_found_exception",
+              "reason" : "[1:40] unknown field [bogus]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:40] [put_lifecycle_request] failed to parse field [policy]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:40] [lifecycle_policy] failed to parse field [phases]",
+            "caused_by" : {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:40] [phases] failed to parse field [hot]",
+              "caused_by" : {
+                "type" : "x_content_parse_exception",
+                "reason" : "[1:40] [phase] failed to parse field [actions]",
+                "caused_by" : {
+                  "type" : "x_content_parse_exception",
+                  "reason" : "[1:40] [actions] failed to parse field [bogus]",
+                  "caused_by" : {
+                    "type" : "named_object_not_found_exception",
+                    "reason" : "[1:40] unknown field [bogus]"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_ilm/policy/compat-xpack-bad2",
+      "body" : {
+        "policy" : {
+          "phases" : {
+            "lukewarm" : {
+              "actions" : { }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: Timeseries lifecycle does not support phase [lukewarm];"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: Timeseries lifecycle does not support phase [lukewarm];"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_ilm/policy/compat-xpack-bad3",
+      "body" : {
+        "policy" : {
+          "phases" : {
+            "warm" : {
+              "actions" : {
+                "rollover" : {
+                  "max_age" : "1d"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: invalid action [rollover] defined in phase [warm];"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: invalid action [rollover] defined in phase [warm];"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_ilm/policy/compat-xpack-bad4",
+      "body" : {
+        "policy" : {
+          "phases" : {
+            "hot" : {
+              "min_age" : "bad",
+              "actions" : { }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:39] [phase] failed to parse field [min_age]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:39] [put_lifecycle_request] failed to parse field [policy]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:39] [lifecycle_policy] failed to parse field [phases]",
+            "caused_by" : {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:39] [phases] failed to parse field [hot]",
+              "caused_by" : {
+                "type" : "x_content_parse_exception",
+                "reason" : "[1:39] [phase] failed to parse field [min_age]",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "failed to parse [bad]",
+                  "caused_by" : {
+                    "type" : "number_format_exception",
+                    "reason" : "For input string: \"ba\""
+                  }
+                }
+              }
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-ilmidx",
+      "body" : {
+        "settings" : {
+          "index.lifecycle.name" : "compat-xpack-ilm",
+          "index.lifecycle.rollover_alias" : "compat-xpack-alias"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-ilmidx"
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-ilmidx/_ilm/explain?filter_path=indices.*.managed,indices.*.policy,indices.*.index",
+      "skip" : "ILM steps advance asynchronously",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "compat-xpack-ilmidx" : {
+            "index" : "compat-xpack-ilmidx",
+            "managed" : true,
+            "policy" : "compat-xpack-ilm"
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ilmidx/_ilm/remove",
+      "status" : 200,
+      "response" : {
+        "has_failures" : false,
+        "failed_indexes" : [ ]
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-ilmidx/_ilm/explain",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "compat-xpack-ilmidx" : {
+            "index" : "compat-xpack-ilmidx",
+            "managed" : false
+          }
+        }
+      }
+    },
+    {
+      "req" : "DELETE /_ilm/policy/compat-xpack-ilm",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_ilm/policy/compat-xpack-ilm",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "Lifecycle policy not found: compat-xpack-ilm"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "Lifecycle policy not found: compat-xpack-ilm"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "GET /_ilm/status",
+      "status" : 200,
+      "response" : {
+        "operation_mode" : "RUNNING"
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-ilmidx",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

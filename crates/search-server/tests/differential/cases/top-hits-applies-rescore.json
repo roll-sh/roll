@@ -1,0 +1,227 @@
+{
+  "diff": {
+    "es": 0.7,
+    "path": ".aggregations.top_hits_23.hits.hits[0]._score",
+    "roll": 1.0
+  },
+  "found": {
+    "case": 14,
+    "case_seed": 1000017,
+    "seed": 1
+  },
+  "roll": {
+    "body": {
+      "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 1,
+        "total": 1
+      },
+      "aggregations": {
+        "top_hits_23": {
+          "hits": {
+            "hits": [
+              {
+                "_id": "25",
+                "_index": "diff-m2-a",
+                "_score": 1.0,
+                "_source": {}
+              }
+            ],
+            "max_score": 1.0,
+            "total": {
+              "relation": "eq",
+              "value": 1
+            }
+          }
+        }
+      },
+      "hits": {
+        "hits": [
+          {
+            "_id": "25",
+            "_index": "diff-m2-a",
+            "_score": 0.7,
+            "_source": {}
+          }
+        ],
+        "max_score": 0.7,
+        "total": {
+          "relation": "eq",
+          "value": 1
+        }
+      },
+      "timed_out": false,
+      "took": 1
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+  },
+  "signature": "POST _search .aggregations.top_hits.hits.hits[]._score",
+  "steps": [
+    {
+      "body": {
+        "mappings": {
+          "properties": {
+            "geo0": {
+              "type": "geo_point"
+            }
+          }
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m2-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m2-a"
+    },
+    {
+      "es": {
+        "body": {
+          "errors": false,
+          "items": [
+            {
+              "index": {
+                "_id": "25",
+                "_index": "diff-m2-a",
+                "_primary_term": 1,
+                "_seq_no": 0,
+                "_shards": {
+                  "failed": 0,
+                  "successful": 1,
+                  "total": 2
+                },
+                "_version": 1,
+                "result": "created",
+                "status": 201
+              }
+            }
+          ],
+          "took": 0
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "lines": [
+        {
+          "index": {
+            "_id": "25",
+            "_index": "diff-m2-a"
+          }
+        },
+        {}
+      ],
+      "method": "POST",
+      "path": "/_bulk"
+    },
+    {
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "successful": 1,
+            "total": 2
+          }
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m2-a/_refresh"
+    },
+    {
+      "body": {
+        "aggs": {
+          "top_hits_23": {
+            "top_hits": {}
+          }
+        },
+        "rescore": {
+          "query": {
+            "query_weight": 0.7,
+            "rescore_query": {
+              "geo_distance": {
+                "distance": "971km",
+                "geo0": {
+                  "lat": 10.0,
+                  "lon": 20.0
+                }
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 1,
+            "total": 1
+          },
+          "aggregations": {
+            "top_hits_23": {
+              "hits": {
+                "hits": [
+                  {
+                    "_id": "25",
+                    "_index": "diff-m2-a",
+                    "_score": 0.7,
+                    "_source": {}
+                  }
+                ],
+                "max_score": 0.7,
+                "total": {
+                  "relation": "eq",
+                  "value": 1
+                }
+              }
+            }
+          },
+          "hits": {
+            "hits": [
+              {
+                "_id": "25",
+                "_index": "diff-m2-a",
+                "_score": 0.7,
+                "_source": {}
+              }
+            ],
+            "max_score": 0.7,
+            "total": {
+              "relation": "eq",
+              "value": 1
+            }
+          },
+          "timed_out": false,
+          "took": 5
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m2-a/_search"
+    }
+  ]
+}

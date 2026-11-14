@@ -1,0 +1,29 @@
+{
+  "ppl.explain": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/search-plugins/sql/ppl/index/",
+      "description": "Explains the plan of a PPL query."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ppl/_explain",
+          "methods": [
+            "POST"
+          ]
+        }
+      ]
+    },
+    "params": {
+      "format": {
+        "type": "string",
+        "description": "Plan format: json (default), simple, standard, extended or cost."
+      }
+    },
+    "body": {
+      "description": "The query: {\"query\": \"source=...\"}",
+      "required": true
+    }
+  }
+}

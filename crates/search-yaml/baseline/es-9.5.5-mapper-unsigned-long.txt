@@ -1,0 +1,37 @@
+# Tests of Elasticsearch 9.5.5's `mapper-unsigned-long` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+mapper-unsigned-long:10_basic/Aggs
+mapper-unsigned-long:10_basic/Composite aggregations
+mapper-unsigned-long:10_basic/Decay
+mapper-unsigned-long:10_basic/Exist query
+mapper-unsigned-long:10_basic/Fields retrieval
+mapper-unsigned-long:10_basic/Range query
+mapper-unsigned-long:10_basic/Sort
+mapper-unsigned-long:10_basic/Term query
+mapper-unsigned-long:10_basic/Terms query
+mapper-unsigned-long:20_null_value/Asc sort
+mapper-unsigned-long:20_null_value/Desc sort
+mapper-unsigned-long:20_null_value/Fields retrieval
+mapper-unsigned-long:20_null_value/Term query
+mapper-unsigned-long:30_multi_fields/Multi keyword and unsigned_long fields
+mapper-unsigned-long:40_different_numeric/Aggregation of different numeric types is supported
+mapper-unsigned-long:40_different_numeric/Querying of different numeric types is supported
+mapper-unsigned-long:50_script_values/No Doc Values: Scripted fields using multi-value unsigned long
+mapper-unsigned-long:50_script_values/No Doc Values: Scripted fields values return Long
+mapper-unsigned-long:50_script_values/Script query
+mapper-unsigned-long:50_script_values/Scripted Metric
+mapper-unsigned-long:50_script_values/Scripted fields using multi-value unsigned long
+mapper-unsigned-long:50_script_values/Scripted fields values return Long
+mapper-unsigned-long:50_script_values/Scripted sort values
+mapper-unsigned-long:50_script_values/Scripted sort values via doc
+mapper-unsigned-long:50_script_values/script_score query
+mapper-unsigned-long:60_collapse/Collapse
+mapper-unsigned-long:70_time_series/aggregate the _tsid
+mapper-unsigned-long:70_time_series/composite aggregation on tsid
+mapper-unsigned-long:70_time_series/fetch the _source
+mapper-unsigned-long:70_time_series/fetch the _tsid
+mapper-unsigned-long:70_time_series/sort by tsid
+mapper-unsigned-long:80_synthetic_source/synthetic source
+mapper-unsigned-long:80_synthetic_source/synthetic source with copy_to
+mapper-unsigned-long:80_synthetic_source/synthetic source with disabled doc_values

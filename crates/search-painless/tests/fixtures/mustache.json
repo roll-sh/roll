@@ -1,0 +1,6180 @@
+[
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{s}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "str"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{n}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "5"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{f}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "1.5"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{d}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "1.0"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{b}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "true"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{z}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "false"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{nul}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{missing}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{q}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "a\"b\\c\nd\te/f<g>&'h é ☃"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{{q}}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:84] Unexpected character ('b' (code 98)): was expecting comma to separate Object entries\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"a\"b\\c\nd\\u0009e/f<g>&'h é ☃\"}}}}}\"; line: 1, column: 84]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:84] Unexpected character ('b' (code 98)): was expecting comma to separate Object entries\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"a\"b\\c\nd\\u0009e/f<g>&'h é ☃\"}}}}}\"; line: 1, column: 84]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('b' (code 98)): was expecting comma to separate Object entries\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"a\"b\\c\nd\\u0009e/f<g>&'h é ☃\"}}}}}\"; line: 1, column: 84]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{&q}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:84] Unexpected character ('b' (code 98)): was expecting comma to separate Object entries\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"a\"b\\c\nd\\u0009e/f<g>&'h é ☃\"}}}}}\"; line: 1, column: 84]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:84] Unexpected character ('b' (code 98)): was expecting comma to separate Object entries\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"a\"b\\c\nd\\u0009e/f<g>&'h é ☃\"}}}}}\"; line: 1, column: 84]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('b' (code 98)): was expecting comma to separate Object entries\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"a\"b\\c\nd\\u0009e/f<g>&'h é ☃\"}}}}}\"; line: 1, column: 84]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{l}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "{0=x, 1=y, 2=z}"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{nums}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "{0=1, 1=2, 2=3}"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{e}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "{}"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{m}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "{a=1, b={c=deep}}"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{m.a}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "1"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{m.b.c}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "deep"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{m.b}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "{c=deep}"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{lm}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "{0={k=1, n=one}, 1={k=2, n=two}}"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{l.0}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "x"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{l.2}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "z"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{l.5}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{l.size}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "3"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{lm.1.n}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "two"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{em}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "{}"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{big}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "12345678901234"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{neg}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "-3"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{zero}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "0"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{es}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#b}}yes{{/b}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "yes"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#z}}yes{{/z}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{^z}}no{{/z}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "no"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{^b}}no{{/b}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#l}}[{{.}}]{{/l}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "[x][y][z]"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#nums}}{{.}},{{/nums}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "1,2,3,"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#e}}x{{/e}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{^e}}empty{{/e}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "empty"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#lm}}{{n}}={{k}};{{/lm}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "one=1;two=2;"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#m}}{{a}}-{{b.c}}{{/m}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "1-deep"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#nul}}x{{/nul}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{^nul}}none{{/nul}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "none"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#missing}}x{{/missing}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{^missing}}none{{/missing}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "none"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#s}}{{.}}!{{/s}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "str!"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#n}}{{.}}{{/n}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "5"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#zero}}z{{/zero}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "z"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#es}}e{{/es}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{^es}}ne{{/es}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "ne"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#em}}m{{/em}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "m"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{^em}}ne{{/em}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#lm}}{{#k}}{{n}}{{/k}}{{/lm}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "onetwo"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#m}}{{#b}}{{c}}{{/b}}{{/m}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "deep"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{! comment }}c\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "c"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{=<% %>=}}<% s %>\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "str"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"a {{s}} b {{n}} c\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "a str b 5 c"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":{{#toJson}}m{{/toJson}}}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": {
+         "a": 1,
+         "b": {
+          "c": "deep"
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":{{#toJson}}l{{/toJson}}}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": [
+         "x",
+         "y",
+         "z"
+        ]
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":{{#toJson}}lm{{/toJson}}}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": [
+         {
+          "k": 1,
+          "n": "one"
+         },
+         {
+          "k": 2,
+          "n": "two"
+         }
+        ]
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":{{#toJson}}s{{/toJson}}}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:81] Unrecognized token 'str': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":str}}}}}\"; line: 1, column: 81]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:81] Unrecognized token 'str': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":str}}}}}\"; line: 1, column: 81]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unrecognized token 'str': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":str}}}}}\"; line: 1, column: 81]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":{{#toJson}}n{{/toJson}}}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": 5
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":{{#toJson}}nul{{/toJson}}}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:81] Unexpected character ('}' (code 125)): expected a valid value (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":}}}}}\"; line: 1, column: 81]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:81] Unexpected character ('}' (code 125)): expected a valid value (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":}}}}}\"; line: 1, column: 81]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('}' (code 125)): expected a valid value (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":}}}}}\"; line: 1, column: 81]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":{{#toJson}}missing{{/toJson}}}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:81] Unexpected character ('}' (code 125)): expected a valid value (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":}}}}}\"; line: 1, column: 81]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:81] Unexpected character ('}' (code 125)): expected a valid value (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":}}}}}\"; line: 1, column: 81]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('}' (code 125)): expected a valid value (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":}}}}}\"; line: 1, column: 81]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":{{#toJson}}q{{/toJson}}}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:81] Unrecognized token 'a': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":a\"b\\c\nd\\u0009e/f<g>&'h é ☃}}}}}\"; line: 1, column: 81]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:81] Unrecognized token 'a': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":a\"b\\c\nd\\u0009e/f<g>&'h é ☃}}}}}\"; line: 1, column: 81]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unrecognized token 'a': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":a\"b\\c\nd\\u0009e/f<g>&'h é ☃}}}}}\"; line: 1, column: 81]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":{{#toJson}}f{{/toJson}}}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": 1.5
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":{{#toJson}}m.b{{/toJson}}}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": {
+         "c": "deep"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":{{#toJson}}e{{/toJson}}}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": []
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":{{#toJson}}em{{/toJson}}}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": {}
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":{{#toJson}}b{{/toJson}}}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": true
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#join}}l{{/join}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "x,y,z"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#join}}nums{{/join}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "1,2,3"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#join delimiter='|'}}l{{/join delimiter='|'}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "x|y|z"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#join}}e{{/join}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": ""
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#join}}missing{{/join}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "missing"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#join}}s{{/join}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "s"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#url}}{{q}}{{/url}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "a%5C%22b%5C%5Cc%5Cnd%5Cte%2Ff%3Cg%3E%26%27h+%C3%A9+%E2%98%83"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#url}}a b&c=d/é{{/url}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "a+b%26c%3Dd%2F%C3%A9"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#url}}{{s}}?x=1{{/url}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "str%3Fx%3D1"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#l}}{{#-first}}F{{/-first}}{{.}}{{/l}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "xyz"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#nums}}{{.}}{{^-last}},{{/-last}}{{/nums}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "1,2,3,"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{x}}\"}}}}}",
+   "params": {
+    "x": 1e+300
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "1.0E300"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{x}}\"}}}}}",
+   "params": {
+    "x": 0.1
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "0.1"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{x}}\"}}}}}",
+   "params": {
+    "x": 100.0
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "100.0"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{x}}\"}}}}}",
+   "params": {
+    "x": 18446744073709551615
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "18446744073709551615"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{x}}\"}}}}}",
+   "params": {
+    "x": [
+     1,
+     [
+      2,
+      3
+     ],
+     {
+      "a": null
+     }
+    ]
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": "{0=1, 1=[2, 3], 2={a=null}}"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":{{#toJson}}x{{/toJson}}}}}}}",
+   "params": {
+    "x": {
+     "a": [
+      1,
+      2.5,
+      null,
+      true,
+      "s"
+     ],
+     "b": {}
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "x",
+       "params": {
+        "v": {
+         "a": [
+          1,
+          2.5,
+          null,
+          true,
+          "s"
+         ],
+         "b": {}
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"{{#l}}\n  {{.}}\n{{/l}}\"}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:85] Illegal unquoted character ((CTRL-CHAR, code 10)): has to be escaped using backslash to be included in string value\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"  x\n  y\n  z\n\"}}}}}\"; line: 1, column: 85]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:85] Illegal unquoted character ((CTRL-CHAR, code 10)): has to be escaped using backslash to be included in string value\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"  x\n  y\n  z\n\"}}}}}\"; line: 1, column: 85]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Illegal unquoted character ((CTRL-CHAR, code 10)): has to be escaped using backslash to be included in string value\n at [Source: (String)\"{\"runtime_mappings\":{\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"x\",\"params\":{\"v\":\"  x\n  y\n  z\n\"}}}}}\"; line: 1, column: 85]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"runtime_mappings\":{\n{{#b}}\n\"r\":{\"type\":\"keyword\",\"script\":{\"source\":\"{{s}}\"}}\n{{/b}}\n}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "runtime_mappings": {
+     "r": {
+      "type": "keyword",
+      "script": {
+       "source": "str"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"query\":{\"bool\":{\"filter\":[{{#lm}}{\"term\":{\"k\":{{k}}}}{{^-last}},{{/-last}}{{/lm}}]}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:63] Unexpected character (']' (code 93)): expected a valid value (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"query\":{\"bool\":{\"filter\":[{\"term\":{\"k\":1}},{\"term\":{\"k\":2}},]}}}\"; line: 1, column: 63]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:63] [bool] failed to parse field [filter]",
+    "caused_by": {
+     "type": "x_content_parse_exception",
+     "reason": "[1:63] Unexpected character (']' (code 93)): expected a valid value (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"query\":{\"bool\":{\"filter\":[{\"term\":{\"k\":1}},{\"term\":{\"k\":2}},]}}}\"; line: 1, column: 63]",
+     "caused_by": {
+      "type": "json_parse_exception",
+      "reason": "Unexpected character (']' (code 93)): expected a valid value (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (String)\"{\"query\":{\"bool\":{\"filter\":[{\"term\":{\"k\":1}},{\"term\":{\"k\":2}},]}}}\"; line: 1, column: 63]"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"query\":{\"match\":{\"f\":\"{{s}}\"}},\"size\":{{n}}{{#b}},\"from\":{{zero}}{{/b}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "query": {
+     "match": {
+      "f": "str"
+     }
+    },
+    "size": 5,
+    "from": 0
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"query\":{\"terms\":{\"f\":{{#toJson}}l{{/toJson}}}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 200,
+  "response": {
+   "template_output": {
+    "query": {
+     "terms": {
+      "f": [
+       "x",
+       "y",
+       "z"
+      ]
+     }
+    }
+   }
+  }
+ },
+ {
+  "request": {
+   "source": "{\"a\":\"{{#x}}\"}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "Failed to close 'x' tag @[query-template:1]",
+      "script_stack": [],
+      "script": "{\"a\":\"{{#x}}\"}",
+      "lang": "mustache"
+     }
+    ],
+    "type": "script_exception",
+    "reason": "Failed to close 'x' tag @[query-template:1]",
+    "script_stack": [],
+    "script": "{\"a\":\"{{#x}}\"}",
+    "lang": "mustache",
+    "caused_by": {
+     "type": "mustache_exception",
+     "reason": "Failed to close 'x' tag @[query-template:1]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"a\":\"{{/x}}\"}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "Mismatched start/end tags: null != x in query-template:1 @[query-template:1]",
+      "script_stack": [],
+      "script": "{\"a\":\"{{/x}}\"}",
+      "lang": "mustache"
+     }
+    ],
+    "type": "script_exception",
+    "reason": "Mismatched start/end tags: null != x in query-template:1 @[query-template:1]",
+    "script_stack": [],
+    "script": "{\"a\":\"{{/x}}\"}",
+    "lang": "mustache",
+    "caused_by": {
+     "type": "mustache_exception",
+     "reason": "Mismatched start/end tags: null != x in query-template:1 @[query-template:1]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"a\":\"{{#x}}{{/y}}\"}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "Mismatched start/end tags: x != y in query-template:1 @[query-template:1]",
+      "script_stack": [],
+      "script": "{\"a\":\"{{#x}}{{/y}}\"}",
+      "lang": "mustache"
+     }
+    ],
+    "type": "script_exception",
+    "reason": "Mismatched start/end tags: x != y in query-template:1 @[query-template:1]",
+    "script_stack": [],
+    "script": "{\"a\":\"{{#x}}{{/y}}\"}",
+    "lang": "mustache",
+    "caused_by": {
+     "type": "mustache_exception",
+     "reason": "Mismatched start/end tags: x != y in query-template:1 @[query-template:1]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"a\":\"{{x\"}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "Improperly closed variable @[query-template:1]",
+      "script_stack": [],
+      "script": "{\"a\":\"{{x\"}",
+      "lang": "mustache"
+     }
+    ],
+    "type": "script_exception",
+    "reason": "Improperly closed variable @[query-template:1]",
+    "script_stack": [],
+    "script": "{\"a\":\"{{x\"}",
+    "lang": "mustache",
+    "caused_by": {
+     "type": "mustache_exception",
+     "reason": "Improperly closed variable @[query-template:1]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"a\":\"{{> partial}}\"}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "Cannot expand 'partial' because partial templates are not supported",
+      "script_stack": [],
+      "script": "{\"a\":\"{{> partial}}\"}",
+      "lang": "mustache"
+     }
+    ],
+    "type": "script_exception",
+    "reason": "Cannot expand 'partial' because partial templates are not supported",
+    "script_stack": [],
+    "script": "{\"a\":\"{{> partial}}\"}",
+    "lang": "mustache",
+    "caused_by": {
+     "type": "mustache_exception",
+     "reason": "Cannot expand 'partial' because partial templates are not supported"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"a\":\"{{=<% %>\"}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "parsing_exception",
+      "reason": "Unknown key for a VALUE_STRING in [a].",
+      "line": 1,
+      "col": 6
+     }
+    ],
+    "type": "parsing_exception",
+    "reason": "Unknown key for a VALUE_STRING in [a].",
+    "line": 1,
+    "col": 6
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{{#toJson}}a b{{/toJson}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "parsing_exception",
+      "reason": "Expected [START_OBJECT] but found [null]",
+      "line": 1,
+      "col": 0
+     }
+    ],
+    "type": "parsing_exception",
+    "reason": "Expected [START_OBJECT] but found [null]",
+    "line": 1,
+    "col": 0
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{{#join}}{{/join}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "Mustache function [join] must contain one and only one identifier",
+      "script_stack": [],
+      "script": "{{#join}}{{/join}}",
+      "lang": "mustache"
+     }
+    ],
+    "type": "script_exception",
+    "reason": "Mustache function [join] must contain one and only one identifier",
+    "script_stack": [],
+    "script": "{{#join}}{{/join}}",
+    "lang": "mustache",
+    "caused_by": {
+     "type": "mustache_exception",
+     "reason": "Mustache function [join] must contain one and only one identifier"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"query\":{\"match\":{\"f\":\"{{q}}\"}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   },
+   "options": {
+    "content_type": "text/plain"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:391] [search_template] unknown field [options]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:391] [search_template] unknown field [options]"
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "source": "{\"query\":{\"match\":{\"f\":\"{{q}}\"}}}",
+   "params": {
+    "s": "str",
+    "n": 5,
+    "f": 1.5,
+    "d": 1.0,
+    "b": true,
+    "z": false,
+    "nul": null,
+    "q": "a\"b\\c\nd\te/f<g>&'h é ☃",
+    "l": [
+     "x",
+     "y",
+     "z"
+    ],
+    "nums": [
+     1,
+     2,
+     3
+    ],
+    "e": [],
+    "m": {
+     "a": 1,
+     "b": {
+      "c": "deep"
+     }
+    },
+    "lm": [
+     {
+      "n": "one",
+      "k": 1
+     },
+     {
+      "n": "two",
+      "k": 2
+     }
+    ],
+    "em": {},
+    "big": 12345678901234,
+    "neg": -3,
+    "zero": 0,
+    "es": ""
+   },
+   "options": {
+    "content_type": "application/x-www-form-urlencoded"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:391] [search_template] unknown field [options]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:391] [search_template] unknown field [options]"
+   },
+   "status": 400
+  }
+ }
+]

@@ -1,0 +1,71 @@
+# Tests of Elasticsearch 9.5.5's `otel-data` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+otel-data:10_otel/Test logs-otel* template installation
+otel-data:10_otel/Test logs-otel@custom can override exception.message mapping
+otel-data:10_otel/Test metrics-otel* template installation
+otel-data:10_otel/Test traces-otel* template installation
+otel-data:20_logs_failure_store_test/Test logs-*.otel-* data streams have failure store enabled by default
+otel-data:20_logs_logsdb_columnar_tests/Default data_stream.type must be logs
+otel-data:20_logs_logsdb_columnar_tests/Event body
+otel-data:20_logs_logsdb_columnar_tests/Exception aliases
+otel-data:20_logs_logsdb_columnar_tests/Long stacktrace
+otel-data:20_logs_logsdb_columnar_tests/Multi value fields
+otel-data:20_logs_logsdb_columnar_tests/Structured log body
+otel-data:20_logs_logsdb_columnar_tests/event.dataset alias must point to data_stream.dataset
+otel-data:20_logs_logsdb_columnar_tests/host.name pass-through
+otel-data:20_logs_logsdb_columnar_tests/kubernetes.* -> resource.attributes.k8s.* aliases
+otel-data:20_logs_logsdb_columnar_tests/resolves dynamic field *.geo.location as geo_point
+otel-data:20_logs_logsdb_columnar_tests/resource.attributes.host.name @timestamp should be used as sort fields
+otel-data:20_logs_tests/Default data_stream.type must be logs
+otel-data:20_logs_tests/Event body
+otel-data:20_logs_tests/Exception aliases
+otel-data:20_logs_tests/Long stacktrace
+otel-data:20_logs_tests/Multi value fields
+otel-data:20_logs_tests/Structured log body
+otel-data:20_logs_tests/event.dataset alias must point to data_stream.dataset
+otel-data:20_logs_tests/event.severity should alias to severity_number
+otel-data:20_logs_tests/host.name pass-through
+otel-data:20_logs_tests/http.request.body.bytes and http.response.body.bytes should alias to OTel body size attributes
+otel-data:20_logs_tests/kubernetes.* -> resource.attributes.k8s.* aliases
+otel-data:20_logs_tests/resolves dynamic field *.geo.location as geo_point
+otel-data:20_logs_tests/resource.attributes.host.name @timestamp should be used as sort fields
+otel-data:20_metrics_tests/Boolean as dimension
+otel-data:20_metrics_tests/Custom dynamic template
+otel-data:20_metrics_tests/Default data_stream.type must be metrics
+otel-data:20_metrics_tests/Dynamic templates
+otel-data:20_metrics_tests/Empty IP field
+otel-data:20_metrics_tests/IP dimensions
+otel-data:20_metrics_tests/Long data type in attributes must be accepted
+otel-data:20_metrics_tests/Metrics with different metric name hashes are not duplicates
+otel-data:20_metrics_tests/Metrics with different scope names are not duplicates
+otel-data:20_metrics_tests/Query attributes as top level
+otel-data:20_metrics_tests/Query resource attributes as top level
+otel-data:20_metrics_tests/Test push service overview metric
+otel-data:20_metrics_tests/data stream settings ilm
+otel-data:20_metrics_tests/host.name pass-through
+otel-data:20_metrics_tests/http.response.status_code should be mapped as long
+otel-data:20_metrics_tests/unit metadata
+otel-data:20_traces_tests/Conflicting attribute types
+otel-data:20_traces_tests/Query attributes as top level
+otel-data:20_traces_tests/Query resource attributes as top level
+otel-data:20_traces_tests/Span links test
+otel-data:20_traces_tests/Test pushing simple trace
+otel-data:20_traces_tests/http.request.body.bytes and http.response.body.bytes should alias to OTel body size attributes
+otel-data:20_traces_tests/http.response.status_code should be mapped as long
+otel-data:20_traces_tests/profiler_stack_trace_ids field should have type counted_keyword
+otel-data:20_traces_tests/resource.attributes.host.name @timestamp should be used as sort fields
+otel-data:20_traces_tests/traces@lifecycle
+otel-data:30_aggregated_metrics_tests/Terms aggregation on metricset.interval from metrics-service_destination must by default only contain 1m
+otel-data:30_aggregated_metrics_tests/Terms aggregation on metricset.interval from metrics-service_summary must by default only contain 1m
+otel-data:30_aggregated_metrics_tests/Terms aggregation on metricset.interval from metrics-service_transaction must by default only contain 1m
+otel-data:30_aggregated_metrics_tests/Terms aggregation on metricset.interval from metrics-transaction must by default only contain 1m
+otel-data:30_aggregated_metrics_tests/metrics-service_destination.10m must be hidden
+otel-data:30_aggregated_metrics_tests/metrics-service_destination.60m must be hidden
+otel-data:30_aggregated_metrics_tests/metrics-service_summary.10m must be hidden
+otel-data:30_aggregated_metrics_tests/metrics-service_summary.60m must be hidden
+otel-data:30_aggregated_metrics_tests/metrics-service_transaction.10m must be hidden
+otel-data:30_aggregated_metrics_tests/metrics-service_transaction.60m must be hidden
+otel-data:30_aggregated_metrics_tests/metrics-transaction.10m must be hidden
+otel-data:30_aggregated_metrics_tests/metrics-transaction.60m must be hidden
+otel-data:30_non_ecs_alias_tests/Test alias from service.language.name non-ecs field to telemetry.sdk.language

@@ -1,0 +1,2869 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "PUT",
+      "path": "fxbq2-a",
+      "body": {
+        "settings": {
+          "number_of_shards": 2,
+          "number_of_replicas": 0
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxbq2-a"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "fxbq2-a",
+            "_id": "1"
+          }
+        },
+        {
+          "v": 1
+        },
+        {
+          "index": {
+            "_index": "fxbq2-a",
+            "_id": "2"
+          }
+        },
+        {
+          "v": 2
+        },
+        {
+          "index": {
+            "_index": "fxbq2-a",
+            "_id": "3"
+          }
+        },
+        {
+          "v": 3
+        },
+        {
+          "index": {
+            "_index": "fxbq2-a",
+            "_id": "4"
+          }
+        },
+        {
+          "v": 4
+        },
+        {
+          "index": {
+            "_index": "fxbq2-a",
+            "_id": "5"
+          }
+        },
+        {
+          "v": 5
+        },
+        {
+          "index": {
+            "_index": "fxbq2-a",
+            "_id": "6"
+          }
+        },
+        {
+          "v": 6
+        },
+        {
+          "index": {
+            "_index": "fxbq2-a",
+            "_id": "7"
+          }
+        },
+        {
+          "v": 7
+        },
+        {
+          "index": {
+            "_index": "fxbq2-a",
+            "_id": "8"
+          }
+        },
+        {
+          "v": 8
+        },
+        {
+          "index": {
+            "_index": "fxbq2-a",
+            "_id": "9"
+          }
+        },
+        {
+          "v": 9
+        },
+        {
+          "index": {
+            "_index": "fxbq2-a",
+            "_id": "10"
+          }
+        },
+        {
+          "v": 10
+        },
+        {
+          "index": {
+            "_index": "fxbq2-a",
+            "_id": "11"
+          }
+        },
+        {
+          "v": 11
+        },
+        {
+          "index": {
+            "_index": "fxbq2-a",
+            "_id": "12"
+          }
+        },
+        {
+          "v": 12
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "fxbq2-a",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-a",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-a",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-a",
+                "_id": "4",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-a",
+                "_id": "5",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-a",
+                "_id": "6",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-a",
+                "_id": "7",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-a",
+                "_id": "8",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-a",
+                "_id": "9",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-a",
+                "_id": "10",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 5,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-a",
+                "_id": "11",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 6,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-a",
+                "_id": "12",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "fxbq2-b",
+      "body": {
+        "settings": {
+          "number_of_shards": 2,
+          "number_of_replicas": 0
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxbq2-b"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "fxbq2-b",
+            "_id": "1"
+          }
+        },
+        {
+          "v": 1
+        },
+        {
+          "index": {
+            "_index": "fxbq2-b",
+            "_id": "2"
+          }
+        },
+        {
+          "v": 2
+        },
+        {
+          "index": {
+            "_index": "fxbq2-b",
+            "_id": "3"
+          }
+        },
+        {
+          "v": 3
+        },
+        {
+          "index": {
+            "_index": "fxbq2-b",
+            "_id": "4"
+          }
+        },
+        {
+          "v": 4
+        },
+        {
+          "index": {
+            "_index": "fxbq2-b",
+            "_id": "5"
+          }
+        },
+        {
+          "v": 5
+        },
+        {
+          "index": {
+            "_index": "fxbq2-b",
+            "_id": "6"
+          }
+        },
+        {
+          "v": 6
+        },
+        {
+          "index": {
+            "_index": "fxbq2-b",
+            "_id": "7"
+          }
+        },
+        {
+          "v": 7
+        },
+        {
+          "index": {
+            "_index": "fxbq2-b",
+            "_id": "8"
+          }
+        },
+        {
+          "v": 8
+        },
+        {
+          "index": {
+            "_index": "fxbq2-b",
+            "_id": "9"
+          }
+        },
+        {
+          "v": 9
+        },
+        {
+          "index": {
+            "_index": "fxbq2-b",
+            "_id": "10"
+          }
+        },
+        {
+          "v": 10
+        },
+        {
+          "index": {
+            "_index": "fxbq2-b",
+            "_id": "11"
+          }
+        },
+        {
+          "v": 11
+        },
+        {
+          "index": {
+            "_index": "fxbq2-b",
+            "_id": "12"
+          }
+        },
+        {
+          "v": 12
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 200,
+          "items": [
+            {
+              "index": {
+                "_index": "fxbq2-b",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-b",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-b",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-b",
+                "_id": "4",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-b",
+                "_id": "5",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-b",
+                "_id": "6",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-b",
+                "_id": "7",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-b",
+                "_id": "8",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-b",
+                "_id": "9",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-b",
+                "_id": "10",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 5,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-b",
+                "_id": "11",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 6,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-b",
+                "_id": "12",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "fxbq2-c",
+      "body": {
+        "settings": {
+          "number_of_shards": 2,
+          "number_of_replicas": 0
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxbq2-c"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "fxbq2-c",
+            "_id": "1"
+          }
+        },
+        {
+          "v": 1
+        },
+        {
+          "index": {
+            "_index": "fxbq2-c",
+            "_id": "2"
+          }
+        },
+        {
+          "v": 2
+        },
+        {
+          "index": {
+            "_index": "fxbq2-c",
+            "_id": "3"
+          }
+        },
+        {
+          "v": 3
+        },
+        {
+          "index": {
+            "_index": "fxbq2-c",
+            "_id": "4"
+          }
+        },
+        {
+          "v": 4
+        },
+        {
+          "index": {
+            "_index": "fxbq2-c",
+            "_id": "5"
+          }
+        },
+        {
+          "v": 5
+        },
+        {
+          "index": {
+            "_index": "fxbq2-c",
+            "_id": "6"
+          }
+        },
+        {
+          "v": 6
+        },
+        {
+          "index": {
+            "_index": "fxbq2-c",
+            "_id": "7"
+          }
+        },
+        {
+          "v": 7
+        },
+        {
+          "index": {
+            "_index": "fxbq2-c",
+            "_id": "8"
+          }
+        },
+        {
+          "v": 8
+        },
+        {
+          "index": {
+            "_index": "fxbq2-c",
+            "_id": "9"
+          }
+        },
+        {
+          "v": 9
+        },
+        {
+          "index": {
+            "_index": "fxbq2-c",
+            "_id": "10"
+          }
+        },
+        {
+          "v": 10
+        },
+        {
+          "index": {
+            "_index": "fxbq2-c",
+            "_id": "11"
+          }
+        },
+        {
+          "v": 11
+        },
+        {
+          "index": {
+            "_index": "fxbq2-c",
+            "_id": "12"
+          }
+        },
+        {
+          "v": 12
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "fxbq2-c",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-c",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-c",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-c",
+                "_id": "4",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-c",
+                "_id": "5",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-c",
+                "_id": "6",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-c",
+                "_id": "7",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-c",
+                "_id": "8",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-c",
+                "_id": "9",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-c",
+                "_id": "10",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 5,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-c",
+                "_id": "11",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 6,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq2-c",
+                "_id": "12",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxbq2-a/_delete_by_query?max_docs=3&refresh=true",
+      "body": {
+        "query": {
+          "range": {
+            "v": {
+              "gte": 2
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 19,
+          "timed_out": false,
+          "total": 3,
+          "deleted": 3,
+          "batches": 1,
+          "version_conflicts": 0,
+          "noops": 0,
+          "retries": {
+            "bulk": 0,
+            "search": 0
+          },
+          "throttled_millis": 0,
+          "requests_per_second": -1.0,
+          "throttled_until_millis": 0,
+          "failures": []
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxbq2-a/_search",
+      "body": {
+        "size": 20,
+        "sort": [
+          {
+            "v": "asc"
+          }
+        ],
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 4,
+          "timed_out": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 9,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxbq2-a",
+                "_id": "1",
+                "_score": null,
+                "sort": [
+                  1
+                ]
+              },
+              {
+                "_index": "fxbq2-a",
+                "_id": "4",
+                "_score": null,
+                "sort": [
+                  4
+                ]
+              },
+              {
+                "_index": "fxbq2-a",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  5
+                ]
+              },
+              {
+                "_index": "fxbq2-a",
+                "_id": "6",
+                "_score": null,
+                "sort": [
+                  6
+                ]
+              },
+              {
+                "_index": "fxbq2-a",
+                "_id": "8",
+                "_score": null,
+                "sort": [
+                  8
+                ]
+              },
+              {
+                "_index": "fxbq2-a",
+                "_id": "9",
+                "_score": null,
+                "sort": [
+                  9
+                ]
+              },
+              {
+                "_index": "fxbq2-a",
+                "_id": "10",
+                "_score": null,
+                "sort": [
+                  10
+                ]
+              },
+              {
+                "_index": "fxbq2-a",
+                "_id": "11",
+                "_score": null,
+                "sort": [
+                  11
+                ]
+              },
+              {
+                "_index": "fxbq2-a",
+                "_id": "12",
+                "_score": null,
+                "sort": [
+                  12
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxbq2-b/_update_by_query?max_docs=3&refresh=true",
+      "body": {
+        "query": {
+          "range": {
+            "v": {
+              "gte": 2
+            }
+          }
+        },
+        "script": {
+          "source": "ctx._source.u = 1"
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 44,
+          "timed_out": false,
+          "total": 3,
+          "updated": 3,
+          "deleted": 0,
+          "batches": 1,
+          "version_conflicts": 0,
+          "noops": 0,
+          "retries": {
+            "bulk": 0,
+            "search": 0
+          },
+          "throttled_millis": 0,
+          "requests_per_second": -1.0,
+          "throttled_until_millis": 0,
+          "failures": []
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxbq2-b/_search",
+      "body": {
+        "size": 20,
+        "sort": [
+          {
+            "v": "asc"
+          }
+        ],
+        "query": {
+          "exists": {
+            "field": "u"
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 4,
+          "timed_out": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxbq2-b",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  2
+                ]
+              },
+              {
+                "_index": "fxbq2-b",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  3
+                ]
+              },
+              {
+                "_index": "fxbq2-b",
+                "_id": "7",
+                "_score": null,
+                "sort": [
+                  7
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_reindex?refresh=true",
+      "body": {
+        "max_docs": 3,
+        "source": {
+          "index": "fxbq2-c",
+          "query": {
+            "range": {
+              "v": {
+                "gte": 2
+              }
+            }
+          }
+        },
+        "dest": {
+          "index": "fxbq2-d"
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 110,
+          "timed_out": false,
+          "total": 3,
+          "updated": 0,
+          "created": 3,
+          "deleted": 0,
+          "batches": 1,
+          "version_conflicts": 0,
+          "noops": 0,
+          "retries": {
+            "bulk": 0,
+            "search": 0
+          },
+          "throttled_millis": 0,
+          "requests_per_second": -1.0,
+          "throttled_until_millis": 0,
+          "failures": []
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxbq2-d/_search",
+      "body": {
+        "size": 20,
+        "sort": [
+          {
+            "v": "asc"
+          }
+        ],
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxbq2-d",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  3
+                ]
+              },
+              {
+                "_index": "fxbq2-d",
+                "_id": "7",
+                "_score": null,
+                "sort": [
+                  7
+                ]
+              },
+              {
+                "_index": "fxbq2-d",
+                "_id": "8",
+                "_score": null,
+                "sort": [
+                  8
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "fxbq3-a",
+      "body": {
+        "settings": {
+          "number_of_shards": 3,
+          "number_of_replicas": 0
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxbq3-a"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "fxbq3-a",
+            "_id": "1"
+          }
+        },
+        {
+          "v": 1
+        },
+        {
+          "index": {
+            "_index": "fxbq3-a",
+            "_id": "2"
+          }
+        },
+        {
+          "v": 2
+        },
+        {
+          "index": {
+            "_index": "fxbq3-a",
+            "_id": "3"
+          }
+        },
+        {
+          "v": 3
+        },
+        {
+          "index": {
+            "_index": "fxbq3-a",
+            "_id": "4"
+          }
+        },
+        {
+          "v": 4
+        },
+        {
+          "index": {
+            "_index": "fxbq3-a",
+            "_id": "5"
+          }
+        },
+        {
+          "v": 5
+        },
+        {
+          "index": {
+            "_index": "fxbq3-a",
+            "_id": "6"
+          }
+        },
+        {
+          "v": 6
+        },
+        {
+          "index": {
+            "_index": "fxbq3-a",
+            "_id": "7"
+          }
+        },
+        {
+          "v": 7
+        },
+        {
+          "index": {
+            "_index": "fxbq3-a",
+            "_id": "8"
+          }
+        },
+        {
+          "v": 8
+        },
+        {
+          "index": {
+            "_index": "fxbq3-a",
+            "_id": "9"
+          }
+        },
+        {
+          "v": 9
+        },
+        {
+          "index": {
+            "_index": "fxbq3-a",
+            "_id": "10"
+          }
+        },
+        {
+          "v": 10
+        },
+        {
+          "index": {
+            "_index": "fxbq3-a",
+            "_id": "11"
+          }
+        },
+        {
+          "v": 11
+        },
+        {
+          "index": {
+            "_index": "fxbq3-a",
+            "_id": "12"
+          }
+        },
+        {
+          "v": 12
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "fxbq3-a",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-a",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-a",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-a",
+                "_id": "4",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-a",
+                "_id": "5",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-a",
+                "_id": "6",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-a",
+                "_id": "7",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-a",
+                "_id": "8",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-a",
+                "_id": "9",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-a",
+                "_id": "10",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-a",
+                "_id": "11",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 5,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-a",
+                "_id": "12",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "fxbq3-b",
+      "body": {
+        "settings": {
+          "number_of_shards": 3,
+          "number_of_replicas": 0
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxbq3-b"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "fxbq3-b",
+            "_id": "1"
+          }
+        },
+        {
+          "v": 1
+        },
+        {
+          "index": {
+            "_index": "fxbq3-b",
+            "_id": "2"
+          }
+        },
+        {
+          "v": 2
+        },
+        {
+          "index": {
+            "_index": "fxbq3-b",
+            "_id": "3"
+          }
+        },
+        {
+          "v": 3
+        },
+        {
+          "index": {
+            "_index": "fxbq3-b",
+            "_id": "4"
+          }
+        },
+        {
+          "v": 4
+        },
+        {
+          "index": {
+            "_index": "fxbq3-b",
+            "_id": "5"
+          }
+        },
+        {
+          "v": 5
+        },
+        {
+          "index": {
+            "_index": "fxbq3-b",
+            "_id": "6"
+          }
+        },
+        {
+          "v": 6
+        },
+        {
+          "index": {
+            "_index": "fxbq3-b",
+            "_id": "7"
+          }
+        },
+        {
+          "v": 7
+        },
+        {
+          "index": {
+            "_index": "fxbq3-b",
+            "_id": "8"
+          }
+        },
+        {
+          "v": 8
+        },
+        {
+          "index": {
+            "_index": "fxbq3-b",
+            "_id": "9"
+          }
+        },
+        {
+          "v": 9
+        },
+        {
+          "index": {
+            "_index": "fxbq3-b",
+            "_id": "10"
+          }
+        },
+        {
+          "v": 10
+        },
+        {
+          "index": {
+            "_index": "fxbq3-b",
+            "_id": "11"
+          }
+        },
+        {
+          "v": 11
+        },
+        {
+          "index": {
+            "_index": "fxbq3-b",
+            "_id": "12"
+          }
+        },
+        {
+          "v": 12
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "fxbq3-b",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-b",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-b",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-b",
+                "_id": "4",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-b",
+                "_id": "5",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-b",
+                "_id": "6",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-b",
+                "_id": "7",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-b",
+                "_id": "8",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-b",
+                "_id": "9",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-b",
+                "_id": "10",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-b",
+                "_id": "11",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 5,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-b",
+                "_id": "12",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "fxbq3-c",
+      "body": {
+        "settings": {
+          "number_of_shards": 3,
+          "number_of_replicas": 0
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxbq3-c"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "fxbq3-c",
+            "_id": "1"
+          }
+        },
+        {
+          "v": 1
+        },
+        {
+          "index": {
+            "_index": "fxbq3-c",
+            "_id": "2"
+          }
+        },
+        {
+          "v": 2
+        },
+        {
+          "index": {
+            "_index": "fxbq3-c",
+            "_id": "3"
+          }
+        },
+        {
+          "v": 3
+        },
+        {
+          "index": {
+            "_index": "fxbq3-c",
+            "_id": "4"
+          }
+        },
+        {
+          "v": 4
+        },
+        {
+          "index": {
+            "_index": "fxbq3-c",
+            "_id": "5"
+          }
+        },
+        {
+          "v": 5
+        },
+        {
+          "index": {
+            "_index": "fxbq3-c",
+            "_id": "6"
+          }
+        },
+        {
+          "v": 6
+        },
+        {
+          "index": {
+            "_index": "fxbq3-c",
+            "_id": "7"
+          }
+        },
+        {
+          "v": 7
+        },
+        {
+          "index": {
+            "_index": "fxbq3-c",
+            "_id": "8"
+          }
+        },
+        {
+          "v": 8
+        },
+        {
+          "index": {
+            "_index": "fxbq3-c",
+            "_id": "9"
+          }
+        },
+        {
+          "v": 9
+        },
+        {
+          "index": {
+            "_index": "fxbq3-c",
+            "_id": "10"
+          }
+        },
+        {
+          "v": 10
+        },
+        {
+          "index": {
+            "_index": "fxbq3-c",
+            "_id": "11"
+          }
+        },
+        {
+          "v": 11
+        },
+        {
+          "index": {
+            "_index": "fxbq3-c",
+            "_id": "12"
+          }
+        },
+        {
+          "v": 12
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "fxbq3-c",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-c",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-c",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-c",
+                "_id": "4",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-c",
+                "_id": "5",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-c",
+                "_id": "6",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-c",
+                "_id": "7",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-c",
+                "_id": "8",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-c",
+                "_id": "9",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-c",
+                "_id": "10",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-c",
+                "_id": "11",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 5,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxbq3-c",
+                "_id": "12",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxbq3-a/_delete_by_query?max_docs=3&refresh=true",
+      "body": {
+        "query": {
+          "range": {
+            "v": {
+              "gte": 2
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 20,
+          "timed_out": false,
+          "total": 3,
+          "deleted": 3,
+          "batches": 1,
+          "version_conflicts": 0,
+          "noops": 0,
+          "retries": {
+            "bulk": 0,
+            "search": 0
+          },
+          "throttled_millis": 0,
+          "requests_per_second": -1.0,
+          "throttled_until_millis": 0,
+          "failures": []
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxbq3-a/_search",
+      "body": {
+        "size": 20,
+        "sort": [
+          {
+            "v": "asc"
+          }
+        ],
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 4,
+          "timed_out": false,
+          "_shards": {
+            "total": 3,
+            "successful": 3,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 9,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxbq3-a",
+                "_id": "1",
+                "_score": null,
+                "sort": [
+                  1
+                ]
+              },
+              {
+                "_index": "fxbq3-a",
+                "_id": "3",
+                "_score": null,
+                "sort": [
+                  3
+                ]
+              },
+              {
+                "_index": "fxbq3-a",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  5
+                ]
+              },
+              {
+                "_index": "fxbq3-a",
+                "_id": "6",
+                "_score": null,
+                "sort": [
+                  6
+                ]
+              },
+              {
+                "_index": "fxbq3-a",
+                "_id": "7",
+                "_score": null,
+                "sort": [
+                  7
+                ]
+              },
+              {
+                "_index": "fxbq3-a",
+                "_id": "9",
+                "_score": null,
+                "sort": [
+                  9
+                ]
+              },
+              {
+                "_index": "fxbq3-a",
+                "_id": "10",
+                "_score": null,
+                "sort": [
+                  10
+                ]
+              },
+              {
+                "_index": "fxbq3-a",
+                "_id": "11",
+                "_score": null,
+                "sort": [
+                  11
+                ]
+              },
+              {
+                "_index": "fxbq3-a",
+                "_id": "12",
+                "_score": null,
+                "sort": [
+                  12
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxbq3-b/_update_by_query?max_docs=3&refresh=true",
+      "body": {
+        "query": {
+          "range": {
+            "v": {
+              "gte": 2
+            }
+          }
+        },
+        "script": {
+          "source": "ctx._source.u = 1"
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 44,
+          "timed_out": false,
+          "total": 3,
+          "updated": 3,
+          "deleted": 0,
+          "batches": 1,
+          "version_conflicts": 0,
+          "noops": 0,
+          "retries": {
+            "bulk": 0,
+            "search": 0
+          },
+          "throttled_millis": 0,
+          "requests_per_second": -1.0,
+          "throttled_until_millis": 0,
+          "failures": []
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxbq3-b/_search",
+      "body": {
+        "size": 20,
+        "sort": [
+          {
+            "v": "asc"
+          }
+        ],
+        "query": {
+          "exists": {
+            "field": "u"
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 4,
+          "timed_out": false,
+          "_shards": {
+            "total": 3,
+            "successful": 3,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxbq3-b",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  2
+                ]
+              },
+              {
+                "_index": "fxbq3-b",
+                "_id": "4",
+                "_score": null,
+                "sort": [
+                  4
+                ]
+              },
+              {
+                "_index": "fxbq3-b",
+                "_id": "8",
+                "_score": null,
+                "sort": [
+                  8
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_reindex?refresh=true",
+      "body": {
+        "max_docs": 3,
+        "source": {
+          "index": "fxbq3-c",
+          "query": {
+            "range": {
+              "v": {
+                "gte": 2
+              }
+            }
+          }
+        },
+        "dest": {
+          "index": "fxbq3-d"
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 101,
+          "timed_out": false,
+          "total": 3,
+          "updated": 0,
+          "created": 3,
+          "deleted": 0,
+          "batches": 1,
+          "version_conflicts": 0,
+          "noops": 0,
+          "retries": {
+            "bulk": 0,
+            "search": 0
+          },
+          "throttled_millis": 0,
+          "requests_per_second": -1.0,
+          "throttled_until_millis": 0,
+          "failures": []
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxbq3-d/_search",
+      "body": {
+        "size": 20,
+        "sort": [
+          {
+            "v": "asc"
+          }
+        ],
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 3,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "fxbq3-d",
+                "_id": "2",
+                "_score": null,
+                "sort": [
+                  2
+                ]
+              },
+              {
+                "_index": "fxbq3-d",
+                "_id": "4",
+                "_score": null,
+                "sort": [
+                  4
+                ]
+              },
+              {
+                "_index": "fxbq3-d",
+                "_id": "5",
+                "_score": null,
+                "sort": [
+                  5
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/fxbq2-a,fxbq2-b,fxbq2-c,fxbq2-d,fxbq3-a,fxbq3-b,fxbq3-c,fxbq3-d",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

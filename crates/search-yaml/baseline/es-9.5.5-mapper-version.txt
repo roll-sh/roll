@@ -1,0 +1,9 @@
+# Tests of Elasticsearch 9.5.5's `mapper-version` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+mapper-version:40_synthetic_source/fetch source
+mapper-version:40_synthetic_source/script values
+mapper-version:40_synthetic_source/synthetic source with copy_to
+mapper-version:50_script_values/Scripted fields version values return Version
+mapper-version:60_script_sort_values/Sort by Version script value (doc api)
+mapper-version:60_script_sort_values/Sort by Version script value (field api)

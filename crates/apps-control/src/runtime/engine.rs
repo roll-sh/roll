@@ -41,6 +41,13 @@ pub struct Inspect {
     /// Its last exit: the code, and whether the kernel killed it for its memory limit.
     pub exit_code: Option<i32>,
     pub oom_killed: bool,
+    /// Its main process on this host, while it runs (its network namespace is
+    /// `/proc/<pid>/net`).
+    pub pid: Option<u32>,
+    /// The gateways of the networks it's on: where the host's own connections come from.
+    pub gateways: Vec<std::net::IpAddr>,
+    /// The first TCP port it exposes.
+    pub exposed: Option<u16>,
 }
 
 impl Engine {
@@ -213,6 +220,14 @@ impl Engine {
         self.call(Method::POST, &Self::container(name, "unpause")).await.map(|_| ())
     }
 
+    /// SIGKILL now; not running is fine.
+    pub async fn kill(&self, name: &str) -> anyhow::Result<()> {
+        match self.call(Method::POST, &format!("{}?signal=KILL", Self::container(name, "kill"))).await {
+            Err(e) if e.to_string().contains("is not running") => Ok(()),
+            r => r.map(|_| ()),
+        }
+    }
+
     /// SIGTERM, then SIGKILL after `secs`; already stopped is fine (304).
     pub async fn stop(&self, name: &str, secs: u64) -> anyhow::Result<()> {
         self.call_within(Method::POST, &format!("{}?t={secs}", Self::container(name, "stop")), None, Some(Duration::from_secs(secs) + QUICK)).await.map(|_| ())
@@ -273,11 +288,25 @@ fn parse_inspect(body: &[u8]) -> anyhow::Result<Inspect> {
         host: Host,
         #[serde(rename = "Config", default)]
         config: Option<Config>,
+        #[serde(rename = "NetworkSettings", default)]
+        net: Option<NetSettings>,
     }
     #[derive(Deserialize)]
     struct Config {
         #[serde(rename = "Labels", default)]
         labels: Option<std::collections::BTreeMap<String, String>>,
+        #[serde(rename = "ExposedPorts", default)]
+        exposed: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    }
+    #[derive(Deserialize)]
+    struct NetSettings {
+        #[serde(rename = "Networks", default)]
+        networks: Option<std::collections::BTreeMap<String, Endpoint>>,
+    }
+    #[derive(Deserialize)]
+    struct Endpoint {
+        #[serde(rename = "Gateway", default)]
+        gateway: String,
     }
     #[derive(Deserialize)]
     struct State {
@@ -287,6 +316,8 @@ fn parse_inspect(body: &[u8]) -> anyhow::Result<Inspect> {
         exit_code: Option<i32>,
         #[serde(rename = "OOMKilled", default)]
         oom_killed: bool,
+        #[serde(rename = "Pid", default)]
+        pid: u32,
     }
     #[derive(Deserialize)]
     struct Host {
@@ -300,8 +331,11 @@ fn parse_inspect(body: &[u8]) -> anyhow::Result<Inspect> {
     }
     let c: Container = serde_json::from_slice(body).context("reading an inspect")?;
     let host_port = c.host.ports.into_iter().flatten().flat_map(|(_, b)| b.into_iter().flatten()).find_map(|b| b.port.parse().ok());
+    let exposed = c.config.as_ref().and_then(|c| c.exposed.as_ref()).and_then(|e| e.keys().find_map(|k| k.strip_suffix("/tcp")?.parse().ok()));
     let cpu_nanos = c.config.and_then(|c| c.labels).and_then(|l| l.get("sh.roll.apps.cpu").and_then(|v| v.parse().ok()));
-    Ok(Inspect { id: c.id, running: c.state.running, host_port, cpu_nanos, exit_code: c.state.exit_code, oom_killed: c.state.oom_killed })
+    let gateways = c.net.and_then(|n| n.networks).into_iter().flatten().filter_map(|(_, e)| e.gateway.parse().ok()).collect();
+    let pid = (c.state.running && c.state.pid > 0).then_some(c.state.pid);
+    Ok(Inspect { id: c.id, running: c.state.running, host_port, cpu_nanos, exit_code: c.state.exit_code, oom_killed: c.state.oom_killed, pid, gateways, exposed })
 }
 
 /// Splits Docker's multiplexed log stream (a container without a TTY): frames of an 8-byte header
@@ -352,7 +386,7 @@ mod tests {
     #[test]
     fn inspect_reads_id_state_and_the_published_port() {
         let body = br#"{"Id":"abc","State":{"Running":true},"HostConfig":{"PortBindings":{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"41234"}]}}}"#;
-        assert_eq!(parse_inspect(body).unwrap(), Inspect { id: "abc".into(), running: true, host_port: Some(41234), cpu_nanos: None, exit_code: None, oom_killed: false });
+        assert_eq!(parse_inspect(body).unwrap(), Inspect { id: "abc".into(), running: true, host_port: Some(41234), cpu_nanos: None, exit_code: None, oom_killed: false, pid: None, gateways: vec![], exposed: None });
         let oom = br#"{"Id":"o","State":{"Running":false,"ExitCode":137,"OOMKilled":true},"HostConfig":{}}"#;
         let i = parse_inspect(oom).unwrap();
         assert_eq!((i.exit_code, i.oom_killed), (Some(137), true));

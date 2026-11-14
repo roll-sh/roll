@@ -13,6 +13,7 @@ pub mod docker;
 pub mod engine;
 pub mod fake;
 pub mod fargate;
+pub mod netns;
 
 use crate::logs::LogSink;
 use async_trait::async_trait;
@@ -110,6 +111,25 @@ pub struct Usage {
 pub trait Runtime: Send + Sync {
     /// `docker`, `fargate`, `fake`.
     fn name(&self) -> &'static str;
+    /// Whether a sleeping web instance's network accepted a connection since it went to sleep
+    /// (its stop or suspend) or since it was last asked ([`netns`]: cheap, asked often): a
+    /// caller rolld didn't see, one of the project's other services. False where the runtime
+    /// can't tell (then only rolld's requests wake it).
+    async fn take_callers(&self, _name: &str) -> bool {
+        false
+    }
+    /// The container whose network a helper on this host may join to reach the instance from
+    /// inside (`--network container:<it>`: its sandbox, or the instance itself). None where
+    /// there's no such thing (Fargate, the fake).
+    async fn network_container(&self, _name: &str) -> Option<String> {
+        None
+    }
+
+    /// Connections to it now from the project's other services (not rolld's): dear, read only
+    /// when it's about to sleep.
+    async fn private_peers(&self, _name: &str) -> Option<u32> {
+        None
+    }
     /// Whether [`Runtime::suspend`] freezes (Docker's pause) rather than stops.
     fn can_suspend(&self) -> bool;
     /// Pull an image (with `login` for a private registry) and answer it pinned by digest
@@ -191,7 +211,8 @@ pub struct BuildJob {
     pub deployment: String,
     /// The build context (the source tree, with the Dockerfile written in).
     pub context: PathBuf,
-    /// The Dockerfile, relative to the context.
+    /// The Dockerfile: relative to the context, or a path outside it (a copy with its cache
+    /// mounts namespaced, [`Builder::shares_caches`]).
     pub dockerfile: String,
     /// The image to make: `roll-apps-<service>:<deployment>`.
     pub tag: String,
@@ -207,6 +228,11 @@ pub struct BuildJob {
     pub env_hash: String,
     /// The tree's own Dockerfile (it reads variables with `ARG`), not a generated one.
     pub own_dockerfile: bool,
+    /// Use no cached layer and pull base images again (`--no-cache --pull`).
+    pub no_cache: bool,
+    /// [`apps_build::LAYERS_ARG`]'s value on a builder that shares caches: a secret per service
+    /// that keeps its `RUN` steps' cached layers its own. Never in argv or a log.
+    pub layers: Option<String>,
 }
 
 impl std::fmt::Debug for BuildJob {
@@ -267,6 +293,11 @@ pub trait Builder: Send + Sync {
     async fn build(&self, job: &BuildJob, log: &LogSink, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String>;
     /// Remove an image no deployment needs any more.
     async fn remove_image(&self, image: &str);
+    /// Whether its builds share one BuildKit, cache mounts and all (one node's Docker): then
+    /// each service's mounts are namespaced (`apps_build::isolate_caches`).
+    fn shares_caches(&self) -> bool {
+        false
+    }
 }
 
 /// A free TCP port on loopback (to publish an instance's port on).
@@ -296,6 +327,8 @@ mod tests {
             env: vars,
             env_hash: String::new(),
             own_dockerfile: true,
+            no_cache: false,
+            layers: None,
         };
         assert_eq!(build_args(&job), ["NPM_TOKEN", "A"]);
         job.own_dockerfile = false;

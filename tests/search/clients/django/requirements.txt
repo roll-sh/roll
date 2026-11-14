@@ -1,0 +1,5 @@
+Django==5.2.*
+django-elasticsearch-dsl==9.0
+# django-elasticsearch-dsl 9.0 reads Document._fields, which elasticsearch.dsl dropped after 9.0
+# (documents are indexed with an empty _source): use the client it was released against.
+elasticsearch==9.0.*

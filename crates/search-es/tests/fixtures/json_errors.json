@@ -1,0 +1,1101 @@
+[
+ {
+  "body": "{bad",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:2] Unexpected character ('b' (code 98)): was expecting double-quote to start field name\n at [Source: (byte[])\"{bad\"; line: 1, column: 2]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:2] Unexpected character ('b' (code 98)): was expecting double-quote to start field name\n at [Source: (byte[])\"{bad\"; line: 1, column: 2]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('b' (code 98)): was expecting double-quote to start field name\n at [Source: (byte[])\"{bad\"; line: 1, column: 2]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":1,\"a\":2}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:11] Duplicate field 'a'\n at [Source: (byte[])\"{\"a\":1,\"a\":2}\"; line: 1, column: 11]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:11] Duplicate field 'a'\n at [Source: (byte[])\"{\"a\":1,\"a\":2}\"; line: 1, column: 11]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Duplicate field 'a'\n at [Source: (byte[])\"{\"a\":1,\"a\":2}\"; line: 1, column: 11]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "xyz",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:1] Unrecognized token 'xyz': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"xyz\"; line: 1, column: 1]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:1] Unrecognized token 'xyz': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"xyz\"; line: 1, column: 1]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unrecognized token 'xyz': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"xyz\"; line: 1, column: 1]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_e_o_f_exception",
+      "reason": "[1:2] Unexpected end of file"
+     }
+    ],
+    "type": "x_content_e_o_f_exception",
+    "reason": "[1:2] Unexpected end of file",
+    "caused_by": {
+     "type": "json_e_o_f_exception",
+     "reason": "Unexpected end-of-input: expected close marker for Object (start marker at [Source: (byte[])\"{\"; line: 1, column: 1])\n at [Source: (byte[])\"{\"; line: 1, column: 2]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\"",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_e_o_f_exception",
+      "reason": "[1:5] Unexpected end of file"
+     }
+    ],
+    "type": "x_content_e_o_f_exception",
+    "reason": "[1:5] Unexpected end of file",
+    "caused_by": {
+     "type": "json_e_o_f_exception",
+     "reason": "Unexpected end-of-input within/between Object entries\n at [Source: (byte[])\"{\"a\"\"; line: 1, column: 5]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_e_o_f_exception",
+      "reason": "[1:6] Unexpected end of file"
+     }
+    ],
+    "type": "x_content_e_o_f_exception",
+    "reason": "[1:6] Unexpected end of file",
+    "caused_by": {
+     "type": "json_e_o_f_exception",
+     "reason": "Unexpected end-of-input within/between Object entries\n at [Source: (byte[])\"{\"a\":\"; line: 1, column: 6]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":1",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_e_o_f_exception",
+      "reason": "[1:7] Unexpected end of file"
+     }
+    ],
+    "type": "x_content_e_o_f_exception",
+    "reason": "[1:7] Unexpected end of file",
+    "caused_by": {
+     "type": "json_e_o_f_exception",
+     "reason": "Unexpected end-of-input: expected close marker for Object (start marker at [Source: (byte[])\"{\"a\":1\"; line: 1, column: 1])\n at [Source: (byte[])\"{\"a\":1\"; line: 1, column: 7]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":1,",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:8] Unexpected end-of-input within/between Object entries\n at [Source: (byte[])\"{\"a\":1,\"; line: 1, column: 8]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:8] Unexpected end-of-input within/between Object entries\n at [Source: (byte[])\"{\"a\":1,\"; line: 1, column: 8]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected end-of-input within/between Object entries\n at [Source: (byte[])\"{\"a\":1,\"; line: 1, column: 8]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\" 1}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:6] Unexpected character ('1' (code 49)): was expecting a colon to separate field name and value\n at [Source: (byte[])\"{\"a\" 1}\"; line: 1, column: 6]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:6] Unexpected character ('1' (code 49)): was expecting a colon to separate field name and value\n at [Source: (byte[])\"{\"a\" 1}\"; line: 1, column: 6]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('1' (code 49)): was expecting a colon to separate field name and value\n at [Source: (byte[])\"{\"a\" 1}\"; line: 1, column: 6]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":1 \"b\":2}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:8] Unexpected character ('\"' (code 34)): was expecting comma to separate Object entries\n at [Source: (byte[])\"{\"a\":1 \"b\":2}\"; line: 1, column: 8]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:8] Unexpected character ('\"' (code 34)): was expecting comma to separate Object entries\n at [Source: (byte[])\"{\"a\":1 \"b\":2}\"; line: 1, column: 8]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('\"' (code 34)): was expecting comma to separate Object entries\n at [Source: (byte[])\"{\"a\":1 \"b\":2}\"; line: 1, column: 8]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":[1 2]}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:9] Unexpected character ('2' (code 50)): was expecting comma to separate Array entries\n at [Source: (byte[])\"{\"a\":[1 2]}\"; line: 1, column: 9]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:9] Unexpected character ('2' (code 50)): was expecting comma to separate Array entries\n at [Source: (byte[])\"{\"a\":[1 2]}\"; line: 1, column: 9]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('2' (code 50)): was expecting comma to separate Array entries\n at [Source: (byte[])\"{\"a\":[1 2]}\"; line: 1, column: 9]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":[1,]}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:9] Unexpected character (']' (code 93)): expected a value\n at [Source: (byte[])\"{\"a\":[1,]}\"; line: 1, column: 9]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:9] Unexpected character (']' (code 93)): expected a value\n at [Source: (byte[])\"{\"a\":[1,]}\"; line: 1, column: 9]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character (']' (code 93)): expected a value\n at [Source: (byte[])\"{\"a\":[1,]}\"; line: 1, column: 9]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:6] Unexpected character ('}' (code 125)): expected a value\n at [Source: (byte[])\"{\"a\":}\"; line: 1, column: 6]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:6] Unexpected character ('}' (code 125)): expected a value\n at [Source: (byte[])\"{\"a\":}\"; line: 1, column: 6]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('}' (code 125)): expected a value\n at [Source: (byte[])\"{\"a\":}\"; line: 1, column: 6]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{,}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:2] Unexpected character (',' (code 44)): was expecting double-quote to start field name\n at [Source: (byte[])\"{,}\"; line: 1, column: 2]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:2] Unexpected character (',' (code 44)): was expecting double-quote to start field name\n at [Source: (byte[])\"{,}\"; line: 1, column: 2]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character (',' (code 44)): was expecting double-quote to start field name\n at [Source: (byte[])\"{,}\"; line: 1, column: 2]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":tru}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:6] Unrecognized token 'tru': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":tru}\"; line: 1, column: 6]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:6] Unrecognized token 'tru': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":tru}\"; line: 1, column: 6]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unrecognized token 'tru': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":tru}\"; line: 1, column: 6]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":nul}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:6] Unrecognized token 'nul': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":nul}\"; line: 1, column: 6]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:6] Unrecognized token 'nul': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":nul}\"; line: 1, column: 6]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unrecognized token 'nul': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":nul}\"; line: 1, column: 6]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":\"x",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_e_o_f_exception",
+      "reason": "[1:8] Unexpected end of file"
+     }
+    ],
+    "type": "x_content_e_o_f_exception",
+    "reason": "[1:8] Unexpected end of file",
+    "caused_by": {
+     "type": "json_e_o_f_exception",
+     "reason": "Unexpected end-of-input in VALUE_STRING\n at [Source: (byte[])\"{\"a\":\"x\"; line: 1, column: 8]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":\"\\x\"}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:8] Unrecognized character escape 'x' (code 120)\n at [Source: (byte[])\"{\"a\":\"\\x\"}\"; line: 1, column: 8]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:8] Unrecognized character escape 'x' (code 120)\n at [Source: (byte[])\"{\"a\":\"\\x\"}\"; line: 1, column: 8]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unrecognized character escape 'x' (code 120)\n at [Source: (byte[])\"{\"a\":\"\\x\"}\"; line: 1, column: 8]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":\"a\tb\"}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:8] Illegal unquoted character ((CTRL-CHAR, code 9)): has to be escaped using backslash to be included in string value\n at [Source: (byte[])\"{\"a\":\"a\\u0009b\"}\"; line: 1, column: 8]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:8] Illegal unquoted character ((CTRL-CHAR, code 9)): has to be escaped using backslash to be included in string value\n at [Source: (byte[])\"{\"a\":\"a\\u0009b\"}\"; line: 1, column: 8]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Illegal unquoted character ((CTRL-CHAR, code 9)): has to be escaped using backslash to be included in string value\n at [Source: (byte[])\"{\"a\":\"a\\u0009b\"}\"; line: 1, column: 8]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":01}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:7] Invalid numeric value: Leading zeroes not allowed\n at [Source: (byte[])\"{\"a\":01}\"; line: 1, column: 7]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:7] Invalid numeric value: Leading zeroes not allowed\n at [Source: (byte[])\"{\"a\":01}\"; line: 1, column: 7]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Invalid numeric value: Leading zeroes not allowed\n at [Source: (byte[])\"{\"a\":01}\"; line: 1, column: 7]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":-}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:7] Unexpected character ('}' (code 125)) in numeric value: expected digit (0-9) to follow minus sign, for valid numeric value\n at [Source: (byte[])\"{\"a\":-}\"; line: 1, column: 7]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:7] Unexpected character ('}' (code 125)) in numeric value: expected digit (0-9) to follow minus sign, for valid numeric value\n at [Source: (byte[])\"{\"a\":-}\"; line: 1, column: 7]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('}' (code 125)) in numeric value: expected digit (0-9) to follow minus sign, for valid numeric value\n at [Source: (byte[])\"{\"a\":-}\"; line: 1, column: 7]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":1.}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:8] Unexpected character ('}' (code 125)) in numeric value: Decimal point not followed by a digit\n at [Source: (byte[])\"{\"a\":1.}\"; line: 1, column: 8]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:8] Unexpected character ('}' (code 125)) in numeric value: Decimal point not followed by a digit\n at [Source: (byte[])\"{\"a\":1.}\"; line: 1, column: 8]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('}' (code 125)) in numeric value: Decimal point not followed by a digit\n at [Source: (byte[])\"{\"a\":1.}\"; line: 1, column: 8]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":1e}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:8] Unexpected character ('}' (code 125)) in numeric value: Exponent indicator not followed by a digit\n at [Source: (byte[])\"{\"a\":1e}\"; line: 1, column: 8]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:8] Unexpected character ('}' (code 125)) in numeric value: Exponent indicator not followed by a digit\n at [Source: (byte[])\"{\"a\":1e}\"; line: 1, column: 8]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('}' (code 125)) in numeric value: Exponent indicator not followed by a digit\n at [Source: (byte[])\"{\"a\":1e}\"; line: 1, column: 8]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":.5}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:6] Unexpected character ('.' (code 46)): expected a valid value (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":.5}\"; line: 1, column: 6]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:6] Unexpected character ('.' (code 46)): expected a valid value (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":.5}\"; line: 1, column: 6]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('.' (code 46)): expected a valid value (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":.5}\"; line: 1, column: 6]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":+1}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:7] Unexpected character ('+' (code 43)) in numeric value: JSON spec does not allow numbers to have plus signs: enable `JsonReadFeature.ALLOW_LEADING_PLUS_SIGN_FOR_NUMBERS` to allow\n at [Source: (byte[])\"{\"a\":+1}\"; line: 1, column: 7]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:7] Unexpected character ('+' (code 43)) in numeric value: JSON spec does not allow numbers to have plus signs: enable `JsonReadFeature.ALLOW_LEADING_PLUS_SIGN_FOR_NUMBERS` to allow\n at [Source: (byte[])\"{\"a\":+1}\"; line: 1, column: 7]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('+' (code 43)) in numeric value: JSON spec does not allow numbers to have plus signs: enable `JsonReadFeature.ALLOW_LEADING_PLUS_SIGN_FOR_NUMBERS` to allow\n at [Source: (byte[])\"{\"a\":+1}\"; line: 1, column: 7]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":NaN}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:9] Non-standard token 'NaN': enable `JsonReadFeature.ALLOW_NON_NUMERIC_NUMBERS` to allow\n at [Source: (byte[])\"{\"a\":NaN}\"; line: 1, column: 9]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:9] Non-standard token 'NaN': enable `JsonReadFeature.ALLOW_NON_NUMERIC_NUMBERS` to allow\n at [Source: (byte[])\"{\"a\":NaN}\"; line: 1, column: 9]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Non-standard token 'NaN': enable `JsonReadFeature.ALLOW_NON_NUMERIC_NUMBERS` to allow\n at [Source: (byte[])\"{\"a\":NaN}\"; line: 1, column: 9]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{'a':1}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:2] Unexpected character (''' (code 39)): was expecting double-quote to start field name\n at [Source: (byte[])\"{'a':1}\"; line: 1, column: 2]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:2] Unexpected character (''' (code 39)): was expecting double-quote to start field name\n at [Source: (byte[])\"{'a':1}\"; line: 1, column: 2]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character (''' (code 39)): was expecting double-quote to start field name\n at [Source: (byte[])\"{'a':1}\"; line: 1, column: 2]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":[}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:7] Unexpected close marker '}': expected ']' (for Array starting at [Source: (byte[])\"{\"a\":[}\"; line: 1, column: 6])\n at [Source: (byte[])\"{\"a\":[}\"; line: 1, column: 7]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:7] Unexpected close marker '}': expected ']' (for Array starting at [Source: (byte[])\"{\"a\":[}\"; line: 1, column: 6])\n at [Source: (byte[])\"{\"a\":[}\"; line: 1, column: 7]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected close marker '}': expected ']' (for Array starting at [Source: (byte[])\"{\"a\":[}\"; line: 1, column: 6])\n at [Source: (byte[])\"{\"a\":[}\"; line: 1, column: 7]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":{\"b\":1,\"b\":2}}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:16] Duplicate field 'b'\n at [Source: (byte[])\"{\"a\":{\"b\":1,\"b\":2}}\"; line: 1, column: 16]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:16] Duplicate field 'b'\n at [Source: (byte[])\"{\"a\":{\"b\":1,\"b\":2}}\"; line: 1, column: 16]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Duplicate field 'b'\n at [Source: (byte[])\"{\"a\":{\"b\":1,\"b\":2}}\"; line: 1, column: 16]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":\"\\u12\"}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:11] Unexpected character ('\"' (code 34)): expected a hex-digit for character escape sequence\n at [Source: (byte[])\"{\"a\":\"\\u12\"}\"; line: 1, column: 11]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:11] Unexpected character ('\"' (code 34)): expected a hex-digit for character escape sequence\n at [Source: (byte[])\"{\"a\":\"\\u12\"}\"; line: 1, column: 11]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('\"' (code 34)): expected a hex-digit for character escape sequence\n at [Source: (byte[])\"{\"a\":\"\\u12\"}\"; line: 1, column: 11]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:1] Unexpected close marker '}': no open Object to close\n at [Source: (byte[])\"}\"; line: 1, column: 1]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:1] Unexpected close marker '}': no open Object to close\n at [Source: (byte[])\"}\"; line: 1, column: 1]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected close marker '}': no open Object to close\n at [Source: (byte[])\"}\"; line: 1, column: 1]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "]",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:1] Unexpected close marker ']': no open Array to close\n at [Source: (byte[])\"]\"; line: 1, column: 1]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:1] Unexpected close marker ']': no open Array to close\n at [Source: (byte[])\"]\"; line: 1, column: 1]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected close marker ']': no open Array to close\n at [Source: (byte[])\"]\"; line: 1, column: 1]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":  xyz}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:8] Unrecognized token 'xyz': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":  xyz}\"; line: 1, column: 8]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:8] Unrecognized token 'xyz': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":  xyz}\"; line: 1, column: 8]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unrecognized token 'xyz': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":  xyz}\"; line: 1, column: 8]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":truex}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:6] Unrecognized token 'truex': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":truex}\"; line: 1, column: 6]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:6] Unrecognized token 'truex': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":truex}\"; line: 1, column: 6]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unrecognized token 'truex': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":truex}\"; line: 1, column: 6]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":true x}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:11] Unexpected character ('x' (code 120)): was expecting comma to separate Object entries\n at [Source: (byte[])\"{\"a\":true x}\"; line: 1, column: 11]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:11] Unexpected character ('x' (code 120)): was expecting comma to separate Object entries\n at [Source: (byte[])\"{\"a\":true x}\"; line: 1, column: 11]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('x' (code 120)): was expecting comma to separate Object entries\n at [Source: (byte[])\"{\"a\":true x}\"; line: 1, column: 11]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "[",
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "t1"
+  }
+ },
+ {
+  "body": "[1",
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "t1"
+  }
+ },
+ {
+  "body": "[1,",
+  "status": 200,
+  "response": {
+   "acknowledged": true,
+   "shards_acknowledged": true,
+   "index": "t1"
+  }
+ },
+ {
+  "body": "{\"a\":[1,",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:9] Unexpected end-of-input within/between Array entries\n at [Source: (byte[])\"{\"a\":[1,\"; line: 1, column: 9]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:9] Unexpected end-of-input within/between Array entries\n at [Source: (byte[])\"{\"a\":[1,\"; line: 1, column: 9]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected end-of-input within/between Array entries\n at [Source: (byte[])\"{\"a\":[1,\"; line: 1, column: 9]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "\n\n  {\"a\"  :\n  bad}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[4:3] Unrecognized token 'bad': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"\n\n  {\"a\"  :\n  bad}\"; line: 4, column: 3]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[4:3] Unrecognized token 'bad': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"\n\n  {\"a\"  :\n  bad}\"; line: 4, column: 3]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unrecognized token 'bad': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"\n\n  {\"a\"  :\n  bad}\"; line: 4, column: 3]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":-01}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:8] Invalid numeric value: Leading zeroes not allowed\n at [Source: (byte[])\"{\"a\":-01}\"; line: 1, column: 8]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:8] Invalid numeric value: Leading zeroes not allowed\n at [Source: (byte[])\"{\"a\":-01}\"; line: 1, column: 8]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Invalid numeric value: Leading zeroes not allowed\n at [Source: (byte[])\"{\"a\":-01}\"; line: 1, column: 8]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":1.5e+}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:11] Unexpected character ('}' (code 125)) in numeric value: Exponent indicator not followed by a digit\n at [Source: (byte[])\"{\"a\":1.5e+}\"; line: 1, column: 11]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:11] Unexpected character ('}' (code 125)) in numeric value: Exponent indicator not followed by a digit\n at [Source: (byte[])\"{\"a\":1.5e+}\"; line: 1, column: 11]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected character ('}' (code 125)) in numeric value: Exponent indicator not followed by a digit\n at [Source: (byte[])\"{\"a\":1.5e+}\"; line: 1, column: 11]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":Infinity}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:14] Non-standard token 'Infinity': enable `JsonReadFeature.ALLOW_NON_NUMERIC_NUMBERS` to allow\n at [Source: (byte[])\"{\"a\":Infinity}\"; line: 1, column: 14]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:14] Non-standard token 'Infinity': enable `JsonReadFeature.ALLOW_NON_NUMERIC_NUMBERS` to allow\n at [Source: (byte[])\"{\"a\":Infinity}\"; line: 1, column: 14]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Non-standard token 'Infinity': enable `JsonReadFeature.ALLOW_NON_NUMERIC_NUMBERS` to allow\n at [Source: (byte[])\"{\"a\":Infinity}\"; line: 1, column: 14]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":-Infinity}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:15] Non-standard token '-Infinity': enable `JsonReadFeature.ALLOW_NON_NUMERIC_NUMBERS` to allow\n at [Source: (byte[])\"{\"a\":-Infinity}\"; line: 1, column: 15]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:15] Non-standard token '-Infinity': enable `JsonReadFeature.ALLOW_NON_NUMERIC_NUMBERS` to allow\n at [Source: (byte[])\"{\"a\":-Infinity}\"; line: 1, column: 15]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Non-standard token '-Infinity': enable `JsonReadFeature.ALLOW_NON_NUMERIC_NUMBERS` to allow\n at [Source: (byte[])\"{\"a\":-Infinity}\"; line: 1, column: 15]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":\"é\\u0000\"}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "parse_exception",
+      "reason": "unknown key [a] for create index"
+     }
+    ],
+    "type": "parse_exception",
+    "reason": "unknown key [a] for create index"
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":1}  {\"b\":2}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "parse_exception",
+      "reason": "unknown key [a] for create index"
+     }
+    ],
+    "type": "parse_exception",
+    "reason": "unknown key [a] for create index"
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":/*c*/1}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "parse_exception",
+      "reason": "unknown key [a] for create index"
+     }
+    ],
+    "type": "parse_exception",
+    "reason": "unknown key [a] for create index"
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_e_o_f_exception",
+      "reason": "[1:608] Unexpected end of file"
+     }
+    ],
+    "type": "x_content_e_o_f_exception",
+    "reason": "[1:608] Unexpected end of file",
+    "caused_by": {
+     "type": "json_e_o_f_exception",
+     "reason": "Unexpected end-of-input: expected close marker for Object (start marker at [Source: (byte[])\"{\"a\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"[truncated 107 bytes]; line: 1, column: 1])\n at [Source: (byte[])\"{\"a\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"[truncated 107 bytes]; line: 1, column: 608]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"é\":x}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:7] Unrecognized token 'x': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"é\":x}\"; line: 1, column: 7]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:7] Unrecognized token 'x': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"é\":x}\"; line: 1, column: 7]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unrecognized token 'x': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"é\":x}\"; line: 1, column: 7]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":12345678901234567890123456789}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "parse_exception",
+      "reason": "unknown key [a] for create index"
+     }
+    ],
+    "type": "parse_exception",
+    "reason": "unknown key [a] for create index"
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":1,\"a\":2,\"a\":3}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:11] Duplicate field 'a'\n at [Source: (byte[])\"{\"a\":1,\"a\":2,\"a\":3}\"; line: 1, column: 11]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:11] Duplicate field 'a'\n at [Source: (byte[])\"{\"a\":1,\"a\":2,\"a\":3}\"; line: 1, column: 11]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Duplicate field 'a'\n at [Source: (byte[])\"{\"a\":1,\"a\":2,\"a\":3}\"; line: 1, column: 11]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":tr",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:6] Unrecognized token 'tr': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":tr\"; line: 1, column: 6]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:6] Unrecognized token 'tr': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":tr\"; line: 1, column: 6]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unrecognized token 'tr': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"{\"a\":tr\"; line: 1, column: 6]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":\"\\uD800\"}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "parse_exception",
+      "reason": "unknown key [a] for create index"
+     }
+    ],
+    "type": "parse_exception",
+    "reason": "unknown key [a] for create index"
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":[1,2}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:10] Unexpected close marker '}': expected ']' (for Array starting at [Source: (byte[])\"{\"a\":[1,2}\"; line: 1, column: 6])\n at [Source: (byte[])\"{\"a\":[1,2}\"; line: 1, column: 10]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:10] Unexpected close marker '}': expected ']' (for Array starting at [Source: (byte[])\"{\"a\":[1,2}\"; line: 1, column: 6])\n at [Source: (byte[])\"{\"a\":[1,2}\"; line: 1, column: 10]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected close marker '}': expected ']' (for Array starting at [Source: (byte[])\"{\"a\":[1,2}\"; line: 1, column: 6])\n at [Source: (byte[])\"{\"a\":[1,2}\"; line: 1, column: 10]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "body": "{\"a\":{]}",
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "x_content_parse_exception",
+      "reason": "[1:7] Unexpected close marker ']': expected '}' (for Object starting at [Source: (byte[])\"{\"a\":{]}\"; line: 1, column: 6])\n at [Source: (byte[])\"{\"a\":{]}\"; line: 1, column: 7]"
+     }
+    ],
+    "type": "x_content_parse_exception",
+    "reason": "[1:7] Unexpected close marker ']': expected '}' (for Object starting at [Source: (byte[])\"{\"a\":{]}\"; line: 1, column: 6])\n at [Source: (byte[])\"{\"a\":{]}\"; line: 1, column: 7]",
+    "caused_by": {
+     "type": "json_parse_exception",
+     "reason": "Unexpected close marker ']': expected '}' (for Object starting at [Source: (byte[])\"{\"a\":{]}\"; line: 1, column: 6])\n at [Source: (byte[])\"{\"a\":{]}\"; line: 1, column: 7]"
+    }
+   },
+   "status": 400
+  }
+ }
+]

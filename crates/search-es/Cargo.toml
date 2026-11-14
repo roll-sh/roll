@@ -1,0 +1,49 @@
+[package]
+name = "search-es"
+description = "Elasticsearch REST semantics for roll search: mappings, settings, Query DSL, document, search and admin APIs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+# The PPL grammar bundle `_plugins/_ppl/_grammar` serves (`assets/ppl_grammar.json.gz`).
+flate2.workspace = true
+# Fixed-seed hashing of per-document lookups (field tables, the bulk fast path).
+foldhash.workspace = true
+indexmap.workspace = true
+itoa.workspace = true
+libc.workspace = true
+memchr.workspace = true
+parking_lot.workspace = true
+# Password hashes of the native realm (`xpack::security`, `{PBKDF2}` format).
+pbkdf2.workspace = true
+rand.workspace = true
+# Reindex from remote clusters (`api::remote`), behind `reindex.remote.whitelist`.
+reqwest.workspace = true
+regex.workspace = true
+regex-syntax.workspace = true
+ryu.workspace = true
+search-aggs.workspace = true
+search-analysis.workspace = true
+search-codec.workspace = true
+search-index.workspace = true
+search-painless.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[build-dependencies]
+serde_json.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+tokio.workspace = true

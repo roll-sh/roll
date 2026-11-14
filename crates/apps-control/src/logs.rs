@@ -83,7 +83,7 @@ impl LogHub {
     }
 
     pub fn sink(self: &Arc<Self>, key: impl Into<String>, stream: Stream) -> LogSink {
-        LogSink { hub: self.clone(), key: Arc::from(key.into()), stream, instance: None, deployment: None }
+        LogSink { hub: self.clone(), key: Arc::from(key.into()), stream, instance: None, deployment: None, redact: None }
     }
 
     fn push(&self, key: &str, line: LogLine) {
@@ -150,6 +150,15 @@ impl LogHub {
         }
         let skip = lines.len().saturating_sub(tail);
         lines.split_off(skip)
+    }
+
+    /// How many of the lines still in memory since `since` contain `q` (any case) and came from
+    /// the app (stdout, stderr): cheap, for an alert judged every minute (nothing stored is read).
+    pub fn count_recent(&self, key: &str, q: &str, since: i64) -> usize {
+        let q = q.to_lowercase();
+        let logs = self.logs.lock();
+        let Some(l) = logs.get(key) else { return 0 };
+        l.ring.iter().rev().take_while(|ln| ln.t >= since).filter(|ln| matches!(ln.stream, Stream::Stdout | Stream::Stderr) && ln.text.to_lowercase().contains(&q)).count()
     }
 
     /// Lines that contain `q` (any case), newest last, at most `limit`: the lines in memory, then
@@ -283,6 +292,8 @@ pub struct LogSink {
     stream: Stream,
     instance: Option<Arc<str>>,
     deployment: Option<Arc<str>>,
+    /// Never written: a secret the lines may hold (a build's cache namespace), shown as `…`.
+    redact: Option<Arc<str>>,
 }
 
 impl LogSink {
@@ -298,8 +309,16 @@ impl LogSink {
         LogSink { deployment: Some(deployment.into()), ..self.clone() }
     }
 
+    /// The same sink, with `secret` taken out of every line it writes.
+    pub fn redacting(&self, secret: &str) -> LogSink {
+        LogSink { redact: (!secret.is_empty()).then(|| secret.into()), ..self.clone() }
+    }
+
     pub fn line(&self, text: impl AsRef<str>) {
         let mut text = text.as_ref().trim_end_matches(['\r', '\n']).to_string();
+        if let Some(r) = &self.redact {
+            text = text.replace(&**r, "…");
+        }
         if text.len() > LINE_MAX {
             let mut cut = LINE_MAX;
             while !text.is_char_boundary(cut) {

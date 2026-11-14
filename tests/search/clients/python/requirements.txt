@@ -1,0 +1,2 @@
+elasticsearch==9.5.1
+opensearch-py==3.2.0

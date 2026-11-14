@@ -1,0 +1,34 @@
+[
+  {
+    "signature": "POST _search .suggest.t[].options[].freq",
+    "reason": "Elasticsearch keeps soft-deleted documents (updates, deletes) and delete tombstones in its segments, through merges too, while retention leases hold them, and docFreq counts them; roll drops deleted documents when it merges. The term suggester's freq differs after updates or deletes once roll merged."
+  },
+  {
+    "signature": "POST _search .suggest.p[].options[].score",
+    "reason": "The phrase suggester's WordScorer uses maxDoc as the term count on multi-segment shards; Elasticsearch's maxDoc includes soft-delete tombstones (one per delete) and retained soft-deleted documents, roll's does not (see the term suggester entry)."
+  },
+  {
+    "signature": "POST _search .suggest.p[].options.length",
+    "reason": "As POST _search .suggest.p[].options[].score: the tombstones in Elasticsearch's maxDoc lower the candidates' scores, which can drop a correction below the input's score (or lift one above it)."
+  },
+  {
+    "signature": "POST _msearch .responses[].suggest.p[].options[].score",
+    "reason": "As POST _search .suggest.p[].options[].score."
+  },
+  {
+    "signature": "* _search/scroll .error.caused_by.reason",
+    "reason": "A missing scroll context's reason names the context id, which differs by nature (Elasticsearch prints its internal [uuid][counter] form)."
+  },
+  {
+    "signature": "* _search/scroll .error.root_cause[].reason",
+    "reason": "As * _search/scroll .error.caused_by.reason."
+  },
+  {
+    "signature": "POST _search .suggest.phrase#p[].options[].score",
+    "reason": "As POST _search .suggest.p[].options[].score (typed_keys)."
+  },
+  {
+    "signature": "* *significant_terms*.bg_count",
+    "reason": "As POST _search .suggest.p[].options[].score: significant_terms' superset size is the shard's maxDoc and a keyword term's background frequency its docFreq. On Elasticsearch both count a soft-delete tombstone per delete (even of a missing document; maxDoc only) and the soft-deleted documents that merges retain; roll's count deleted documents only until it merges them away (any typed_keys name, nesting or _msearch item)."
+  }
+]

@@ -1,0 +1,10 @@
+# Tests of Elasticsearch 9.5.5's `diskbbq` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+diskbbq:search.vectors/47_knn_search_bbq_disk_slice/Index requires _slice when slice indexing is enabled
+diskbbq:search.vectors/47_knn_search_bbq_disk_slice/KNN search with _all
+diskbbq:search.vectors/47_knn_search_bbq_disk_slice/KNN search with _slice only searches the requested slice
+diskbbq:search.vectors/47_knn_search_bbq_disk_slice/KNN search with multiple _slice values and duplicatessearches across the requested slices
+diskbbq:search.vectors/47_knn_search_bbq_disk_slice/KNN search with multiple _slice values searches across the requested slices
+diskbbq:search.vectors/47_knn_search_bbq_disk_slice/KNN search without _slice defaults to _all on slice-enabled index
+diskbbq:search.vectors/47_knn_search_bbq_disk_slice/Search without _slice defaults to _all on slice-enabled index
