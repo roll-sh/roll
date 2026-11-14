@@ -73,6 +73,12 @@ pub trait Brancher: Send + Sync {
         anyhow::bail!("this product's branches can't mask columns")
     }
 
+    /// What's wrong with masking `columns` of `parent` that only the product can tell (a NoSQL
+    /// mask on a key column, which makes its table unreadable): one line each, none when fine.
+    async fn mask_problems(&self, _parent: &str, _columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// The preview has been idle a while: drop what the branch keeps for a quick start (a
     /// Postgres branch's local data directory, to object storage). Its next use brings it back.
     async fn idle(&self, _parent: &str, _branch: &str) -> anyhow::Result<()> {

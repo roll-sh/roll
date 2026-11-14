@@ -447,8 +447,16 @@ async fn settings(AxState(e): S, Path(project): Path<String>) -> crate::Result<J
 
 async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> crate::Result<Json<crate::Settings>> {
     let patch: Value = body(&b)?;
+    let (p, check) = (project.clone(), patch.clone());
+    let (old, new) = blocking(e.clone(), move |e| {
+        e.workspace_project(&p)?;
+        let old = e.store.settings(&p)?;
+        let new = old.patched(&check)?;
+        Ok((old, new))
+    })
+    .await?;
+    e.check_masks(&old, &new).await?;
     let s = blocking(e.clone(), move |e| {
-        e.workspace_project(&project)?;
         let s = e.store.settings(&project)?.patched(&patch)?;
         let s = e.store.put_settings(&project, &s)?;
         // Every preview of the project converges on the new rules (modes, masks, variables,

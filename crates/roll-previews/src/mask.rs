@@ -1,6 +1,7 @@
 //! Postgres column masks for a preview's branch (`masking` rules for `postgres:<ref>`): the
 //! columns are rewritten in the branch, once it's made or reset and before anything serves it.
-//! The parent is never touched. NoSQL masks are a read policy instead (`Brancher::mask`).
+//! The parent is never touched. NoSQL masks are a read policy instead (`Brancher::mask`), which
+//! can't hide a key column ([`nosql_key_masks`]).
 
 use std::collections::BTreeMap;
 
@@ -91,8 +92,47 @@ fn literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
+/// The NoSQL masks (`keyspace.table.column`) that name a column of a primary key, in the
+/// parent's schema (roll nosql's `/schema`): the table, or a view of it keyed by that column,
+/// can't be read with it masked (a key reaches its reader however the rows are masked), so the
+/// preview's pages would fail. One line per problem; columns the schema doesn't have yet (a
+/// migration may add them) are none.
+pub fn nosql_key_masks(schema: &serde_json::Value, columns: &BTreeMap<String, String>) -> Vec<String> {
+    let has = |t: &serde_json::Value, column: &str| {
+        ["partition_key", "clustering_key"].iter().any(|k| t[k].as_array().is_some_and(|a| a.iter().any(|c| c == column)))
+    };
+    let mut out = Vec::new();
+    for path in columns.keys() {
+        let mut parts = path.splitn(3, '.');
+        let (Some(ks), Some(table), Some(column)) = (parts.next(), parts.next(), parts.next()) else { continue };
+        let Some(k) = schema["keyspaces"].as_array().into_iter().flatten().find(|k| k["name"] == ks) else { continue };
+        let tables = k["tables"].as_array().into_iter().flatten();
+        if tables.filter(|t| t["name"] == table).any(|t| has(t, column)) {
+            out.push(format!("{path} is in {ks}.{table}'s primary key, and a table can't be read with a key column masked: mask its other columns"));
+            continue;
+        }
+        for v in k["views"].as_array().into_iter().flatten().filter(|v| v["base_table"] == table && has(v, column)) {
+            out.push(format!("{path} is in the key of the view {ks}.{}, which can't be read with it masked: mask other columns, or drop the view from what the preview reads", v["name"].as_str().unwrap_or_default()));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_nosql_mask_on_a_key_column_is_named() {
+        let schema = serde_json::json!({ "keyspaces": [{ "name": "app",
+            "tables": [{ "name": "users", "partition_key": ["id"], "clustering_key": [] }],
+            "views": [{ "name": "users_by_email", "base_table": "users", "partition_key": ["email"], "clustering_key": ["id"] }],
+        }]});
+        let masks = |cols: &[&str]| cols.iter().map(|c| (c.to_string(), "mask_default()".to_string())).collect();
+        let got = super::nosql_key_masks(&schema, &masks(&["app.users.id", "app.users.email", "app.users.name", "app.later.x", "other.t.c"]));
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got[0].starts_with("app.users.email is in the key of the view app.users_by_email"), "{got:?}");
+        assert!(got[1].starts_with("app.users.id is in app.users's primary key"), "{got:?}");
+    }
+
     use std::collections::BTreeMap;
 
     /// Rules become one transaction per branch, names and values quoted whatever they hold.
