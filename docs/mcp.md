@@ -464,6 +464,8 @@ previews are listed once those products are on.
 | `previews_list_shares` | Who a preview is shared with outside the team (never the links' tokens). | `GET /v1/previews/{id}/shares` |
 | `previews_env` | A preview's own variables, with their values (reveal). | `GET /v1/previews/{id}/env` |
 | `previews_connect` | Each data branch's connection as the preview's services get it (the branches' own credentials; reveal). | `GET /v1/previews/{id}/connect` |
+| `previews_list_mail` | The mail a preview's services sent, caught and never delivered (reveal). | `GET /v1/previews/{id}/mail` |
+| `previews_read_mail` | One caught message as text (reveal). | `GET /v1/previews/{id}/mail/{mail}` |
 | `previews_screenshot` | A preview's page as an image the agent can look at (`diff`, `page`, `view`); accepting a visual change stays a person's (admin, no tool). | `GET /v1/previews/{id}/screenshot` |
 | `previews_sleep` | Stop a preview's services until it's woken. | `POST /v1/previews/{id}/sleep` |
 | `previews_wake` | Start a sleeping preview's services again. | `POST /v1/previews/{id}/wake` |
@@ -518,15 +520,16 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); the connect panel says what a
-choice of toolsets costs (tools and context tokens, from `GET /v1/mcp/toolsets`) and warns past a
-client's limit (VS Code refuses more than 128 tools a request; with every product on roll lists
-about 259); the token page counts what a model reads (name, description, schema); `previews_connect`
-and its reveal row, and a preview's QR code as reveal (previews-next); the core products' everyday
-routes as tools (streams: a topic, a group's lag, branching; tasks: retrying messages and dead
-letters, cancelling and rerunning runs, functions, queues; NoSQL: reset, restore, a branch's diff;
-storage: branching a bucket, the trash and restoring from it); against Neon's MCP server and main's
-routes: `postgres_reset_branch` (reset from parent), `postgres_get_endpoint`,
+revoked as leaked, about to expire; only their own, never a secret); a preview's caught mail as
+reveal, with `previews_list_mail` and `previews_read_mail` (previews-next); the connect panel says
+what a choice of toolsets costs (tools and context tokens, from `GET /v1/mcp/toolsets`) and warns
+past a client's limit (VS Code refuses more than 128 tools a request; with every product on roll
+lists about 259); the token page counts what a model reads (name, description, schema);
+`previews_connect` and its reveal row, and a preview's QR code as reveal (previews-next); the core
+products' everyday routes as tools (streams: a topic, a group's lag, branching; tasks: retrying
+messages and dead letters, cancelling and rerunning runs, functions, queues; NoSQL: reset, restore,
+a branch's diff; storage: branching a bucket, the trash and restoring from it); against Neon's MCP
+server and main's routes: `postgres_reset_branch` (reset from parent), `postgres_get_endpoint`,
 `postgres_update_endpoint`, `redis_restore`, `apps_delete_environment`; each product's routes
 compared with its tools (`tool-gaps.py`): `search_update_cluster`, `search_delete_cluster`,
 `secrets_list_rotators`, `secrets_list_syncs` and `secrets_diff` added; previews' bypass, search's

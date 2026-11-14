@@ -1188,6 +1188,10 @@ static ROWS: &[Row] = &[
     // Each data branch's connection as the preview's services get it (the branches' own
     // credentials, never a parent's; previews-next): reveal, as the preview's env is.
     row("GET", "/v1/previews/{id}/connect", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // The mail a preview's services sent, caught and never delivered (previews-next): it can hold
+    // copies of production's people, so reveal, as the preview's env is.
+    row("GET", "/v1/previews/{id}/mail", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("GET", "/v1/previews/{id}/mail/{mail}", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // Accepting a visual change is a person's call (with `visual_review = "required"` previews
     // refuses tokens anyway): admin, so a write token can't wave its own diff through.
     row("POST", "/v1/previews/{id}/visual/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
