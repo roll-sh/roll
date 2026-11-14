@@ -436,6 +436,7 @@ async fn run() -> anyhow::Result<()> {
     // Workspace projects: always on (docs/workspace.md); roll apps places its services there.
     let workspace = workspace::open(&args, &home)?;
     // roll apps: services built and run on this host's Docker, each on its lease's holder.
+    let apps_secrets = secrets::ForApps::default();
     let apps = match on.on(Product::Apps) {
         true => Some(
             apps::start(
@@ -447,6 +448,7 @@ async fn run() -> anyhow::Result<()> {
                 code.as_ref().map(|c| c.code.clone()),
                 postgres.as_ref().map(|p| p.control.clone()),
                 redis.as_ref().map(|r| r.control.clone()),
+                apps_secrets.clone(),
             )
             .await?,
         ),
@@ -541,6 +543,7 @@ async fn run() -> anyhow::Result<()> {
     let grants: std::sync::Arc<dyn roll_auth::Grants> = access.clone();
     let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), Some(grants), people)?;
     code_secrets.set(secrets.clone(), workspace.clone());
+    apps_secrets.set(secrets.clone(), workspace.clone());
     let _ = secrets_envs.0.set(secrets.clone());
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
