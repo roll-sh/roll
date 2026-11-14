@@ -801,3 +801,63 @@ async fn the_proxys_own_cost_is_measured() {
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
 }
 
+
+/// Detected builds, built and run for real: a Deno app and an ASP.NET app, neither with a
+/// Dockerfile, each deployed from its tree and answering through roll on `$PORT`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deno_and_dotnet_trees_build_and_answer() {
+    let Some(w) = docker_world().await else { return };
+    // An app: its name, its files, and what it answers.
+    type App<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a str);
+    let apps: [App; 2] = [
+        (
+            "deno-hi",
+            &[
+                ("deno.json", r#"{"tasks": {"start": "deno run --allow-net --allow-env main.ts"}}"#),
+                ("main.ts", r#"Deno.serve({ port: Number(Deno.env.get("PORT")), hostname: "0.0.0.0" }, () => new Response("deno says hi"));"#),
+            ],
+            "deno says hi",
+        ),
+        (
+            "dotnet-hi",
+            &[
+                ("Hi.csproj", r#"<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><TargetFramework>net9.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>"#),
+                ("Program.cs", "var app = WebApplication.CreateBuilder(args).Build();\napp.MapGet(\"/\", () => \"dotnet says hi\");\napp.Run();\n"),
+            ],
+            "dotnet says hi",
+        ),
+    ];
+    for (name, files, want) in apps {
+        let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "upload"}, "run": {"memory_mb": 512, "cpu": 1.0, "health_timeout_s": 60} })), "application/json", None).await;
+        assert_eq!(st, StatusCode::CREATED, "{svc}");
+        let id = svc["id"].as_str().unwrap().to_string();
+        let tree = tempfile::tempdir().unwrap();
+        for (f, body) in files {
+            std::fs::write(tree.path().join(f), body).unwrap();
+        }
+        let mut bundle = Vec::new();
+        roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+        let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), None, "application/gzip", Some(bundle)).await;
+        let dep = d["id"].as_str().unwrap().to_string();
+        let mut x = Value::Null;
+        // A first build pulls its images and packages: minutes, not seconds.
+        for _ in 0..6000 {
+            x = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}"), None, "application/json", None).await.1;
+            if ["failed", "active"].contains(&x["status"].as_str().unwrap_or("")) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if x["status"] != "active" {
+            let log = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}/logs?tail=80"), None, "application/json", None).await.1;
+            let lines: Vec<&str> = log.as_array().into_iter().flatten().filter_map(|l| l["text"].as_str()).collect();
+            panic!("{name}: {x}\n{}", lines.join("\n"));
+        }
+        let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
+        let host = env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
+        let resp = w.public.clone().oneshot(Request::get("/").header("host", host.as_str()).body(Body::empty()).unwrap()).await.unwrap();
+        let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+        assert!(body.contains(want), "{name}: {body}");
+        assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    }
+}
