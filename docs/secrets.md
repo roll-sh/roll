@@ -1591,6 +1591,14 @@ Done and in PR #20:
 
 Then change policies per folder (#53), as Infisical's approval policies on secret paths.
 
+A ninth independent review (2026-11-14, of `roll run`'s masking and the eighth review's fixes)
+found no high-severity issue; it found a held tail flushed on a timer (a block-buffered program
+pausing mid-value leaked it in halves), masking on by default for data written to files and pipes,
+background processes holding roll open, `--watch` dropping SIGTERM, a SIGINT judged by stdin (#54),
+a folder's admin counting toward a protected environment's own gate and an import guard outside its
+transaction (#53), a Vault refusal told by an error's text (#52), and a write during a watch's
+re-read going unnoticed (#49): all fixed and checked live, tested where a test guards behaviour.
+
 Then (2026-11-14, latest): `roll run` masks values in what the command prints when it isn't a
 terminal (#54), as 1Password's `op run` and GitHub Actions do; pulling into Kubernetes with External
 Secrets Operator (#55: its webhook provider, checked against ESO 2.15 on k3s) and
@@ -1599,7 +1607,10 @@ together, and the merged tree passes roll-secrets', rolld's auth and the dashboa
 import dialog names Vault trees and AWS (screenshots on #52). `roll secrets kubernetes` and the
 Export menu print ESO's manifests with a fresh token (#55), and a workload identity's login renews
 itself (#56), so a pod running `roll run --watch` needs no stored token, as with Vault's Kubernetes
-auth.
+auth; and identities pin their issuer's keys (#57), so clusters roll can't reach (k3s, kind,
+private EKS) log pods in too (checked on k3s, with #56: a 5-minute login renewed by itself).
+`roll run`'s masking was measured and made 5x faster (#54: 330 MB/s with 300 values and a 3 KB
+key).
 
 An eighth independent review (2026-11-14, of moving in, change policies per folder and the
 seventh review's fixes) found no high-severity issue; it found folder gates a reviewer, a
@@ -1694,10 +1705,12 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A ninth independent review** of `roll run`'s masking (#54) and the eighth review's fixes
-   (running), and its fixes.
-2. **Measure `roll run`'s masking** on a noisy command (a test suite's output, hundreds of values):
-   throughput through the masker against the command alone, and fix what it costs.
+1. **A tenth independent review** of ESO (#55), renewing identity logins (#56), pinned issuer keys
+   (#57) and the ninth review's fixes, and its fixes.
+2. **`…/values` answers each followed digest from the same read**, so a watch that newly follows an
+   environment (a reference added) compares from that read, not a poll just after it (#49 now
+   polls every known environment before reading; only a newly referenced one is polled after).
+   **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys).
 3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
 4. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
@@ -1739,6 +1752,8 @@ Open pull requests after this one:
   after its grace; a user with two keys already is refused, never pruned.
 - **#55, pulling into Kubernetes with External Secrets Operator** (after #20): its webhook
   provider (one store for whole environments and single keys) and `values?dynamic=false`.
+- **#57, workload identities pin their issuer's keys** (after #20): `jwks` on an identity, for a
+  cluster's own issuer; `identities add --jwks`, the dashboard's Other OIDC form.
 - **#56, a workload identity's login renews itself** (after #20): long-running `roll run
   --watch` in a pod logs in again before its login ends, reading the rotated token file.
 - **#54, `roll run` masks values in the command's output** (after #20): stdout and stderr that
