@@ -44,6 +44,8 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   }, [project]);
   const [secret, setSecret] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
+  // The target whose events are being changed (in place: its URL and secret stay).
+  const [editing, setEditing] = useState<string | null>(null);
   const { copied, copy } = useCopy();
   const load = useCallback(() => appsApi.notifyTargets(project).then(setTargets, () => setTargets([])), [project]);
   useEffect(() => {
@@ -82,6 +84,9 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
                   <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void runner.run("test", () => appsApi.testNotifyTarget(project, t.id)).then((r) => r && !r.ok && runner.setError(`The test didn't arrive: ${r.error ?? "no answer"}`))}>
                     <Send className="size-3.5" /> Test
                   </button>
+                  <button type="button" className={btn} aria-expanded={editing === t.id} onClick={() => setEditing(editing === t.id ? null : t.id)}>
+                    Events
+                  </button>
                   <button type="button" className={btn} onClick={() => setOpen(open === t.id ? null : t.id)}>
                     Deliveries
                   </button>
@@ -90,6 +95,18 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
                   </button>
                 </span>
               </div>
+              {editing === t.id && (
+                <EditEvents
+                  current={t.events}
+                  busy={runner.busy !== null}
+                  onSave={async (events) => {
+                    if (await runner.run("events", () => appsApi.updateNotifyTarget(project, t.id, { events }))) {
+                      setEditing(null);
+                      void load();
+                    }
+                  }}
+                />
+              )}
               {open === t.id && <Deliveries project={project} target={t.id} />}
             </li>
           ))}
@@ -167,5 +184,23 @@ function Deliveries({ project, target }: { project: string; target: string }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+/** A target's events, changed in place. A resolved alert goes to whoever gets that alert. */
+function EditEvents({ current, busy, onSave }: { current: NotifyEvent[]; busy: boolean; onSave: (events: NotifyEvent[]) => void }) {
+  const [events, setEvents] = useState<NotifyEvent[]>(current);
+  return (
+    <div className="rise mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted">
+      {EVENTS.map((e) => (
+        <label key={e.value} className="inline-flex items-center gap-1">
+          <input type="checkbox" checked={events.includes(e.value)} onChange={(x) => setEvents((es) => (x.target.checked ? [...es, e.value] : es.filter((v) => v !== e.value)))} />
+          {e.label}
+        </label>
+      ))}
+      <button type="button" className={btn} disabled={busy || events.length === 0} onClick={() => onSave(events)}>
+        Save
+      </button>
+    </div>
   );
 }

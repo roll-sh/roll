@@ -32,7 +32,7 @@ import { PreviewsOverlay } from "./previews-overlay";
 const btn =
   "flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-raised px-2.5 text-[12px] font-medium inset-shadow-highlight transition-colors hover:border-line-3";
 
-export type ProjectTab = "canvas" | "previews";
+export type ProjectTab = "canvas" | "previews" | "logs";
 
 /**
  * `/dashboard/projects/$id`: the project's resources on a canvas, or (`children`, the route's
@@ -157,14 +157,14 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
             </span>
           )}
           <nav aria-label="Project views" className="flex h-7 items-center rounded-md border border-line-2 bg-canvas p-0.5">
-            {(["canvas", "previews"] as const).map((t) => (
+            {(["canvas", "previews", "logs"] as const).map((t) => (
               <Link
                 key={t}
-                href={`/dashboard/projects/${encodeURIComponent(project.id)}${t === "canvas" ? "" : "/previews"}`}
+                href={`/dashboard/projects/${encodeURIComponent(project.id)}${t === "canvas" ? "" : `/${t}`}`}
                 aria-current={tab === t ? "page" : undefined}
                 className={`flex h-full items-center rounded-[5px] px-2 text-[12px] font-medium transition-colors ${tab === t ? "bg-panel-3 text-fg" : "text-muted hover:text-fg"}`}
               >
-                {t === "canvas" ? "Canvas" : "Previews"}
+                {t === "canvas" ? "Canvas" : t === "previews" ? "Previews" : "Logs"}
               </Link>
             ))}
           </nav>

@@ -66,8 +66,9 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/notifications", get(targets).post(add_target))
         .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
-        .route("/v1/apps/projects/{project}/drains/{did}", axum::routing::delete(delete_drain))
-        .route("/v1/apps/projects/{project}/notifications/{nid}", axum::routing::delete(delete_target))
+        .route("/v1/apps/projects/{project}/drains/{did}", axum::routing::delete(delete_drain).patch(update_drain))
+        .route("/v1/apps/projects/{project}/drains/{did}/test", post(test_drain))
+        .route("/v1/apps/projects/{project}/notifications/{nid}", axum::routing::delete(delete_target).patch(update_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/test", post(test_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries", get(deliveries))
         .route("/v1/apps/services/{id}/registry", put(put_registry).delete(delete_registry))
@@ -339,6 +340,14 @@ async fn delete_link(State(apps): S, Path((id, kind, r)): Path<(String, String, 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+async fn update_drain(State(apps): S, Path((project, did)): Path<(String, String)>, b: Bytes) -> R {
+    ok(apps.update_drain(&project, &did, body(&b)?).await?)
+}
+
+async fn test_drain(State(apps): S, Path((project, did)): Path<(String, String)>) -> R {
+    ok(apps.test_drain(&project, &did).await?)
+}
+
 async fn drains(State(apps): S, Path(project): Path<String>) -> R {
     ok(apps.drains(&project).await?)
 }
@@ -367,6 +376,10 @@ async fn targets(State(apps): S, Path(project): Path<String>) -> R {
 async fn add_target(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
     let t = apps.add_target(&project, body(&b)?).await?;
     Ok((StatusCode::CREATED, Json(t)).into_response())
+}
+
+async fn update_target(State(apps): S, Path((project, nid)): Path<(String, String)>, b: Bytes) -> R {
+    ok(apps.update_target(&project, &nid, body(&b)?).await?)
 }
 
 async fn delete_target(State(apps): S, Path((project, nid)): Path<(String, String)>) -> R {
@@ -534,6 +547,8 @@ struct LogQuery {
     instance: Option<String>,
     deployment: Option<String>,
     stream: Option<String>,
+    /// Lines whose app says this level or a worse one (`warn`: warnings, errors, fatal).
+    level: Option<String>,
 }
 
 /// Which access lines `status` and `min_ms` keep (`None`: all of them).
@@ -584,9 +599,13 @@ async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tok
         None => None,
         Some(s) => Some(serde_json::from_value::<crate::logs::Stream>(json!(s)).map_err(|_| Error::BadRequest("stream is stdout, stderr, system, http or build".into()))?),
     };
+    let level = match q.level.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => None,
+        Some(l) => Some(crate::logs::Level::parse(l).ok_or_else(|| Error::BadRequest("level is trace, debug, info, warn, error or fatal".into()))?),
+    };
     // Every filter in one: the route's own (`keep`), then the asker's.
     let (instance, deployment) = (q.instance.clone().filter(|s| !s.is_empty()), q.deployment.clone().filter(|s| !s.is_empty()));
-    let narrowed = keep.is_some() || instance.is_some() || deployment.is_some() || stream.is_some();
+    let narrowed = keep.is_some() || instance.is_some() || deployment.is_some() || stream.is_some() || level.is_some();
     let keep: Keep = narrowed.then(|| {
         let k = keep;
         Box::new(move |l: &LogLine| {
@@ -594,6 +613,7 @@ async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tok
                 && instance.as_deref().is_none_or(|i| l.instance.as_deref() == Some(i))
                 && deployment.as_deref().is_none_or(|d| l.deployment.as_deref() == Some(d))
                 && stream.is_none_or(|s| l.stream == s)
+                && level.is_none_or(|min| l.level.is_some_and(|x| x >= min))
         }) as Box<dyn Fn(&LogLine) -> bool + Send + Sync>
     });
     // Read back (a search, a time window, or filtered): memory, then the stored chunks.

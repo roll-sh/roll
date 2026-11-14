@@ -1182,7 +1182,10 @@ async fn an_environment_is_cloned_and_a_live_image_promoted_to_it() {
     let (_, vals) = call(&w.api, "GET", &format!("{base}/staging/variables/values"), None).await;
     assert_eq!(vals["API_KEY"], "k1", "{vals}");
     let pulls = Fake::count(&w.fake.counts.pulls);
-    let (st, p) = call(&w.api, "POST", &format!("{base}/staging/promote"), Some(json!({"from": "production"}))).await;
+    // Only what was looked at: a deployment that isn't production's live one is refused.
+    let (st, v) = call(&w.api, "POST", &format!("{base}/staging/promote"), Some(json!({"from": "production", "expect": "dep_somethingelse"}))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    let (st, p) = call(&w.api, "POST", &format!("{base}/staging/promote"), Some(json!({"from": "production", "expect": d["id"]}))).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{p}");
     let p = settled(&w, &id, "staging", p["id"].as_str().unwrap()).await;
     assert_eq!((p["status"].as_str(), p["trigger"].as_str(), &p["image"]), (Some("active"), Some("promote"), &d["image"]), "{p}");
@@ -1271,6 +1274,15 @@ async fn a_5xx_rate_past_the_alert_is_an_event_once() {
     assert_eq!((alerts[0]["data"]["value"].as_i64(), alerts[0]["data"]["threshold"].as_i64()), (Some(20), Some(10)));
     // Memory stayed low and no latency alert is set: nothing else.
     assert!(!ev.to_string().contains("alert.memory") && !ev.to_string().contains("alert.latency"), "{ev}");
+    // Five clean minutes: it's said once that it cleared, naming the alert.
+    let now = code_sql::now_ms() / 60_000;
+    w.apps.store.put_minutes(&id, "production", &(0..=6).map(|i| minute(now - i, 0)).collect::<Vec<_>>()).unwrap();
+    w.apps.judge_alerts(&live).await;
+    w.apps.judge_alerts(&live).await;
+    let (_, ev) = call(&w.api, "GET", "/v1/apps/events?after=0", None).await;
+    let resolved: Vec<&Value> = ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "alert.resolved").collect();
+    assert_eq!(resolved.len(), 1, "{ev}");
+    assert_eq!(resolved[0]["data"]["alert"], "alert.errors");
 }
 
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
@@ -1696,14 +1708,23 @@ async fn a_log_drain_gets_the_runtime_output_signed() {
     use hmac::Mac;
     let w = world().await;
     let got: Arc<parking_lot::Mutex<Vec<(axum::http::HeaderMap, bytes::Bytes)>>> = Default::default();
-    let g = got.clone();
-    let app = axum::Router::new().route("/logs", axum::routing::post(move |h: axum::http::HeaderMap, b: bytes::Bytes| {
-        let g = g.clone();
-        async move {
-            g.lock().push((h, b));
-            StatusCode::OK
-        }
-    }));
+    let vendor: Arc<parking_lot::Mutex<Vec<(axum::http::HeaderMap, bytes::Bytes)>>> = Default::default();
+    let (g, v) = (got.clone(), vendor.clone());
+    let app = axum::Router::new()
+        .route("/logs", axum::routing::post(move |h: axum::http::HeaderMap, b: bytes::Bytes| {
+            let g = g.clone();
+            async move {
+                g.lock().push((h, b));
+                StatusCode::OK
+            }
+        }))
+        .route("/vendor", axum::routing::post(move |h: axum::http::HeaderMap, b: bytes::Bytes| {
+            let v = v.clone();
+            async move {
+                v.lock().push((h, b));
+                StatusCode::ACCEPTED
+            }
+        }));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let at = l.local_addr().unwrap();
     tokio::spawn(axum::serve(l, app).into_future());
@@ -1714,6 +1735,16 @@ async fn a_log_drain_gets_the_runtime_output_signed() {
     assert!(!call(&w.api, "GET", &base, None).await.1.to_string().contains("/logs"), "the URL never comes back");
     // A request wakes the service: its instance's output goes out.
     let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    // A vendor's drain: its key as a header (sealed, never shown), only the requests, only this service.
+    let (st, vd) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{at}/vendor"), "sources": ["http"], "services": ["api"], "headers": {"DD-API-KEY": "k-123"}}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{vd}");
+    assert_eq!((&vd["sources"], &vd["headers"]), (&json!(["http"]), &json!(["DD-API-KEY"])), "{vd}");
+    assert!(!call(&w.api, "GET", &base, None).await.1.to_string().contains("k-123"), "a header's value never comes back");
+    let (st, v) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{at}/vendor"), "headers": {"X-Roll-Signature-256": "x"}}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "roll's own headers aren't a drain's: {v}");
+    let test = call(&w.api, "POST", &format!("{base}/{}/test", vd["id"].as_str().unwrap()), None).await.1;
+    assert_eq!((&test["ok"], &test["code"]), (&json!(true), &json!(202)), "{test}");
+    vendor.lock().clear();
     visit(&w, &host(&svc["environments"][0]["url"]), "/").await;
     let mut lines = Vec::new();
     for _ in 0..200 {
@@ -1733,6 +1764,19 @@ async fn a_log_drain_gets_the_runtime_output_signed() {
     mac.update(&b);
     let want = mac.finalize().into_bytes().iter().map(|x| format!("{x:02x}")).collect::<String>();
     assert_eq!(h["x-roll-signature-256"].to_str().unwrap(), format!("sha256={want}"));
+    // The vendor got the request, with its key, and nothing else.
+    let mut sent = Vec::new();
+    for _ in 0..200 {
+        sent = vendor.lock().clone();
+        if !sent.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let (h, b) = sent.first().cloned().unwrap_or_else(|| panic!("nothing reached the vendor's drain"));
+    assert_eq!(h["dd-api-key"], "k-123");
+    let lines: Vec<Value> = String::from_utf8_lossy(&b).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert!(!lines.is_empty() && lines.iter().all(|l| l["source"] == "http"), "{lines:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1766,6 +1810,13 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");
     assert_eq!(call(&w.api, "POST", &format!("{base}/{}/test", hook["id"].as_str().unwrap()), None).await.1["ok"], true);
+    // Edited in place: what's given changes, the rest (and its URL and secret) stays.
+    let (st, edited) = call(&w.api, "PATCH", &format!("{base}/{}", down["id"].as_str().unwrap()), Some(json!({"events": ["deploy.failed", "crash_loop"], "environments": ["production"]}))).await;
+    assert_eq!(st, StatusCode::OK, "{edited}");
+    assert_eq!((&edited["events"], &edited["environments"], &edited["host"]), (&json!(["deploy.failed", "crash_loop"]), &json!(["production"]), &down["host"]), "{edited}");
+    let (st, v) = call(&w.api, "PATCH", &format!("{base}/{}", down["id"].as_str().unwrap()), Some(json!({"url": "https://example.com/x"}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "a new URL is a new target: {v}");
+    call(&w.api, "PATCH", &format!("{base}/{}", down["id"].as_str().unwrap()), Some(json!({"environments": null}))).await;
     // A deploy fails its health check: both targets get a try.
     let (svc, _) = image_service(&w, "api", json!({"port": 80, "health_path": "/healthz", "health_timeout_s": 1})).await;
     let id = svc["id"].as_str().unwrap();
@@ -2318,8 +2369,21 @@ async fn a_crowd_wakes_one_instance_and_a_slow_start_says_when_to_retry() {
     let id = svc["id"].as_str().unwrap().to_string();
     assert_eq!(settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
     let h = host(&svc["environments"][0]["url"]);
+    // The deploy reads as active once the store switched; its instance joins the live state a
+    // moment later (its commit). Until then a request (this test's reads too) adopts the
+    // deployment with a warm, never-started one, and a crowd waking that keeps the deploy's own
+    // up: so this waits for the deploy's, the one its health check started.
+    let live = w.apps.live(&id, "production");
+    let joined = || live.instances().iter().any(|i| i.started_at().is_some());
+    for _ in 0..500 {
+        if joined() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(joined(), "the deploy's instance joined: {:?}", live.instances().iter().map(|i| (i.name.clone(), i.state())).collect::<Vec<_>>());
     // Asleep first, and stopped (a rested instance may be frozen, which resumes at once).
-    w.apps.live(&id, "production").sleep().await;
+    live.sleep().await;
     get_until(&w.api, &format!("/v1/apps/services/{id}/environments/production"), |e| e["state"] == "stopped").await;
     let get = || async {
         let req = Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap();
@@ -3213,4 +3277,51 @@ async fn a_paused_worker_stays_stopped_until_its_resumed() {
     assert_eq!(st, StatusCode::OK, "{e}");
     assert!(e.get("paused").is_none(), "{e}");
     get_until(&w.api, &env, |e| e["state"] == "running").await;
+}
+
+/// What an app's line says its level is (JSON, logfmt, a leading `ERROR`) filters its log:
+/// `level=warn` is warnings and worse, and a line that says none isn't one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_apps_log_filters_by_the_level_its_lines_say() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let out = w.apps.logs.sink(format!("env:{id}/production"), apps_control::logs::Stream::Stdout);
+    for line in [r#"{"level":"info","msg":"ready"}"#, r#"{"level":"error","msg":"db down"}"#, "level=warn msg=slow", "an error in prose", "FATAL out of memory"] {
+        out.line(line);
+    }
+    let path = format!("/v1/apps/services/{id}/environments/production/logs?level=warn&tail=100");
+    let (st, lines) = call(&w.api, "GET", &path, None).await;
+    assert_eq!(st, StatusCode::OK, "{lines}");
+    let got: Vec<(&str, &str)> = lines.as_array().unwrap().iter().map(|l| (l["level"].as_str().unwrap_or(""), l["text"].as_str().unwrap())).collect();
+    assert_eq!(got, [("error", r#"{"level":"error","msg":"db down"}"#), ("warn", "level=warn msg=slow"), ("fatal", "FATAL out of memory")]);
+    let (st, v) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs?level=loud"), None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+}
+
+/// A paused cron service skips what falls due and doesn't make it up when it's resumed, and
+/// pausing stops a run that's going.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paused_cron_skips_its_runs_and_pausing_stops_one() {
+    let w = world().await;
+    let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "every-minute", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "* * * * *"} }))).await;
+    let cid = cron["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &cid, "production", cron["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
+    let (env, runs) = (format!("/v1/apps/services/{cid}/environments/production"), format!("/v1/apps/services/{cid}/environments/production/runs"));
+    let t = (code_sql::now_ms() / 60_000 + 60) * 60_000 + 30_000;
+    w.apps.cron_pass(t).await;
+    call(&w.api, "PUT", &env, Some(json!({ "paused": true }))).await;
+    for m in 1..=10 {
+        w.apps.cron_pass(t + m * 60_000).await;
+    }
+    assert_eq!(call(&w.api, "GET", &runs, None).await.1, json!([]), "nothing runs while paused");
+    call(&w.api, "PUT", &env, Some(json!({ "paused": false }))).await;
+    w.apps.cron_pass(t + 10 * 60_000 + 1_000).await;
+    w.apps.cron_pass(t + 11 * 60_000).await;
+    let one = get_until(&w.api, &runs, |r| r[0]["status"] == "running").await;
+    assert_eq!(one.as_array().unwrap().len(), 1, "the next one, not the ten it missed: {one}");
+    // Paused with it going: it stops.
+    call(&w.api, "PUT", &env, Some(json!({ "paused": true }))).await;
+    let ended = get_until(&w.api, &runs, |r| r[0]["status"] != "running").await;
+    assert_eq!(ended[0]["status"], "canceled", "{ended}");
 }

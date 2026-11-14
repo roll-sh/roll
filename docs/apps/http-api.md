@@ -38,11 +38,14 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` | | 204 (revokes a credential the link made) | write |
 | `GET /v1/apps/projects/{project}/notifications` | | `NotifyTarget[]` (the URL never returned, only its host) | read |
 | `POST /v1/apps/projects/{project}/notifications` | `{ kind?: "webhook" \| "slack" \| "discord", url, events?, environments?, services?, previews? }` (environments: names; services: names or ids, kept as ids; previews: default false) | 201 `NotifyTarget` (+ `secret` once, for a webhook) | reveal for a webhook (its secret comes back), write for Slack and Discord |
+| `PATCH /v1/apps/projects/{project}/notifications/{nid}` | `{ events?, environments?, services?, previews? }` (given ones replace, the rest stay; null is a new target's default: the default events, every environment and service, no previews; any other field 400: a new URL is a new target) | `NotifyTarget` (its URL and secret unchanged) | reveal (it can send a webhook more) |
 | `DELETE /v1/apps/projects/{project}/notifications/{nid}` | | 204 | write |
 | `POST /v1/apps/projects/{project}/notifications/{nid}/test` | | `{ ok, code, error }` (sent now, not retried) | write |
 | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` | | `Delivery[]`, newest first (50) | read |
 | `GET /v1/apps/projects/{project}/drains` | | `LogDrain[]` (the URL never returned, only its host) | read |
-| `POST /v1/apps/projects/{project}/drains` | `{ url }` (https, a public host) | 201 `LogDrain` + `secret` once | reveal (its secret comes back) |
+| `POST /v1/apps/projects/{project}/drains` | `{ url, sources?, environments?, services?, previews?, headers? }` (https, a public host; `sources` some of `runtime` (default), `http`, `build`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`) | 201 `LogDrain` + `secret` once | reveal (its secret comes back) |
+| `PATCH /v1/apps/projects/{project}/drains/{did}` | `{ sources?, environments?, services?, previews?, headers? }` (given ones replace, `headers` all of them; a new URL is a new drain) | `LogDrain` | reveal (it can send more out) |
+| `POST /v1/apps/projects/{project}/drains/{did}/test` | | `{ ok, code, error }` (one line sent now, signed and with its headers, not retried) | write |
 | `DELETE /v1/apps/projects/{project}/drains/{did}` | | 204 | write |
 | `GET /v1/apps/projects/{project}/limits` | | `SpendLimits` | read |
 | `PUT /v1/apps/projects/{project}/limits` | `{ alert_usd: number \| null, hard_usd: number \| null }` | `SpendLimits` (this month's alert and cap are decided again within 30 s) | admin (the hard limit pauses the whole project) |
@@ -62,7 +65,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback` | `{ keep_variables? }` (default false: the variables come back as they were when it was live) | 202 `Deployment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/rollback` | `{ keep_variables? }` | 202 `Deployment`: back to the deployment live before what runs, walking back through rollbacks (after B → A the next goes before A, never forward to B); 409 when there's none | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/redeploy` | `{ message? }`; `Idempotency-Key` header optional (a retry with it answers the first call's redeploy; a key a deploy of another kind used is a 409) | 202 `Deployment` (trigger `settings`) | deploy* |
-| `POST /v1/apps/services/{id}/environments/{env}/promote` | `{ from, message? }` | 202 `Deployment` (trigger `promote`: `from`'s live image, no build, with `env`'s variables; `rollback_of` names the promoted deployment) | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/promote` | `{ from, message?, expect? }` (`expect`: a deployment id; 409 when `from`'s live deployment isn't it, checked against the read the promotion is made from) | 202 `Deployment` (trigger `promote`: `from`'s live image, no build, with `env`'s variables; `rollback_of` names the promoted deployment) | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/hook` | | 201 `{ path }`: a new deploy hook, its path shown once (prefix the API's base URL; the token is `rlk_…` with a checksum, so secret scanning finds a leaked one); the old one stops working | admin (a standing credential that deploys) |
 | `DELETE /v1/apps/services/{id}/environments/{env}/hook` | | 204 | admin |
 | `POST /v1/apps/hooks/{id}/{env}/{token}?image=` | | 202 `Deployment` (actor `deploy hook`); `image`: another tag or digest of an image service's own repository, else 400; any token that isn't the live hook's is a 404. No API token: the URL is the secret (rolld's `RULES` let it through to the hook's own check; access lines log the route pattern, never the token). Each deploy is `audit.hook.deployed` in the activity, with the caller's address | none (the URL) |
@@ -78,7 +81,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/pending` | | `{ variables: { added, removed, changed } \| null, run: string[], secrets: boolean \| null }` (secrets: the project's secrets changed since, by roll secrets' digest; null without one): what the next deploy changes (names, never values; variables against the snapshot kept at the live deployment's switch, null without one; run: fields the service sets that the live deployment doesn't run with). Links and project secrets move `needs_deploy` too, unnamed | read |
 | `GET /v1/apps/services/{id}/environments/{env}/variables/values` | | `{[name]: value}`, never a sealed variable (nor a reference that reads one); 403 naming them when some come from roll secrets and roll secrets wouldn't show them to the caller (`SecretSource::may_reveal`) | reveal |
 | `PATCH /v1/apps/services/{id}/environments/{env}/variables` | `{set?: {[name]: value}, unset?: string[], seal?: string[]}` (set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed) | `Variables` | deploy* |
-| `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&before=&instance=&deployment=&stream=&q=&http=&status=&min_ms=&by=` | | `LogLine[]` or SSE; `before` (unix ms) reads back to a time (not followed), `instance`/`deployment`/`stream` narrow it (followed too), `X-Roll-Search-Truncated: 1` when a read back stopped short; `http=1`: the proxy's access log (`stream: "http"`, text `AccessLine`), `status` (`500`, `5xx`, `400-499`), `min_ms` and `by` (one reason, or `any`: every answer roll gave itself) filtering it | read |
+| `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&before=&instance=&deployment=&stream=&level=&q=&http=&status=&min_ms=&by=` | | `LogLine[]` or SSE; `before` (unix ms) reads back to a time (not followed), `instance`/`deployment`/`stream` narrow it (followed too), `level` keeps lines at that level or worse (a line that says none isn't; 400 for another word), `X-Roll-Search-Truncated: 1` when a read back stopped short; `http=1`: the proxy's access log (`stream: "http"`, text `AccessLine`), `status` (`500`, `5xx`, `400-499`), `min_ms` and `by` (one reason, or `any`: every answer roll gave itself) filtering it | read |
 | `GET /v1/apps/services/{id}/environments/{env}/metrics?minutes=&format=` | | `Metrics`; `format=prometheus`: the last finished minute as Prometheus text (`roll_apps_requests_per_minute`, `…_errors_per_minute`, `…_latency_ms{quantile}`, `…_cpu_seconds_per_minute`, `…_memory_bytes`, `…_instances`, `…_cold_starts_per_minute`, `…_cold_start_ms`, labelled `service`, `service_id`, `environment`) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/usage?days=` | | `Usage` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/runs` | | `CronRun[]` | read |
@@ -434,7 +437,7 @@ type Variables = { vars: { name: string; masked: string; source: "service" | "se
 // setting one that names another service needs `reveal` on it (403), and one naming no service of
 // the project is a 400.
 
-type LogLine = { t: number; stream: "stdout" | "stderr" | "build" | "system"; instance: string | null; deployment: string | null; text: string };
+type LogLine = { t: number; stream: "stdout" | "stderr" | "build" | "system"; instance: string | null; deployment: string | null; text: string; level?: "trace" | "debug" | "info" | "warn" | "error" | "fatal" /* what the app's own line says (JSON's level/severity/lvl/log.level, a name or pino's number; logfmt's level=; an upper-case level word among its first three); absent when it says none */ };
 
 type Metrics = {
   minutes: number[];         // unix minute of each point, oldest first
@@ -454,7 +457,7 @@ type Usage = {
 
 /** In the event log, each written in the same transaction as the change it records. Sequence
  *  numbers commit in order with no gaps, so a reader moving past `next` never misses one. Kept 7 days. */
-type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | `audit.${string}` /* changes people made: what /activity lists */; service: string; environment: string; deployment: string | null; data: object };
+type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "alert.resolved" /* data.alert: which alert cleared; sent to targets that get that alert */ | `audit.${string}` /* changes people made: what /activity lists */; service: string; environment: string; deployment: string | null; data: object };
 /** A webhook's body: { type, at, seq, service, environment, deployment, data, title, text, url },
  *  signed as roll code's webhooks are: X-Roll-Signature-256: sha256=hex(HMAC-SHA256(secret,
  *  X-Roll-Timestamp + "." + body)), the timestamp the send time in Unix seconds (a retry is signed
@@ -472,7 +475,15 @@ type SpendLimits = { alert_usd: number | null; hard_usd: number | null; month_us
  *  webhooks are (X-Roll-Signature-256, X-Roll-Timestamp, X-Roll-Delivery the batch's id). Best
  *  effort: a batch is tried three times, then dropped; a drain that can't keep up loses its
  *  oldest lines. At most 5 a project. */
-type LogDrain = { id: string; project: string; host: string; created_at: number; secret?: string };
+type LogDrain = {
+  id: string; project: string; host: string; created_at: number; secret?: string;
+  sources: ("runtime" | "http" | "build")[]; // runtime: the instances' output and roll's lines about them; http: the access log, a request a line (text: an AccessLine); build: each deploy's build
+  environments: string[];     // only these environments' (empty: every one)
+  services: string[];         // only these services' (ids; empty: every one)
+  previews: boolean;          // preview environments' too (a drain made before this field: true)
+  headers: string[];          // the names of the headers it's sent with (values sealed, never returned)
+};
+// A batch's line: { t, source, service, service_name, environment, instance, deployment, stream, text }.
 /** A request through the proxy (`stream: "http"` lines' text, JSON). The path has no query string. */
 type AccessLine = {
   method: string; path: string; status: number; ms: number; bytes: number;

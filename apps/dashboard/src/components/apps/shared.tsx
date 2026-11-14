@@ -182,6 +182,11 @@ export function LogView({ lines, columns = false, empty, className = "h-[420px]"
                   {l.stream === "stdout" || l.stream === "stderr" ? (l.instance ?? l.stream) : l.stream}
                 </span>
               )}
+              {l.level && (l.level === "warn" || l.level === "error" || l.level === "fatal") && (
+                <span className={`w-9 shrink-0 select-none uppercase ${l.level === "warn" ? "text-muted" : "text-danger"}`} title={`The app says ${l.level}`}>
+                  {l.level === "fatal" ? "fatal" : l.level === "error" ? "err" : "warn"}
+                </span>
+              )}
               <span className={`min-w-0 flex-1 break-all whitespace-pre-wrap ${STREAM_TEXT[l.stream]}`}>{l.stream === "http" ? <AccessText text={l.text} /> : l.text}</span>
             </div>
           ))

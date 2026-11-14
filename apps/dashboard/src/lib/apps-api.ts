@@ -528,7 +528,14 @@ export interface LogLine {
   instance: string | null;
   deployment: string | null;
   text: string;
+  /** The level the app's line says (JSON's `level`/`severity`, logfmt's `level=`, a leading `ERROR`). */
+  level?: LogLevel;
 }
+
+export type LogLevel = "trace" | "debug" | "info" | "warn" | "error" | "fatal";
+export const LOG_LEVELS: LogLevel[] = ["trace", "debug", "info", "warn", "error", "fatal"];
+/** At `min` or worse: a line that says no level isn't. */
+export const atLeast = (l: LogLine, min: LogLevel | "") => !min || (!!l.level && LOG_LEVELS.indexOf(l.level) >= LOG_LEVELS.indexOf(min));
 
 export interface Metrics {
   minutes: number[];
@@ -598,11 +605,31 @@ export interface AppEvent {
 }
 
 /** A project's log drain: where its services' runtime output is POSTed (NDJSON). */
+export type DrainSource = "runtime" | "http" | "build";
+
+export interface DrainSettings {
+  sources?: DrainSource[];
+  environments?: string[];
+  services?: string[];
+  previews?: boolean;
+  /** `{name: value}`: a vendor's key (DD-API-KEY, Authorization); sealed. */
+  headers?: Record<string, string>;
+}
+
 export interface LogDrain {
   id: string;
   project: string;
   host: string;
   created_at: number;
+  /** What it's sent: the instances' output, the requests (a line each), the builds. */
+  sources: DrainSource[];
+  /** Only these environments' (empty: every one). */
+  environments: string[];
+  /** Only these services' (ids; empty: every one). */
+  services: string[];
+  previews: boolean;
+  /** The names of the headers it's sent with; their values are sealed, never shown. */
+  headers: string[];
   /** Only in the answer that made it. */
   secret?: string;
 }
@@ -702,11 +729,17 @@ export const appsApi = {
   environment: (id: string, e: string) => call<Environment>("GET", env(id, e)),
   notifyTargets: (project: string) => call<NotifyTarget[]>("GET", `/v1/apps/projects/${enc(project)}/notifications`),
   drains: (project: string) => call<LogDrain[]>("GET", `/v1/apps/projects/${enc(project)}/drains`),
-  addDrain: (project: string, url: string) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, { url }),
+  addDrain: (project: string, body: { url: string } & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
+  /** Its sources, filters and headers (given ones replace; `headers` replaces them all); its URL and secret stay. */
+  updateDrain: (project: string, id: string, body: DrainSettings) => call<LogDrain>("PATCH", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`, body),
+  testDrain: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}/test`),
   removeDrain: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`),
   limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
   setLimits: (project: string, body: { alert_usd: number | null; hard_usd: number | null }) => call<SpendLimits>("PUT", `/v1/apps/projects/${enc(project)}/limits`, body),
   addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url: string; events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),
+  /** Its events and filters (given ones replace); its URL and secret stay. */
+  updateNotifyTarget: (project: string, id: string, body: { events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) =>
+    call<NotifyTarget>("PATCH", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}`, body),
   removeNotifyTarget: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}`),
   testNotifyTarget: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/test`),
   notifyDeliveries: (project: string, id: string) => call<NotifyDelivery[]>("GET", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/deliveries`),
@@ -728,7 +761,8 @@ export const appsApi = {
   rollbackPrevious: (id: string, e: string) => call<Deployment>("POST", `${env(id, e)}/rollback`),
   /** The live image again with the current variables and settings: no build, same revision. */
   redeploy: (id: string, e: string, body: { message?: string } = {}) => call<Deployment>("POST", `${env(id, e)}/redeploy`, body),
-  promote: (id: string, e: string, from: string) => call<Deployment>("POST", `${env(id, e)}/promote`, { from }),
+  /** `expect`: the deployment of `from` that was looked at; a 409 when `from` runs another now. */
+  promote: (id: string, e: string, from: string, expect?: string) => call<Deployment>("POST", `${env(id, e)}/promote`, { from, ...(expect ? { expect } : {}) }),
   backups: (id: string, e: string) => call<Backup[]>("GET", `${env(id, e)}/volume/backups`),
   /** A new deploy hook (the old one stops working): its URL, shown once. */
   createHook: async (id: string, e: string) => `${ROLL_API}${(await call<{ path: string }>("POST", `${env(id, e)}/hook`)).path}`,
@@ -764,7 +798,7 @@ export const appsApi = {
   readLogs: async (
     id: string,
     e: string,
-    q: { q?: string; since?: number; before?: number; instance?: string; deployment?: string; stream?: string; http?: boolean; by?: string; status?: string; min_ms?: number; tail?: number },
+    q: { q?: string; since?: number; before?: number; instance?: string; deployment?: string; stream?: string; level?: LogLevel; http?: boolean; by?: string; status?: string; min_ms?: number; tail?: number },
   ): Promise<{ lines: LogLine[]; truncated: boolean }> => {
     const res = await fetch(`${ROLL_API}${env(id, e)}/logs${qs({ ...q, http: q.http || undefined, tail: q.tail ?? 500 })}`, { headers: apiHeaders(), cache: "no-store" });
     onApiStatus(res.status);

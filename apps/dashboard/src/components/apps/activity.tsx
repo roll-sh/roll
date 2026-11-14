@@ -51,6 +51,8 @@ export function describe(e: AppEvent): string {
     case "alert.latency":
     case "alert.log":
       return `alerted: ${e.kind.slice(6)} at ${String(d.value ?? d.count ?? "")} (the alert is at ${String(d.threshold ?? "")})${where}`;
+    case "alert.resolved":
+      return `cleared the ${String(d.alert ?? "alert.").slice(6)} alert${where}`;
     case "domain.active":
       return `put ${String(d.hostname)} live${where}`;
     case "domain.expiring":

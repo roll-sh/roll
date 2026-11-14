@@ -980,9 +980,9 @@ function Promote({ preview: p }: { preview: Preview }) {
             setBusy(true);
             setError(null);
             try {
-              const now = (await appsApi.environments(asking.id)).find((e) => e.name === env)?.active?.id ?? null;
-              if (now !== asking.seen) throw new Error("A newer push deployed to this preview since you opened it: look at it again before promoting it.");
-              await appsApi.promote(asking.id, "production", env);
+              // roll apps promotes only the deployment the sheet showed (a 409 if a newer push
+              // deployed since), from the same read the promotion is made of.
+              await appsApi.promote(asking.id, "production", env, asking.seen ?? undefined);
               setDone(asking.name);
               setAsking(null);
             } catch (e) {

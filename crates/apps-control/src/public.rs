@@ -788,7 +788,10 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
     // that failed): in the access log with why, and metered, so its errors count.
     if let Some(By(by)) = r.extensions().get::<By>().copied() {
         let status = r.status().as_u16();
-        apps.live(service, env).meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, status, 0);
+        // A page the owner chose (paused, in maintenance) is a request, not the app's error: no
+        // 5xx alert for an environment its owner stopped.
+        let metered = if matches!(by, "paused" | "maintenance") { 0 } else { status };
+        apps.live(service, env).meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, metered, 0);
         Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen }.write_by(status, began, by);
     }
     let mut r = their_page(&apps, service, env, r).await;
@@ -887,6 +890,10 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         && let Some(m) = &gate.maintenance
     {
         return by("maintenance", maintenance_page(m));
+    }
+    // Paused: nothing of it answers (a static site's files and rewrites, a deployment's own URL).
+    if live.paused() {
+        return by("paused", page(StatusCode::SERVICE_UNAVAILABLE, "Paused", "This service is paused. Its owner can resume it."));
     }
     // A static site's rewrite to one of the project's services, before its own cookies (a
     // gradual rollout's bucket, affinity) are read: they're the target's to read too.

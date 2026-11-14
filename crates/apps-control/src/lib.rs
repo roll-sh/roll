@@ -192,7 +192,8 @@ pub struct Apps {
     /// per node, and canceled when the environment goes from this node.
     running_jobs: Mutex<HashMap<String, String>>,
     /// Cron runs this process runs now (a takeover's cleanup spares them).
-    pub(crate) running_runs: Mutex<HashMap<String, String>>,
+    /// Cron runs going on this node: run id → (service, environment).
+    pub(crate) running_runs: Mutex<HashMap<String, (String, String)>>,
     /// What each public host named lately ([`Apps::env_for_host`]): when, at which
     /// `hosts_gen`, and the answer.
     hosts: Mutex<HashMap<String, HostAnswer>>,
@@ -207,6 +208,8 @@ pub struct Apps {
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
     /// Log drains whose batch came back (the drainer sends the next).
     drain_done: Arc<Mutex<Vec<String>>>,
+    /// Projects whose drains changed on this node: the drainer reads theirs again (only theirs).
+    pub(crate) drains_dirty: Mutex<std::collections::HashSet<String>>,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
     access: Mutex<HashMap<String, Option<Access>>>,
     /// Bumped by every change to the access cache: a cold read caches what it read only if
@@ -335,6 +338,7 @@ impl Apps {
             capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
+            drains_dirty: Mutex::new(Default::default()),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
             needs: Mutex::new(HashMap::new()),
@@ -1167,6 +1171,14 @@ impl Apps {
             live.set_paused(on);
             if on {
                 live.sleep().await;
+                // What runs to its end (a job, a cron run) stops too: nothing of it runs.
+                self.cancel_jobs(service, env);
+                let runs: Vec<String> = self.running_runs.lock().iter().filter(|(_, (s, e))| s == service && e == env).map(|(id, _)| id.clone()).collect();
+                for id in runs {
+                    if let Some(t) = self.cancels.lock().get(&id) {
+                        t.cancel();
+                    }
+                }
             } else {
                 live.tick().await;
             }

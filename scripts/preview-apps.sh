@@ -175,7 +175,11 @@ done
 PROD_HOST=$(api GET "/v1/apps/services/$SVC/environments/production" | jq_ "d.get('url') or ''" | sed -E 's#^https?://##; s#/.*##; s#:.*##')
 PROD_BEFORE=$(curl -sS -H "Host: $PROD_HOST" "http://127.0.0.1:${PORTS}080/" --max-time 120)
 [ "$PROD_BEFORE" = main ] || { echo "production should serve main before the promote: $PROD_BEFORE"; exit 1; }
-PROMOTE=$(api POST "/v1/apps/services/$SVC/environments/production/promote" "{\"from\":\"$ENV\"}")
+# The deployment the sheet showed (`expect`): another one is refused (409), that one promoted.
+SEEN=$(api GET "/v1/apps/services/$SVC/environments/$ENV" | jq_ "(d.get('active') or {}).get('id','')")
+STALE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/apps/services/$SVC/environments/production/promote" -H 'content-type: application/json' -d "{\"from\":\"$ENV\",\"expect\":\"dep_not_what_runs\"}")
+[ "$STALE" = 409 ] || { echo "a promote expecting another deployment should be refused: $STALE"; exit 1; }
+PROMOTE=$(api POST "/v1/apps/services/$SVC/environments/production/promote" "{\"from\":\"$ENV\",\"expect\":\"$SEEN\"}")
 PROMOTED=$(echo "$PROMOTE" | jq_ "d.get('trigger')")
 [ "$PROMOTED" = promote ] || { echo "the promote should be a deploy of its own: $PROMOTE"; exit 1; }
 T5=$(now_ms)
@@ -202,6 +206,6 @@ cat <<EOF
 | Body / the Redis host the service saw / the preview's Redis branch | $BODY / $WHERE / $BRANCH |
 | Variables on the environment | $VARS |
 | A preview's own variable on roll apps | $UNSET |
-| Promoted to production (the preview's image, no build): production serves / took | $PROD_AFTER / $((T6 - T5)) ms |
+| Promoted to production (the preview's image, no build): production serves / took / expecting another deployment | $PROD_AFTER / $((T6 - T5)) ms / HTTP $STALE |
 | After landing: previews left / the environment | $N / HTTP $GONE |
 EOF

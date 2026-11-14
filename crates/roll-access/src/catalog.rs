@@ -1048,6 +1048,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/projects/{project}/notifications", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications", "apps", Act::Body(apps_notification_action), one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/notifications/{nid}", "apps", W, one(&["project"], "project")),
+    // An edit can send a webhook more (events, environments, services): reveal, as a drain's edit is.
+    row("PATCH", "/v1/apps/projects/{project}/notifications/{nid}", "apps", REVEAL, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications/{nid}/test", "apps", W, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/notifications/{nid}/deliveries", "apps", R, one(&["project"], "project")),
     // A project's log drains: every service's output POSTed out of roll, signed. Adding one sends
@@ -1056,6 +1058,9 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/projects/{project}/drains", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/drains/{did}", "apps", W, one(&["project"], "project")),
+    // An edit can send more out (another source, every environment): reveal, as making one is.
+    row("PATCH", "/v1/apps/projects/{project}/drains/{did}", "apps", REVEAL, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/drains/{did}/test", "apps", W, one(&["project"], "project")),
     // A private registry's login (never answered back), and unlinking a database: settings.
     row("PUT", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
     row("DELETE", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),

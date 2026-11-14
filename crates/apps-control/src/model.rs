@@ -180,15 +180,29 @@ pub struct Event {
 
 /// Where a project's events go (`…/projects/{project}/notifications`): a webhook (JSON, signed),
 /// a Slack or a Discord incoming webhook. The URL is sealed; only its host shows.
-/// A project's log drain (`/v1/apps/projects/{project}/drains`): where its runtime output goes.
-/// The URL is never returned, only its host.
+/// A project's log drain (`/v1/apps/projects/{project}/drains`): where its output goes. The URL
+/// and the headers' values are never returned, only the host and the headers' names.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct LogDrain {
     pub id: String,
     pub project: String,
     pub host: String,
     pub created_at: i64,
+    /// What it's sent: `runtime` (the instances' output and roll's lines about them), `http`
+    /// (the access log, a request a line) and `build`.
+    pub sources: Vec<String>,
+    /// Only these environments' (empty: every one).
+    pub environments: Vec<String>,
+    /// Only these services' (ids; empty: every one).
+    pub services: Vec<String>,
+    /// Preview environments' too.
+    pub previews: bool,
+    /// The names of the headers it's sent with (an API key's: their values are sealed).
+    pub headers: Vec<String>,
 }
+
+/// What a drain can be sent.
+pub const DRAIN_SOURCES: [&str; 3] = ["runtime", "http", "build"];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NotifyTarget {

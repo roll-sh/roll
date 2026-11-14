@@ -126,16 +126,14 @@ describe("the Previews tab", () => {
     expect(confirm).toBeDisabled();
     await u.type(screen.getByRole("textbox", { name: /to confirm/ }), "web");
     await u.click(confirm);
-    expect(appsApi.promote).toHaveBeenCalledWith("svc_web", "production", "pv-abc");
+    expect(appsApi.promote).toHaveBeenCalledWith("svc_web", "production", "pv-abc", "dep_1");
     expect(await screen.findByText(/Promoting web to production/)).toBeInTheDocument();
-    // A newer push deployed since the sheet opened: refused, nothing promoted.
-    vi.mocked(appsApi.environments).mockResolvedValue([{ name: "pv-abc", active: { id: "dep_2", revision: "c3d4", created_at: 2 } }] as never);
-    vi.mocked(appsApi.promote).mockClear();
+    // A newer push deployed since the sheet opened: roll apps refuses (its `expect`), and the sheet says why.
+    vi.mocked(appsApi.promote).mockRejectedValue(new Error("pv-abc runs dep_2 now, not dep_1"));
     await u.click(screen.getByRole("button", { name: "Promote web to production" }));
     await u.type(screen.getByRole("textbox", { name: /to confirm/ }), "web");
     await u.click(screen.getByRole("button", { name: "Promote to production" }));
-    expect(await screen.findByText(/A newer push deployed/)).toBeInTheDocument();
-    expect(appsApi.promote).not.toHaveBeenCalled();
+    expect(await screen.findByText(/runs dep_2 now/)).toBeInTheDocument();
   });
 
   it("lists the previews waiting for a visual review first, tagged", async () => {
