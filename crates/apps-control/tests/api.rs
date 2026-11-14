@@ -1662,6 +1662,35 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     // Targets are checked: not a URL that isn't one, not Slack anywhere but Slack.
     assert_eq!(call(&w.api, "POST", &base, Some(json!({"url": "ftp://x"}))).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(call(&w.api, "POST", &base, Some(json!({"url": "https://hooks.example.com/x", "events": ["nope"]}))).await.0, StatusCode::BAD_REQUEST);
+    // A target follows the environments and services it names, and leaves previews out unless
+    // asked: each pull request's failed deploys don't reach the team's channel.
+    assert_eq!(hook["previews"], false, "{hook}");
+    let (_, staging) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/staging"), "events": ["deploy.failed"], "environments": ["staging"]}))).await;
+    let (_, by_name) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/api"), "events": ["deploy.failed"], "services": ["api"], "previews": true}))).await;
+    assert_eq!(by_name["services"], json!([id]), "kept by id: {by_name}");
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/x"), "services": ["nope"]}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/pr-1"), Some(json!({"ephemeral": true}))).await.0, StatusCode::OK);
+    let sid = id.to_string();
+    w.apps.db(move |s| s.add_event("deploy.failed", &sid, "pr-1", None, &json!({"error": "a preview's"}))).await.unwrap();
+    let sid = id.to_string();
+    w.apps.db(move |s| s.add_event("deploy.failed", &sid, "production", None, &json!({"error": "production's"}))).await.unwrap();
+    let seqs = |env: &'static str| {
+        let api = w.api.clone();
+        async move {
+            let ev = call(&api, "GET", "/v1/apps/events?after=0&limit=1000", None).await.1;
+            ev["events"].as_array().unwrap().iter().filter(|e| e["environment"] == env && e["data"]["error"].is_string()).map(|e| e["seq"].as_i64().unwrap()).collect::<Vec<_>>()
+        }
+    };
+    let (pr, prod) = (seqs("pr-1").await, seqs("production").await);
+    let (pr, prod) = (vec![*pr.last().unwrap()], vec![*prod.last().unwrap()]);
+    let got_of = |t: &Value| format!("{base}/{}/deliveries", t["id"].as_str().unwrap());
+    let has = |log: &Value, seq: i64| log.as_array().unwrap().iter().any(|d| d["event"] == seq);
+    let log = get_until(&w.api, &got_of(&by_name), |l| has(l, pr[0]) && has(l, prod[0])).await;
+    assert!(has(&log, pr[0]) && has(&log, prod[0]), "the service's, previews too: {log}");
+    let log = get_until(&w.api, &got_of(&hook), |l| has(l, prod[0])).await;
+    assert!(!has(&log, pr[0]), "not a preview's: {log}");
+    let log = call(&w.api, "GET", &got_of(&staging), None).await.1;
+    assert!(!has(&log, pr[0]) && !has(&log, prod[0]), "staging's only: {log}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

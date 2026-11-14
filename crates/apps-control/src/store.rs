@@ -599,6 +599,10 @@ impl Store {
         db.add_column("deployments", "actor", "TEXT")?;
         db.add_column("deployments", "pruned_at", "INTEGER")?;
         db.add_column("runs", "instance", "TEXT")?;
+        // Targets made before filters follow every environment, previews too, as they did.
+        db.add_column("notify_targets", "environments", "TEXT NOT NULL DEFAULT '[]'")?;
+        db.add_column("notify_targets", "services", "TEXT NOT NULL DEFAULT '[]'")?;
+        db.add_column("notify_targets", "previews", "INTEGER NOT NULL DEFAULT 1")?;
         db.add_column("environments", "wait_for_ci", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "run", "TEXT NOT NULL DEFAULT '{}'")?;
         db.add_column("environments", "hook_hash", "TEXT")?;
@@ -872,27 +876,38 @@ impl Store {
 
     // ── notifications ──
 
-    pub fn add_target(&self, project: &str, kind: &str, host: &str, url: &str, secret: Option<&str>, events: &[String]) -> Result<NotifyTarget> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_target(&self, project: &str, kind: &str, host: &str, url: &str, secret: Option<&str>, events: &[String], filters: &TargetFilters) -> Result<NotifyTarget> {
         let id = new_id("ntf");
         let now = self.now()?;
         let url_sealed = self.sealer.seal(&format!("notify:{id}:url"), url);
         let secret_sealed = secret.map(|s| self.sealer.seal(&format!("notify:{id}:secret"), s));
         self.db.execute(
-            "INSERT INTO notify_targets (id, project, kind, host, url_sealed, secret_sealed, events, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            params![id, project, kind, host, url_sealed, secret_sealed, serde_json::to_string(events).expect("JSON"), now],
+            "INSERT INTO notify_targets (id, project, kind, host, url_sealed, secret_sealed, events, created_at, environments, services, previews) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![id, project, kind, host, url_sealed, secret_sealed, serde_json::to_string(events).expect("JSON"), now, to_json(&filters.environments), to_json(&filters.services), filters.previews],
         )?;
-        Ok(NotifyTarget { id, project: project.into(), kind: kind.into(), host: host.into(), events: events.to_vec(), created_at: now })
+        Ok(NotifyTarget {
+            id,
+            project: project.into(),
+            kind: kind.into(),
+            host: host.into(),
+            events: events.to_vec(),
+            environments: filters.environments.clone(),
+            services: filters.services.clone(),
+            previews: filters.previews,
+            created_at: now,
+        })
     }
 
     pub fn targets(&self, project: &str) -> Result<Vec<NotifyTarget>> {
-        Ok(self.db.query("SELECT id, project, kind, host, events, created_at FROM notify_targets WHERE project = ? ORDER BY created_at", [project], target_row)?)
+        Ok(self.db.query(&format!("SELECT {TARGET_COLS} FROM notify_targets WHERE project = ? ORDER BY created_at"), [project], target_row)?)
     }
 
     /// A target with its URL and signing secret opened, to deliver to.
     pub fn target_secrets(&self, id: &str) -> Result<Option<(NotifyTarget, String, Option<String>)>> {
         let row: Option<(NotifyTarget, String, Option<String>)> = self
             .db
-            .query_row("SELECT id, project, kind, host, events, created_at, url_sealed, secret_sealed FROM notify_targets WHERE id = ?", [id], |r| Ok((target_row(r)?, r.get(6)?, r.get(7)?)))
+            .query_row(&format!("SELECT {TARGET_COLS}, url_sealed, secret_sealed FROM notify_targets WHERE id = ?"), [id], |r| Ok((target_row(r)?, r.get(9)?, r.get(10)?)))
             .optional()?;
         row.map(|(t, u, s)| {
             let url = self.sealer.open(&format!("notify:{}:url", t.id), &u)?;
@@ -1997,9 +2012,28 @@ impl Store {
     }
 }
 
+const TARGET_COLS: &str = "id, project, kind, host, events, created_at, environments, services, previews";
+
+/// What a target follows ([`NotifyTarget::follows`]).
+pub struct TargetFilters {
+    pub environments: Vec<String>,
+    pub services: Vec<String>,
+    pub previews: bool,
+}
+
 fn target_row(r: &code_sql::Row<'_>) -> code_sql::Result<NotifyTarget> {
-    let events: String = r.get(4)?;
-    Ok(NotifyTarget { id: r.get(0)?, project: r.get(1)?, kind: r.get(2)?, host: r.get(3)?, events: serde_json::from_str(&events).unwrap_or_default(), created_at: r.get(5)? })
+    let list = |i: usize| -> code_sql::Result<Vec<String>> { Ok(serde_json::from_str(&r.get::<_, String>(i)?).unwrap_or_default()) };
+    Ok(NotifyTarget {
+        id: r.get(0)?,
+        project: r.get(1)?,
+        kind: r.get(2)?,
+        host: r.get(3)?,
+        events: list(4)?,
+        created_at: r.get(5)?,
+        environments: list(6)?,
+        services: list(7)?,
+        previews: r.get(8)?,
+    })
 }
 
 const JOB_COLS: &str = "id, deployment, command, status, exit_code, started_at, finished_at, tasks";

@@ -199,7 +199,26 @@ pub struct NotifyTarget {
     /// The URL's host, for recognising it (the URL itself is a secret).
     pub host: String,
     pub events: Vec<String>,
+    /// Only these environments' events (names); empty: every environment's.
+    pub environments: Vec<String>,
+    /// Only these services' events (ids); empty: every service's.
+    pub services: Vec<String>,
+    /// Whether preview (ephemeral) environments' events come too.
+    pub previews: bool,
     pub created_at: i64,
+}
+
+impl NotifyTarget {
+    /// Whether an event of `service` in `env` (empty: the project's own, as spend) is this
+    /// target's to send; `ephemeral`: the environment is a preview's.
+    pub fn follows(&self, service: &str, env: &str, ephemeral: bool) -> bool {
+        if service.is_empty() {
+            return true;
+        }
+        (self.services.is_empty() || self.services.iter().any(|s| s == service))
+            && (self.environments.is_empty() || self.environments.iter().any(|e| e == env))
+            && (self.previews || !ephemeral || self.environments.iter().any(|e| e == env))
+    }
 }
 
 /// One try of sending one event to one target.

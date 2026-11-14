@@ -27,7 +27,7 @@ impl Apps {
     /// answer this once.
     pub async fn add_target(self: &Arc<Self>, project: &str, body: Value) -> Result<Value> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["kind", "url", "events"].contains(&k.as_str())) {
+        if let Some(k) = o.keys().find(|k| !["kind", "url", "events", "environments", "services", "previews"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
         let kind = o.get("kind").and_then(Value::as_str).unwrap_or("webhook").to_string();
@@ -44,7 +44,40 @@ impl Apps {
             }
             Some(_) => return Err(Error::BadRequest("events is a list".into())),
         };
+        let names = |field: &str| -> Result<Vec<String>> {
+            match o.get(field) {
+                None | Some(Value::Null) => Ok(Vec::new()),
+                Some(Value::Array(a)) if a.len() <= 50 => {
+                    let v: Vec<String> = a.iter().filter_map(Value::as_str).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    if v.len() != a.len() {
+                        return Err(Error::BadRequest(format!("{field} is a list of names")));
+                    }
+                    Ok(v)
+                }
+                Some(_) => Err(Error::BadRequest(format!("{field} is a list of at most 50 names"))),
+            }
+        };
+        let environments = names("environments")?;
+        // A service by its name or id, kept by id (a rename doesn't drop it); only the project's.
         let p = project.to_string();
+        let mut services = Vec::new();
+        let wanted = names("services")?;
+        if !wanted.is_empty() {
+            let pp = p.clone();
+            let all = self.db(move |s| s.services(Some(&pp))).await?;
+            for w in wanted {
+                let svc = all.iter().find(|s| s.id == w || s.name == w).ok_or_else(|| Error::BadRequest(format!("services: the project has no service {w}")))?;
+                services.push(svc.id.clone());
+            }
+        }
+        // New targets leave previews out (each pull request's failed deploys would reach the
+        // team), unless asked, or unless they name an environment that is one.
+        let previews = match o.get("previews") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err(Error::BadRequest("previews is true or false".into())),
+        };
+        let filters = crate::store::TargetFilters { environments, services, previews };
         {
             let this = self.clone();
             let p = p.clone();
@@ -56,7 +89,7 @@ impl Apps {
         }
         let secret = (kind == "webhook").then(|| format!("whsec_{}", crate::model::random(32)));
         let (k, u, s2, ev) = (kind.clone(), url.clone(), secret.clone(), events.clone());
-        let t = self.db(move |s| s.add_target(&p, &k, &host, &u, s2.as_deref(), &ev)).await?;
+        let t = self.db(move |s| s.add_target(&p, &k, &host, &u, s2.as_deref(), &ev, &filters)).await?;
         let mut v = serde_json::to_value(&t).expect("JSON");
         if let Some(s) = secret {
             v["secret"] = json!(s);
@@ -149,6 +182,8 @@ impl Apps {
         let Ok(events) = self.db(move |s| s.events(cursor, 200)).await else { return };
         let Some(last) = events.last().map(|e| e.seq) else { return };
         let mut queued = Vec::new();
+        // Whether an environment is a preview's, looked up once per pass.
+        let mut ephemeral: std::collections::HashMap<(String, String), bool> = std::collections::HashMap::new();
         for e in &events {
             // A project's own events (spend) name it; a service's are its project's.
             let p = match e.data["project"].as_str().filter(|_| e.service.is_empty()) {
@@ -159,8 +194,18 @@ impl Apps {
                     svc.project
                 }
             };
+            let key = (e.service.clone(), e.environment.clone());
+            let preview = match ephemeral.get(&key) {
+                Some(b) => *b,
+                None => {
+                    let (sid, en) = key.clone();
+                    let b = !sid.is_empty() && self.db(move |s| s.environment(&sid, &en)).await.is_ok_and(|r| r.ephemeral);
+                    ephemeral.insert(key, b);
+                    b
+                }
+            };
             for t in self.db(move |s| s.targets(&p)).await.unwrap_or_default() {
-                if t.events.contains(&e.kind) {
+                if t.events.contains(&e.kind) && t.follows(&e.service, &e.environment, preview) {
                     queued.push((t.id.clone(), e.seq, e.kind.clone()));
                 }
             }

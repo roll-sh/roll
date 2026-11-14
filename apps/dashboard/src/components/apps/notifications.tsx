@@ -30,6 +30,8 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   const [kind, setKind] = useState<NotifyTarget["kind"]>("slack");
   const [url, setUrl] = useState("");
   const [events, setEvents] = useState<NotifyEvent[]>(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed"]);
+  const [envs, setEnvs] = useState("");
+  const [previews, setPreviews] = useState(false);
   const [secret, setSecret] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const { copied, copy } = useCopy();
@@ -39,9 +41,11 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   }, [load]);
 
   const add = async () => {
-    const t = await runner.run("notification", () => appsApi.addNotifyTarget(project, { kind, url: url.trim(), events }));
+    const environments = envs.split(",").map((e) => e.trim()).filter(Boolean);
+    const t = await runner.run("notification", () => appsApi.addNotifyTarget(project, { kind, url: url.trim(), events, environments, previews }));
     if (t) {
       setUrl("");
+      setEnvs("");
       setSecret(t.secret ?? null);
       void load();
     }
@@ -58,6 +62,10 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
                 <span className="font-medium">{KINDS.find((k) => k.value === t.kind)?.label}</span>
                 <span className="font-mono text-[12px] text-muted">{t.host}</span>
                 <span className="text-[12px] text-subtle">{t.events.map((e) => EVENTS.find((x) => x.value === e)?.label ?? e).join(", ")}</span>
+                <span className="text-[12px] text-subtle">
+                  · {t.environments.length ? t.environments.join(", ") : "every environment"}
+                  {t.previews ? ", previews too" : ""}
+                </span>
                 <span className="ml-auto flex gap-1.5">
                   <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void runner.run("test", () => appsApi.testNotifyTarget(project, t.id)).then((r) => r && !r.ok && runner.setError(`The test didn't arrive: ${r.error ?? "no answer"}`))}>
                     <Send className="size-3.5" /> Test
@@ -105,6 +113,11 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
             </label>
           ))}
         </div>
+        <input value={envs} onChange={(e) => setEnvs(e.target.value)} placeholder="every environment" aria-label="Only these environments (comma-separated)" title="Only these environments' events (comma-separated); empty: every environment" spellCheck={false} autoComplete="off" className={`${input} w-44 font-mono text-[12px]`} />
+        <label className="inline-flex items-center gap-1 text-[12px] text-muted" title="Each pull request's preview: its failed deploys and alerts too">
+          <input type="checkbox" checked={previews} onChange={(e) => setPreviews(e.target.checked)} />
+          Include previews
+        </label>
         <button type="submit" className={primary} disabled={!url.trim() || !events.length || runner.busy !== null}>
           Add
         </button>

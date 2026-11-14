@@ -498,6 +498,15 @@ pub enum AppsCmd {
         add: Option<String>,
         #[arg(long, default_value = "webhook")]
         kind: String,
+        /// With `--add`: only this environment's events (repeat it for more).
+        #[arg(long = "only-env", requires = "add")]
+        only_env: Vec<String>,
+        /// With `--add`: only this service's events (a name or id; repeat it for more).
+        #[arg(long = "only-service", requires = "add")]
+        only_service: Vec<String>,
+        /// With `--add`: preview environments' events too (left out by default).
+        #[arg(long, requires = "add")]
+        previews: bool,
         #[arg(long)]
         remove: Option<String>,
     },
@@ -2288,11 +2297,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::Notifications { target, add, kind, remove } => {
+        AppsCmd::Notifications { target, add, kind, only_env, only_service, previews, remove } => {
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/projects/{}/notifications", enc(&s(&svc["project"])));
             if let Some(url) = add {
-                let t = api.post(&path, json!({ "kind": kind, "url": url })).await?;
+                let t = api.post(&path, json!({ "kind": kind, "url": url, "environments": only_env, "services": only_service, "previews": previews })).await?;
                 if !json_out {
                     println!("{}  {} {}  events {}", s(&t["id"]), s(&t["kind"]), s(&t["host"]), t["events"]);
                     if let Some(secret) = t["secret"].as_str() {
