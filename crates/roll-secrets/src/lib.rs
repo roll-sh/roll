@@ -16,6 +16,7 @@ pub mod api;
 pub mod health;
 pub mod outside;
 pub mod aws;
+pub mod iam;
 pub mod rotators;
 mod strength;
 mod audit;
@@ -406,11 +407,13 @@ impl Secrets {
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
         db.ensure_schema(aws::SCHEMA)?;
+        db.ensure_schema(iam::SCHEMA)?;
         // Rotators are a link kind of roll secrets' own: they call out through rolld.
         let mut links = opts.links;
         let unwrap = kms::Unwrapper::new(opts.kms.clone());
         if let Some(sts) = &opts.sts {
             links.register(Arc::new(aws::Provider { db: db.clone(), sts: sts.clone() }));
+            links.register(Arc::new(iam::Provider { db: db.clone(), sts: sts.clone() }));
         }
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
             links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone() }));
@@ -550,7 +553,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "aws_roles"];
+const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "aws_users", "aws_roles"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked.
 fn forget_if_done(c: &code_sql::Conn<'_>, project: &str) -> Result<()> {

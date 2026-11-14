@@ -289,6 +289,10 @@ pub enum Secrets {
     /// AWS roles for dynamic AWS credentials: list, add (roll assumes it to check), remove.
     #[command(subcommand, name = "aws-roles")]
     AwsRoles(AwsRolesCmd),
+    /// IAM users whose access keys roll rotates as an AWS role: list, add (roll lists its keys as
+    /// the role to check), remove.
+    #[command(subcommand, name = "aws-users")]
+    AwsUsers(AwsUsersCmd),
     /// The customer-managed key wrapping the project's data key: show it, `set` a KMS key's ARN,
     /// or `rm` it (roll's deployment key alone again).
     Kms {
@@ -515,6 +519,21 @@ pub enum KmsCmd {
     Set { key: String },
     /// Back to roll's deployment key alone (the KMS key must still answer).
     Rm,
+}
+
+#[derive(Subcommand)]
+pub enum AwsUsersCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register an IAM user: roll manages its keys as `--role` (an AWS role's id or name), whose
+    /// policy allows iam:ListAccessKeys, CreateAccessKey and DeleteAccessKey on it.
+    Add {
+        name: String,
+        user: String,
+        #[arg(long)]
+        role: String,
+    },
+    Rm { id: String },
 }
 
 #[derive(Subcommand)]
@@ -1288,6 +1307,31 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             AwsRolesCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/aws-roles/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::AwsUsers(a) => match a {
+            AwsUsersCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/aws-users", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for u in v.as_array().into_iter().flatten() {
+                    println!("{}  {:<16} {:<24} as {}", s(&u["id"]), s(&u["name"]), s(&u["user"]), s(&u["role"]));
+                }
+            }
+            AwsUsersCmd::Add { name, user, role } => {
+                // A role by name too: the API takes its id.
+                let roles = c.call(Method::GET, &format!("{}/aws-roles", c.base()), None).await?;
+                let role = roles.as_array().into_iter().flatten().find(|r| r["name"] == role.as_str()).and_then(|r| r["id"].as_str()).map_or(role.clone(), str::to_string);
+                let v = c.call(Method::POST, &format!("{}/aws-users", c.base()), Some(json!({ "name": name, "role": role, "user": user }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to it, managed.", s(&v["name"]), s(&v["id"]));
+            }
+            AwsUsersCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/aws-users/{}", c.base(), enc(&id)), None).await?;
                 println!("Removed {id}");
             }
         },

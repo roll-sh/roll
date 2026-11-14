@@ -38,10 +38,25 @@ pub struct Session {
     pub expires_at: i64,
 }
 
-/// STS (rolld: the AWS SDK, with roll's own credentials). Calls block; errors are STS's code or
-/// reason, never a credential.
+/// STS, and IAM as a role roll assumed (rolld: the AWS SDK, with roll's own credentials). Calls
+/// block; errors are AWS's code or reason, never a credential.
 pub trait Sts: Send + Sync {
     fn assume(&self, role_arn: &str, external_id: &str, session_name: &str, seconds: i32) -> std::result::Result<Session, String>;
+    /// An IAM user's access key ids, as `role_arn` (iam.rs).
+    fn iam_keys(&self, role_arn: &str, external_id: &str, user: &str) -> std::result::Result<Vec<String>, String> {
+        let _ = (role_arn, external_id, user);
+        Err("IAM isn't on this server".into())
+    }
+    /// A new access key for `user`: its id and secret.
+    fn iam_create_key(&self, role_arn: &str, external_id: &str, user: &str) -> std::result::Result<(Value, Value), String> {
+        let _ = (role_arn, external_id, user);
+        Err("IAM isn't on this server".into())
+    }
+    /// Delete one of `user`'s keys (one that's gone already is fine).
+    fn iam_delete_key(&self, role_arn: &str, external_id: &str, user: &str, key_id: &str) -> std::result::Result<(), String> {
+        let _ = (role_arn, external_id, user, key_id);
+        Err("IAM isn't on this server".into())
+    }
 }
 
 /// The ExternalId roll presents for `project`.
@@ -198,6 +213,10 @@ impl Secrets {
                 c.query("SELECT key FROM secrets WHERE project_id = ? AND link LIKE ? AND link LIKE ? ORDER BY key LIMIT 5", params![project, format!("%\"kind\":\"{KIND}\"%"), format!("%\"ref\":\"{id}\"%")], |r| r.get(0))?;
             if !linked.is_empty() {
                 return Err(Error::Conflict("in_use", format!("{name} still issues {}: unlink them first", linked.join(", "))));
+            }
+            let users: Vec<String> = c.query("SELECT name FROM aws_users WHERE role_id = ? ORDER BY name LIMIT 5", [id], |r| r.get(0))?;
+            if !users.is_empty() {
+                return Err(Error::Conflict("in_use", format!("{name} still rotates the keys of {}: delete those first", users.join(", "))));
             }
             c.execute("DELETE FROM aws_roles WHERE id = ?", [id])?;
             audit::record(c, project, caller, "aws_role.delete", None, None, &[], &format!("deleted AWS role {name}"), now)
