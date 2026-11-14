@@ -628,6 +628,7 @@ static TOOLS: &[Tool] = &[
     t("apps_wake", "Wake", "Start a sleeping environment's instances.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/wake", &[SERVICE, ENV]),
     t("apps_usage", "Service usage", "An environment's usage and cost per day.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/usage", &[SERVICE, ENV, q("days", Ty::Int, "Days back")]),
     t("apps_restart", "Restart", "Restart an environment's instances.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/restart", &[SERVICE, ENV]),
+    t("apps_restart_instance", "Restart one instance", "Replace one instance of a web service (a fresh one answers before this one drains; if it doesn't start, this one keeps serving). Instance names are in apps_get_environment. Production is a \"deploy\" action.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/instances/{name}/restart", &[SERVICE, ENV, req("name", "Instance name")]),
     t("apps_redeploy", "Redeploy", "Deploy what's running again with the current settings and variables (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/redeploy", &[SERVICE, ENV, b("message", Ty::Str, "Why")]),
     t(
         "apps_run_job",
@@ -665,7 +666,7 @@ static TOOLS: &[Tool] = &[
     t("apps_list_links", "List links", "The databases, buckets, streams and other services a service is linked to.", "apps", "GET", "/v1/apps/services/{service}/links", &[SERVICE]),
     t("apps_list_cron_runs", "Cron runs", "A cron service's runs, newest first.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs", &[SERVICE, ENV]),
     t("apps_get_cron_run", "Get a cron run", "One cron run: its status, exit code, start and end.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs/{run}", &[SERVICE, ENV, req("run", "Run id")]),
-    t("apps_cron_run_logs", "A cron run's logs", "A cron run's output (it can hold the environment's variables: reveal).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs/{run}/logs", &[SERVICE, ENV, req("run", "Run id")]),
+    t("apps_cron_run_logs", "A cron run's logs", "A cron run's output (its lines in the environment's log).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs/{run}/logs", &[SERVICE, ENV, req("run", "Run id")]),
     t("apps_cancel_cron_run", "Cancel a cron run", "Stop a running cron run (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/runs/{run}/cancel", &[SERVICE, ENV, req("run", "Run id")]),
     t("apps_run_cron", "Run a cron now", "Run a cron service's job now (in production this is a deploy action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/runs", &[SERVICE, ENV]),
     t("apps_limits", "Spend limits", "A project's apps spend limits and how much of them is used.", "apps", "GET", "/v1/apps/projects/{project}/limits", &[req("project", "Workspace project")]),

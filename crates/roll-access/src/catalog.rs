@@ -1166,8 +1166,6 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/services/{id}/environments/{env}/variables/values", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
     // A job is a command run with the environment's variables: its output can be them.
     row("GET", "/v1/apps/services/{id}/environments/{env}/jobs/{job}/logs", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
-    // A cron run's output, as a job's.
-    row("GET", "/v1/apps/services/{id}/environments/{env}/runs/{run}/logs", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
     // ── previews (feature/roll-previews, docs/previews.md) ──
     // A preview's link carries its access token (`share_url`, also each service's and earlier
     // ones'): the link is a credential, as its QR code is.
