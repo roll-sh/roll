@@ -125,6 +125,8 @@ pub(crate) trait Adjacency {
     fn num_levels(&self) -> usize;
     fn entry(&self) -> Option<u32>;
     fn for_each_neighbor(&self, level: usize, ord: u32, f: impl FnMut(u32));
+    /// Hints that `ord`'s level-0 neighbors will be read soon.
+    fn prefetch_neighbors(&self, _ord: u32) {}
 }
 
 /// Reusable heaps of [`search_layer`].
@@ -1009,6 +1011,13 @@ impl GraphReader {
 }
 
 impl Adjacency for GraphReader {
+    #[inline]
+    fn prefetch_neighbors(&self, ord: u32) {
+        let len = row_len(2 * self.m, self.bits);
+        if let Some(row) = self.level0.get(ord as usize * len..ord as usize * len + len) {
+            super::distance::prefetch(row);
+        }
+    }
     fn num_levels(&self) -> usize {
         if self.n == 0 { 0 } else { self.upper.len() + 1 }
     }
@@ -1080,14 +1089,14 @@ pub(crate) fn search_graph<G: Adjacency, S: FnMut(u32) -> f32, P: Fn(u32)>(
 /// empties. `accepted` is the number of ordinals the filter accepts (`0 < accepted < m`'s graph
 /// size); `m` is the graph's `m`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn search_graph_filtered<G: Adjacency, S: FnMut(u32) -> f32, P: Fn(u32)>(
+pub(crate) fn search_graph_filtered<G: Adjacency, S: FnMut(u32) -> f32, P: Fn(u32), A: Fn(u32) -> bool>(
     g: &G,
     n: usize,
     m: usize,
     score: &mut S,
     prefetch: &P,
     ef: usize,
-    accept: &dyn Fn(u32) -> bool,
+    accept: &A,
     accepted: usize,
     visit_limit: usize,
 ) -> (Vec<Scored>, usize, bool) {
@@ -1129,7 +1138,7 @@ const EXPANDED_EXPLORATION_LAMBDA: f32 = 0.10;
 /// accepted ones further away). Level 0 is strongly connected (`GraphBuilder::connect_back`),
 /// so the search returns `min(ef, accepted)` nodes unless the visit budget ends it.
 #[allow(clippy::too_many_arguments)]
-fn filtered_level0<G: Adjacency, S: FnMut(u32) -> f32, P: Fn(u32)>(
+fn filtered_level0<G: Adjacency, S: FnMut(u32) -> f32, P: Fn(u32), A: Fn(u32) -> bool>(
     g: &G,
     n: usize,
     m: usize,
@@ -1137,7 +1146,7 @@ fn filtered_level0<G: Adjacency, S: FnMut(u32) -> f32, P: Fn(u32)>(
     prefetch: &P,
     entry: &[Scored],
     ef: usize,
-    accept: &dyn Fn(u32) -> bool,
+    accept: &A,
     accepted: usize,
     visited: &mut Visited,
     budget: &mut usize,
@@ -1152,7 +1161,8 @@ fn filtered_level0<G: Adjacency, S: FnMut(u32) -> f32, P: Fn(u32)>(
     let mut results: BinaryHeap<std::cmp::Reverse<Scored>> = BinaryHeap::new();
     let mut nbrs: Vec<u32> = Vec::new();
     let mut to_score: Vec<u32> = Vec::with_capacity(cap);
-    let mut to_explore: std::collections::VecDeque<u32> = std::collections::VecDeque::with_capacity(cap);
+    // A queue of bridges: `to_explore[head..]` (a plain vector: it never holds more than `cap`).
+    let mut to_explore: Vec<u32> = Vec::with_capacity(cap);
     // Rejected nodes passed over while the results were not full yet.
     let mut deferred: Vec<u32> = Vec::new();
     for &e in entry {
@@ -1180,6 +1190,7 @@ fn filtered_level0<G: Adjacency, S: FnMut(u32) -> f32, P: Fn(u32)>(
             let neighbor_count = nbrs.len().max(1);
             to_score.clear();
             to_explore.clear();
+            let mut head = 0usize;
             for &nb in &nbrs {
                 if to_score.len() == cap {
                     break;
@@ -1191,8 +1202,13 @@ fn filtered_level0<G: Adjacency, S: FnMut(u32) -> f32, P: Fn(u32)>(
                     visited.insert(nb);
                     to_score.push(nb);
                 } else if to_explore.len() < cap {
-                    to_explore.push_back(nb);
+                    to_explore.push(nb);
                 }
+            }
+            // The bridges' neighbor rows are read next: fetch them while this candidate's
+            // neighbors are sorted out.
+            for &b in &to_explore {
+                g.prefetch_neighbors(b);
             }
             let filtered = to_explore.len() as f32 / neighbor_count as f32;
             let max_to_score = (neighbor_count as f32 * (multiplier as f32).min(1.0 / (1.0 - filtered))) as usize;
@@ -1200,7 +1216,8 @@ fn filtered_level0<G: Adjacency, S: FnMut(u32) -> f32, P: Fn(u32)>(
             let mut explored = to_score.len() + to_explore.len();
             if to_score.len() < max_to_score && filtered > EXPANDED_EXPLORATION_LAMBDA {
                 while explored < max_explore && to_score.len() < max_to_score {
-                    let Some(bridge) = to_explore.pop_front() else { break };
+                    let Some(&bridge) = to_explore.get(head) else { break };
+                    head += 1;
                     if !visited.insert(bridge) {
                         continue;
                     }
@@ -1221,8 +1238,9 @@ fn filtered_level0<G: Adjacency, S: FnMut(u32) -> f32, P: Fn(u32)>(
                         if accept(nb) {
                             visited.insert(nb);
                             to_score.push(nb);
-                        } else if explored < max_explore && to_score.len() < min_to_score && to_explore.len() < cap {
-                            to_explore.push_back(nb);
+                        } else if explored < max_explore && to_score.len() < min_to_score && to_explore.len() - head < cap {
+                            g.prefetch_neighbors(nb);
+                            to_explore.push(nb);
                         } else if starving {
                             deferred.push(nb);
                         }
@@ -1230,7 +1248,7 @@ fn filtered_level0<G: Adjacency, S: FnMut(u32) -> f32, P: Fn(u32)>(
                 }
             }
             if starving {
-                deferred.extend(to_explore.drain(..));
+                deferred.extend_from_slice(&to_explore[head..]);
             }
             if !score_batch(&to_score, score, prefetch, budget, ef, &mut candidates, &mut results) {
                 return finish(results, out, false);

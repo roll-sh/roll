@@ -31,8 +31,9 @@
 //! scores more vectors than `visit_limit`, or finds fewer than `k` hits where more may exist, it
 //! reports `complete: false` and the caller should run [`VectorsReader::exact_search`] instead,
 //! as Lucene does (`AbstractKnnVectorQuery`). Level 0 of every graph is strongly connected, so
-//! short results are rare (filters, visit limits). Callers that
-//! know the filter's cardinality use [`VectorsReader::search_filtered`]: under 60% of the
+//! short results are rare (filters, visit limits). Callers with a query filter turn it into an
+//! [`OrdFilter`] (a bitset over ordinals, which also counts the filter's cardinality) and use
+//! [`VectorsReader::search_filtered`]: under 60% of the
 //! vectors it switches to the filtered graph search, which scores only accepted vectors and
 //! steps over rejected ones (Lucene's ACORN-style `FilteredHnswGraphSearcher`). Fields without a
 //! graph always search exactly.
@@ -901,37 +902,70 @@ impl VectorsReader {
         }
     }
 
-    /// Approximate k-NN over the docs `accept` passes, `accepted` of them (the filter's
-    /// cardinality; an overestimate is fine). Like Lucene, filters passing under 60% of the
+    /// The ordinals of the docs set in `docs` (one bit per doc of the segment, e.g. a filter
+    /// already intersected with the live docs), for [`search_filtered`](Self::search_filtered).
+    pub fn ord_filter(&self, docs: &[u64]) -> OrdFilter {
+        let words = (self.count as usize).div_ceil(64);
+        if self.ord_to_doc.is_none() {
+            // Every doc has a vector: ordinal = doc.
+            let mut w: Vec<u64> = docs.iter().copied().take(words).collect();
+            w.resize(words, 0);
+            if !self.count.is_multiple_of(64)
+                && let Some(last) = w.last_mut()
+            {
+                *last &= (1u64 << (self.count % 64)) - 1;
+            }
+            let count = w.iter().map(|x| x.count_ones()).sum();
+            return OrdFilter { words: w, count };
+        }
+        let mut w = vec![0u64; words];
+        let mut count = 0;
+        for (i, &x) in docs.iter().enumerate() {
+            let mut x = x;
+            while x != 0 {
+                let d = i as u32 * 64 + x.trailing_zeros();
+                x &= x - 1;
+                if let Some(o) = self.docs.rank(d) {
+                    w[o as usize >> 6] |= 1 << (o & 63);
+                    count += 1;
+                }
+            }
+        }
+        OrdFilter { words: w, count }
+    }
+
+    /// Approximate k-NN over the ordinals `filter` holds (a doc filter through
+    /// [`ord_filter`](Self::ord_filter)). Like Lucene, filters passing under 60% of the
     /// vectors use the filtered graph search, which scores only accepted vectors and steps
     /// over rejected ones to their neighbors; wider filters use [`search`](Self::search).
-    /// `visit_limit` is usually `accepted`: past it, exact search over the filter is cheaper
-    /// (`complete == false`, also when fewer than `k` hits came back). A filter accepting at
-    /// most `k` vectors is searched exactly.
+    /// `visit_limit` is usually the filter's count: past it, exact search over the filter is
+    /// cheaper (`complete == false`, also when fewer than `k` hits came back). A filter
+    /// accepting at most `k` vectors is searched exactly.
     pub fn search_filtered(
         &self,
         q: &PreparedQuery,
         k: usize,
         num_candidates: usize,
-        accept: &dyn Fn(u32) -> bool,
-        accepted: u32,
+        filter: &OrdFilter,
         visit_limit: usize,
     ) -> KnnResult {
+        let accepted = filter.count;
+        let accept_ord = |ord: u32| filter.get(ord);
+        let accept_doc = |doc: u32| self.ord(doc).is_some_and(|o| filter.get(o));
         let Some(g) = &self.graph else {
-            return self.search(q, k, num_candidates, Some(accept), visit_limit);
+            return self.search(q, k, num_candidates, Some(&accept_doc), visit_limit);
         };
         if k == 0 || self.count == 0 || accepted == 0 {
             return KnnResult { hits: Vec::new(), visited: 0, complete: true };
         }
         if accepted as usize <= k {
             // Lucene: when the filter cannot even fill k, exact search is the answer.
-            return self.exact_search(q, k, Some(accept));
+            return self.exact_search(q, k, Some(&accept_doc));
         }
         if accepted as u64 * 100 >= self.count as u64 * FILTERED_SEARCH_THRESHOLD {
-            return self.search(q, k, num_candidates, Some(accept), visit_limit);
+            return self.search(q, k, num_candidates, Some(&accept_doc), visit_limit);
         }
         let ef = k.max(num_candidates);
-        let accept_ord = |ord: u32| accept(self.doc(ord));
         let mut score = |ord: u32| self.steer_score(q, ord);
         let prefetch = |ord: u32| distance::prefetch(self.steer_bytes(q, ord));
         let (beam, visited, complete) = search_graph_filtered(
@@ -945,10 +979,29 @@ impl VectorsReader {
             accepted as usize,
             visit_limit,
         );
-        // `accepted > k` here, so fewer than k hits means the search fell short (or the
-        // cardinality was overestimated): the caller confirms with an exact search (Lucene).
+        // `accepted > k` here, so fewer than k hits means the search fell short: the caller
+        // confirms with an exact search (Lucene).
         let complete = complete && beam.len() >= k;
         KnnResult { hits: self.rescore(q, &beam, k), visited, complete }
+    }
+}
+
+/// The ordinals a filtered k-NN search may return ([`VectorsReader::ord_filter`]).
+#[derive(Clone, Debug)]
+pub struct OrdFilter {
+    words: Vec<u64>,
+    count: u32,
+}
+
+impl OrdFilter {
+    /// Number of accepted ordinals.
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+
+    #[inline]
+    fn get(&self, ord: u32) -> bool {
+        self.words.get(ord as usize >> 6).is_some_and(|w| w >> (ord & 63) & 1 != 0)
     }
 }
 
@@ -997,6 +1050,16 @@ mod tests {
             v.iter_mut().for_each(|x| *x /= n);
         }
         r.prepare(VectorQuery::Float(&v)).unwrap()
+    }
+
+    /// The ordinals of the docs `accept` passes.
+    fn ord_filter(r: &VectorsReader, accept: impl Fn(u32) -> bool) -> OrdFilter {
+        let max = r.docs.max_doc();
+        let mut w = vec![0u64; (max as usize).div_ceil(64)];
+        for d in (0..max).filter(|&d| accept(d)) {
+            w[d as usize >> 6] |= 1 << (d & 63);
+        }
+        r.ord_filter(&w)
     }
 
     fn open(spec: &VectorSpec, docs: &[u32], data: &[u8], max_doc: u32) -> VectorsReader {
@@ -1291,7 +1354,6 @@ mod tests {
             let r = open(&sp, &docs, &data, n as u32);
             for modulo in [3u32, 20, 100] {
                 let accept = move |d: u32| d.wrapping_mul(2654435761).is_multiple_of(modulo);
-                let accepted = (0..n as u32).filter(|&d| accept(d)).count() as u32;
                 let (mut hit_f, mut hit_p, mut total) = (0usize, 0usize, 0usize);
                 let (mut cost_f, mut cost_p) = (0usize, 0usize);
                 for _ in 0..20 {
@@ -1299,7 +1361,7 @@ mod tests {
                     let q = prep(&r, &qv);
                     let exact: std::collections::HashSet<u32> =
                         r.exact_search(&q, 10, Some(&accept)).hits.iter().map(|h| h.doc).collect();
-                    let f = r.search_filtered(&q, 10, 50, &accept, accepted, usize::MAX);
+                    let f = r.search_filtered(&q, 10, 50, &ord_filter(&r, accept), usize::MAX);
                     let p = r.search(&q, 10, 50, Some(&accept), usize::MAX);
                     assert!(f.complete && f.hits.len() == 10);
                     assert!(f.hits.iter().all(|h| accept(h.doc)));
@@ -1318,12 +1380,12 @@ mod tests {
                 // A visit limit below what the search needs reports incompleteness.
                 let qv: Vec<f32> = (0..dims).map(|_| rng.gen_range(-1.0..1.0)).collect();
                 let q = prep(&r, &qv);
-                assert!(!r.search_filtered(&q, 10, 50, &accept, accepted, 5).complete);
+                assert!(!r.search_filtered(&q, 10, 50, &ord_filter(&r, accept), 5).complete);
             }
             // Nothing accepted, and a filter accepting everything (falls back to plain search).
             let q = r.prepare(VectorQuery::Float(&vec![0.1; dims])).unwrap();
-            assert!(r.search_filtered(&q, 5, 20, &|_| false, 0, usize::MAX).hits.is_empty());
-            let all = r.search_filtered(&q, 5, 20, &|_| true, n as u32, usize::MAX);
+            assert!(r.search_filtered(&q, 5, 20, &ord_filter(&r, |_| false), usize::MAX).hits.is_empty());
+            let all = r.search_filtered(&q, 5, 20, &ord_filter(&r, |_| true), usize::MAX);
             assert_eq!(all.hits, r.search(&q, 5, 20, None, usize::MAX).hits);
         }
     }
@@ -1531,12 +1593,11 @@ mod tests {
     #[test]
     fn knn_returns_k_hits_or_reports_incomplete() {
         for (name, (r, mut rng)) in hard_graph_cases() {
-            let n = r.len();
             let even = |d: u32| d.is_multiple_of(2);
             for _ in 0..30 {
                 let qv: Vec<f32> = (0..r.spec.dims).map(|_| rng.gen_range(-1.0..1.0)).collect();
                 let q = prep(&r, &qv);
-                let f = r.search_filtered(&q, 50, 100, &even, n / 2, usize::MAX);
+                let f = r.search_filtered(&q, 50, 100, &ord_filter(&r, even), usize::MAX);
                 assert!(f.complete && f.hits.len() == 50, "{name}: filtered {} (visited {})", f.hits.len(), f.visited);
                 assert!(f.hits.iter().all(|h| even(h.doc)));
                 let p = r.search(&q, 50, 100, Some(&even), usize::MAX);
@@ -1550,11 +1611,11 @@ mod tests {
             let few = |d: u32| d < 10;
             let p = r.search(&q, 50, 100, Some(&few), usize::MAX);
             assert!(!p.complete && p.hits.len() <= 10, "{name}");
-            let f = r.search_filtered(&q, 50, 100, &few, 10, usize::MAX);
+            let f = r.search_filtered(&q, 50, 100, &ord_filter(&r, few), usize::MAX);
             assert!(f.complete && f.hits.len() == 10, "{name}");
             assert_eq!(f.hits, r.exact_search(&q, 50, Some(&few)).hits);
             // An overestimated cardinality: the graph search cannot fill k, so it says so.
-            let f = r.search_filtered(&q, 50, 100, &few, 100, usize::MAX);
+            let f = r.search_filtered(&q, 50, 100, &OrdFilter { count: 100, ..ord_filter(&r, few) }, usize::MAX);
             assert!(!f.complete && f.hits.len() <= 10, "{name}");
         }
     }

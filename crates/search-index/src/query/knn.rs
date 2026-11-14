@@ -119,24 +119,17 @@ impl KnnQuery {
                 None => None,
             };
             let accept = |d: u32| live.as_ref().is_none_or(|l| l.is_live(d)) && bits.as_ref().is_none_or(|b| b.get(d));
-            // Accepted docs when filtered: filtered live docs with a vector.
-            let cost = match &bits {
+            // Filtered: the filter's live docs with a vector, as ordinals (also their count).
+            let filter = match &bits {
                 Some(b) => {
-                    let mut cost = 0u32;
-                    let mut c = vr.docs().cursor();
-                    loop {
-                        let d = c.next();
-                        if d == NO_MORE_DOCS {
-                            break;
-                        }
-                        if b.get(d) && live.as_ref().is_none_or(|l| l.is_live(d)) {
-                            cost += 1;
-                        }
-                    }
-                    if cost == 0 {
+                    let f = match &live {
+                        None => vr.ord_filter(b.words()),
+                        Some(l) => vr.ord_filter(&b.words().iter().zip(l.words()).map(|(x, y)| x & y).collect::<Vec<u64>>()),
+                    };
+                    if f.count() == 0 {
                         continue;
                     }
-                    Some(cost)
+                    Some(f)
                 }
                 None => None,
             };
@@ -144,10 +137,10 @@ impl KnnQuery {
             // One search of `kk` hits (beam `nc`): exact when asked or when the filter accepts
             // few docs, else the graph, falling back to exact when the visit limit hits.
             let run = |kk: usize, nc: usize| -> search_codec::vectors::KnnResult {
-                match cost {
-                    Some(cost) if self.exact || cost as usize <= kk => vr.exact_search(&q, kk, accept_opt),
-                    Some(cost) => {
-                        let r = vr.search_filtered(&q, kk, nc, &accept, cost, cost as usize + 1);
+                match &filter {
+                    Some(f) if self.exact || f.count() as usize <= kk => vr.exact_search(&q, kk, accept_opt),
+                    Some(f) => {
+                        let r = vr.search_filtered(&q, kk, nc, f, f.count() as usize + 1);
                         if r.complete { r } else { vr.exact_search(&q, kk, accept_opt) }
                     }
                     None if self.exact => vr.exact_search(&q, kk, accept_opt),
