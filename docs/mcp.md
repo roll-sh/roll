@@ -40,13 +40,24 @@ config with your address filled in.
 
 ### Toolsets
 
-Every product's tools are about 183 tools, ~33k tokens of an agent's context before it does
-anything. Connect to `/v1/mcp?toolsets=postgres,code` (or send `X-MCP-Toolsets: postgres,code`) to
+Every product's tools are about 259 (222 of roll's own, ~21k tokens of what a model reads, and
+roll code's), before an agent does anything. Connect to `/v1/mcp?toolsets=postgres,code` (or send `X-MCP-Toolsets: postgres,code`) to
 list only those products' tools, as GitHub's MCP server does; the access tools (approvals,
 `access_check`) are always listed. On a four-product node, Redis alone is 12 tools, ~2.4k tokens
 instead of ~16k. An unknown name is `400`, naming the toolsets there are. The dashboard's connect
 panel picks them. A toolset only narrows the list: the token's rules decide every call as before,
 and OAuth's resource is the server whatever the toolsets (checked with the TypeScript SDK).
+
+Clients cap how many tools they take. VS Code refuses a chat request with more than 128 tools, its
+own built-in ones included ("Cannot have more than 128 tools per request"); Windsurf takes 100;
+Cursor is reported to drop tools past about 40. Claude Code defers a long list behind its own tool
+search. So with every product on, VS Code, Windsurf and Cursor need toolsets: the connect panel
+adds up a choice (`GET /v1/mcp/toolsets`: each product's tools, read-only tools and context cost,
+to a caller) and warns past the picked client's limit.
+
+The whole list stays the default. A smaller default would quietly drop tools from connections
+that use them. A search-then-call pair of meta-tools (GitHub's dynamic toolsets) would hide each
+tool's read-only and destructive hints, which clients use to decide what to run without asking.
 
 ### Read-only
 
@@ -481,32 +492,28 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Context cost with every product on** (222 tools, ~164 KB): measure what each client
-   actually sends a model (Claude Code's tool search, Cursor's cap of 40 tools) and decide
-   whether a default toolset, or a `roll_search_tools` meta-tool like GitHub's dynamic toolsets,
-   serves agents better than the whole list. Measure first; the list itself stays correct.
-2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+1. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25), and compare each product's routes with its tools
    (an everyday route with no tool is a gap: apps' were found this way).
-3. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+2. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
    lands after #20, #25 and #30): kept merged both ways (secrets' head of 2026-11-14 merged: a
    forgotten project's credentials revoked first and retried by the sweeper, with the integration's
    `identity_logins` kept in what's forgotten). The canvas check costs nothing measurable
    (`gate_latency`, release, pinned, A/B twice: 83–115 µs p50 with it, 105–116 µs without).
-4. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
+3. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
    `.index("name")` on the per-key routes and `Scope.key` in their own check (`GrantGrants` sets
    `id` since #30's fix). The tools and the builder's key picker are in; check both live once the
    rows land (a token on `prj_x/one-key` signs with it and is refused another key and the
    project's environments).
-5. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+4. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
-Considered and left out: a connection narrowed to one project (Supabase's `project_ref`): their
+Considered and left out: a smaller default toolset, or search-then-call meta-tools (see Toolsets: clients handle long lists or have a picker, and meta-tools would hide each tool's hints); a connection narrowed to one project (Supabase's `project_ref`): their
 tokens are account-wide; a roll token's rules already name projects, and the builder's presets
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
