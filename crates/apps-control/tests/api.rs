@@ -426,7 +426,7 @@ async fn a_get_to_a_vanished_instance_goes_to_a_fresh_one() {
     let first = body["instance"].as_str().unwrap().to_string();
     w.fake.crash(&first);
     let (st, body) = visit(&w, &h, "/").await;
-    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(st, StatusCode::OK, "{body} {:?}", w.apps.logs.follow(&format!("env:{}/production", svc["id"].as_str().unwrap()), 50).0.iter().map(|l| l.text.clone()).collect::<Vec<_>>());
     let second = body["instance"].as_str().unwrap().to_string();
     assert_ne!(second, first);
     w.fake.crash(&second);

@@ -1133,6 +1133,17 @@ impl Store {
         Ok(self.db.query(&format!("SELECT {DEPLOY_COLS} FROM deployments WHERE service = ? ORDER BY created_at"), [service], deploy_row)?)
     }
 
+    /// The ids of every service's deployments that may still run: live or about to be, ready to
+    /// be put live, or ended since `since_ms` (its instances may still be draining).
+    pub fn deployments_in_use(&self, since_ms: i64) -> Result<Vec<String>> {
+        Ok(self.db.query(
+            "SELECT id FROM deployments WHERE status IN ('queued', 'building', 'deploying', 'active', 'ready') OR COALESCE(finished_at, created_at) >= ?
+             UNION SELECT active FROM environments WHERE active IS NOT NULL",
+            [since_ms],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Deployments still queued or in progress, oldest first (the queue, and what a new owner
     /// resumes).
     pub fn pending_deployments(&self, service: &str) -> Result<Vec<Deployment>> {

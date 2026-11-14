@@ -1185,14 +1185,26 @@ impl Apps {
         let sid = service.to_string();
         let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { return };
         for e in envs {
-            if let Err(err) = self.load_live(service, &e.name).await {
+            // A passing failure (the database, a secret's provider) is tried again before what
+            // the previous owner ran is given up.
+            let mut loaded = Err(Error::Internal(String::new()));
+            for attempt in 0..3u64 {
+                if attempt > 0 {
+                    tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
+                }
+                loaded = self.load_live(service, &e.name).await;
+                if loaded.is_ok() {
+                    break;
+                }
+            }
+            if let Err(err) = loaded {
                 warn!(service, env = %e.name, error = %err, "apps: loading an environment failed");
                 // Nothing will keep what the previous owner ran of it: it goes, as before.
                 if let Some(a) = &e.active {
                     let prefix = crate::live::instance_prefix(service, &e.name, a);
                     for name in self.deps.runtime.list(Some(service)).await {
                         let owner = name.strip_suffix("-net").or_else(|| name.strip_suffix("-wake")).unwrap_or(&name);
-                        if owner.starts_with(&prefix) {
+                        if owner.strip_prefix(prefix.as_str()).is_some_and(|n| n.parse::<u64>().is_ok()) {
                             self.deps.runtime.remove(&name).await;
                         }
                     }
@@ -1423,8 +1435,12 @@ impl Apps {
                 self.cron_pass(code_sql::now_ms()).await;
             }
             if n.is_multiple_of(600) {
-                let runtime = self.deps.runtime.clone();
-                tokio::spawn(async move { runtime.sweep().await });
+                let day_ago = code_sql::now_ms() - 86_400_000;
+                // Only with the store's answer: none would read as "nothing in use".
+                if let Ok(in_use) = self.db(move |s| s.deployments_in_use(day_ago)).await {
+                    let runtime = self.deps.runtime.clone();
+                    tokio::spawn(async move { runtime.sweep(&in_use.into_iter().collect()).await });
+                }
             }
             if n.is_multiple_of(60) {
                 self.sweep_uploads().await;

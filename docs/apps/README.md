@@ -699,16 +699,20 @@ The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`,
   environment's live deployment (its instances' names say their deployment; one that answers is
   taken as running: `EnvLive::adopt` with `Runtime::adopt`, which makes it this process's own,
   its output followed from then, the instance numbers after it), so a node's death or a rolld
-  restart costs visitors no cold start. Docker checks the container runs and reads its port;
+  restart costs visitors no cold start. Docker checks the container runs and reads its port (a
+  web instance's is its network sandbox's, `<instance>-net`;
+  `docker.rs::a_restart_keeps_the_running_container`, frozen too);
   Fargate takes a task `list` found from another process (its newest RUNNING one, its private
   address; any other task of that name stops), so a sleep or a scale-in stops it as any other.
   Only a web service's or a worker's, of the deployment its label or tag names (a cron run's or
   a job's container is `…-run<n>`, never kept); a frozen one is kept asleep with nothing asked of
   it, a TCP service is checked by its port accepting, an HTTP one by an answer; new names start
   past every one seen. Anything else of the service's (older deployments, jobs, one that doesn't
-  answer) is removed, and so is all of it if the environment can't be loaded. On a runtime the
-  nodes share (Fargate), a node giving a service up (a handoff, or fenced) lets its instances go
-  untouched (`EnvLive::let_go`), so it never stops what the next owner just kept
+  answer) is removed, and so is all of it if the environment can't be loaded (tried three times,
+  a second apart at most). On a runtime the nodes share (Fargate), a node giving a service up (a
+  handoff, or fenced) lets its instances go untouched (`EnvLive::let_go`; `Runtime::release`
+  forgets the tasks and stops following their logs, which the next owner reads from its
+  adoption on), so it never stops what the next owner just kept
   (`a_takeover_keeps_the_instances_the_dead_owner_ran` and
   `a_handoff_on_a_shared_runtime_keeps_the_instances`, two nodes on one runtime;
   `fargate.rs::a_restart_keeps_the_running_task`, on the fake ECS; an independent review found
@@ -1396,13 +1400,17 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   login as a Secrets Manager secret `roll-apps/registry/<service>` named in the task definition
   (repository credentials; tested against the fake AWS): the fleet role needs
   `CreateSecret`/`PutSecretValue`/`DeleteSecret` there and the execution role `GetSecretValue`;
-  the secret is deleted (without recovery) when the login is removed or the service deleted
-  (`Runtime::drop_registry_login`). A value over several lines (a PEM key) can't go in an
+  the secret is deleted (without recovery) when the login is removed, its registry changed, or
+  the service deleted (`Runtime::drop_registry_login`); instances made after that, and stopped
+  ones starting again, go without it. A value over several lines (a PEM key) can't go in an
   environment file (one line each), so a deployment's such values are one Secrets Manager secret
   (`roll-apps/vars/<service>-<deployment>`, JSON) the task definition names per variable
-  (`valueFrom <arn>:<NAME>::`); it's written at each instance's create, deleted when this node
-  removes the deployment's last instance and with the service (the fleet role needs
-  `CreateSecret`/`PutSecretValue`/`DeleteSecret`/`ListSecrets` under `roll-apps/vars/`, the
+  (`valueFrom <arn>:<NAME>::`). It's made once and kept while the deployment may run (live,
+  pending, ready, or ended in the last day), so its ARN and the task definition stay the same
+  across cron runs and scale-outs; the ten-minute sweep deletes the rest after an hour, and the
+  service's deletion all of them. A secret is written only when its value changed (every write
+  is a new version). The fleet role needs `CreateSecret`/`PutSecretValue`/`GetSecretValue`/
+  `DeleteSecret`/`ListSecrets` under `roll-apps/vars/` and `roll-apps/registry/`, the
   execution role `GetSecretValue`; `fargate.rs::a_multi_line_value_reaches_the_task_through_its_
   deployments_secret`). Still missing on the fleet: private networking (Cloud Map), volumes
   (EFS; a service with a volume is refused) and shells (ECS Exec).

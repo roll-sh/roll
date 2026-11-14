@@ -174,8 +174,11 @@ pub trait Runtime: Send + Sync {
         self.drop_registry_login(service).await;
     }
     /// Clean up what a node that died left behind outside its instances (Fargate: environment
-    /// files no task will read). Every ten minutes, on every node (it only deletes).
-    async fn sweep(&self) {}
+    /// files no task will read), and what's kept for deployments outside `in_use` (the ids of
+    /// those that may still run). Every ten minutes, on every node (it only deletes).
+    async fn sweep(&self, _in_use: &std::collections::HashSet<String>) {}
+    /// Forget `name` without stopping it: another node keeps it now ([`Self::shares_instances`]).
+    async fn release(&self, _name: &str) {}
     /// Whether what one node made, another can see and run (Fargate; not one host's Docker per
     /// node): a node giving a service up then leaves its instances for the next to keep.
     fn shares_instances(&self) -> bool {

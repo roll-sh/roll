@@ -1431,8 +1431,27 @@ impl EnvLive {
         self.closed.store(true, Ordering::SeqCst);
         *self.canary.lock() = None;
         self.viewed.lock().clear();
-        self.insts.lock().clear();
+        let all: Vec<Arc<Inst>> = self.insts.lock().drain(..).collect();
+        for i in all {
+            self.runtime.release(&i.name).await;
+        }
         *self.template.lock() = None;
+    }
+
+    /// The service's registry login was removed: instances made from now on go without it.
+    pub fn forget_registry(&self) {
+        let strip = |t: &Arc<Template>| {
+            let mut t = (**t).clone();
+            t.spec.registry = None;
+            Arc::new(t)
+        };
+        let mut tpl = self.template.lock();
+        if let Some(t) = tpl.as_ref() {
+            *tpl = Some(strip(t));
+        }
+        if let Some((t, _)) = self.canary.lock().as_mut() {
+            *t = strip(t);
+        }
     }
 
     pub async fn shutdown(&self) {

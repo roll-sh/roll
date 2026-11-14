@@ -552,8 +552,17 @@ impl Apps {
     pub async fn delete_registry(self: &Arc<Self>, service: &str) -> Result<Service> {
         let sid = service.to_string();
         self.db(move |s| s.delete_registry(&sid)).await?;
-        self.deps.runtime.drop_registry_login(service).await;
+        self.forget_registry(service).await;
         self.service(service).await
+    }
+
+    /// A service's registry login is gone (removed, or its registry changed): wherever the
+    /// runtime keeps a copy, and from what its environments make instances of.
+    async fn forget_registry(&self, service: &str) {
+        for l in self.lives().into_iter().filter(|l| l.service == service) {
+            l.forget_registry();
+        }
+        self.deps.runtime.drop_registry_login(service).await;
     }
 
     pub fn url(&self, slug: &str) -> String {
@@ -630,6 +639,9 @@ impl Apps {
             Ok(())
         })
         .await?;
+        if forget_login {
+            self.forget_registry(id).await;
+        }
         self.service(id).await
     }
 
