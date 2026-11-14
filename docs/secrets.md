@@ -1586,6 +1586,12 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
+Built on 2026-11-14 (later), again without a merge: revoking certificates (#44: a list of what a
+CA signed, `…/revoke`, revocation when a lease ends, a public CRL every certificate names, checked
+with `openssl verify -crl_check`); SQL Server outside roll (#39, merged up into #41 and #42;
+checked live against SQL Server 2022); bringing an encryption key (#47: Vault's `vault:v<n>:`
+ciphertexts decrypt and rewrap, checked against Vault 1.20).
+
 Built on 2026-11-14 from the last ranking, without waiting on a merge: a rotations overview (#48:
 `GET …/rotations`, Health's "Managed credentials", `roll secrets rotations`); signing and HMAC
 with encryption keys (#47: Ed25519 a stock library checks with the exported public key, HMAC
@@ -1617,14 +1623,14 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **Revoking certificates** (on #44), as Vault's and Infisical's PKI: a CSR's certificate lives
-   up to the CA's `max_days` with no lease, so a lost device needs one. `…/cas/{id}/revoke
-   {serial}` (audited) and a CRL the CA signs, served without a token (`GET /v1/secrets/cas/{id}/crl`,
-   as the issuer's JWKS is), named in every certificate's CRL distribution point.
-2. **SQL Server outside roll** (on #39), Vault's other common database: two logins take turns, or
-   a login per lease in a role, over verified TLS to a public address, as Postgres and MySQL do.
-3. **Bringing a key** (on #47), as Vault's transit import: an encryption key's version from
-   outside (wrapped to a one-time key roll makes), so data encrypted before roll still opens.
+1. **A fourth independent security review** of what was built on 2026-11-14 (the rotations
+   overview, transit signing, HMAC and brought keys, CSR signing, revocation and the public CRL,
+   SQL Server outside roll), and its fixes.
+2. **SSH host certificates** (on #45), as Vault's SSH engine signs host keys: a server's key signed
+   for its host names, so clients trust the CA (`@cert-authority` in `known_hosts`) instead of
+   trusting each host on first use.
+3. **ClickHouse outside roll** (on #39): two users take turns, or a user per lease with a role, over
+   its native TLS port, through the same guards.
 4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
 5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
@@ -1662,15 +1668,15 @@ Open pull requests after this one:
   findings, with the reason, until roll succeeds; a rotations overview of every managed credential.
 - **#47, encryption keys** (after #20): encryption as a service, as Vault's Transit: named,
   versioned keys that never leave roll; encrypt, decrypt (audited), rewrap, data keys, Ed25519
-  signatures and HMACs.
+  signatures and HMACs; keys brought from outside, Vault's ciphertexts included.
 - **#46, sensitive keys** (after #20): a key tagged `sensitive` reaches only roll's runtimes, syncs
   and workload identities, never a person or a token; the tag is for good.
 - **#45, SSH certificates** (after #44): a project's SSH CA signs short-lived user certificates
   for the logins it allows, and `roll ssh` uses them for one session; OpenSSH's formats, checked
   with `ssh-keygen` and a real `sshd` login.
 - **#44, a project's own certificate authority** (after #20): short-lived TLS certificates for the
-  names its name-constrained CA allows, dynamic or managed, and CSRs it signs; checked with a real
-  TLS handshake.
+  names its name-constrained CA allows, dynamic or managed, and CSRs it signs; revocation and a
+  public CRL; checked with a real TLS handshake and `openssl verify -crl_check`.
 - **#43, dynamic GCP and Azure credentials** (after #20): roll as an OIDC issuer
   (`/v1/secrets/oidc`); GCP's workload identity federation and Azure's federated credentials trust
   its token for one project, checked with a decoy project at registration.
@@ -1679,7 +1685,7 @@ Open pull requests after this one:
   signature checked.
 - **#41, Redis outside roll** (after #39): two ACL users take turns (`#<sha256>` passwords), or a
   user per lease copying a template user's rules; the tenant's replies read by a bounded parser.
-- **#39, Postgres and MySQL outside roll** (after #20): two login roles take turns (rotation), or a
+- **#39, Postgres, MySQL and SQL Server outside roll** (after #20): two login roles take turns (rotation), or a
   login per lease in a group role (dynamic), over verified TLS to a public address rolld resolved
   itself (Postgres gets a SCRAM verifier, never the password).
 
