@@ -576,6 +576,14 @@ TLS certificates for services (mTLS between them), with no CA to run.
   most) and never past the CA's own end. A link's names and rotation are checked when it's written.
   Certificates are for servers and clients both (`serverAuth`, `clientAuth`; the key only signs),
   with a random 128-bit serial.
+- `POST …/cas/{id}/sign {csr (PEM), days? | ttl_minutes?}` (`write`, audited; `roll secrets cas
+  sign NAME req.csr [--days N] [--chain]`) signs a CSR, for a device or a service mesh that keeps
+  its own private key. The request's signature is checked, then only its public key and its
+  subjectAltName names (DNS names and IP addresses, each within the policy; the subject's CN isn't
+  read) are taken: usages, lifetime (30 days, or the CA's `max_days` if shorter, by default; 5
+  minutes to `max_days`) and everything else are the CA's own, whatever the CSR asks (being a CA
+  itself, signing code). It answers `{certificate, ca, serial, names, not_after}`. Checked with
+  OpenSSL's CSRs (P-256 and RSA): `openssl verify -x509_strict` passes against the CA.
 - A certificate can't be taken back: there are no revocation lists, so lifetimes stay short, and a
   lease that ends leaves its certificate valid until it expires. A CA a key links to can't be
   deleted; deleting one leaves what it signed valid until it expires.
@@ -634,7 +642,7 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
-roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | rm ID
+roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain] | rm ID
 roll secrets ssh-cas ls | add NAME --principal P… [--max-hours N] | key ID | rm ID
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 roll ssh [-p project] [-e production] [--cert SSH_CERT] [--identity SSH_KEY] -- <ssh arguments…>
@@ -1476,6 +1484,7 @@ isn't in the workspace is 404.
 | `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
 | `POST /cas` | `{name, domains, allow_ip?, max_days?}` | 201 `Ca` (`admin`) |
 | `DELETE /cas/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `POST /cas/{id}/sign` | `{csr, days?, ttl_minutes?}` | `{certificate, ca, serial, names, not_after}` (`write`, audited); 400 for a name outside the policy or a lifetime past `max_days` |
 | `GET /ssh-cas` | | `SshCa[]` (`read` on the project; public keys, never private ones) |
 | `POST /ssh-cas` | `{name, principals, max_hours?}` | 201 `SshCa` (`admin`) |
 | `DELETE /ssh-cas/{id}` | | 204; 409 while a key links to it (`admin`) |
@@ -1646,8 +1655,13 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
-An independent security review of #43–#45 (the issuer's keys and tokens, CA name constraints, SSH
-formats) is running. Measured again on 2026-11-14 (load about 20): values at 9,900 keys took 89–122 ms on SQLite and
+A third independent review (of #46 and #47) found four ways a sensitive value still reached a person
+(older versions, change requests that add the tag, syncs and sandboxes counted as runtimes) and
+guessing oracles, plus backups leaving out encryption keys: all fixed and tested. roll apps (#26)
+now seals sensitive variables and redeploys when an environment's digest moves (#31 implements
+it). An independent security review of #43–#45 found no cross-tenant path; it found managed
+certificates that could lapse, an issuer key that a deployment-key rotation would have broken, a
+fail-open decoy check and leases outliving cloud tokens, all fixed and tested. Measured again on 2026-11-14 (load about 20): values at 9,900 keys took 89–122 ms on SQLite and
 155 ms on Postgres, within the noise of the Performance table; nothing to fix. Reviewed again on
 2026-11-14: an independent security review of #39–#41 found racing rotations
 could reset the login in use (now a claim never takes a busy role), a `#` in a password shown as
@@ -1663,17 +1677,26 @@ Doppler, Infisical, Vault and 1Password (clients, IaC, CI, Kubernetes, BYOK). Th
 is Vault's signature: dynamic credentials for clouds and databases roll doesn't run. CI stays
 under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
-Ranked (work that can start now):
+Ranked: first what can be built now, without a merge; then what waits on one (merges are the
+user's call).
 
-1. **AWS through roll's issuer** (once #38 and #43 land): `AssumeRoleWithWebIdentity` with roll's
-   own token, so roll needs no AWS keys of its own and the trust policy pins `sub` as GCP's and
-   Azure's do.
-2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
-   customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
-3. **Products say who owns a resource**, so a person's project can link their own databases,
-   buckets and streams. Waits on products serving signed-in people.
-4. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
-   besides its owner.
+1. **A rotations overview** (on #48), as Infisical's secret rotation page: every managed
+   credential in the project (environment, keys, resource), when it last rotated, when it's next
+   due, and why its last scheduled rotation failed; rotate from there.
+2. **Signing and HMAC with encryption keys** (on #47), as Vault's Transit: `…/sign` and `…/verify`
+   (Ed25519) for webhooks and tokens an app issues, and `…/hmac` for lookups over encrypted fields.
+3. **Certificates for keys that stay put** (on #44): `…/cas/{id}/sign` signs a CSR within the CA's
+   policy, so a device or a service mesh keeps its private key.
+4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
+   already seals such variables). One line once both are on #20.
+5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
+   token; the trust policy pins `sub`, as GCP's and Azure's do).
+6. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
+   notice.
+7. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
+   project can link their own databases, buckets and streams.
+8. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+   environment).
 
 Open pull requests after this one:
 
@@ -1697,6 +1720,12 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#48, failing rotations in health** (after #20): `rotation_failing` and `revoke_failing`
+  findings, with the reason, until roll succeeds.
+- **#47, encryption keys** (after #20): encryption as a service, as Vault's Transit: named,
+  versioned keys that never leave roll; encrypt, decrypt (audited), rewrap, data keys.
+- **#46, sensitive keys** (after #20): a key tagged `sensitive` reaches only roll's runtimes, syncs
+  and workload identities, never a person or a token; the tag is for good.
 - **#45, SSH certificates** (after #44): a project's SSH CA signs short-lived user certificates
   for the logins it allows, and `roll ssh` uses them for one session; OpenSSH's formats, checked
   with `ssh-keygen` and a real `sshd` login.

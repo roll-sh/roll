@@ -1046,6 +1046,27 @@ async fn a_projects_ca_signs_short_lived_certificates_for_its_names_only() {
     let (_, der) = parse_x509_pem(stored.as_bytes()).unwrap();
     let (_, managed) = parse_x509_certificate(&der.contents).unwrap();
     assert_eq!((managed.validity().not_after.timestamp() - managed.validity().not_before.timestamp()) / 86_400, 14);
+    // A CSR: its key stays with the device; only its key and names are taken, never what else it
+    // asks for (here, to be a CA itself and to sign code).
+    let device = rcgen::KeyPair::generate().unwrap();
+    let csr = |names: &[&str]| {
+        let mut p = rcgen::CertificateParams::new(names.iter().map(|n| n.to_string()).collect::<Vec<_>>()).unwrap();
+        p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        p.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::CodeSigning];
+        p.serialize_request(&device).unwrap().pem().unwrap()
+    };
+    let at = format!("/cas/{}/sign", ca["id"].as_str().unwrap());
+    let sign = |csr: String, days: u32| api.call(Method::POST, &at, Some(json!({ "csr": csr, "days": days })));
+    let (s, signed) = sign(csr(&["sensor-7.svc.internal"]), 3).await;
+    assert_eq!(s, StatusCode::OK, "{signed}");
+    let (_, der) = parse_x509_pem(signed["certificate"].as_str().unwrap().as_bytes()).unwrap();
+    let (_, leaf) = parse_x509_certificate(&der.contents).unwrap();
+    leaf.verify_signature(Some(ca_cert.public_key())).expect("signed by the project's CA");
+    assert_eq!(leaf.public_key().subject_public_key.data.as_ref(), rcgen::PublicKeyData::der_bytes(&device), "the device's own key");
+    assert!(!leaf.is_ca() && !leaf.extended_key_usage().unwrap().unwrap().value.code_signing, "not what the CSR asked beyond its names");
+    assert_eq!((leaf.validity().not_after.timestamp() - leaf.validity().not_before.timestamp()) / 86_400, 3);
+    assert_eq!(sign(csr(&["sensor-7.example.com"]), 3).await.0, StatusCode::BAD_REQUEST, "a name outside the CA's domains");
+    assert_eq!(sign(csr(&["sensor-7.svc.internal"]), 91).await.0, StatusCode::BAD_REQUEST, "longer than the CA allows");
     // A CA a key links to stays.
     assert_eq!(api.call(Method::DELETE, &format!("/cas/{}", ca["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
 }
