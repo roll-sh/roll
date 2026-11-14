@@ -139,6 +139,10 @@ async fn settings_through_the_cli() {
     std::fs::create_dir_all(t.work.path().join("src/lib")).unwrap();
     let here = t.run_in("src/lib", &["--json", "show"]).await;
     assert_eq!((here.0, serde_json::from_str::<serde_json::Value>(&here.1).map(|v| v["name"].clone()).ok()), (Some(0), Some(serde_json::json!("site"))), "{here:?}");
+    // A command here with the environment's variables, the platform's own left out, its exit code kept.
+    let (code, out, err) = t.run(&["exec", "-s", "site", "-p", "acme", "--", "sh", "-c", "echo \"$MODE ${PORT:-no-port} ${KEY:-no-key}\"; exit 3"]).await;
+    assert_eq!((code, out.trim()), (Some(3), "prod no-port no-key"), "{err}");
+    assert!(err.contains("not set here (sealed") && err.contains("KEY"), "{err}");
     // `roll up` doesn't upload to an image service: it says what deploys one.
     let (code, _, err) = t.run_up().await;
     assert!(code != Some(0) && err.contains("roll deploy"), "{err}");

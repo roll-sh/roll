@@ -462,6 +462,17 @@ pub enum AppsCmd {
         #[arg(long)]
         dockerfile: bool,
     },
+    /// Run a command here, on this machine, with an environment's variables (Railway's
+    /// `railway run`): `roll apps exec -- npm run dev`. `PORT` and `ROLL_*` are left out (they're
+    /// the platform's), sealed variables can't be (they're never shown again), and `*.internal`
+    /// names only resolve inside roll (`roll apps proxy` reaches a private service from here).
+    /// Exits with the command's exit code.
+    Exec {
+        #[command(flatten)]
+        target: Target,
+        #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
     /// Run the live image again with the current variables and settings (no build, same
     /// revision): how changed variables reach a `roll up` service.
     Redeploy {
@@ -2004,6 +2015,37 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             svc
+        }
+        AppsCmd::Exec { target, command } => {
+            let svc = service(api, &target).await?;
+            let base = env_path(&svc, &target.env);
+            let (values, listed) = (api.get(&format!("{base}/variables/values")).await?, api.get(&format!("{base}/variables")).await?);
+            let vars: Vec<(String, String)> = values
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(k, _)| k.as_str() != "PORT" && !k.starts_with("ROLL_"))
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .collect();
+            let sealed: Vec<String> = listed["vars"].as_array().into_iter().flatten().filter(|v| v["sealed"] == true).map(|v| s(&v["name"])).collect();
+            if !sealed.is_empty() {
+                eprintln!("not set here (sealed, never shown again): {}", sealed.join(", "));
+            }
+            let internal: Vec<&str> = vars.iter().filter(|(_, v)| v.contains(".internal")).map(|(k, _)| k.as_str()).collect();
+            if !internal.is_empty() {
+                eprintln!("{} name a private address (*.internal) that only resolves inside roll: `roll apps proxy` reaches one from here", internal.join(", "));
+            }
+            let status = tokio::process::Command::new(&command[0])
+                .args(&command[1..])
+                .envs(vars)
+                .status()
+                .await
+                .with_context(|| format!("couldn't run {}", command[0]))?;
+            match status.code() {
+                Some(0) => return Ok(()),
+                Some(code) => std::process::exit(code),
+                None => bail!("{} was killed by a signal", command[0]),
+            }
         }
         AppsCmd::Delete { target, yes } => {
             let svc = service(api, &target).await?;
