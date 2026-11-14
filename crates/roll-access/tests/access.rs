@@ -356,6 +356,10 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     let (_, graced) = d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{grant}/rotate"), Some(json!({ "keep_old_for_s": 3600 }))).await;
     let newer = graced["token"].as_str().unwrap().to_string();
     assert_eq!((d.call(&token, Method::GET, "/v1/projects", None).await.0, d.call(&newer, Method::GET, "/v1/projects", None).await.0), (StatusCode::OK, StatusCode::OK));
+    // The old one, in its grace, calls products but manages no tokens (it may have leaked).
+    let (s, e) = d.call(&token, Method::POST, &format!("/v1/access/tokens/{grant}/rotate"), None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("rotated_secret")), "{e}");
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/tokens", Some(json!({ "name": "child", "rules": [] }))).await.0, StatusCode::FORBIDDEN);
     let (_, plain) = d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{grant}/rotate"), None).await;
     assert_eq!((d.call(&token, Method::GET, "/v1/projects", None).await.0, d.call(&newer, Method::GET, "/v1/projects", None).await.0), (StatusCode::UNAUTHORIZED, StatusCode::UNAUTHORIZED));
     let token = plain["token"].as_str().unwrap().to_string();
