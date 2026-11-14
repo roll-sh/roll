@@ -1602,6 +1602,7 @@ Every stacked pull request's API tests (#49, #50, #51, #53, #55, #57) also pass 
 stacked pull request is mergeable, and #20 is level with `main`.
 Then roll secrets for VS Code (#58): hovers and warnings where code reads a variable, names
 completed, and `.env` values moved into roll as `roll://` references (checked in code-server).
+Then `roll completions` and direnv documented (#59).
 
 Then (2026-11-14, latest): `roll run` masks values in what the command prints when it isn't a
 terminal (#54), as 1Password's `op run` and GitHub Actions do; pulling into Kubernetes with External
@@ -1711,9 +1712,9 @@ user's call).
 
 1. **A tenth independent review** of ESO (#55), renewing identity logins (#56), pinned issuer keys
    (#57) and the ninth review's fixes, and its fixes.
-2. **Shell completions and direnv**: `roll completions bash|zsh|fish|powershell` (every product's
-   commands, from clap), and a documented `.envrc` (`eval "$(roll secrets export --format shell)"`
-   with `watch_file` on the setup) so a directory's environment loads as you `cd` into it.
+2. **Recipes for Docker builds and Compose**, each checked: a build secret through BuildKit
+   (`roll run -- docker build --secret id=npm,env=NPM_TOKEN .`, never a build arg, which stays in
+   the image's history) and a Compose service that passes the environment through.
 3. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
    #49 and #54 meet, `watch` keeps both (answered digests, streams and signals).
 4. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
@@ -1760,6 +1761,8 @@ Open pull requests after this one:
   after its grace; a user with two keys already is refused, never pruned.
 - **#55, pulling into Kubernetes with External Secrets Operator** (after #20): its webhook
   provider (one store for whole environments and single keys) and `values?dynamic=false`.
+- **#59, `roll completions` and direnv** (after #20): completion scripts for every command; a
+  documented `.envrc`.
 - **#58, roll secrets for VS Code** (after #20): hovers, warnings and completion where code reads
   a variable; `.env` values replaced by `roll://` references or moved into roll first.
 - **#57, workload identities pin their issuer's keys** (after #20): `jwks` on an identity, for a
