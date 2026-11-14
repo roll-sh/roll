@@ -39,6 +39,9 @@ impl Drop for Node {
 struct Fleet {
     nodes: Vec<Node>,
     project: String,
+    ws: Arc<roll_workspace::Workspace>,
+    db: code_sql::Db,
+    members: roll_cluster::MemoryStore,
     _dir: tempfile::TempDir,
 }
 
@@ -48,11 +51,20 @@ async fn fleet(n: usize) -> Fleet {
     let project = ws.create("", "acme", "", None).unwrap().id;
     let db = code_sql::Db::open_sqlite(&dir.path().join("apps.db"), code_sql::SqliteOptions { readers: 2, cache_kib: 1024 }).unwrap();
     let members = roll_cluster::MemoryStore::new();
-    let mut nodes = Vec::new();
+    let mut f = Fleet { nodes: Vec::new(), project, ws, db, members, _dir: dir };
     for i in 0..n {
+        f.join(&format!("n{i}")).await;
+    }
+    f
+}
+
+impl Fleet {
+    /// One more node: its own server, runtime and home, on the fleet's store and membership.
+    async fn join(&mut self, id: &str) {
+        let (ws, db, members) = (self.ws.clone(), self.db.clone(), self.members.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let cluster = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::new(members.clone())), roll_cluster::ClusterConfig::for_tests(format!("n{i}"), url, SECRET.to_vec())).unwrap();
+        let cluster = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::new(members)), roll_cluster::ClusterConfig::for_tests(id, url, SECRET.to_vec())).unwrap();
         let home = tempfile::tempdir().unwrap();
         let mut cfg = AppsConfig::new(home.path().to_path_buf());
         cfg.live.worker_grace = Duration::from_millis(20);
@@ -80,9 +92,8 @@ async fn fleet(n: usize) -> Fleet {
             let _ = axum::serve(listener, internal.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
         })
         .abort_handle();
-        nodes.push(Node { public: apps_control::public::router(apps.clone()), api, apps, fake, _home: home, server });
+        self.nodes.push(Node { public: apps_control::public::router(apps.clone()), api, apps, fake, _home: home, server });
     }
-    Fleet { nodes, project, _dir: dir }
 }
 
 async fn call(r: &axum::Router, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -250,4 +261,76 @@ async fn a_killed_owners_service_moves_to_the_node_left() {
     }
     assert_eq!(status, "active");
     drop(dead);
+}
+
+/// A deploy in flight when its owner dies (rolling out: its new instance still booting) finishes
+/// on the node left, from the store; the dead node (still running here, as a partitioned
+/// process would) can't switch the environment live any more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deploy_in_flight_on_a_killed_owner_finishes_on_the_node_left() {
+    let mut f = fleet(2).await;
+    let (id, _) = f.image_service(&f.nodes[0], "web").await;
+    let key = apps_control::lease_key(&id);
+    let owner = f.nodes.iter().position(|n| n.apps.deps.cluster.owns(&key)).unwrap();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    // A slow start: the rollout waits two seconds for the new instance.
+    call(&f.nodes[0].api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_BOOT_MS": "2000"}}))).await;
+    let (st, d) = call(&f.nodes[0].api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    let dep = d["id"].as_str().unwrap().to_string();
+    for _ in 0..200 {
+        if call(&f.nodes[0].api, "GET", &format!("{base}/deploys/{dep}"), None).await.1["status"] == "deploying" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let dead = f.nodes.remove(owner);
+    dead.server.abort();
+    dead.apps.deps.cluster.fault_kill();
+    let left = &f.nodes[0];
+    let mut status = Value::Null;
+    for _ in 0..600 {
+        status = call(&left.api, "GET", &format!("{base}/deploys/{dep}"), None).await.1["status"].clone();
+        if status == "active" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(status, "active", "finished on the node left");
+    assert!(left.apps.deps.cluster.owns(&key));
+    // The live instances are the node left's: the dead one's rollout never took the switch.
+    let (_, env) = call(&left.api, "GET", &base, None).await;
+    assert_eq!(env["active"]["id"], dep.as_str(), "{env}");
+    assert!(left.fake.instances(&id).iter().any(|(_, d, _)| *d == dep), "the new deployment's instance was made on the node left: {:?}", left.fake.instances(&id));
+    drop(dead);
+}
+
+/// A node that joins takes services over (the cluster rebalances), and no visitor's request
+/// fails meanwhile: a handoff moves a service with its requests still answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_joining_node_takes_services_with_no_request_failing() {
+    let mut f = fleet(1).await;
+    let mut svcs = Vec::new();
+    for i in 0..4 {
+        svcs.push(f.image_service(&f.nodes[0], &format!("web{i}")).await);
+    }
+    f.join("n1").await;
+    let mut failed = Vec::new();
+    let mut moved = false;
+    for round in 0..600 {
+        for (id, h) in &svcs {
+            let req = Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap();
+            let st = f.nodes[round % 2].public.clone().oneshot(req).await.unwrap().status();
+            if st != StatusCode::OK {
+                failed.push((round, id.clone(), st));
+            }
+        }
+        moved = svcs.iter().any(|(id, _)| f.nodes[1].apps.deps.cluster.owns(&apps_control::lease_key(id)));
+        if moved && round > 40 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(moved, "the new node took at least one service");
+    assert!(failed.is_empty(), "requests failed during the handoff: {failed:?}");
 }

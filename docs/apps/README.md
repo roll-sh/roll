@@ -673,8 +673,13 @@ The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`,
   visitor who reached a node not owning the service got the API's 404
   (`apps-control/tests/cluster.rs`: two nodes in one process, each with its own server and fake
   runtime, sharing a store: a visitor and an API call through the other node, a static site's
-  rewrite to a service the other node owns, and a killed owner's service woken and deployed on
-  the node left once its lease expires). A node that takes a
+  rewrite to a service the other node owns, a killed owner's service woken and deployed on the
+  node left once its lease expires, a deploy in flight on a killed owner finishing on the node
+  left with the dead one fenced off, and a joining node taking services with no visitor's request
+  failing). That last one found a roll-cluster bug: mid-handoff the joining node still sent a
+  service's requests to the old owner, which sent them back, until the hop limit answered 508;
+  now a forward that would go straight back to the node that sent it asks the backend instead of
+  the node's memory (`Cluster::dispatch`). A node that takes a
   service over starts from the store: it marks instances the previous owner had as unknown and
   stops the Fargate tasks still running as the service's (`startedBy roll-apps-<service>`);
   the next request starts a fresh one. (Adopting them instead, after checking their deployment,
