@@ -1776,6 +1776,21 @@ impl EnvLive {
             up += 1;
             self.log.stream(Stream::System).line(format!("scaled out: {up} instances for the backlog"));
         }
+        // Crashed ones past what's wanted (its backlog fell while they waited): they go, their
+        // crash kept in the crash list; none is started again to be scaled in.
+        if up + finished >= target {
+            let extra: Vec<Arc<Inst>> = self.instances().into_iter().filter(|i| i.phase() == Phase::Crashed && !i.done.load(Ordering::SeqCst)).collect();
+            for i in extra {
+                self.insts.lock().retain(|x| !Arc::ptr_eq(x, &i));
+                let (runtime, name, stopping) = (self.runtime.clone(), i.name.clone(), i.stopping.lock().take());
+                tokio::spawn(async move {
+                    if let Some(s) = stopping {
+                        let _ = s.await;
+                    }
+                    runtime.remove(&name).await;
+                });
+            }
+        }
         // Fewer wanted for `scale_down_after`: one goes (the newest), its work given the drain
         // to finish; the rest follow on later ticks.
         let fewer = up > target;

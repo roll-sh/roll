@@ -1867,6 +1867,20 @@ async fn a_worker_follows_its_streams_backlog() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(up(&w), 3, "caught up: one goes at a time");
+    // Two crash while it's caught up (a target of one): they go, none started again to be
+    // scaled in, and what runs is left as it is.
+    let running: Vec<String> = w.fake.instances(&id).into_iter().filter(|(_, _, st)| *st == FakeState::Running).map(|(n, ..)| n).collect();
+    for n in &running[..2] {
+        w.fake.crash(n);
+    }
+    let starts = Fake::count(&w.fake.counts.starts);
+    for _ in 0..5 {
+        live.tick().await;
+    }
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
+    let states: Vec<&str> = env["instances"].as_array().unwrap().iter().map(|i| i["state"].as_str().unwrap()).collect();
+    assert!(!states.contains(&"crashed"), "{states:?}");
+    assert_eq!(Fake::count(&w.fake.counts.starts), starts, "none started again");
     assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"scale": {"stream": "orders", "group": "g"}}}))).await.0, StatusCode::BAD_REQUEST, "a stream by its id, never a name");
     // Becoming a web service drops it (a web service scales on its requests).
     let (st, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"type": "web"}}))).await;
