@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 
 /// How far back "read lately" looks.
 pub const READ_DAYS: i64 = 30;
-/// The audit rows read for it, newest first.
-const READS_MAX: i64 = 20_000;
+/// The audit rows read per project, newest first (a project's reads in [`READ_DAYS`]).
+const READS_MAX: i64 = 100_000;
 
 #[derive(Debug, Serialize)]
 pub struct Reach {
@@ -159,14 +159,25 @@ impl Secrets {
                 }
                 frontier = next;
             }
+            // One audit read per project (not per folder): its reads in the window, kept for the
+            // folders above.
             let mut reads: Vec<(Source, String, i64, String)> = vec![];
-            for src in std::iter::once((project.to_string(), slug.to_string(), path.clone())).chain(sources.iter().cloned()) {
-                let rows: Vec<(String, i64, String)> = c.query(
-                    "SELECT actor, at, keys FROM audit WHERE project_id = ? AND env = ? AND path = ? AND at >= ? AND action IN ('secrets.reveal', 'secrets.export', 'secrets.resolve', 'sync.push') ORDER BY id DESC LIMIT ?",
-                    params![src.0, src.1, src.2, now - READ_DAYS * 86_400_000, READS_MAX],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            let all: Vec<Source> = std::iter::once((project.to_string(), slug.to_string(), path.clone())).chain(sources.iter().cloned()).collect();
+            let mut projects: Vec<&str> = all.iter().map(|s| s.0.as_str()).collect();
+            projects.sort();
+            projects.dedup();
+            for p in projects {
+                let wanted: std::collections::HashSet<(&str, &str)> = all.iter().filter(|s| s.0 == p).map(|s| (s.1.as_str(), s.2.as_str())).collect();
+                let rows: Vec<(String, String, String, i64, String)> = c.query(
+                    "SELECT env, path, actor, at, keys FROM audit WHERE project_id = ? AND at >= ? AND action IN ('secrets.reveal', 'secrets.export', 'secrets.resolve', 'sync.push') ORDER BY id DESC LIMIT ?",
+                    params![p, now - READ_DAYS * 86_400_000, READS_MAX],
+                    |r| Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get::<_, Option<String>>(1)?.unwrap_or_default(), r.get(2)?, r.get(3)?, r.get(4)?)),
                 )?;
-                reads.extend(rows.into_iter().map(|(a, at, k)| (src.clone(), a, at, k)));
+                for (e, at, actor, when, keys) in rows {
+                    if wanted.contains(&(e.as_str(), at.as_str())) {
+                        reads.push(((p.to_string(), e, at), actor, when, keys));
+                    }
+                }
             }
             Ok::<_, Error>((env, sources, reads, truncated))
         })?;

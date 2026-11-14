@@ -1256,6 +1256,11 @@ credentials as the tokens list does. Names and metadata only, never a value:
 
 roll-access's grants (`rlt_`, OAuth) aren't listed yet: they're rolld's (#30).
 
+Measured (release, 2026-11-14, `examples/bench.rs`, load average about 52): at its cap, 300 folders
+importing production (it follows 256), each read once, reach takes 5–7 ms on SQLite and 120–150 ms
+on Postgres. The audit is read once per project and filtered in memory (it was a query per folder:
+55–89 ms and 254–302 ms); what's left on Postgres is the walk's two queries per folder.
+
 ### Workload identities (OIDC)
 
 A CI job or a cluster logs in with its own short-lived OpenID Connect token instead of holding a
