@@ -509,12 +509,11 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Pending tokens from the CLI and in admins' mail** (#25): `roll token list --pending`,
-   `roll token approve|deny <id>`, and a mail to admins when a person's token waits (GitHub mails
-   organization owners), through accounts' list of admins.
-2. **Docs an agent can search** (Supabase's `search_docs`): roll's docs (docs/*.md) served by
-   rolld under a read route and searched by a `docs_search` tool, so an agent looks up how a
-   product works instead of guessing.
+1. **The approval flow live, with accounts and mail** (`users-live/`, a rolld on :7480 built from
+   #25 with accounts and a mail outbox): a person's token past the policy waits, admins get the
+   mail, an admin approves from the CLI, the person gets theirs, and the token works.
+2. **`debug_failing_service` reads apps' new signals**: an environment's `attention` (crash loop,
+   capped, maintenance, a failed deploy with `error_detail`) and `apps_activity` with `all`.
 3. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25), and compare each product's routes with its tools
@@ -536,7 +535,7 @@ waits on a sibling PR reaching main is last.
 7. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
-Considered and left out: a smaller default toolset, or search-then-call meta-tools (see Toolsets: clients handle long lists or have a picker, and meta-tools would hide each tool's hints); a connection narrowed to one project (Supabase's `project_ref`): their
+Considered and left out: a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset, or search-then-call meta-tools (see Toolsets: clients handle long lists or have a picker, and meta-tools would hide each tool's hints); a connection narrowed to one project (Supabase's `project_ref`): their
 tokens are account-wide; a roll token's rules already name projects, and the builder's presets
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
