@@ -421,20 +421,26 @@ async fn a_get_to_a_vanished_instance_goes_to_a_fresh_one() {
     let w = world().await;
     let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
     let h = host(&svc["environments"][0]["url"]);
+    let log = || w.apps.logs.follow(&format!("env:{}/production", svc["id"].as_str().unwrap()), 50).0.iter().map(|l| l.text.clone()).collect::<Vec<_>>();
     let (st, body) = visit(&w, &h, "/").await;
-    assert_eq!(st, StatusCode::OK);
+    assert_eq!(st, StatusCode::OK, "{body} {:?}", log());
     let first = body["instance"].as_str().unwrap().to_string();
-    w.fake.crash(&first);
+    w.fake.vanish(&first);
     let (st, body) = visit(&w, &h, "/").await;
-    assert_eq!(st, StatusCode::OK, "{body} {:?}", w.apps.logs.follow(&format!("env:{}/production", svc["id"].as_str().unwrap()), 50).0.iter().map(|l| l.text.clone()).collect::<Vec<_>>());
+    assert_eq!(st, StatusCode::OK, "{body} {:?}", log());
     let second = body["instance"].as_str().unwrap().to_string();
     assert_ne!(second, first);
-    w.fake.crash(&second);
-    let made = w.fake.instances(svc["id"].as_str().unwrap()).len();
+    // Every running instance gone, roll not told: a POST that finds one is never sent again
+    // (one that finds none starts a created one, and that's its only send).
+    for (name, ..) in w.fake.instances(svc["id"].as_str().unwrap()) {
+        w.fake.vanish(&name);
+    }
+    let resent = || log().iter().filter(|l| l.ends_with("the request goes to a fresh instance")).count();
+    let before = resent();
     let post = Request::post("/").header("host", h.as_str()).header("content-length", "1").body(Body::from("x")).unwrap();
     let st = w.public.clone().oneshot(post).await.unwrap().status();
-    assert!(matches!(st, StatusCode::SERVICE_UNAVAILABLE | StatusCode::BAD_GATEWAY), "{st}");
-    assert_eq!(w.fake.instances(svc["id"].as_str().unwrap()).len(), made, "not sent again");
+    assert!(matches!(st, StatusCode::SERVICE_UNAVAILABLE | StatusCode::BAD_GATEWAY | StatusCode::OK), "{st}");
+    assert_eq!(resent(), before, "not sent again: {:?}", log());
 }
 
 /// A newer push stops a push's build that's still running (superseded, its minutes saved); the
@@ -2237,6 +2243,14 @@ async fn maintenance_answers_roll_page_and_wakes_nothing() {
     call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"timeout_s": 1}}))).await;
     let (_, r) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
     settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
+    // Live in the store a moment before it answers: the slow request goes to it, not to the
+    // old deployment's instance, which its drain stops.
+    for _ in 0..500 {
+        if visit(&w, &h, "/").await.1["deployment"] == r["id"] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(get("/sleep/1500").await, (StatusCode::GATEWAY_TIMEOUT, None, "<h1>oops</h1>".into()));
     assert_eq!(get("/").await.0, StatusCode::OK);
     let (_, env) = call(&w.api, "PUT", &base, Some(json!({"pages": {"error": null, "maintenance": null}}))).await;

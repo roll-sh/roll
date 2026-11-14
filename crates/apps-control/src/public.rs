@@ -974,9 +974,11 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // Gone: nothing listened (the app never saw it), or a kept-alive connection broke and the
     // instance isn't running any more (it died, perhaps with the request read: a safe request
     // may be repeated, RFC 9110 9.2.2, as browsers do when a reused connection closes). Never
-    // for a request with a body.
+    // for a request with a body. The runtime can learn of a kill a moment after the connection
+    // breaks, so an instance it still thinks runs is asked too: one that doesn't answer is gone,
+    // one that does closed the connection itself (a 502).
     let gone = match &sent {
-        Err(e) if replay.is_some() && again.is_some() => e.is_connect() || !apps.deps.runtime.running(&lease.inst.name).await,
+        Err(e) if replay.is_some() && again.is_some() => e.is_connect() || !apps.deps.runtime.running(&lease.inst.name).await || !live.answers(lease.addr, None, lease.h2c).await,
         _ => false,
     };
     let sent = match (sent, replay, again) {
@@ -1008,7 +1010,10 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
                         None => send.await,
                     }
                 }
-                Err(_) => Err(e),
+                Err(we) => {
+                    live.log.stream(crate::logs::Stream::System).line(format!("a request couldn't wake a fresh instance: {we}"));
+                    Err(e)
+                }
             }
         }
         (sent, _, _) => sent,

@@ -346,6 +346,9 @@ pub struct EnvLive {
     /// Recent crashes: when, unix ms, why, and the deployment the instance ran.
     crashes: Mutex<std::collections::VecDeque<(Instant, i64, String, String)>>,
     seq: AtomicU64,
+    /// Every instance this process made here (a deploy's being checked isn't in `insts` until
+    /// its commit): [`Self::adopt`] never takes one for a previous owner's.
+    mine: Mutex<std::collections::HashSet<String>>,
     pub log: LogSink,
     pub meter: Mutex<Meter>,
     over_since: Mutex<Option<Instant>>,
@@ -401,6 +404,7 @@ impl EnvLive {
             failed: Mutex::new(None),
             crashes: Mutex::new(std::collections::VecDeque::new()),
             seq: AtomicU64::new(0),
+            mine: Mutex::default(),
             log,
             meter: Mutex::new(Meter::default()),
             over_since: Mutex::new(None),
@@ -525,13 +529,14 @@ impl EnvLive {
         anyhow::ensure!(!self.closed.load(Ordering::SeqCst), "this environment was torn down");
         let mut spec = tpl.spec.clone();
         spec.name = self.name_for(tpl);
+        self.mine.lock().insert(spec.name.clone());
         self.runtime.create(&spec).await?;
         Ok(Inst::new(spec.name, tpl.deployment.clone()))
     }
 
     /// Whether something answers HTTP at `addr` (`path`: a 2xx or 3xx there; none: any answer,
     /// since a published port accepts connections before the app listens).
-    async fn answers(&self, addr: SocketAddr, path: Option<&str>, h2c: bool) -> bool {
+    pub(crate) async fn answers(&self, addr: SocketAddr, path: Option<&str>, h2c: bool) -> bool {
         let uri = format!("http://{addr}{}", path.unwrap_or("/"));
         let version = if h2c { axum::http::Version::HTTP_2 } else { axum::http::Version::HTTP_11 };
         let Ok(req) = axum::http::Request::get(uri).version(version).header("user-agent", "roll-apps-health").body(axum::body::Body::empty()) else { return false };
@@ -1303,7 +1308,7 @@ impl EnvLive {
             let Some(n) = name.strip_prefix(&prefix).and_then(|n| n.parse::<u64>().ok()) else { continue };
             // New names after every one seen, kept or not (the old owner may still be removing it).
             self.seq.fetch_max(n + 1, Ordering::SeqCst);
-            if here.contains(&name) {
+            if here.contains(&name) || self.mine.lock().contains(&name) {
                 continue;
             }
             if !matches!(tpl.run.kind, RunType::Web | RunType::Worker) {

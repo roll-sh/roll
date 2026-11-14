@@ -159,6 +159,17 @@ impl Fake {
         }
     }
 
+    /// Its port stops answering and roll isn't told (no exit to wait on, still running to the
+    /// runtime's eye): what a request finds before the runtime notices a kill.
+    pub fn vanish(&self, name: &str) {
+        if let Some(i) = self.instances.lock().get_mut(name) {
+            if let Some(s) = i.server.take() {
+                s.abort();
+            }
+            i.killed.cancel();
+        }
+    }
+
     pub fn networks(&self) -> Vec<String> {
         self.networks.lock().clone()
     }
@@ -184,9 +195,9 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
         tokio::time::sleep(b).await;
     }
     log.line(format!("listening on {}", spec.port.unwrap_or(0)));
-    let (name, dep) = (spec.name.clone(), spec.deployment.clone());
+    let (name, dep, kill) = (spec.name.clone(), spec.deployment.clone(), killed.clone());
     let app = axum::Router::new().fallback(move |req: Request| {
-        let (name, dep, echo, sick, missing, killed) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), killed.clone());
+        let (name, dep, echo, sick, missing, killed) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), kill.clone());
         async move {
             use axum::response::IntoResponse;
             if missing.as_deref().is_some_and(|m| req.uri().path().starts_with(m)) {
@@ -219,7 +230,30 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te }))).into_response()
         }
     });
-    let _ = axum::serve(listener, app).await;
+    // Served by hand so a kill ends every connection too, kept-alive ones included, as the
+    // kernel closes a killed process's sockets (axum::serve's connections outlive its loop).
+    loop {
+        let sock = tokio::select! {
+            r = listener.accept() => match r {
+                Ok((s, _)) => s,
+                Err(_) => continue,
+            },
+            _ = killed.cancelled() => return,
+        };
+        let (app, killed) = (app.clone(), killed.clone());
+        tokio::spawn(async move {
+            let svc = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
+                use tower::ServiceExt;
+                app.clone().oneshot(req.map(axum::body::Body::new))
+            });
+            let builder = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+            let conn = builder.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(sock), svc);
+            tokio::select! {
+                _ = conn => {}
+                _ = killed.cancelled() => {}
+            }
+        });
+    }
 }
 
 #[async_trait]
