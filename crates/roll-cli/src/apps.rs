@@ -347,6 +347,15 @@ pub enum AppsCmd {
         #[arg(long)]
         rollback_on_crash: Option<bool>,
     },
+    /// A copy of the service in its project (Railway's Duplicate): its source, build and run
+    /// settings, links and production's own variables. Sealed variables are never shown, so
+    /// they're named for the copy to set; other environments, domains and a registry login stay.
+    Duplicate {
+        /// The copy's name.
+        name: String,
+        #[command(flatten)]
+        target: Target,
+    },
     /// Delete a service: its environments, instances, deployments and images (asks first;
     /// `--yes` doesn't).
     Delete {
@@ -1907,6 +1916,44 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 bail!("nothing to change: see `roll apps set --help`");
             }
             api.call(reqwest::Method::PATCH, &format!("/v1/apps/services/{}", enc(&s(&svc["id"]))), Some(Value::Object(body))).await?
+        }
+        AppsCmd::Duplicate { name, target } => {
+            let svc = service(api, &target).await?;
+            let id = enc(&s(&svc["id"]));
+            let prod = format!("/v1/apps/services/{id}/environments/production");
+            let (vars, values, links) = (api.get(&format!("{prod}/variables")).await?, api.get(&format!("{prod}/variables/values")).await?, api.get(&format!("/v1/apps/services/{id}/links")).await?);
+            // Its own variables (a reference's template as written); a sealed one is named, not copied.
+            let (mut copied, mut sealed) = (serde_json::Map::new(), Vec::new());
+            for v in vars["vars"].as_array().into_iter().flatten() {
+                let (n, source) = (s(&v["name"]), s(&v["source"]));
+                if source != "service" && source != "reference" {
+                    continue;
+                }
+                if v["sealed"] == true {
+                    sealed.push(n);
+                } else if let Some(t) = v["reference"].as_str() {
+                    copied.insert(n, json!(t));
+                } else if let Some(x) = values.get(&n) {
+                    copied.insert(n, x.clone());
+                }
+            }
+            let links: Vec<Value> = links.as_array().into_iter().flatten().map(|l| json!({ "kind": l["kind"], "ref": l["ref"], "prefix": l["prefix"] })).collect();
+            let mut body = json!({ "project": svc["project"], "name": name, "source": svc["source"], "build": svc["build"], "run": svc["run"] });
+            if !copied.is_empty() {
+                body["variables"] = Value::Object(copied);
+            }
+            if !links.is_empty() {
+                body["links"] = json!(links);
+            }
+            let made = api.post("/v1/apps/services", body).await?;
+            if !json_out {
+                println!("{}  {}", s(&made["id"]), s(&made["name"]));
+                if !sealed.is_empty() {
+                    eprintln!("set its sealed {} again: roll apps vars -s {} KEY=value --seal KEY", sealed.join(", "), s(&made["name"]));
+                }
+                return Ok(());
+            }
+            json!({ "service": made, "sealed": sealed })
         }
         AppsCmd::Delete { target, yes } => {
             let svc = service(api, &target).await?;

@@ -989,13 +989,14 @@ as documented.
 
 ## Duplicating a service
 
-Settings → Duplicate (Railway's) makes a new service in the project, beside the original on the
+Settings → Duplicate (Railway's; `roll apps duplicate <name>`) makes a new service in the project, beside the original on the
 canvas, with its source, build and run settings, links, and production's own variables (a
 reference's template as written). It's made with the calls a person can make, so it copies only
 what that person can read: sealed variables are never shown again, so they're named for the copy
 to set, and other environments, domains and a registry login stay with the original. A repo or
 image copy deploys at once, as any new one does. The settings round trip is
-`a_service_is_made_again_from_its_own_settings`; what's copied, `duplicate.test.ts`.
+`a_service_is_made_again_from_its_own_settings`; what's copied, `duplicate.test.ts` and
+`settings_through_the_cli`.
 
 ## A service and its database
 
