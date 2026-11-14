@@ -1050,7 +1050,10 @@ Ranked by what a person notices first. Done so far:
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-6. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+   `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
+   them (as `HandoffFailures` has) belongs with the stack's others.
+7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.
