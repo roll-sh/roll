@@ -913,6 +913,13 @@ compression plugins), else gzipped here (level 6) for files from 1 KiB to 8 MiB,
 and node (a site never changes; up to 32 MiB of a site's gzipped copies are kept). Each
 encoding has its own ETag, and `Vary: Accept-Encoding` goes on every such file.
 
+A page loaded before a deploy keeps working after it (Vercel's skew protection, for static
+sites): a fingerprinted file the live site doesn't have, which is what a lazy-loaded chunk of the
+old build is, is served from the environment's last three static deployments before it
+(`Apps::earlier_site_file`), where Vite's "failed to fetch dynamically imported module" would
+otherwise follow every deploy. Only fingerprinted names, so a page or file the new build removed
+is gone at once.
+
 A file sent as it is takes one byte range (`Range: bytes=…`, `Accept-Ranges: bytes`), so Safari
 plays a site's video and a download resumes: a 206 with `Content-Range`, a 416 past the end,
 and the whole file for several ranges or an `If-Range` that names another version.

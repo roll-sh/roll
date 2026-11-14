@@ -253,10 +253,23 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
         Some(crate::site_rules::Outcome::Serve(status, to)) => crate::sites::resolve(&site, &to, false).filter(|(_, s)| *s == 200).map(|(n, _)| (n, status)),
         None => crate::sites::resolve(&site, &path, tpl.spa),
     };
-    let Some((name, status)) = resolved else {
-        done(404, 0);
-        return not_found();
+    // A fingerprinted file the live site doesn't have may be an earlier deployment's, asked for by
+    // a page loaded before the deploy (a lazy-loaded chunk): served from there (skew protection).
+    let resolved = resolved.map(|(n, s)| (n.to_string(), s));
+    let (site, key, name, status) = match resolved {
+        Some((n, 200)) => (site, key, n, 200),
+        other => match apps.earlier_site_file(service, env, &key, &path).await {
+            Some((s, k, n)) => (s, k, n, 200),
+            None => match other {
+                Some((n, s)) => (site, key, n, s),
+                None => {
+                    done(404, 0);
+                    return not_found();
+                }
+            },
+        },
     };
+    let name = name.as_str();
     let ctype = crate::sites::content_type(name);
     // Compressed as Render's and Vercel's static sites are: the build's own `.br` or `.gz` of the
     // file, else gzipped here (once: a site never changes), for text-like files the client takes

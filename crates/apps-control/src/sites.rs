@@ -33,6 +33,10 @@ pub struct Site {
     pub used: std::sync::atomic::AtomicU64,
 }
 
+/// How many of an environment's earlier static deployments still answer for their fingerprinted
+/// files ([`Apps::earlier_site_file`]).
+pub const EARLIER_SITES: usize = 3;
+
 /// How long a site nobody asks for stays loaded (its index and gzipped copies).
 const IDLE: u64 = 15 * 60;
 
@@ -227,6 +231,49 @@ impl Apps {
         let k = key.clone();
         self.db(move |s| s.put_site(&k, n)).await?;
         Ok(Some(n))
+    }
+
+    /// `path`'s file from one of the environment's last [`EARLIER_SITES`] static deployments
+    /// before the live one (`live`: its site), when it's fingerprinted ([`fingerprinted`]): a page
+    /// loaded before a deploy still gets the chunks it asks for. The site, its key and the file.
+    pub(crate) async fn earlier_site_file(self: &Arc<Self>, service: &str, env: &str, live: &str, path: &str) -> Option<(Arc<Site>, String, String)> {
+        let name = path.trim_matches('/');
+        if !fingerprinted(name) {
+            return None;
+        }
+        let ek = crate::env_key(service, env);
+        let cached = self.earlier_sites.lock().get(&ek).filter(|(l, _)| l == live).map(|(_, k)| k.clone());
+        let keys = match cached {
+            Some(k) => k,
+            None => {
+                let (sid, e) = (service.to_string(), env.to_string());
+                let deps = self.db(move |s| s.deployments(&sid, &e, 20)).await.ok()?;
+                let mut keys: Vec<String> = Vec::new();
+                for d in deps.iter().filter(|d| d.status == crate::model::DeployStatus::Inactive && d.plan.as_ref().is_some_and(|p| p["start"] == apps_build::STATIC_START)) {
+                    if let Some(k) = d.image.as_deref().and_then(key).filter(|k| k != live && !keys.contains(k)) {
+                        keys.push(k);
+                    }
+                    if keys.len() == EARLIER_SITES {
+                        break;
+                    }
+                }
+                self.earlier_sites.lock().insert(ek.clone(), (live.to_string(), keys.clone()));
+                keys
+            }
+        };
+        for k in keys {
+            match self.site(&k).await {
+                Ok(site) if site.files.contains_key(name) => return Some((site, k, name.to_string())),
+                Ok(_) => {}
+                // Gone (its image removed): not looked for again.
+                Err(_) => {
+                    if let Some((_, ks)) = self.earlier_sites.lock().get_mut(&ek) {
+                        ks.retain(|x| *x != k);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// A site's files go with its image (the service's deletion): here, in object storage, and

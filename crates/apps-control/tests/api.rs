@@ -1208,6 +1208,22 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     let (hb, br) = get("/assets/pre.css", Some("gzip, br")).await;
     assert_eq!((hb["content-encoding"].to_str().unwrap(), &br[..]), ("br", &b"BROTLI-BYTES"[..]));
     assert!(get("/index.html", Some("gzip")).await.0.get("content-encoding").is_none(), "too small to bother");
+    // A page loaded before the next deploy still gets its old chunks (skew protection); the new
+    // site has its own, and a fingerprinted name no deployment had is still missing.
+    let chunk = |image: &Value| {
+        let h = image.as_str().unwrap().bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, c| (h ^ c as u64).wrapping_mul(0x0100_0000_01b3));
+        format!("/assets/chunk-{:08x}z9.js", h as u32)
+    };
+    let mut bundle = Vec::new();
+    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+    let req = Request::post(format!("/v1/apps/services/{id}/environments/production/deploys")).header("content-type", "application/gzip").body(Body::from(bundle)).unwrap();
+    let d2: Value = serde_json::from_slice(&w.api.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let d2 = settled(&w, &id, "production", d2["id"].as_str().unwrap()).await;
+    assert_ne!(d2["image"], d["image"]);
+    for (path, want) in [(chunk(&d["image"]), StatusCode::OK), (chunk(&d2["image"]), StatusCode::OK), ("/assets/chunk-0123abcdz9.js".to_string(), StatusCode::NOT_FOUND)] {
+        let r = site(&path).await.unwrap();
+        assert_eq!(r.status(), want, "{path}");
+    }
 
     // A cron service: runs to its exit, recorded.
     let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "nightly", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "0 3 * * *"} }))).await;

@@ -358,10 +358,14 @@ impl Runtime for Fake {
     }
 
     /// A static site: an index, a script, and a symlink that must never be served.
-    async fn export_files(&self, _image: &str, _dir: &str) -> anyhow::Result<super::VolumeStream> {
+    async fn export_files(&self, image: &str, _dir: &str) -> anyhow::Result<super::VolumeStream> {
         let mut b = tar::Builder::new(Vec::new());
         let big = "console.log('roll');\n".repeat(200);
-        let files: [(&str, &[u8]); 8] = [
+        // A fingerprinted chunk of this build's own, as Vite names them.
+        let h = image.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, c| (h ^ c as u64).wrapping_mul(0x0100_0000_01b3));
+        let chunk = format!("./assets/chunk-{:08x}z9.js", h as u32);
+        let files: [(&str, &[u8]); 9] = [
+            (chunk.as_str(), b"chunk()"),
             ("./assets/big.js", big.as_bytes()),
             ("./assets/pre.css", b"body{color:#000}"),
             ("./assets/pre.css.br", b"BROTLI-BYTES"),
