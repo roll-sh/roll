@@ -506,8 +506,12 @@ Ranked; the top item is in progress. A watchdog reads this list. Unblocked work 
 waits on a sibling PR reaching main is last.
 
 1. **People's tokens above a reach need an admin's approval** (GitHub's organization approval of
-   fine-grained tokens): a person asks for a token past a policy's reach (admin, reveal on
-   production, `*`); an admin approves it from the approvals page, and it works from then on.
+   fine-grained tokens; on #25, where people make their own). Policy: `approve_people_tokens:
+   [actions]` (e.g. reveal, admin, deploy). A person's token whose rules allow one of them is made
+   `pending`: not usable (`usable()` false, the gate answers `pending_approval`), listed for
+   admins on the access page with what it reaches, and `POST /v1/access/tokens/{id}/approve` or
+   `…/deny` (an admin's, never a token's; audited; the person mailed) decides it. Changing its
+   rules to reach more needs approval again. Tests in `roll-access/tests/access.rs` (users' part).
 2. **More of Supabase's and Neon's MCP surface**: TypeScript types from a schema, and two
    branches' schemas compared (Neon's `compare_database_schema`).
 3. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
