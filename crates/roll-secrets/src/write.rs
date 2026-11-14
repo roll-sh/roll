@@ -506,12 +506,14 @@ impl Secrets {
         for item in &mut out.items {
             let ItemAction::Set { link: Some(Some(link)), value, .. } = &item.action else { continue };
             let (link, has_value) = (link.clone(), value.is_some());
-            if let Err(e) = self.links.check(&link) {
-                result = Err(e);
-                break;
-            }
+            // The project's own resource first: a provider's check asks the product, which would
+            // say whether someone else's resource exists.
             if !resources.contains(&(link.kind.clone(), link.r#ref.clone())) {
                 result = Err(Error::BadRequest(self.not_linkable(project, &link.kind, &link.r#ref)));
+                break;
+            }
+            if let Err(e) = self.links.check(&link) {
+                result = Err(e);
                 break;
             }
             if link.mode != Mode::Managed || has_value {
