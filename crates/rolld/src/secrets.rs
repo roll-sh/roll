@@ -121,6 +121,72 @@ async fn kms_decrypt(conf: &aws_config::SdkConfig, ciphertext: &str) -> Result<V
     String::from_utf8(plain).map(Value::new).map_err(|_| "the KMS-decrypted deployment key isn't text".to_string())
 }
 
+/// Customers' own KMS keys for their projects' data keys (docs/secrets.md, "Customer-managed
+/// keys"): AWS KMS in the key's own region, with roll's credentials (the customer's key policy
+/// grants roll's role), the encryption context naming roll secrets and the project. Errors name
+/// KMS's code, never key material.
+pub struct CustomerKms {
+    conf: tokio::sync::OnceCell<aws_config::SdkConfig>,
+}
+
+impl CustomerKms {
+    pub fn new(conf: Option<aws_config::SdkConfig>) -> CustomerKms {
+        CustomerKms { conf: tokio::sync::OnceCell::new_with(conf) }
+    }
+
+    async fn client(&self, key: &str) -> Result<aws_sdk_kms::Client, String> {
+        let conf = self.conf.get_or_init(|| aws_config::load_defaults(aws_config::BehaviorVersion::latest())).await;
+        // arn:aws:kms:<region>:<account>:key/<id>: the key's own region.
+        let region = key.split(':').nth(3).filter(|r| !r.is_empty()).ok_or("the key's ARN names no region")?;
+        Ok(aws_sdk_kms::Client::from_conf(aws_sdk_kms::config::Builder::from(conf).region(aws_sdk_kms::config::Region::new(region.to_string())).build()))
+    }
+
+    // The store calls from its blocking threads (and nothing else may): wait for KMS there.
+    fn block<T>(f: impl std::future::Future<Output = T>) -> T {
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
+    }
+}
+
+fn kms_code<E: aws_sdk_kms::error::ProvideErrorMetadata>(e: &E) -> String {
+    e.code().unwrap_or("no answer").to_string()
+}
+
+impl roll_secrets::kms::ProjectKms for CustomerKms {
+    fn encrypt(&self, key: &str, project: &str, plain: &[u8]) -> Result<Vec<u8>, String> {
+        Self::block(async {
+            let out = self
+                .client(key)
+                .await?
+                .encrypt()
+                .key_id(key)
+                .plaintext(aws_sdk_kms::primitives::Blob::new(plain))
+                .encryption_context("roll", "secrets")
+                .encryption_context("project", project)
+                .send()
+                .await
+                .map_err(|e| kms_code(&e))?;
+            out.ciphertext_blob.map(|b| b.into_inner()).ok_or_else(|| "KMS answered without a ciphertext".to_string())
+        })
+    }
+
+    fn decrypt(&self, key: &str, project: &str, ciphertext: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+        Self::block(async {
+            let out = self
+                .client(key)
+                .await?
+                .decrypt()
+                .key_id(key)
+                .ciphertext_blob(aws_sdk_kms::primitives::Blob::new(ciphertext))
+                .encryption_context("roll", "secrets")
+                .encryption_context("project", project)
+                .send()
+                .await
+                .map_err(|e| kms_code(&e))?;
+            out.plaintext.map(|b| zeroize::Zeroizing::new(b.into_inner())).ok_or_else(|| "KMS answered without a plaintext".to_string())
+        })
+    }
+}
+
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     #[cfg(unix)]
@@ -146,7 +212,8 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     let web_url = std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.trim().is_empty());
     // Syncs' webhooks go to private addresses only where roll code's may (local development).
     let allow_private = args.code_webhook_allow_private.unwrap_or(open);
-    let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))), grants, people: Some(Arc::new(people)) };
+    let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))), grants, people: Some(Arc::new(people)), kms: Some(Arc::new(CustomerKms::new(None))),
+    };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
     // A deleted project's secrets go with it.
@@ -841,6 +908,7 @@ mod tests {
             deliver: None,
             grants: None,
             people: None,
+            kms: None,
         };
         let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
         let set = axum::http::Request::put(format!("/v1/secrets/projects/{project}/environments/production/secrets/DB_URL"))
@@ -874,6 +942,48 @@ mod tests {
         assert!(roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap().status().is_success());
         assert_ne!(apps.digest(&project, "production").await.unwrap(), Some(before));
         assert_eq!(apps.digest(&project, "pr-9").await.unwrap(), None);
+    }
+
+    /// A customer's key wraps a project's data key: Encrypt and Decrypt name the key and carry the
+    /// project in the encryption context, in the key's own region; a refusal is KMS's code.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_customer_key_wraps_with_the_project_as_its_context() {
+        use base64::Engine as _;
+        use roll_secrets::kms::ProjectKms;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let seen: Arc<Mutex<Vec<(String, String, Json)>>> = Default::default();
+        let s = seen.clone();
+        let app = axum::Router::new().fallback(move |headers: HeaderMap, body: axum::body::Bytes| {
+            let s = s.clone();
+            async move {
+                let req: Json = serde_json::from_slice(&body).unwrap_or_default();
+                let target = headers.get("x-amz-target").and_then(|t| t.to_str().ok()).unwrap_or_default().to_string();
+                let region = headers.get("authorization").and_then(|a| a.to_str().ok()).and_then(|a| a.split('/').nth(2)).unwrap_or_default().to_string();
+                s.lock().unwrap().push((target.clone(), region, req.clone()));
+                let ok = req["KeyId"] == "arn:aws:kms:ap-south-1:999999999999:key/c1" && req["EncryptionContext"] == json!({ "roll": "secrets", "project": "prj_a" });
+                match (target.as_str(), ok) {
+                    ("TrentService.Encrypt", true) => (axum::http::StatusCode::OK, axum::Json(json!({ "KeyId": req["KeyId"], "CiphertextBlob": b64(b"wrapped") }))),
+                    ("TrentService.Decrypt", true) if req["CiphertextBlob"] == json!(b64(b"wrapped")) => (axum::http::StatusCode::OK, axum::Json(json!({ "KeyId": req["KeyId"], "Plaintext": b64(b"v1:inner") }))),
+                    _ => (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({ "__type": "AccessDeniedException", "message": "no" }))),
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conf = aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new("eu-west-1"))
+            .endpoint_url(&base)
+            .credentials_provider(aws_sdk_kms::config::SharedCredentialsProvider::new(aws_sdk_kms::config::Credentials::new("AKIATEST", "secret", None, None, "test")))
+            .build();
+        let kms = super::CustomerKms::new(Some(conf));
+        let key = "arn:aws:kms:ap-south-1:999999999999:key/c1";
+        let ct = kms.encrypt(key, "prj_a", b"v1:inner").unwrap();
+        assert_eq!(kms.decrypt(key, "prj_a", &ct).unwrap().as_slice(), b"v1:inner");
+        assert_eq!(kms.decrypt(key, "prj_other", &ct).unwrap_err(), "AccessDeniedException", "another project's context");
+        let regions: Vec<String> = seen.lock().unwrap().iter().map(|(_, r, _)| r.clone()).collect();
+        assert!(regions.iter().all(|r| r == "ap-south-1"), "the key's own region: {regions:?}");
     }
 
     /// A KMS that decrypts one ciphertext, and only with roll secrets' encryption context.

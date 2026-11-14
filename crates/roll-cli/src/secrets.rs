@@ -282,6 +282,12 @@ pub enum Secrets {
     Tokens(Tokens),
     /// Where a key is set, in every project you can read (`STRIPE_*` for a prefix). Never values.
     Find { key: String },
+    /// The customer-managed key wrapping the project's data key: show it, `set` a KMS key's ARN,
+    /// or `rm` it (roll's deployment key alone again).
+    Kms {
+        #[command(subcommand)]
+        cmd: Option<KmsCmd>,
+    },
     /// A key pair for backups: the secret key written to a file only you can read, the public key
     /// printed (give it to `backup --to`).
     Keygen {
@@ -494,6 +500,14 @@ pub enum Requests {
         bypass: bool,
     },
     Close { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum KmsCmd {
+    /// Wrap the project's data key with this KMS key (roll checks it can use it first).
+    Set { key: String },
+    /// Back to roll's deployment key alone (the KMS key must still answer).
+    Rm,
 }
 
 #[derive(Subcommand)]
@@ -1171,6 +1185,20 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 return print(&v);
             }
             println!("{} is {}", s(&v["id"]), s(&v["state"]));
+        }
+        Secrets::Kms { cmd } => {
+            let v = match cmd {
+                None => c.call(Method::GET, &format!("{}/kms", c.base()), None).await?,
+                Some(KmsCmd::Set { key }) => c.call(Method::PUT, &format!("{}/kms", c.base()), Some(json!({ "key": key }))).await?,
+                Some(KmsCmd::Rm) => c.call(Method::DELETE, &format!("{}/kms", c.base()), None).await?,
+            };
+            if json_out {
+                return print(&v);
+            }
+            match v["key"].as_str() {
+                Some(k) => println!("the data key is wrapped by {k}: revoking roll's use of it locks roll out of this project"),
+                None => println!("no customer-managed key: roll's deployment key seals the data key"),
+            }
         }
         Secrets::Tokens(t) => match t {
             Tokens::Ls => {

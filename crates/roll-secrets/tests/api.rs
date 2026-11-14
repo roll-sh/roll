@@ -182,8 +182,34 @@ impl roll_workspace::Owners for People {
     }
 }
 
+/// A customer's KMS: its key policy pins one project (or, unpinned, takes any), and it stops
+/// decrypting once revoked.
+#[derive(Default)]
+struct FakeKms {
+    revoked: Mutex<bool>,
+    pinned: Mutex<Option<String>>,
+}
+
+impl roll_secrets::kms::ProjectKms for FakeKms {
+    fn encrypt(&self, key: &str, project: &str, plain: &[u8]) -> Result<Vec<u8>, String> {
+        if self.pinned.lock().unwrap().as_deref().is_some_and(|p| p != project) {
+            return Err("AccessDeniedException".into());
+        }
+        Ok([format!("{key}|{project}|").as_bytes(), plain].concat())
+    }
+    fn decrypt(&self, key: &str, project: &str, ct: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+        if *self.revoked.lock().unwrap() {
+            return Err("AccessDeniedException".into());
+        }
+        let prefix = format!("{key}|{project}|");
+        ct.strip_prefix(prefix.as_bytes()).map(|p| zeroize::Zeroizing::new(p.to_vec())).ok_or_else(|| "InvalidCiphertextException".into())
+    }
+}
+
 struct Api {
     sent: Arc<Sent>,
+    kms: Arc<FakeKms>,
+    ws: Arc<roll_workspace::Workspace>,
     people: Arc<People>,
     router: Router,
     secrets: Arc<Secrets>,
@@ -208,11 +234,12 @@ impl Api {
         syncs.register(sync.clone());
         let sent = Arc::new(Sent::default());
         let people = Arc::new(People::default());
+        let kms = Arc::new(FakeKms::default());
         ws.set_owners(people.clone());
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: None, people: Some(people.clone()) };
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: None, people: Some(people.clone()), kms: Some(kms.clone()) };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
-        let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets.clone()));
-        let mut api = Api { sent, people, router, secrets, db, fake, sync, project: String::new(), _dir: dir };
+        let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone()));
+        let mut api = Api { sent, kms, ws: ws.clone(), people, router, secrets, db, fake, sync, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -1134,6 +1161,57 @@ async fn a_signed_in_person_manages_only_their_own_projects_secrets() {
     for t in [&token, &child] {
         assert_eq!(api.req(Method::GET, &at(&mine, "/environments"), None, Some(t)).await.0, StatusCode::UNAUTHORIZED);
     }
+}
+
+#[tokio::test]
+async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_out() {
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_live_123").await;
+    let key = "arn:aws:kms:eu-west-1:123456789012:key/k1";
+    // A key whose policy would wrap any project's data key (another customer's, say) is refused.
+    let (s, e) = api.call(Method::PUT, "/kms", Some(json!({ "key": key }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("doesn't pin the project"), "{e}");
+    *api.kms.pinned.lock().unwrap() = Some(api.project.clone());
+    let set = api.ok(Method::PUT, "/kms", Some(json!({ "key": key }))).await;
+    assert_eq!(set["key"], key);
+    assert_eq!(api.ok(Method::GET, "/kms", None).await["key"], key);
+    let stored: String = api.db.read(|c| c.query_row("SELECT dek FROM projects WHERE project_id = ?", [api.project.as_str()], |r| r.get(0))).unwrap();
+    assert!(stored.starts_with("kms:v1:"), "{stored}");
+    assert_eq!(api.values("production", "/").await["values"]["STRIPE_KEY"], "sk_live_123", "the values didn't change");
+    let node = |keyring: Keyring| {
+        let opts = Options { keyring: Ok(keyring), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()) };
+        Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap())
+    };
+    // The deployment key rotates: health counts the wrapped project as not resealed until the
+    // sweeper reseals it inside its wrap (the previous key can't be dropped before).
+    let rotated = node(Keyring::new(&"n".repeat(32), Some(&"k".repeat(32))).unwrap());
+    assert_eq!(rotated.health().unwrap()["resealed"], json!(0));
+    rotated.sweep().unwrap();
+    assert_eq!(rotated.health().unwrap()["resealed"], "all");
+    let fresh = node(Keyring::new(&"n".repeat(32), None).unwrap());
+    let values = |s: Arc<Secrets>| {
+        let req = Request::get(format!("/v1/secrets/projects/{}/environments/production/values", api.project)).body(Body::empty()).unwrap();
+        async move {
+            let res = roll_secrets::router(s).oneshot(req).await.unwrap();
+            (res.status(), String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    assert!(values(fresh.clone()).await.1.contains("sk_live_123"), "opens with the new deployment key alone");
+    // The customer revokes it: a node without the key in memory is refused (423, not an outage).
+    *api.kms.revoked.lock().unwrap() = true;
+    let (status, body) = values(node(Keyring::new(&"n".repeat(32), None).unwrap())).await;
+    assert_eq!(status, StatusCode::LOCKED);
+    assert!(body.contains("kms_denied") && !body.contains("sk_live"), "{body}");
+    // Nor can the wrapping be changed then, even by a node that has the key in memory.
+    assert_eq!(roll_secrets::router(fresh).oneshot(Request::delete(format!("/v1/secrets/projects/{}/kms", api.project)).body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::LOCKED);
+    // Back with roll alone: no KMS needed any more.
+    *api.kms.revoked.lock().unwrap() = false;
+    let opts = Options { keyring: Ok(Keyring::new(&"n".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()) };
+    let after = Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap());
+    assert!(roll_secrets::router(after.clone()).oneshot(Request::delete(format!("/v1/secrets/projects/{}/kms", api.project)).body(Body::empty()).unwrap()).await.unwrap().status().is_success());
+    *api.kms.revoked.lock().unwrap() = true;
+    assert!(values(after).await.1.contains("sk_live_123"));
 }
 
 #[tokio::test]
