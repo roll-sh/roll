@@ -177,6 +177,8 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
   until the answer ("still running (it may be waiting for a person to approve it)"), so a client
   that times out on silence keeps waiting for a person (checked with the TypeScript SDK's
   `onprogress`). The call stays the request's: a client that goes away cancels it, as before.
+- `serverInfo` carries roll's Horizon mark as an icon (2025-11-25 `icons`, an inline SVG: the
+  dashboard's favicon), for clients that show one next to the server.
 - Requests with an `Origin` header must come from the dashboard's or the API's origin (DNS
   rebinding).
 - Results come back as `structuredContent` (the route's JSON; arrays as `{"items": […]}`) and a
@@ -433,19 +435,28 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
-   lands after #20, #25 and #30): kept merged both ways; secrets' tenth-review fixes are in #30
-   (an admin's token reaches operator projects, project-wide metadata needs a rule over the whole
-   project). The canvas check costs nothing measurable (`gate_latency`, release, pinned, A/B
-   twice: a token's one-resource request 83–115 µs p50 with it, 105–116 µs without).
-2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
-   rolld, and send each thread its conflicts and their resolutions.
-3. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+1. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+   rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
+   route classified, per method, with #25).
+2. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+   lands after #20, #25 and #30): kept merged both ways (secrets' head of 2026-11-14 merged: a
+   forgotten project's credentials revoked first and retried by the sweeper, with the integration's
+   `identity_logins` kept in what's forgotten). The canvas check costs nothing measurable
+   (`gate_latency`, release, pinned, A/B twice: 83–115 µs p50 with it, 105–116 µs without).
+3. *Waits on secrets' transit rows (feature/roll-secrets-transit, #47):* `.index("name")` on the
+   per-key routes, then `secrets_transit_sign`, `_verify` and `_hmac` as tools (body shapes asked
+   for) and a key picker in the builder like search's indices (from `GET …/transit`).
+4. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-4. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
+
+Considered and left out: a connection narrowed to one project (Supabase's `project_ref`): their
+tokens are account-wide; a roll token's rules already name projects, and the builder's presets
+start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
+`structuredContent` as JSON anyway.
 
 Done lately: a person's own token's page tested to show only their reach; `roll token list
 --product/--resource` and `--workloads`; a workload token makes no tokens; the ninth review's
@@ -458,14 +469,17 @@ start and pre-deploy commands, schedule, kind, port, volume and `run.public`, ar
 a day or less); workload tokens (`Access::mint_workload`: minutes, within an identity's scope, owned
 by its maker, out of the list and caps) for secrets' identity logins; a person's own tokens' news is
 mailed to them (an approval waiting on them, used from a new network, revoked as leaked, about to
-expire; only their own, never a secret); `secrets_list_rotations` and `secrets_ca_certificates`
-(secrets #48, #44); `tools/list` 11% smaller with every product on (183 tools, 150 → 134 KB: the
-approval argument's description shortened, the title not repeated in annotations); apps' plan,
-activity, deploys, links, cron runs and limits as MCP tools (apps-next #26; the shell, tunnel, hooks
-and webhook notifications stay out); secrets' history and workflow as MCP tools (changes, versions,
-compare, rotate, promote, change requests and proposing one: how an agent changes a protected
-environment); `previews_revoke_share` and `previews_settings` (previews-next #28); `apps_pending`
-and `apps_deploy_commits` (what the next deploy changes, what a deploy brought; apps-next #26), and
+expire; only their own, never a secret); roll's mark as the server's icon (`serverInfo.icons`); a
+rule can narrow a secrets project to some of its encryption keys (`{id, index}`, as search's
+indices: signing with one key needn't be write on the project; secrets' transit rows add
+`.index("name")`); `secrets_list_rotations` and `secrets_ca_certificates` (secrets #48, #44);
+`tools/list` 11% smaller with every product on (183 tools, 150 → 134 KB: the approval argument's
+description shortened, the title not repeated in annotations); apps' plan, activity, deploys, links,
+cron runs and limits as MCP tools (apps-next #26; the shell, tunnel, hooks and webhook notifications
+stay out); secrets' history and workflow as MCP tools (changes, versions, compare, rotate, promote,
+change requests and proposing one: how an agent changes a protected environment);
+`previews_revoke_share` and `previews_settings` (previews-next #28); `apps_pending` and
+`apps_deploy_commits` (what the next deploy changes, what a deploy brought; apps-next #26), and
 `debug_failing_service` uses them; `roll token tools <id>` (what an agent sees, from the CLI); roll
 code's stream and device-login caps take the client the trusted proxy saw (the right-most
 `X-Forwarded-For` entry that isn't the proxy, over every line, only an address), not the left-most a
