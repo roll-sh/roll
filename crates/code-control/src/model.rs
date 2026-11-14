@@ -337,6 +337,12 @@ pub struct PreviewEnvironment {
 pub struct PreviewSpeedBudget {
     pub load_ms: u32,
     pub bytes: u64,
+    /// Largest contentful paint; 0 is no limit.
+    #[serde(default)]
+    pub lcp_ms: u32,
+    /// Cumulative layout shift; 0 is no limit.
+    #[serde(default)]
+    pub cls: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -389,6 +395,9 @@ pub struct PreviewBaseChange {
     /// How long the branch's first page took to load where it was compared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_ms: Option<u32>,
+    /// Its largest contentful paint there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lcp_ms: Option<u32>,
     /// Accessibility problems its first page has that the branch's didn't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub a11y_added: Option<u32>,
@@ -428,6 +437,11 @@ pub struct PreviewPageSpeed {
     pub bytes: u64,
     /// The load at the head before, to compare.
     pub before_load_ms: Option<u32>,
+    /// Core Web Vitals: largest contentful paint and cumulative layout shift.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lcp_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cls: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

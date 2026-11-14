@@ -838,7 +838,14 @@ type Settings = {
     comment's checks say "over its budget". Against main too (as Vercel's Speed Insights compare
     with production): the baseline's timing at the head it was compared with rides along
     (`base_change.load_ms`), and a difference past the noise (100 ms and a tenth) is said in the
-    comment's checks, the sheet and the change page ("300 ms slower than main"). Accessibility
+    comment's checks, the sheet and the change page ("300 ms slower than main"). Core Web
+    Vitals come from the same load (Vercel's Speed Insights, Lighthouse): a `PerformanceObserver`
+    put in before the page's first script records the last largest-contentful-paint candidate and
+    the largest session window of layout shifts (under 1 s apart, 5 s at most, none right after
+    input, as web-vitals counts them), so `page_speed` has `lcp_ms` and `cls`; main's LCP rides
+    along too (`base_change.lcp_ms`, "LCP 400 ms slower than main"), and the budget takes
+    `lcp_ms` and `cls` ("over its budget (0.10 CLS)"). Lab numbers, from one load in roll's
+    browser: field data (real visitors) is a different measure. Accessibility
     the same way (as Netlify's checks count what a deploy adds): the baseline's report there is
     kept, and the change answers for the problems it added, per kind and a language or title it
     lost (`base_change.a11y_added`; "5 accessibility problems, 1 new against main"), and errors
@@ -1021,6 +1028,8 @@ Ranked by what a person notices first. Done so far:
 - stable screenshots: animations stopped and `github.hide` selectors blanked before each capture;
 - where a page changed, as a diff image (`?diff=base|previous`, the sheet's Diff);
 - a speed budget per project (`github.budget`, the `roll/speed` status);
+- Core Web Vitals per push (LCP and CLS from the screenshot's load, LCP against main's, both in
+  the budget);
 - screenshot comparisons off the async runtime, and a test for reading a run's pages;
 - the previews waiting for a visual review first in the list, tagged "to review";
 - `roll preview screenshot` (any screenshot or diff to a file);
@@ -1081,30 +1090,26 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Core Web Vitals per push** (Vercel Speed Insights, Lighthouse): the largest contentful
-   paint and layout shift measured in the screenshot's session, compared with main's at the
-   merge base ("LCP 1.8 s, 400 ms slower than main"), and in the speed budget (`github.budget`
-   gains `lcp_ms`, `cls`).
-2. **A visual threshold per project** (Chromatic's `diffThreshold`, Percy's sensitivity): a page
+1. **A visual threshold per project** (Chromatic's `diffThreshold`, Percy's sensitivity): a page
    counts as changed only past a share of its pixels (`github.visual_threshold`, default 0), for
    a page whose clock or rotating banner `hide` can't name.
-3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+5. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-7. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1117,7 +1122,7 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

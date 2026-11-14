@@ -314,6 +314,17 @@ export function PreviewSheet({
                 {p.base_change && thanMain(p.page_speed.now.load_ms, p.base_change.load_ms, p.base_change.branch) ? ` · ${thanMain(p.page_speed.now.load_ms, p.base_change.load_ms, p.base_change.branch)}` : ""}
               </p>
             )}
+            {p.page_speed && (p.page_speed.now.lcp_ms != null || p.page_speed.now.cls != null) && (
+              <p className="mt-0.5 font-mono text-[11px] text-subtle tabular-nums" title="Core Web Vitals, measured by the browser that took the screenshot">
+                {[
+                  p.page_speed.now.lcp_ms != null ? `LCP ${duration(p.page_speed.now.lcp_ms)}` : "",
+                  p.page_speed.now.lcp_ms != null && p.base_change ? thanMain(p.page_speed.now.lcp_ms, p.base_change.lcp_ms, p.base_change.branch) : "",
+                  p.page_speed.now.cls != null ? `CLS ${p.page_speed.now.cls.toFixed(2)}` : "",
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </p>
+            )}
 
             <Label>Cost</Label>
             <div className="grid grid-cols-3 gap-2">

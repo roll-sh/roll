@@ -77,6 +77,7 @@ function Form({
   onSaved: (s: PreviewSettings) => void;
 }) {
   const [s, setS] = useState(saved);
+  const budget = s.github.budget ?? { load_ms: 0, bytes: 0 };
   const [branches, setBranches] = useState(saved.branches.join(", "));
   const [paths, setPaths] = useState(saved.paths.join(", "));
   const [ignorePaths, setIgnorePaths] = useState(saved.ignore_paths.join(", "));
@@ -404,13 +405,16 @@ function Form({
         {s.github.screenshot && (
           <div className="grid grid-cols-2 gap-3">
             <Field label="Speed budget (ms)" note="Over it, roll/speed fails. 0 is no limit.">
-              <Num value={s.github.budget?.load_ms ?? 0} onChange={(v) => set("github", { ...s.github, budget: { load_ms: v, bytes: s.github.budget?.bytes ?? 0 } })} />
+              <Num value={s.github.budget?.load_ms ?? 0} onChange={(v) => set("github", { ...s.github, budget: { ...budget, load_ms: v } })} />
             </Field>
             <Field label="Size budget (KB)" note="The first page and what it loads.">
-              <Num
-                value={Math.round((s.github.budget?.bytes ?? 0) / 1024)}
-                onChange={(v) => set("github", { ...s.github, budget: { load_ms: s.github.budget?.load_ms ?? 0, bytes: v * 1024 } })}
-              />
+              <Num value={Math.round(budget.bytes / 1024)} onChange={(v) => set("github", { ...s.github, budget: { ...budget, bytes: v * 1024 } })} />
+            </Field>
+            <Field label="LCP budget (ms)" note="Largest contentful paint; Core Web Vitals call up to 2500 good.">
+              <Num value={budget.lcp_ms ?? 0} onChange={(v) => set("github", { ...s.github, budget: { ...budget, lcp_ms: v } })} />
+            </Field>
+            <Field label="Layout shift budget" note="Cumulative layout shift; up to 0.1 is good.">
+              <Num value={budget.cls ?? 0} step="any" onChange={(v) => set("github", { ...s.github, budget: { ...budget, cls: v } })} />
             </Field>
           </div>
         )}

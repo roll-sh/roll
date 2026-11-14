@@ -290,6 +290,9 @@ case "$SHOT" in *PNG) ;; *) echo "the screenshot should be a PNG: $SHOT"; exit 1
 # The same load timed the page (shot.js over the DevTools pipe).
 SPEED=$(api GET "/v1/previews/$PV" | jq_ "('load %s ms, first byte %s ms, %s bytes' % (d['page_speed']['now']['load_ms'], d['page_speed']['now']['ttfb_ms'], d['page_speed']['now']['bytes'])) if d.get('page_speed') and d['page_speed']['now']['load_ms'] > 0 else ''")
 [ -n "$SPEED" ] || { echo "the screenshot's load should have timed the page"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:6]]"; exit 1; }
+# Core Web Vitals from the same load: the page's text is its largest paint, and nothing shifts.
+VITALS=$(api GET "/v1/previews/$PV" | jq_ "'LCP %s ms, CLS %s' % (d['page_speed']['now'].get('lcp_ms'), d['page_speed']['now'].get('cls'))")
+case "$VITALS" in "LCP "[1-9]*" ms, CLS 0"*) ;; *) echo "the screenshot's load should measure Core Web Vitals: $VITALS"; exit 1;; esac
 # A public preview's change carries a signed link to it (the pull request comment's image),
 # which opens without credentials; a changed signature doesn't.
 api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"public"}' >/dev/null
@@ -567,6 +570,7 @@ cat <<EOF
 | NoSQL: app.users.email in the branch / a filter on the real address there | $NOSQL_READ / $NOSQL_FILTER |
 | NoSQL: a mask on app.users_by_email's key, set | $KEY_MASK |
 | What each branch hands the preview's code | $DATA |
+| Core Web Vitals of the first page (the screenshot's load) | $VITALS |
 | Postgres users.email in the branch / in the parent | $PG_MASKED / $PG_PARENT |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |

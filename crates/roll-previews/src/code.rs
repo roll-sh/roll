@@ -125,8 +125,9 @@ impl CodeSource {
                 head: Some(p.head.clone()),
                 schema_changes: p.schema_changes.clone(),
                 expires_at: p.goes_at,
-                base_change: p.base_change.as_ref().map(|b| code_control::model::PreviewBaseChange { branch: b.branch.clone(), percent: b.percent, phone_percent: b.phone_percent, load_ms: b.load_ms, a11y_added: b.a11y_added, errors_added: b.errors_added }),
-                speed_budget: Some(code_control::model::PreviewSpeedBudget { load_ms: s.github.budget.load_ms, bytes: s.github.budget.bytes }).filter(|b| b.load_ms > 0 || b.bytes > 0),
+                base_change: p.base_change.as_ref().map(|b| code_control::model::PreviewBaseChange { branch: b.branch.clone(), percent: b.percent, phone_percent: b.phone_percent, load_ms: b.load_ms, lcp_ms: b.lcp_ms, a11y_added: b.a11y_added, errors_added: b.errors_added }),
+                speed_budget: Some(code_control::model::PreviewSpeedBudget { load_ms: s.github.budget.load_ms, bytes: s.github.budget.bytes, lcp_ms: s.github.budget.lcp_ms, cls: s.github.budget.cls })
+                    .filter(|b| b.load_ms > 0 || b.bytes > 0 || b.lcp_ms > 0 || b.cls > 0.0),
                 pages: p
                     .pages
                     .iter()
@@ -159,6 +160,8 @@ impl CodeSource {
                     load_ms: v.now.load_ms,
                     bytes: v.now.bytes,
                     before_load_ms: v.before.as_ref().map(|b| b.load_ms),
+                    lcp_ms: v.now.lcp_ms,
+                    cls: v.now.cls,
                 }),
                 visual_change: p.visual_change.as_ref().map(|v| code_control::model::PreviewVisualChange { since: v.since.clone(), percent: v.percent, phone_percent: v.phone_percent }),
                 earlier: p.earlier.iter().map(|x| code_control::model::PreviewEarlier { service: x.service.clone(), head: x.revision.clone(), url: x.url.clone() }).collect(),

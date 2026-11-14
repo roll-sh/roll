@@ -95,7 +95,7 @@ export interface Preview {
   /** How much the page changed since the screenshot at an earlier head (`since`). */
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
   /** How much its page differs from the project's preview of the default branch. */
-  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; a11y_added?: number | null; errors_added?: number | null } | null;
+  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null } | null;
   /** The project's other pages (`github.pages`) at the latest screenshot. */
   pages?: PageCheck[];
   /** Its visual review (`github.visual_review`): whether how its pages look against the baseline was accepted at this head. */
@@ -166,12 +166,25 @@ export interface PageCheck {
   base_percent: number | null;
 }
 
+/** How slow and heavy the first page may get (0: no limit): over it, `roll/speed` fails. */
+export interface SpeedBudget {
+  load_ms: number;
+  bytes: number;
+  /** Largest contentful paint (Core Web Vitals' "good": up to 2500). */
+  lcp_ms?: number;
+  /** Cumulative layout shift ("good": up to 0.1). */
+  cls?: number;
+}
+
 /** A page's load, as the browser that took its screenshot timed it. */
 export interface PageSpeed {
   ttfb_ms: number;
   fcp_ms: number | null;
   load_ms: number;
   bytes: number;
+  /** Core Web Vitals: largest contentful paint, and cumulative layout shift (its largest session window). */
+  lcp_ms?: number | null;
+  cls?: number | null;
 }
 
 /** A preview page's accessibility problems in words ("3 images without alt text", "no title"). */
@@ -212,7 +225,7 @@ export interface PreviewSettings {
   secrets: { base: string; allow_production: boolean };
   /** A patch replaces the whole map. */
   env: Record<string, string>;
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: { load_ms: number; bytes: number } };
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget };
   /** "link": a preview's URLs need its link (its access token once, then a cookie). */
   access: "link" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */

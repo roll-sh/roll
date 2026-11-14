@@ -44,11 +44,36 @@ const once = (method) =>
     listeners.add(l);
   });
 const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
+// Core Web Vitals, observed from before the page's first script (they aren't in the timeline's
+// entries): the last largest-contentful-paint candidate, and the largest session window of layout
+// shifts (shifts under 1 s apart, 5 s at most, none right after input), as web-vitals counts it.
+const VITALS = `(() => {
+  const v = (window.__rollVitals = { lcp: null, cls: 0 });
+  try {
+    new PerformanceObserver((l) => { for (const e of l.getEntries()) v.lcp = e.startTime; }).observe({ type: "largest-contentful-paint", buffered: true });
+  } catch {}
+  let win = 0, first = 0, last = 0;
+  try {
+    new PerformanceObserver((l) => {
+      for (const e of l.getEntries()) {
+        if (e.hadRecentInput) continue;
+        if (win && e.startTime - last < 1000 && e.startTime - first < 5000) win += e.value;
+        else { win = e.value; first = e.startTime; }
+        last = e.startTime;
+        v.cls = Math.max(v.cls, win);
+      }
+    }).observe({ type: "layout-shift", buffered: true });
+  } catch {}
+})()`;
 const SPEED = `JSON.stringify((() => {
   const n = performance.getEntriesByType("navigation")[0] || {};
   const fcp = performance.getEntriesByName("first-contentful-paint")[0];
   const bytes = [n, ...performance.getEntriesByType("resource")].reduce((s, e) => s + (e.transferSize || 0), 0);
-  return { ttfb_ms: Math.round(n.responseStart || 0), fcp_ms: fcp ? Math.round(fcp.startTime) : null, load_ms: Math.round(n.loadEventEnd || n.duration || 0), bytes };
+  const v = window.__rollVitals;
+  return {
+    ttfb_ms: Math.round(n.responseStart || 0), fcp_ms: fcp ? Math.round(fcp.startTime) : null, load_ms: Math.round(n.loadEventEnd || n.duration || 0), bytes,
+    lcp_ms: v && typeof v.lcp === "number" ? Math.round(v.lcp) : null, cls: v && typeof v.cls === "number" ? Math.round(v.cls * 1000) / 1000 : null,
+  };
 })())`;
 const errors = [];
 const failed = [];
@@ -102,6 +127,7 @@ const still = async (sessionId) => {
   await send("Page.enable", {}, sessionId);
   await send("Runtime.enable", {}, sessionId);
   await send("Network.enable", {}, sessionId);
+  await send("Page.addScriptToEvaluateOnNewDocument", { source: VITALS }, sessionId).catch(() => null);
   const loaded = once("Page.loadEventFired");
   await send("Page.navigate", { url: process.env.URL }, sessionId);
   await Promise.race([loaded, sleep(45000)]);

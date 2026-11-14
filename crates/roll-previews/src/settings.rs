@@ -157,6 +157,10 @@ pub struct GithubRule {
 pub struct Budget {
     pub load_ms: u32,
     pub bytes: u64,
+    /// Largest contentful paint (Core Web Vitals' "good" is up to 2500).
+    pub lcp_ms: u32,
+    /// Cumulative layout shift ("good" is up to 0.1).
+    pub cls: f64,
 }
 
 pub const MAX_HIDE: usize = 20;
@@ -376,8 +380,9 @@ impl Settings {
         if self.github.hide.len() > MAX_HIDE || !self.github.hide.iter().all(|s| selector_ok(s)) {
             return bad(format!("github.hide: at most {MAX_HIDE} CSS selectors of up to 200 characters (no braces, semicolons or comments)"));
         }
-        if self.github.budget.load_ms > 600_000 || self.github.budget.bytes > 10 << 30 {
-            return bad("github.budget: load_ms up to 600000, bytes up to 10 GiB".into());
+        let b = &self.github.budget;
+        if b.load_ms > 600_000 || b.bytes > 10 << 30 || b.lcp_ms > 600_000 || !(0.0..=100.0).contains(&b.cls) {
+            return bad("github.budget: load_ms and lcp_ms up to 600000, bytes up to 10 GiB, cls from 0 to 100".into());
         }
         let pages = &self.github.pages;
         if pages.len() > MAX_PAGES || pages.iter().any(|p| page_entry(p).is_none() || p == "/") || pages.iter().enumerate().any(|(i, p)| pages[..i].contains(p)) {

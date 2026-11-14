@@ -385,7 +385,9 @@ fn speed_line(s: &crate::model::PreviewPageSpeed) -> String {
         None => String::new(),
     };
     let paint = s.fcp_ms.map(|f| format!(", first paint {}", t(f))).unwrap_or_default();
-    format!("Its first page loads in {}{moved}{paint}, {kb}, first byte {}.\n\n", t(s.load_ms), t(s.ttfb_ms))
+    let vitals = [s.lcp_ms.map(|l| format!("LCP {}", t(l))), s.cls.map(|c| format!("CLS {}", cls_words(c)))].into_iter().flatten().collect::<Vec<_>>();
+    let vitals = if vitals.is_empty() { String::new() } else { format!(" Core Web Vitals: {}.", vitals.join(", ")) };
+    format!("Its first page loads in {}{moved}{paint}, {kb}, first byte {}.{vitals}\n\n", t(s.load_ms), t(s.ttfb_ms))
 }
 
 /// A load time and a size as the comment says them.
@@ -413,13 +415,30 @@ fn over_budget(b: &crate::model::PreviewSpeedBudget, s: &crate::model::PreviewPa
     if b.bytes > 0 && s.bytes > b.bytes {
         over.push(byte_words(b.bytes));
     }
+    if b.lcp_ms > 0 && s.lcp_ms.is_some_and(|l| l > b.lcp_ms) {
+        over.push(format!("{} LCP", ms_words(b.lcp_ms)));
+    }
+    if b.cls > 0.0 && s.cls.is_some_and(|c| c > b.cls) {
+        over.push(format!("{} CLS", cls_words(b.cls)));
+    }
     over
+}
+
+/// A layout shift as Core Web Vitals prints it.
+fn cls_words(c: f64) -> String {
+    format!("{:.2}", c)
 }
 
 /// The `roll/speed` status, once the first page was timed under a budget.
 fn speed_status(e: &crate::model::PreviewEnvironment) -> Option<(&'static str, String)> {
     let (b, s) = (e.speed_budget.as_ref()?, e.page_speed.as_ref()?);
-    let took = format!("Loads in {}, {}", ms_words(s.load_ms), byte_words(s.bytes));
+    let mut took = format!("Loads in {}, {}", ms_words(s.load_ms), byte_words(s.bytes));
+    if let Some(l) = s.lcp_ms {
+        took.push_str(&format!(", LCP {}", ms_words(l)));
+    }
+    if let Some(c) = s.cls {
+        took.push_str(&format!(", CLS {}", cls_words(c)));
+    }
     let over = over_budget(b, s);
     Some(if over.is_empty() { ("success", format!("{took}: within its budget")) } else { ("failure", format!("{took}: over its budget ({})", over.join(", "))) })
 }
@@ -581,6 +600,10 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
         let main = e.base_change.as_ref().and_then(|b| Some((branch_name(&b.branch), b.load_ms?)));
         if let Some(words) = main.as_ref().and_then(|(branch, ms)| than_main(s.load_ms, *ms, branch)) {
             part.push_str(&format!(", {words}"));
+        }
+        let main_lcp = e.base_change.as_ref().and_then(|b| Some((branch_name(&b.branch), b.lcp_ms?)));
+        if let Some(words) = s.lcp_ms.zip(main_lcp).and_then(|(now, (branch, then))| than_main(now, then, &branch)) {
+            part.push_str(&format!(", LCP {words}"));
         }
         summary.push(part);
         details.push_str(&speed_line(s));
@@ -783,7 +806,7 @@ mod preview_tests {
         assert_eq!(visual_line(&v(0.0)), "The page looks the same as at `1a2b3c4d5e`.\n\n");
         let both = crate::model::PreviewVisualChange { phone_percent: Some(3.44), ..v(12.34) };
         assert_eq!(visual_line(&both), "The page changed 12.3% since `1a2b3c4d5e` (its share of pixels). At a phone's width: 3.4%.\n\n");
-        let sp = |load_ms, before| crate::model::PreviewPageSpeed { ttfb_ms: 40, fcp_ms: Some(380), load_ms, bytes: 312_000, before_load_ms: before };
+        let sp = |load_ms, before| crate::model::PreviewPageSpeed { ttfb_ms: 40, fcp_ms: Some(380), load_ms, bytes: 312_000, before_load_ms: before, lcp_ms: None, cls: None };
         assert_eq!(speed_line(&sp(1200, Some(900))), "Its first page loads in 1.2 s (+300 ms since the push before), first paint 380 ms, 305 KB, first byte 40 ms.\n\n");
         assert_eq!(speed_line(&sp(800, None)), "Its first page loads in 800 ms, first paint 380 ms, 305 KB, first byte 40 ms.\n\n");
         let h = |errors, failed| crate::model::PreviewPageHealth { errors, first_error: Some("TypeError: `x` is undefined".into()), failed, first_failed: Some("500 http://x/api".into()) };
@@ -793,7 +816,7 @@ mod preview_tests {
         let a = crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img src=`x`>"), issue("buttons", 1, "<button></button>")], lang: false, title: true };
         assert_eq!(a11y_line(&a), "**Accessibility:** 3 images without alt text (first: `<img src=x>`); 1 button without a name (first: `<button></button>`); no page language.\n\n");
         assert_eq!(a11y_line(&crate::model::PreviewPageA11y { issues: vec![], lang: true, title: true }), "No accessibility problems found on its first page.\n\n");
-        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, a11y_added: None, errors_added: None };
+        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, lcp_ms: None, a11y_added: None, errors_added: None };
         assert_eq!(base_line(&b), "Against `mainx`, the page differs by 8.0%, at a phone's width the same.\n\n");
         // In the comment, one folded block whose summary is counts only.
         let mut e = p.environment.clone().unwrap();
@@ -820,15 +843,24 @@ mod preview_tests {
         assert_eq!(review_line(&review("unchanged", None), None), None);
         // A speed budget: within it, then over it (load and size).
         let mut timed = p.environment.clone().unwrap();
-        (timed.page_speed, timed.speed_budget) = (Some(sp(1200, None)), Some(crate::model::PreviewSpeedBudget { load_ms: 2000, bytes: 0 }));
+        (timed.page_speed, timed.speed_budget) = (Some(sp(1200, None)), Some(crate::model::PreviewSpeedBudget { load_ms: 2000, bytes: 0, lcp_ms: 0, cls: 0.0 }));
         assert_eq!(speed_status(&timed), Some(("success", "Loads in 1.2 s, 305 KB: within its budget".into())));
-        timed.speed_budget = Some(crate::model::PreviewSpeedBudget { load_ms: 1000, bytes: 100_000 });
+        timed.speed_budget = Some(crate::model::PreviewSpeedBudget { load_ms: 1000, bytes: 100_000, lcp_ms: 0, cls: 0.0 });
         assert_eq!(speed_status(&timed), Some(("failure", "Loads in 1.2 s, 305 KB: over its budget (1.0 s load, 98 KB)".into())));
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, over its budget</summary>"));
         // Against main's load where it was compared: only a difference past the noise counts.
         timed.speed_budget = None;
-        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), a11y_added: None, errors_added: None });
+        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), lcp_ms: None, a11y_added: None, errors_added: None });
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, 300 ms slower than main</summary>"));
+        // Core Web Vitals: in the line, against main's paint, and in the budget.
+        let ps = timed.page_speed.as_mut().unwrap();
+        (ps.lcp_ms, ps.cls) = (Some(1300), Some(0.123));
+        timed.base_change.as_mut().unwrap().lcp_ms = Some(900);
+        let checks = page_checks(&timed).unwrap();
+        assert!(checks.contains("300 ms slower than main, LCP 400 ms slower than main</summary>"), "{checks}");
+        assert!(checks.contains("first byte 40 ms. Core Web Vitals: LCP 1.3 s, CLS 0.12."), "{checks}");
+        timed.speed_budget = Some(crate::model::PreviewSpeedBudget { load_ms: 0, bytes: 0, lcp_ms: 2500, cls: 0.1 });
+        assert_eq!(speed_status(&timed), Some(("failure", "Loads in 1.2 s, 305 KB, LCP 1.3 s, CLS 0.12: over its budget (0.10 CLS)".into())));
         // A public preview's diff against main goes inside, as an image; anything else, not.
         timed.diff_url = Some("https://api.roll.sh/v1/previews/pv_1/screenshot.png?diff=base&exp=1&sig=ab".into());
         assert!(page_checks(&timed).unwrap().contains("![Where it differs from main](https://api.roll.sh/v1/previews/pv_1/screenshot.png?diff=base&exp=1&sig=ab)"));

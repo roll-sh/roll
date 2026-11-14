@@ -1742,7 +1742,8 @@ impl Store {
             percent: b.change_bp as f64 / 100.0,
             phone_percent: b.phone_bp.map(|p| p as f64 / 100.0),
             head: b.head,
-            load_ms: b.speed.map(|s| s.load_ms),
+            load_ms: b.speed.as_ref().map(|s| s.load_ms),
+            lcp_ms: b.speed.and_then(|s| s.lcp_ms),
             a11y_added: page_a11y.as_ref().zip(b.a11y.as_ref()).map(|(ours, main)| ours.added_since(main)),
             errors_added: page_health.as_ref().zip(b.health.as_ref()).map(|(ours, main)| ours.added_since(main)),
         });
@@ -1893,7 +1894,7 @@ mod tests {
         let (_dir, store) = store();
         let (row, _) = store.create(&new("chg_visual")).unwrap();
         let id = row.id.as_str();
-        let speed = |load_ms| crate::PageSpeed { ttfb_ms: 20, fcp_ms: Some(100), load_ms, bytes: 1000 };
+        let speed = |load_ms| crate::PageSpeed { ttfb_ms: 20, fcp_ms: Some(100), load_ms, bytes: 1000, lcp_ms: None, cls: None };
         store.set_screenshot(id, "cs_1", &png(0), Some(&speed(900)), Some(&png(0))).unwrap();
         assert_eq!(store.visual_change(id).unwrap(), None, "a first one: nothing to compare");
         assert_eq!(store.page_speed(id).unwrap(), Some(crate::PageSpeedView { now: speed(900), before: None }));

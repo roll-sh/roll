@@ -355,11 +355,11 @@ export interface PreviewEnvironment {
   /** How much the first service's page changed since the screenshot at an earlier head. */
   visual_change?: { since: string; percent: number };
   /** How fast that page loaded (timed with its screenshot), and its load at the head before. */
-  page_speed?: { ttfb_ms: number; fcp_ms: number | null; load_ms: number; bytes: number; before_load_ms: number | null };
+  page_speed?: { ttfb_ms: number; fcp_ms: number | null; load_ms: number; bytes: number; before_load_ms: number | null; lcp_ms?: number | null; cls?: number | null };
   /** What went wrong while that page loaded (the page's own words). */
   page_health?: { errors: number; first_error: string | null; failed: number; first_failed: string | null };
   /** How much its page differs from the project's preview of the default branch. */
-  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; a11y_added?: number | null; errors_added?: number | null };
+  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null };
   /** The project's other pages (`github.pages`): errors while each loaded, change since the push before, against the default branch. */
   pages?: { path: string; errors: number; percent: number | null; base_percent: number | null }[];
   /** The `roll/visual` review (the project's `visual_review`); `required`: it keeps the change from landing too. */

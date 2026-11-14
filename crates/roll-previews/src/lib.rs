@@ -387,14 +387,22 @@ pub struct PageSpeed {
     pub load_ms: u32,
     /// What it fetched (the page and what it loaded).
     pub bytes: u64,
+    /// Its largest contentful paint (Core Web Vitals), when it painted one.
+    #[serde(default)]
+    pub lcp_ms: Option<u32>,
+    /// Its cumulative layout shift (the largest session window, as Core Web Vitals counts it).
+    #[serde(default)]
+    pub cls: Option<f64>,
 }
 
 impl PageSpeed {
-    /// From what the browser wrote, if it's that and within reason (10 minutes, 10 GiB).
+    /// From what the browser wrote, if it's that and within reason (10 minutes, 10 GiB, a
+    /// layout shift up to 100).
     pub fn parse(json: &str) -> Option<PageSpeed> {
         let s: PageSpeed = serde_json::from_str(json.trim()).ok()?;
         let ms = 600_000;
-        (s.ttfb_ms <= ms && s.load_ms <= ms && s.fcp_ms.is_none_or(|f| f <= ms) && s.bytes <= 10 << 30).then_some(s)
+        let ok = s.ttfb_ms <= ms && s.load_ms <= ms && s.fcp_ms.is_none_or(|f| f <= ms) && s.bytes <= 10 << 30;
+        (ok && s.lcp_ms.is_none_or(|l| l <= ms) && s.cls.is_none_or(|c| c.is_finite() && (0.0..=100.0).contains(&c))).then_some(s)
     }
 }
 
@@ -481,6 +489,8 @@ pub struct BaseChange {
     pub head: Option<String>,
     /// How long the branch's first page took to load there (Vercel's against production).
     pub load_ms: Option<u32>,
+    /// Its largest contentful paint there.
+    pub lcp_ms: Option<u32>,
     /// How many accessibility problems the change's first page has that the branch's didn't.
     pub a11y_added: Option<u32>,
     /// How many more errors and failed requests it had while it loaded than the branch's.
@@ -668,7 +678,10 @@ mod tests {
     #[test]
     fn page_speed_reads_what_the_browser_wrote() {
         let s = PageSpeed::parse(r#"{"ttfb_ms":40,"fcp_ms":380,"load_ms":1200,"bytes":312000}"#).unwrap();
-        assert_eq!((s.ttfb_ms, s.fcp_ms, s.load_ms, s.bytes), (40, Some(380), 1200, 312000));
+        assert_eq!((s.ttfb_ms, s.fcp_ms, s.load_ms, s.bytes, s.lcp_ms, s.cls), (40, Some(380), 1200, 312000, None, None), "an older browser script's");
+        let v = PageSpeed::parse(r#"{"ttfb_ms":40,"fcp_ms":380,"load_ms":1200,"bytes":0,"lcp_ms":900,"cls":0.12}"#).unwrap();
+        assert_eq!((v.lcp_ms, v.cls), (Some(900), Some(0.12)));
+        assert_eq!(PageSpeed::parse(r#"{"ttfb_ms":40,"fcp_ms":380,"load_ms":1200,"bytes":0,"lcp_ms":900,"cls":1e9}"#), None, "a shift past reason");
         assert_eq!(PageSpeed::parse(r#"{"ttfb_ms":40,"fcp_ms":null,"load_ms":1200,"bytes":0}"#).unwrap().fcp_ms, None);
         assert_eq!(PageSpeed::parse(r#"{"ttfb_ms":40,"fcp_ms":380,"load_ms":99999999,"bytes":0}"#), None, "a page that lies past 10 minutes");
         assert_eq!(PageSpeed::parse("<html>"), None);

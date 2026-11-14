@@ -78,6 +78,17 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
           {env.base_change && thanMain(env.page_speed.load_ms, env.base_change.load_ms, env.base_change.branch) ? ` · ${thanMain(env.page_speed.load_ms, env.base_change.load_ms, env.base_change.branch)}` : ""}
         </p>
       )}
+      {env.page_speed && (env.page_speed.lcp_ms != null || env.page_speed.cls != null) && (
+        <p className="font-mono text-[11px] text-subtle tabular-nums" title="Core Web Vitals">
+          {[
+            env.page_speed.lcp_ms != null ? `LCP ${env.page_speed.lcp_ms < 1000 ? `${env.page_speed.lcp_ms} ms` : `${(env.page_speed.lcp_ms / 1000).toFixed(1)} s`}` : "",
+            env.page_speed.lcp_ms != null && env.base_change ? thanMain(env.page_speed.lcp_ms, env.base_change.lcp_ms, env.base_change.branch) : "",
+            env.page_speed.cls != null ? `CLS ${env.page_speed.cls.toFixed(2)}` : "",
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </p>
+      )}
       {env.visual_change && (
         <p className="text-[12px] text-muted">
           {env.visual_change.percent > 0
