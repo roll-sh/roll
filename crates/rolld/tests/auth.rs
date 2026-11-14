@@ -128,9 +128,11 @@ async fn every_control_plane_route_needs_the_operator_token() {
     let routes = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
     // And how the permission catalogue classifies it for scoped tokens: `scoped=postgres`.
     let scoped = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
+    // And the methods each serves: `methods=GET,POST` (`*`: a nested service).
+    let methods = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
     let output = Arc::new(Mutex::new(String::new()));
     for pipe in [Box::new(child.stdout.take().unwrap()) as Box<dyn std::io::Read + Send>, Box::new(child.stderr.take().unwrap())] {
-        let (routes, scoped, output) = (routes.clone(), scoped.clone(), output.clone());
+        let (routes, scoped, methods, output) = (routes.clone(), scoped.clone(), methods.clone(), output.clone());
         std::thread::spawn(move || {
             for line in BufReader::new(pipe).lines().map_while(Result::ok) {
                 if line.contains("rolld::auth")
@@ -139,6 +141,8 @@ async fn every_control_plane_route_needs_the_operator_token() {
                     && let Some((route, rest)) = rest.split_once(" scoped=")
                     && let Some((class, access)) = rest.split_once(" access=")
                 {
+                    let (access, served) = access.split_once(" methods=").unwrap_or((access, "*"));
+                    methods.lock().unwrap().push((host.to_string(), route.to_string(), served.trim().to_string()));
                     routes.lock().unwrap().push((host.to_string(), route.to_string(), access.trim().to_string()));
                     scoped.lock().unwrap().push((host.to_string(), route.to_string(), class.trim().to_string()));
                 }
@@ -342,23 +346,27 @@ async fn every_control_plane_route_needs_the_operator_token() {
         .map(|(_, r, _)| r.clone())
         .collect();
     assert!(unscoped.is_empty(), "routes no scoped token can be classified for (add catalogue rows in roll-access): {unscoped:#?}");
-    // A route under a prefix row takes the prefix's action by method, whatever it answers: each was
-    // looked at, and a new one is (a GET that answers values is reveal; the env of a preview was
-    // read until it was).
-    // A public route (anyone may call it without a token) isn't a grant's to classify.
+    // A method a prefix row decides (no row of the route's own names it) takes the prefix's action,
+    // whatever it answers: each was looked at, and a new one is (a GET that answers values is
+    // reveal; the env of a preview was read until it was). Public routes aren't a grant's.
     let public: Vec<String> = routes.iter().filter(|(h, _, a)| h == "api" && a.starts_with("public:")).map(|(_, r, _)| r.clone()).collect();
-    let mut unreviewed: Vec<String> = scoped
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(h, r, _)| h == "api" && !public.contains(r) && roll_access::catalog::by_prefix_only(r) && !roll_access::catalog::prefix_reviewed(r))
-        .map(|(_, r, _)| r.clone())
-        .collect();
+    let mut unreviewed: Vec<String> = Vec::new();
+    for (h, r, served) in methods.lock().unwrap().iter() {
+        if h != "api" || public.contains(r) {
+            continue;
+        }
+        let list: Vec<&str> = if served == "*" { vec!["GET", "POST", "PUT", "PATCH", "DELETE"] } else { served.split(',').collect() };
+        for m in list {
+            if roll_access::catalog::method_by_prefix(m, r) && !roll_access::catalog::prefix_reviewed(m, r) {
+                unreviewed.push(format!("{m} {r}"));
+            }
+        }
+    }
     unreviewed.sort();
     unreviewed.dedup();
     assert!(
         unreviewed.is_empty(),
-        "routes decided only by a prefix row that nobody looked at: give each its own catalogue row (a GET whose answer holds a credential is reveal; changing what production runs is deploy), or add it to crates/roll-access/src/prefix-reviewed.txt: {unreviewed:#?}"
+        "methods decided only by a prefix row that nobody looked at: give each its own catalogue row (a GET whose answer holds a credential is reveal; changing what production runs is deploy), or add its `METHOD route` line to crates/roll-access/src/prefix-reviewed.txt: {unreviewed:#?}"
     );
     // A token with every action on everything works where the operator's does.
     let made: serde_json::Value = http

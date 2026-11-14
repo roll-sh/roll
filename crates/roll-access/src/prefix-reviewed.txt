@@ -1,182 +1,199 @@
-# Routes decided only by a prefix row (roll_access::catalog::by_prefix_only): each was looked at and
-# takes its prefix's action by method. A new one fails rolld's auth test until it's added here, or
-# better, given its own row: a GET whose answer holds a credential is reveal, not read; a route that
-# changes what production runs is deploy. One route pattern per line, as axum lists it.
-/v1/apps/services/{id}/activity
-/v1/apps/services/{id}/changes
-/v1/apps/services/{id}/environments
-/v1/apps/services/{id}/environments/{env}/deploys
-/v1/apps/services/{id}/environments/{env}/deploys/{dep}
-/v1/apps/services/{id}/environments/{env}/deploys/{dep}/cancel
-/v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs
-/v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback
-/v1/apps/services/{id}/environments/{env}/domains
-/v1/apps/services/{id}/environments/{env}/jobs
-/v1/apps/services/{id}/environments/{env}/jobs/{job}
-/v1/apps/services/{id}/environments/{env}/jobs/{job}/cancel
-/v1/apps/services/{id}/environments/{env}/logs
-/v1/apps/services/{id}/environments/{env}/metrics
-/v1/apps/services/{id}/environments/{env}/promote
-/v1/apps/services/{id}/environments/{env}/redeploy
-/v1/apps/services/{id}/environments/{env}/restart
-/v1/apps/services/{id}/environments/{env}/rollback
-/v1/apps/services/{id}/environments/{env}/runs
-/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize
-/v1/apps/services/{id}/environments/{env}/sleep
-/v1/apps/services/{id}/environments/{env}/usage
-/v1/apps/services/{id}/environments/{env}/variables
-/v1/apps/services/{id}/links
-/v1/code/agents/{owner}/automations
-/v1/code/agents/{owner}/automations/catalog
-/v1/code/agents/{owner}/automations/notices
-/v1/code/agents/{owner}/automations/runs
-/v1/code/agents/{owner}/automations/runs/{run}
-/v1/code/agents/{owner}/automations/runs/{run}/cancel
-/v1/code/agents/{owner}/automations/runs/{run}/retry
-/v1/code/agents/{owner}/automations/test
-/v1/code/agents/{owner}/automations/{id}
-/v1/code/agents/{owner}/automations/{id}/disable
-/v1/code/agents/{owner}/automations/{id}/enable
-/v1/code/agents/{owner}/automations/{id}/run
-/v1/code/agents/{owner}/automations/{id}/runs
-/v1/code/agents/{owner}/automations/{id}/webhook
-/v1/code/agents/{owner}/canvas
-/v1/code/agents/{owner}/endpoints
-/v1/code/agents/{owner}/events
-/v1/code/agents/{owner}/gateway/members
-/v1/code/agents/{owner}/gateway/members/{machine}
-/v1/code/agents/{owner}/integrations
-/v1/code/agents/{owner}/integrations/{platform}/install
-/v1/code/agents/{owner}/integrations/{platform}/{id}
-/v1/code/agents/{owner}/linear/key
-/v1/code/agents/{owner}/linear/oauth
-/v1/code/agents/{owner}/linear/settings
-/v1/code/agents/{owner}/linear/teams
-/v1/code/agents/{owner}/linear/webhook/secret
-/v1/code/agents/{owner}/login/{user_code}
-/v1/code/agents/{owner}/lookup/{source}/{kind}
-/v1/code/agents/{owner}/machines
-/v1/code/agents/{owner}/machines/{machine}
-/v1/code/agents/{owner}/machines/{machine}/projects
-/v1/code/agents/{owner}/sandboxes
-/v1/code/agents/{owner}/sandboxes/usage
-/v1/code/agents/{owner}/sandboxes/{id}
-/v1/code/agents/{owner}/sandboxes/{id}/start
-/v1/code/agents/{owner}/sandboxes/{id}/stop
-/v1/code/agents/{owner}/shares
-/v1/code/agents/{owner}/shares/{id}
-/v1/code/agents/{owner}/state
-/v1/code/agents/{owner}/threads/{thread}/shares
-/v1/code/agents/{owner}/threads/{thread}/work
-/v1/code/changes/{id}/ai-jobs
-/v1/code/changes/{id}/ai-review
-/v1/code/changes/{id}/checks
-/v1/code/changes/{id}/close
-/v1/code/changes/{id}/preview
-/v1/code/changes/{id}/review-requests
-/v1/code/changes/{id}/review-status
-/v1/code/changes/{id}/reviews
-/v1/code/changes/{id}/reviews/{rid}/dismiss
-/v1/code/changes/{id}/revise
-/v1/code/changes/{id}/threads
-/v1/code/owners/{owner}/billing
-/v1/code/owners/{owner}/review-apps
-/v1/code/owners/{owner}/review-provider
-/v1/code/owners/{owner}/tokens
-/v1/code/owners/{owner}/tokens/{id}
-/v1/code/repos/{owner}/{repo}/audit
-/v1/code/repos/{owner}/{repo}/blame/{rev}/{*path}
-/v1/code/repos/{owner}/{repo}/blob/{rev}/{*path}
-/v1/code/repos/{owner}/{repo}/changes
-/v1/code/repos/{owner}/{repo}/changes/{number}
-/v1/code/repos/{owner}/{repo}/changesets
-/v1/code/repos/{owner}/{repo}/changesets/{id}
-/v1/code/repos/{owner}/{repo}/compare/{spec}
-/v1/code/repos/{owner}/{repo}/events
-/v1/code/repos/{owner}/{repo}/learnings
-/v1/code/repos/{owner}/{repo}/learnings/{id}
-/v1/code/repos/{owner}/{repo}/log
-/v1/code/repos/{owner}/{repo}/paths/{rev}
-/v1/code/repos/{owner}/{repo}/queue
-/v1/code/repos/{owner}/{repo}/readme/{rev}
-/v1/code/repos/{owner}/{repo}/refs
-/v1/code/repos/{owner}/{repo}/search
-/v1/code/repos/{owner}/{repo}/statuses/{rev}
-/v1/code/repos/{owner}/{repo}/tree/{rev}
-/v1/code/repos/{owner}/{repo}/tree/{rev}/
-/v1/code/repos/{owner}/{repo}/tree/{rev}/{*path}
-/v1/code/repos/{owner}/{repo}/webhooks/{id}
-/v1/code/repos/{owner}/{repo}/webhooks/{id}/deliveries
-/v1/code/repos/{owner}/{repo}/webhooks/{id}/deliveries/{did}/redeliver
-/v1/code/repos/{owner}/{repo}/webhooks/{id}/ping
-/v1/code/repos/{owner}/{repo}/work
-/v1/code/repos/{owner}/{repo}/work/claim
-/v1/code/repos/{owner}/{repo}/work/{number}
-/v1/code/review-apps/{id}/deliveries
-/v1/code/review-apps/{id}/deliveries/{did}/redeliver
-/v1/code/review-apps/{id}/rotate
-/v1/code/threads/{id}/apply
-/v1/code/threads/{id}/comments
-/v1/code/threads/{id}/resolve
-/v1/code/threads/{id}/unresolve
-/v1/code/work/{id}/complete
-/v1/code/work/{id}/heartbeat
-/v1/code/work/{id}/release
-/v1/previews/projects/{project}/settings
-/v1/previews/projects/{project}/usage
-/v1/previews/{id}/activity
-/v1/previews/{id}/keep
-/v1/previews/{id}/logs
-/v1/previews/{id}/refresh
-/v1/previews/{id}/screenshot
-/v1/previews/{id}/screenshot.png
-/v1/previews/{id}/shares/{share}
-/v1/previews/{id}/sleep
-/v1/previews/{id}/wake
-/v1/queues/vhosts/{vhost}/bindings
-/v1/queues/vhosts/{vhost}/exchanges
-/v1/queues/vhosts/{vhost}/exchanges/{exchange}
-/v1/queues/vhosts/{vhost}/publish
-/v1/queues/vhosts/{vhost}/queues
-/v1/queues/vhosts/{vhost}/queues/{queue}
-/v1/queues/vhosts/{vhost}/queues/{queue}/messages
-/v1/queues/vhosts/{vhost}/queues/{queue}/rates
-/v1/queues/vhosts/{vhost}/queues/{queue}/replay
-/v1/search/clusters/{id}/indices
-/v1/search/clusters/{id}/indices/{index}/docs
-/v1/search/clusters/{id}/indices/{index}/docs/{doc}
-/v1/search/clusters/{id}/indices/{index}/mapping
-/v1/search/clusters/{id}/indices/{index}/refresh
-/v1/search/clusters/{id}/indices/{index}/settings
-/v1/search/clusters/{id}/unload
-/v1/search/clusters/{id}/usage
-/v1/secrets/projects/{project}/audit
-/v1/secrets/projects/{project}/audit/sinks/{id}
-/v1/secrets/projects/{project}/compare
-/v1/secrets/projects/{project}/environments
-/v1/secrets/projects/{project}/environments/{env}/changes
-/v1/secrets/projects/{project}/environments/{env}/changes/{seq}
-/v1/secrets/projects/{project}/environments/{env}/digest
-/v1/secrets/projects/{project}/environments/{env}/folders
-/v1/secrets/projects/{project}/environments/{env}/import
-/v1/secrets/projects/{project}/environments/{env}/insights
-/v1/secrets/projects/{project}/environments/{env}/requests
-/v1/secrets/projects/{project}/environments/{env}/requests/{id}
-/v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply
-/v1/secrets/projects/{project}/environments/{env}/requests/{id}/close
-/v1/secrets/projects/{project}/environments/{env}/rollback
-/v1/secrets/projects/{project}/environments/{env}/secrets
-/v1/secrets/projects/{project}/environments/{env}/secrets/{key}
-/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/rotate
-/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/versions
-/v1/secrets/projects/{project}/grid
-/v1/secrets/projects/{project}/identities/{id}
-/v1/secrets/projects/{project}/leases
-/v1/secrets/projects/{project}/leases/{id}
-/v1/secrets/projects/{project}/links
-/v1/secrets/projects/{project}/shared
-/v1/secrets/projects/{project}/shares/{id}
-/v1/secrets/projects/{project}/suggestions
-/v1/secrets/projects/{project}/syncs/preview
-/v1/secrets/projects/{project}/syncs/{id}
-/v1/secrets/projects/{project}/syncs/{id}/run
+# Methods decided only by a prefix row (roll_access::catalog::method_by_prefix): no row of the
+# route's own names the method, so it takes the prefix's action, whatever it answers. Each was
+# looked at. A new one fails rolld's auth test until it's added here, or better, given its own row:
+# a GET whose answer holds a credential is reveal, not read; a method that changes what production
+# runs is deploy. One `METHOD route` a line, the route as axum lists it.
+GET /v1/apps/services/{id}/activity
+GET /v1/apps/services/{id}/changes
+GET /v1/apps/services/{id}/environments
+GET /v1/apps/services/{id}/environments/{env}/deploys
+POST /v1/apps/services/{id}/environments/{env}/deploys
+GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}
+POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/cancel
+GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs
+POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback
+GET /v1/apps/services/{id}/environments/{env}/domains
+POST /v1/apps/services/{id}/environments/{env}/domains
+PATCH /v1/apps/services/{id}/environments/{env}/domains/{host}
+GET /v1/apps/services/{id}/environments/{env}/jobs
+POST /v1/apps/services/{id}/environments/{env}/jobs
+GET /v1/apps/services/{id}/environments/{env}/jobs/{job}
+POST /v1/apps/services/{id}/environments/{env}/jobs/{job}/cancel
+GET /v1/apps/services/{id}/environments/{env}/logs
+GET /v1/apps/services/{id}/environments/{env}/metrics
+POST /v1/apps/services/{id}/environments/{env}/promote
+POST /v1/apps/services/{id}/environments/{env}/redeploy
+POST /v1/apps/services/{id}/environments/{env}/restart
+POST /v1/apps/services/{id}/environments/{env}/rollback
+GET /v1/apps/services/{id}/environments/{env}/runs
+POST /v1/apps/services/{id}/environments/{env}/runs
+POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize
+POST /v1/apps/services/{id}/environments/{env}/sleep
+GET /v1/apps/services/{id}/environments/{env}/usage
+GET /v1/apps/services/{id}/environments/{env}/variables
+PATCH /v1/apps/services/{id}/environments/{env}/variables
+GET /v1/apps/services/{id}/environments/{env}/volume/backups
+GET /v1/apps/services/{id}/links
+GET /v1/code/agents/{owner}/automations
+POST /v1/code/agents/{owner}/automations
+GET /v1/code/agents/{owner}/automations/catalog
+GET /v1/code/agents/{owner}/automations/notices
+GET /v1/code/agents/{owner}/automations/runs
+GET /v1/code/agents/{owner}/automations/runs/{run}
+POST /v1/code/agents/{owner}/automations/runs/{run}/cancel
+POST /v1/code/agents/{owner}/automations/runs/{run}/retry
+POST /v1/code/agents/{owner}/automations/test
+DELETE /v1/code/agents/{owner}/automations/{id}
+GET /v1/code/agents/{owner}/automations/{id}
+PUT /v1/code/agents/{owner}/automations/{id}
+POST /v1/code/agents/{owner}/automations/{id}/disable
+POST /v1/code/agents/{owner}/automations/{id}/enable
+POST /v1/code/agents/{owner}/automations/{id}/run
+GET /v1/code/agents/{owner}/automations/{id}/runs
+POST /v1/code/agents/{owner}/automations/{id}/webhook
+GET /v1/code/agents/{owner}/canvas
+PUT /v1/code/agents/{owner}/canvas
+GET /v1/code/agents/{owner}/endpoints
+GET /v1/code/agents/{owner}/events
+POST /v1/code/agents/{owner}/gateway/members
+DELETE /v1/code/agents/{owner}/gateway/members/{machine}
+GET /v1/code/agents/{owner}/integrations
+POST /v1/code/agents/{owner}/integrations/{platform}/install
+DELETE /v1/code/agents/{owner}/integrations/{platform}/{id}
+PATCH /v1/code/agents/{owner}/integrations/{platform}/{id}
+PUT /v1/code/agents/{owner}/linear/key
+POST /v1/code/agents/{owner}/linear/oauth
+PUT /v1/code/agents/{owner}/linear/settings
+GET /v1/code/agents/{owner}/linear/teams
+PUT /v1/code/agents/{owner}/linear/webhook/secret
+GET /v1/code/agents/{owner}/login/{user_code}
+GET /v1/code/agents/{owner}/lookup/{source}/{kind}
+POST /v1/code/agents/{owner}/lookup/{source}/{kind}
+GET /v1/code/agents/{owner}/machines
+POST /v1/code/agents/{owner}/machines
+DELETE /v1/code/agents/{owner}/machines/{machine}
+PATCH /v1/code/agents/{owner}/machines/{machine}
+POST /v1/code/agents/{owner}/machines/{machine}/projects
+GET /v1/code/agents/{owner}/sandboxes
+POST /v1/code/agents/{owner}/sandboxes
+GET /v1/code/agents/{owner}/sandboxes/usage
+DELETE /v1/code/agents/{owner}/sandboxes/{id}
+POST /v1/code/agents/{owner}/sandboxes/{id}/start
+POST /v1/code/agents/{owner}/sandboxes/{id}/stop
+GET /v1/code/agents/{owner}/settings
+GET /v1/code/agents/{owner}/shares
+DELETE /v1/code/agents/{owner}/shares/{id}
+GET /v1/code/agents/{owner}/state
+POST /v1/code/agents/{owner}/threads/{thread}/shares
+DELETE /v1/code/agents/{owner}/threads/{thread}/work
+POST /v1/code/agents/{owner}/threads/{thread}/work
+GET /v1/code/changes/{id}/ai-jobs
+POST /v1/code/changes/{id}/ai-review
+POST /v1/code/changes/{id}/checks
+POST /v1/code/changes/{id}/close
+DELETE /v1/code/changes/{id}/enqueue
+DELETE /v1/code/changes/{id}/preview
+POST /v1/code/changes/{id}/preview
+GET /v1/code/changes/{id}/review-requests
+POST /v1/code/changes/{id}/review-requests
+GET /v1/code/changes/{id}/review-status
+GET /v1/code/changes/{id}/reviews
+POST /v1/code/changes/{id}/reviews
+POST /v1/code/changes/{id}/reviews/{rid}/dismiss
+POST /v1/code/changes/{id}/revise
+GET /v1/code/changes/{id}/threads
+POST /v1/code/changes/{id}/threads
+GET /v1/code/owners/{owner}/billing
+PUT /v1/code/owners/{owner}/billing
+GET /v1/code/owners/{owner}/review-apps
+POST /v1/code/owners/{owner}/review-apps
+DELETE /v1/code/owners/{owner}/review-provider
+GET /v1/code/owners/{owner}/review-provider
+PUT /v1/code/owners/{owner}/review-provider
+GET /v1/code/owners/{owner}/tokens
+POST /v1/code/owners/{owner}/tokens
+DELETE /v1/code/owners/{owner}/tokens/{id}
+GET /v1/code/repos/{owner}/{repo}/audit
+GET /v1/code/repos/{owner}/{repo}/blame/{rev}/{*path}
+GET /v1/code/repos/{owner}/{repo}/blob/{rev}/{*path}
+GET /v1/code/repos/{owner}/{repo}/changes
+POST /v1/code/repos/{owner}/{repo}/changes
+GET /v1/code/repos/{owner}/{repo}/changes/{number}
+POST /v1/code/repos/{owner}/{repo}/changesets
+GET /v1/code/repos/{owner}/{repo}/changesets/{id}
+GET /v1/code/repos/{owner}/{repo}/compare/{spec}
+GET /v1/code/repos/{owner}/{repo}/events
+GET /v1/code/repos/{owner}/{repo}/learnings
+POST /v1/code/repos/{owner}/{repo}/learnings
+DELETE /v1/code/repos/{owner}/{repo}/learnings/{id}
+GET /v1/code/repos/{owner}/{repo}/log
+GET /v1/code/repos/{owner}/{repo}/paths/{rev}
+GET /v1/code/repos/{owner}/{repo}/queue
+GET /v1/code/repos/{owner}/{repo}/readme/{rev}
+GET /v1/code/repos/{owner}/{repo}/refs
+GET /v1/code/repos/{owner}/{repo}/review-settings
+GET /v1/code/repos/{owner}/{repo}/reviewer
+GET /v1/code/repos/{owner}/{repo}/search
+GET /v1/code/repos/{owner}/{repo}/statuses/{rev}
+POST /v1/code/repos/{owner}/{repo}/statuses/{rev}
+GET /v1/code/repos/{owner}/{repo}/tree/{rev}
+GET /v1/code/repos/{owner}/{repo}/tree/{rev}/
+GET /v1/code/repos/{owner}/{repo}/tree/{rev}/{*path}
+DELETE /v1/code/repos/{owner}/{repo}/webhooks/{id}
+GET /v1/code/repos/{owner}/{repo}/webhooks/{id}
+PATCH /v1/code/repos/{owner}/{repo}/webhooks/{id}
+GET /v1/code/repos/{owner}/{repo}/webhooks/{id}/deliveries
+POST /v1/code/repos/{owner}/{repo}/webhooks/{id}/deliveries/{did}/redeliver
+POST /v1/code/repos/{owner}/{repo}/webhooks/{id}/ping
+GET /v1/code/repos/{owner}/{repo}/work
+POST /v1/code/repos/{owner}/{repo}/work
+POST /v1/code/repos/{owner}/{repo}/work/claim
+GET /v1/code/repos/{owner}/{repo}/work/{number}
+GET /v1/code/review-apps/{id}/deliveries
+POST /v1/code/review-apps/{id}/deliveries/{did}/redeliver
+POST /v1/code/review-apps/{id}/rotate
+POST /v1/code/threads/{id}/apply
+POST /v1/code/threads/{id}/comments
+POST /v1/code/threads/{id}/resolve
+POST /v1/code/threads/{id}/unresolve
+POST /v1/code/work/{id}/complete
+POST /v1/code/work/{id}/heartbeat
+POST /v1/code/work/{id}/release
+GET /v1/previews/projects/{project}/settings
+PUT /v1/previews/projects/{project}/settings
+GET /v1/previews/projects/{project}/usage
+GET /v1/previews/{id}/activity
+PUT /v1/previews/{id}/env
+POST /v1/previews/{id}/keep
+GET /v1/previews/{id}/logs
+POST /v1/previews/{id}/refresh
+GET /v1/previews/{id}/screenshot
+DELETE /v1/previews/{id}/shares/{share}
+POST /v1/previews/{id}/sleep
+POST /v1/previews/{id}/wake
+DELETE /v1/queues/vhosts/{vhost}/bindings
+GET /v1/queues/vhosts/{vhost}/bindings
+POST /v1/queues/vhosts/{vhost}/bindings
+GET /v1/queues/vhosts/{vhost}/exchanges
+POST /v1/queues/vhosts/{vhost}/exchanges
+DELETE /v1/queues/vhosts/{vhost}/exchanges/{exchange}
+POST /v1/queues/vhosts/{vhost}/publish
+GET /v1/queues/vhosts/{vhost}/queues
+POST /v1/queues/vhosts/{vhost}/queues
+DELETE /v1/queues/vhosts/{vhost}/queues/{queue}
+GET /v1/queues/vhosts/{vhost}/queues/{queue}
+GET /v1/queues/vhosts/{vhost}/queues/{queue}/messages
+GET /v1/queues/vhosts/{vhost}/queues/{queue}/rates
+POST /v1/queues/vhosts/{vhost}/queues/{queue}/replay
+GET /v1/search/clusters/{id}/indices
+GET /v1/search/clusters/{id}/indices/{index}/docs
+POST /v1/search/clusters/{id}/indices/{index}/docs
+DELETE /v1/search/clusters/{id}/indices/{index}/docs/{doc}
+GET /v1/search/clusters/{id}/indices/{index}/docs/{doc}
+PUT /v1/search/clusters/{id}/indices/{index}/docs/{doc}
+GET /v1/search/clusters/{id}/indices/{index}/mapping
+PUT /v1/search/clusters/{id}/indices/{index}/mapping
+POST /v1/search/clusters/{id}/indices/{index}/refresh
+GET /v1/search/clusters/{id}/indices/{index}/settings
+POST /v1/search/clusters/{id}/unload
+GET /v1/search/clusters/{id}/usage
