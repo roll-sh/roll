@@ -105,6 +105,10 @@ pub struct ClusterConfig {
     pub host_metrics: bool,
     /// Seals the secrets the cluster stores ([`crate::seal`]); `None`: stored as given.
     pub sealer: Option<std::sync::Arc<crate::seal::Sealer>>,
+    /// The name roll's default repository is registered under
+    /// ([`crate::api::snapshots::install_default_repository`]): clusters whose snapshot
+    /// contents are durable in roll's object storage (`None`: no default repository).
+    pub default_repository: Option<String>,
 }
 
 impl ClusterConfig {
@@ -118,6 +122,7 @@ impl ClusterConfig {
             test_features: false,
             host_metrics: false,
             sealer: None,
+            default_repository: None,
         }
     }
 
@@ -525,6 +530,7 @@ impl Cluster {
             let on = crate::meta::stack_templates::Registries::of(&config);
             crate::meta::stack_templates::install_missing(&mut state.metadata, on, crate::time::now_millis());
         }
+        crate::api::snapshots::install_default_repository(&mut state.metadata, config.default_repository.as_deref());
         let (changes, _) = tokio::sync::watch::channel(state.version);
         let thread_pools = crate::thread_pool::ThreadPools::new(&config);
         // Runtime-field grok runs inside Painless, which reads the static node setting from here.
@@ -676,6 +682,7 @@ impl Cluster {
             // (`IndexLifecycleService.triggerPolicies` on the applied state).
             crate::xpack::ilm_run::reconcile(&self.state(), &mut next, crate::time::now_millis());
         }
+        crate::api::snapshots::install_default_repository(&mut next.metadata, self.config.default_repository.as_deref());
         next.version += 1;
         next.metadata.version += 1;
         next.state_uuid = random_uuid();

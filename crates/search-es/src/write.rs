@@ -1102,79 +1102,149 @@ pub fn copy_index(cluster: &Cluster, src: &Arc<IndexMeta>, dst: &Arc<IndexMeta>)
 /// Indexes every document of `searchers` (an index's shards as of some point, e.g. a snapshot)
 /// into `dst` keeping ids, routing, versions and sequence numbers, logged like writes.
 pub fn copy_docs(cluster: &Cluster, searchers: &[search_index::Searcher], dst: &Arc<IndexMeta>) -> EsResult<()> {
-    let st = cluster.state();
-    let de = cluster.engine.index(cluster, &st, dst)?;
-    let table = de.table();
-    let ctx = dst.mapping_ctx();
-    let root = search_index::query::nested::root_filter();
+    let target = CopyTarget::new(cluster, dst)?;
     // The source's stored source may lack its vectors: they come back from its segments (by
     // path: the copies number their engine fields their own way) before the copy is indexed.
-    let vectors = crate::engine::source_vectors::copied(&table);
+    let vectors = crate::engine::source_vectors::copied(&target.table);
     for searcher in searchers {
-        let mut docs = Vec::new();
-        struct All<'a>(&'a mut Vec<u32>);
-        struct Leaf<'a> {
-            out: &'a mut Vec<u32>,
-            base: u32,
-        }
-        impl search_index::LeafCollector for Leaf<'_> {
-            fn collect(&mut self, doc: u32, _s: &mut dyn search_index::Scorable) -> search_index::Result<()> {
-                self.out.push(self.base + doc);
-                Ok(())
-            }
-        }
-        impl search_index::Collector for All<'_> {
-            fn score_mode(&self) -> search_index::ScoreMode {
-                search_index::ScoreMode::CompleteNoScores
-            }
-            fn leaf<'a>(&'a mut self, seg: &search_index::SegmentContext) -> search_index::Result<Box<dyn search_index::LeafCollector + 'a>> {
-                Ok(Box::new(Leaf { out: self.0, base: seg.base }))
-            }
-        }
-        searcher.search(&root, &mut All(&mut docs)).map_err(convert::index_error)?;
-        for doc in docs {
-            let Some((seg, local)) = searcher.segment_of(doc) else { continue };
-            let stored = searcher.stored(doc).map_err(convert::index_error)?;
-            let id = crate::search::hits::stored_id(&stored).unwrap_or_default();
-            let routing = crate::fetch::routing(&stored);
-            let mut source = crate::fetch::source_bytes(&stored).map(Bytes::copy_from_slice).unwrap_or_else(|| Bytes::from_static(b"{}"));
-            let mut value = crate::fetch::parse_source(&source)?;
-            if let Value::Obj(m) = &mut value
-                && crate::engine::source_vectors::patch_raw(&vectors, m, &mut crate::engine::source_vectors::InSegmentByName(seg, local))
-            {
-                source = Bytes::from(value.to_json());
-            }
-            let mut parsed = crate::document::parse_document(&dst.mapping, &ctx, &value, Some(&source), Some(&id))?;
-            crate::search::index_time::apply(&cluster.scripts, &cluster.state(), &dst.mapping, &value, &mut parsed)?;
-            // Time series documents keep their `_tsid` and the routing hash their `_id` starts
-            // with (`_ts_routing_hash`).
-            let ts = crate::engine::tsdb::is_time_series(dst).then(|| {
-                let tsid = crate::engine::tsdb::build_tsid(&crate::engine::tsdb::dimensions(dst, &parsed));
-                let hash = crate::engine::tsdb::id_routing_hash(dst, &id).map(crate::engine::tsdb::encode_hash).unwrap_or_default();
-                (tsid, hash)
-            });
-            let meta = DocMeta {
-                id: &id,
-                routing: if ts.is_some() { None } else { routing.as_deref() },
-                source: stored_source(dst, &table, &source, &value),
-                tsid: ts.as_ref().map(|(t, h)| (t.as_slice(), h.as_str())),
-            };
-            let idoc = convert::to_indexable(&table, &parsed, &meta)?;
-            let seq_no = crate::search::hits::meta_dv(seg, local, search_index::schema::SEQ_NO_FIELD);
-            let primary_term = crate::search::hits::meta_dv(seg, local, search_index::schema::PRIMARY_TERM_FIELD);
-            let version = crate::search::hits::meta_dv(seg, local, search_index::schema::VERSION_FIELD);
-            let mut op = IndexOp::new(idoc);
-            op.origin = search_index::Origin::Replay { seq_no, primary_term, version };
-            let target_shard = crate::meta::routing::shard_for(dst, &id, routing.as_deref());
-            let ts = de.shard(target_shard);
-            if let Some(log) = &ts.log {
-                log.check()?;
-            }
-            if let search_index::OpResult::Indexed { .. } = ts.shard.index(op).map_err(convert::index_error)? {
-                log_op(ts, &LoggedOp::Index { id: &id, routing: routing.as_deref(), source: &source, seq_no, primary_term, version })?;
-            }
-            ts.wrote();
+        for doc in live_root_docs(searcher, &|_| true)? {
+            target.index(&read_copy(searcher, &vectors, doc)?)?;
         }
     }
-    de.refresh_all()
+    target.finish()
+}
+
+/// One document as a copy indexes it again (a restore, shrink, split or clone): its id,
+/// routing, source (with the vectors stored source leaves out put back) and the sequence
+/// number, primary term and version it had.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocCopy {
+    pub id: String,
+    pub routing: Option<String>,
+    pub source: Bytes,
+    pub seq_no: i64,
+    pub primary_term: i64,
+    pub version: i64,
+}
+
+/// The live root documents of `searcher` (global doc ids, in order) in the segments `wanted`
+/// picks.
+pub fn live_root_docs(searcher: &search_index::Searcher, wanted: &dyn Fn(&search_index::SegmentContext) -> bool) -> EsResult<Vec<u32>> {
+    struct All<'w> {
+        out: Vec<u32>,
+        wanted: &'w dyn Fn(&search_index::SegmentContext) -> bool,
+    }
+    struct Leaf<'a> {
+        out: &'a mut Vec<u32>,
+        base: u32,
+        keep: bool,
+    }
+    impl search_index::LeafCollector for Leaf<'_> {
+        fn collect(&mut self, doc: u32, _s: &mut dyn search_index::Scorable) -> search_index::Result<()> {
+            if self.keep {
+                self.out.push(self.base + doc);
+            }
+            Ok(())
+        }
+    }
+    impl search_index::Collector for All<'_> {
+        fn score_mode(&self) -> search_index::ScoreMode {
+            search_index::ScoreMode::CompleteNoScores
+        }
+        fn leaf<'a>(&'a mut self, seg: &search_index::SegmentContext) -> search_index::Result<Box<dyn search_index::LeafCollector + 'a>> {
+            let keep = (self.wanted)(seg);
+            Ok(Box::new(Leaf { out: &mut self.out, base: seg.base, keep }))
+        }
+    }
+    let root = search_index::query::nested::root_filter();
+    let mut all = All { out: Vec::new(), wanted };
+    searcher.search(&root, &mut all).map_err(convert::index_error)?;
+    Ok(all.out)
+}
+
+/// Document `doc` of `searcher` as a copy, its vector fields among `vectors`
+/// ([`crate::engine::source_vectors::copied`]) put back into its source from its segment.
+pub fn read_copy(searcher: &search_index::Searcher, vectors: &[Arc<crate::engine::fields::FieldInfo>], doc: u32) -> EsResult<DocCopy> {
+    let Some((seg, local)) = searcher.segment_of(doc) else { return Err(EsError::internal(format!("document [{doc}] is in no segment"))) };
+    let stored = searcher.stored(doc).map_err(convert::index_error)?;
+    let id = crate::search::hits::stored_id(&stored).unwrap_or_default();
+    let routing = crate::fetch::routing(&stored);
+    let mut source = crate::fetch::source_bytes(&stored).map(Bytes::copy_from_slice).unwrap_or_else(|| Bytes::from_static(b"{}"));
+    if !vectors.is_empty() {
+        let mut value = crate::fetch::parse_source(&source)?;
+        if let Value::Obj(m) = &mut value
+            && crate::engine::source_vectors::patch_raw(vectors, m, &mut crate::engine::source_vectors::InSegmentByName(seg, local))
+        {
+            source = Bytes::from(value.to_json());
+        }
+    }
+    Ok(DocCopy {
+        id,
+        routing,
+        source,
+        seq_no: crate::search::hits::meta_dv(seg, local, search_index::schema::SEQ_NO_FIELD),
+        primary_term: crate::search::hits::meta_dv(seg, local, search_index::schema::PRIMARY_TERM_FIELD),
+        version: crate::search::hits::meta_dv(seg, local, search_index::schema::VERSION_FIELD),
+    })
+}
+
+/// An index copies are indexed into ([`CopyTarget::index`]), refreshed by
+/// [`CopyTarget::finish`].
+pub struct CopyTarget<'c> {
+    cluster: &'c Cluster,
+    dst: Arc<IndexMeta>,
+    de: Arc<IndexEngine>,
+    pub table: Arc<crate::engine::fields::FieldTable>,
+    ctx: MappingCtx,
+}
+
+impl<'c> CopyTarget<'c> {
+    pub fn new(cluster: &'c Cluster, dst: &Arc<IndexMeta>) -> EsResult<CopyTarget<'c>> {
+        let st = cluster.state();
+        let de = cluster.engine.index(cluster, &st, dst)?;
+        let table = de.table();
+        Ok(CopyTarget { cluster, dst: dst.clone(), de, table, ctx: dst.mapping_ctx() })
+    }
+
+    /// Indexes `copy` into the shard its id and routing route to, with its sequence number,
+    /// primary term and version, logged like a write.
+    pub fn index(&self, copy: &DocCopy) -> EsResult<()> {
+        let (cluster, dst, table) = (self.cluster, &self.dst, &self.table);
+        let DocCopy { id, routing, source, seq_no, primary_term, version } = copy;
+        let (id, routing, seq_no, primary_term, version) = (id.as_str(), routing.as_deref(), *seq_no, *primary_term, *version);
+        let value = crate::fetch::parse_source(source)?;
+        let mut parsed = crate::document::parse_document(&dst.mapping, &self.ctx, &value, Some(source), Some(id))?;
+        crate::search::index_time::apply(&cluster.scripts, &cluster.state(), &dst.mapping, &value, &mut parsed)?;
+        // Time series documents keep their `_tsid` and the routing hash their `_id` starts
+        // with (`_ts_routing_hash`).
+        let ts = crate::engine::tsdb::is_time_series(dst).then(|| {
+            let tsid = crate::engine::tsdb::build_tsid(&crate::engine::tsdb::dimensions(dst, &parsed));
+            let hash = crate::engine::tsdb::id_routing_hash(dst, id).map(crate::engine::tsdb::encode_hash).unwrap_or_default();
+            (tsid, hash)
+        });
+        let meta = DocMeta {
+            id,
+            routing: if ts.is_some() { None } else { routing },
+            source: stored_source(dst, table, source, &value),
+            tsid: ts.as_ref().map(|(t, h)| (t.as_slice(), h.as_str())),
+        };
+        let idoc = convert::to_indexable(table, &parsed, &meta)?;
+        let mut op = IndexOp::new(idoc);
+        op.origin = search_index::Origin::Replay { seq_no, primary_term, version };
+        let target_shard = crate::meta::routing::shard_for(dst, id, routing);
+        let ts = self.de.shard(target_shard);
+        if let Some(log) = &ts.log {
+            log.check()?;
+        }
+        if let search_index::OpResult::Indexed { .. } = ts.shard.index(op).map_err(convert::index_error)? {
+            log_op(ts, &LoggedOp::Index { id, routing, source, seq_no, primary_term, version })?;
+        }
+        ts.wrote();
+        Ok(())
+    }
+
+    /// Makes the copies searchable.
+    pub fn finish(self) -> EsResult<()> {
+        self.de.refresh_all()
+    }
 }

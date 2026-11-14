@@ -79,6 +79,13 @@ pub struct SearchArgs {
     /// cluster, one node at a time runs it.
     #[arg(long = "search-gc-interval", env = "ROLL_SEARCH_GC_INTERVAL", default_value_t = 3600)]
     pub search_gc_interval_s: u64,
+    /// The name of every cluster's default snapshot repository, on roll's own object storage
+    /// (empty: none).
+    #[arg(long = "search-default-repository", env = "ROLL_SEARCH_DEFAULT_REPOSITORY", default_value = "found-snapshots")]
+    pub search_default_repository: String,
+    /// Let `s3` snapshot repositories reach private addresses (local development with MinIO).
+    #[arg(long = "search-repository-allow-private", env = "ROLL_SEARCH_REPOSITORY_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    pub search_repository_allow_private: bool,
     /// Publish Elasticsearch's test cluster features (to run the YAML REST suites against
     /// clusters created through the API). Test deployments only.
     #[arg(long = "search-test-features", env = "ROLL_SEARCH_TEST_FEATURES", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
@@ -130,6 +137,10 @@ impl Search {
         cfg.history_retention = Duration::from_secs(args.search_history_s);
         cfg.test_features = args.search_test_features;
         cfg.gc_interval = (args.search_gc_interval_s > 0).then(|| Duration::from_secs(args.search_gc_interval_s));
+        cfg.default_repository = Some(args.search_default_repository.trim().to_string()).filter(|n| !n.is_empty());
+        if args.search_repository_allow_private {
+            cfg.node_settings.push((search_control::S3_ALLOW_PRIVATE.to_string(), "true".to_string()));
+        }
         // Watch passwords, connector and Fleet secrets are sealed in cluster state under the
         // deployment's key; without one they're stored as given (as on Elasticsearch).
         cfg.sealer = std::env::var("ROLL_SECRET_KEY").ok().and_then(|k| search_control::Sealer::from_secret(&k));

@@ -1330,9 +1330,26 @@ the rest are skipped by the tests' own prerequisites.
   start. The health report's `slm` indicator reports a stopped SLM and policies that failed
   `slm.health.failed_snapshot_warn_threshold` times in a row. A policy's next run and the next
   retention (only while a policy has a retention) are due times that wake a sleeping cluster.
-  Not shown: `in_progress` in `GET _slm/policy` (roll takes the snapshot within the run). On the
-  fleet no cluster has a `path.repo` yet, so no `fs` repository, and so no policy, can be
-  registered there.
+  Not shown: `in_progress` in `GET _slm/policy` (roll takes the snapshot within the run). On
+  roll's fleet policies use the default repository (below) or an `s3` one.
+- Repositories: `fs` and `url` under `path.repo` (a node setting; fleet clusters have none),
+  `source` over either, and `s3`. Every cluster with object storage also has
+  `found-snapshots`, an `s3` repository with client `roll` kept in the cluster's own storage,
+  as Elastic Cloud registers its own; changing or unregistering it answers 400
+  `illegal_argument_exception` (wildcard deletes pass over it), and no other repository may use
+  client `roll`. An `s3` repository takes `bucket`, `base_path`, `endpoint`, `protocol`,
+  `region`, `path_style_access` and `readonly` as Elasticsearch's client and repository settings
+  do, and its credentials (`access_key`, `secret_key`, `session_token`) as repository settings,
+  since a roll cluster has no keystore: they are sealed and never shown back, where
+  Elasticsearch prints repository settings as given. `PUT` with `verify` (the default) and
+  `_verify` write, read and delete a test object before answering (500
+  `repository_verification_exception` when the bucket can't be reached; the repository stays
+  registered, as on Elasticsearch). Its layout is roll's own
+  (`<base_path>/roll/`), so Elasticsearch can't read roll's snapshots nor roll Elasticsearch's;
+  `_cleanup` deletes what no snapshot references, `_verify_integrity` checks every shard
+  snapshot is in the bucket. Not supported: `chunk_size`, `server_side_encryption`,
+  `canned_acl`, `storage_class` (accepted, not applied), throttling of bucket traffic, `gcs` and
+  `azure`.
 - Searchable snapshots mount through the snapshot restore API; mounted indices keep the
   repository from being unregistered or moved (409 `repository_conflict_exception`). The
   statistics list the mounted shards' files by Lucene extension with their sizes but no blob
@@ -1342,8 +1359,8 @@ the rest are skipped by the tests' own prerequisites.
   shard each snapshot records still has its durable copy; `_analyze` (the repository test kit)
   validates and plans as Elasticsearch does, and times out when the repository's
   `max_snapshot_bytes_per_sec`/`max_restore_bytes_per_sec` couldn't move the data within
-  `timeout`; it doesn't exercise a blob store, since roll keeps snapshot contents in the
-  cluster's own storage.
+  `timeout`; it doesn't exercise a blob store: roll's own repositories keep snapshot contents
+  in the cluster's storage, and an `s3` repository's bucket isn't touched by it (`_verify` is).
 - x-pack (`crates/search-es/src/xpack/`): security (native realm, API keys, tokens, role
   mappings, privileges, request authorization), ES|QL, SQL, EQL, enrich, transforms, async
   search, ILM, search applications, query rules, connectors, graph, terms enum, text structure

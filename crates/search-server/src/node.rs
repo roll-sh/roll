@@ -123,6 +123,10 @@ pub struct NodeConfig {
     pub snapshot_leftover_grace: Duration,
     /// Seals the secrets clusters store (`search_es::seal`; `None`: stored as given).
     pub sealer: Option<Arc<search_es::seal::Sealer>>,
+    /// The name roll's default snapshot repository is registered under in every cluster whose
+    /// data is in object storage (`search_es::api::snapshots::install_default_repository`;
+    /// `None`: none).
+    pub default_repository: Option<String>,
 }
 
 impl Default for NodeConfig {
@@ -143,6 +147,7 @@ impl Default for NodeConfig {
             unload_memory_only: false,
             snapshot_leftover_grace: search_es::api::snapshots::LEFTOVER_GRACE,
             sealer: None,
+            default_repository: None,
         }
     }
 }
@@ -1011,6 +1016,8 @@ impl Node {
         cfg.test_features = self.cfg.test_features;
         cfg.host_metrics = self.cfg.host_metrics;
         cfg.sealer = self.cfg.sealer.clone();
+        // Snapshot contents are durable only with object storage behind the cluster.
+        cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
         let mut cluster = Cluster::open(cfg, store).await?;
         cluster.node.id = stable_node_id(&spec.name);
         if cluster.state().version <= 1 {
