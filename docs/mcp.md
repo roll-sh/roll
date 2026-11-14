@@ -532,17 +532,17 @@ start from one. `outputSchema` per tool: it would double `tools/list` for client
 `structuredContent` as JSON anyway.
 
 Done lately: a person's canvas no longer widens a project rule (`Workspace::trusts`, built on
-secrets' branch) and people's tokens reach secrets; a token can start later (`not_before`,
-Cloudflare's TTL start): refused until then as an unknown token, the dashboard's "Starts" and `roll
-token create --starts 2h` (the expiry counts from the start), changeable and clearable; a person's
-own token's page tested to show only their reach; `roll token list --product/--resource` and
-`--workloads`; a workload token makes no tokens; the ninth review's findings (people's mail in
+secrets' branch) and people's tokens reach secrets; the ninth review's findings (people's mail in
 roll's words only: names as words, an approval's mail without its resource, a leak's without where,
 one approval mail per token per ten minutes and 20 a person an hour; workload tokens capped per
 owner and a person's listed before the limit; a refresh token's retry within its grace audited; apps
 settings that change what production runs, its source, build, start and pre-deploy commands,
 schedule, kind, port, volume and `run.public`, are deploy; `create_grant` refuses extensions that
-name no caller; the expiry digest leaves out tokens made for a day or less); workload tokens
+name no caller; the expiry digest leaves out tokens made for a day or less); a token can start later
+(`not_before`, Cloudflare's TTL start): refused until then as an unknown token, the dashboard's
+"Starts" and `roll token create --starts 2h` (the expiry counts from the start), changeable and
+clearable; a person's own token's page tested to show only their reach; `roll token list
+--product/--resource` and `--workloads`; a workload token makes no tokens; workload tokens
 (`Access::mint_workload`: minutes, within an identity's scope, owned by its maker, out of the list
 and caps) for secrets' identity logins; a person's own tokens' news is mailed to them (an approval
 waiting on them, used from a new network, revoked as leaked, about to expire; only their own, never
