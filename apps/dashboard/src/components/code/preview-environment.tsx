@@ -140,6 +140,27 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
           {env.release_before_ms != null && thanMain(env.release_ms, env.release_before_ms, "the push before") ? ` · ${thanMain(env.release_ms, env.release_before_ms, "the push before")}` : ""}
         </p>
       )}
+      {env.schema_risks && env.schema_risks.length > 0 && (
+        <ul className="space-y-0.5 rounded-lg border border-danger/40 bg-danger/10 px-2.5 py-1.5 text-[12px] text-danger" aria-label="Migration risks">
+          {env.schema_risks.map((r, i) => (
+            <li key={i} className="break-words">
+              {r}
+            </li>
+          ))}
+        </ul>
+      )}
+      {env.schema_changes && env.schema_changes.length > 0 && (
+        <details className="text-[12px]">
+          <summary className="cursor-pointer text-muted hover:text-fg">Schema changes ({env.schema_changes.length})</summary>
+          <pre className="mt-1 max-h-48 overflow-auto rounded-lg border border-line-2 px-2.5 py-1.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]">
+            {env.schema_changes.map((l, i) => (
+              <div key={i} className={l.startsWith("- ") ? "text-danger" : l.startsWith("+ ") ? "text-fg" : "text-subtle"}>
+                {l}
+              </div>
+            ))}
+          </pre>
+        </details>
+      )}
       {env.expires_at != null && (
         <p className="text-[12px] text-muted">
           It goes {new Date(env.expires_at).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}; keep it from Previews.

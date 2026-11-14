@@ -366,8 +366,8 @@ VALID` validated first doesn't); on a search branch, an index that goes ("its do
 it") and a field whose type changes ("a mapping can't change in place": a reindex). Added
 columns, fields and indexes aren't risks here: the release ran
 them on production's own rows, and its time is said beside it. The comment lists them unfolded
-as "Migration risks", each in a code span its names can't close; the sheet shows them in red over
-the lines.
+as "Migration risks", each in a code span its names can't close; the sheet and the change page
+show them in red over the lines (the change page with the lines folded).
 
 Search branches the same way: each one's `_mapping` and its parent's, read through roll search's
 operator console request (no cluster password), become `index <name>` and `field <index>.<path>
