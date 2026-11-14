@@ -1390,7 +1390,9 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   definitions, pass the execution role, `StartBuild`/`StopBuild`/`BatchGetBuilds` on the project,
   ECR `CreateRepository`/`BatchDeleteImage` under `apps/`, Secrets Manager under
   `roll-apps/builds/`), a bucket lifecycle rule expiring `<prefix>env/` and `<prefix>builds/`
-  after a day, and the `ROLL_APPS_*` node settings. A private image pulls with the service's
+  after a day, current and noncurrent versions alike (the data bucket is versioned: a deleted
+  environment file, its secrets in it, is otherwise a noncurrent version for 35 days; the
+  `code/runs/` rule is the model), and the `ROLL_APPS_*` node settings. A private image pulls with the service's
   login as a Secrets Manager secret `roll-apps/registry/<service>` named in the task definition
   (repository credentials; tested against the fake AWS): the fleet role needs
   `CreateSecret`/`PutSecretValue` there and the execution role `GetSecretValue`; the secret
@@ -1415,7 +1417,8 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   ports; both are the host's set-up (the fleet runs tasks, not containers on a node). roll-fetch
   writes a bundle's env file 0644 (what reads it in previews' containers decides whether it can
   be 0600). Builds' secrets a stopped node left in Secrets Manager are swept at start (two days
-  old); the bucket's `builds/` and `env/` objects wait for the stack's lifecycle rule.
+  old) and tasks' environment files every ten minutes (`Runtime::sweep`); the bucket's `builds/`
+  zips, and every object's noncurrent versions, wait for the stack's lifecycle rule.
 - Links: Postgres and Redis are wired; buckets, streams, queues and NoSQL answer "not wired yet".
 - roll secrets isn't on main yet: `NoSecrets` stands in, and service variables are the env store.
 - Private networking is a Docker network per project and environment; it isn't reachable from
