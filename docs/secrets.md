@@ -1594,7 +1594,35 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
-An independent security review of #43–#45 found no cross-tenant path; it found managed
+Then (2026-11-14, latest): certificates ending as health findings (#44: `certificate_expiring`)
+and ClickHouse outside roll (#39, merged up into #41 and #42: its HTTPS interface, `sha256_hash`
+passwords, checked live against ClickHouse 25.8).
+
+A fourth independent review (2026-11-14, of the rotations overview, transit signing, HMAC and
+brought keys, CSR signing, revocation and the CRL, SQL Server) found no high-severity issue; it
+found an ended SQL Server lease whose login could stay usable, generated passwords SQL Server's
+policy refuses, deleted CAs undoing their revocations, a public CRL signed per request, P-384 CSRs
+mislabelled, unrevocable serials, a batch failed by one retired version and a restore that forgot
+brought keys: all fixed, tested where a test guards behaviour, and checked live (SQL Server 2022,
+OpenSSL). Then SSH host certificates (#45, checked against a real `sshd`).
+
+Built on 2026-11-14 (later), again without a merge: revoking certificates (#44: a list of what a
+CA signed, `…/revoke`, revocation when a lease ends, a public CRL every certificate names, checked
+with `openssl verify -crl_check`); SQL Server outside roll (#39, merged up into #41 and #42;
+checked live against SQL Server 2022); bringing an encryption key (#47: Vault's `vault:v<n>:`
+ciphertexts decrypt and rewrap, checked against Vault 1.20).
+
+Built on 2026-11-14 from the last ranking, without waiting on a merge: a rotations overview (#48:
+`GET …/rotations`, Health's "Managed credentials", `roll secrets rotations`); signing and HMAC
+with encryption keys (#47: Ed25519 a stock library checks with the exported public key, HMAC
+blind indexes, `transit(name)` in `@roll/secrets`); CSR signing (#44: `…/cas/{id}/sign`, checked
+with OpenSSL's P-256 and RSA CSRs under `openssl verify -x509_strict`).
+
+A third independent review (of #46 and #47) found four ways a sensitive value still reached a person
+(older versions, change requests that add the tag, syncs and sandboxes counted as runtimes) and
+guessing oracles, plus backups leaving out encryption keys: all fixed and tested. roll apps (#26)
+now seals sensitive variables and redeploys when an environment's digest moves (#31 implements
+it). An independent security review of #43–#45 found no cross-tenant path; it found managed
 certificates that could lapse, an issuer key that a deployment-key rotation would have broken, a
 fail-open decoy check and leases outliving cloud tokens, all fixed and tested. Measured again on 2026-11-14 (load about 20): values at 9,900 keys took 89–122 ms on SQLite and
 155 ms on Postgres, within the noise of the Performance table; nothing to fix. Reviewed again on
@@ -1612,20 +1640,28 @@ Doppler, Infisical, Vault and 1Password (clients, IaC, CI, Kubernetes, BYOK). Th
 is Vault's signature: dynamic credentials for clouds and databases roll doesn't run. CI stays
 under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
-Ranked (work that can start now):
+Ranked: first what can be built now, without a merge; then what waits on one (merges are the
+user's call).
 
-1. **Sensitive keys in roll apps** (once #46 and #31 land): `ForApps` sets `SecretVar.sensitive`
-   from `Values.sensitive`; apps (#26) already seals such variables (in a container's env, masked in
-   every answer). One line once both are on #20.
-2. **AWS through roll's issuer** (once #38 and #43 land): `AssumeRoleWithWebIdentity` with roll's
-   own token, so roll needs no AWS keys of its own and the trust policy pins `sub` as GCP's and
-   Azure's do.
-3. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
-   customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
-4. **Products say who owns a resource**, so a person's project can link their own databases,
-   buckets and streams. Waits on products serving signed-in people.
-5. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
-   besides its owner.
+1. **Transit keys scoped by name**: a grant's resources include one encryption key
+   (`secrets:transit/<name>`), so signing with one key doesn't need write on the project. Needs a
+   resource kind in roll-access's catalogue (the MCP thread's), so agree it there first.
+2. **Certificates for keys that stay put on SSH too**: `roll ssh` signs a key the user already has
+   (`…/ssh-cas/{id}/sign-user {public_key}`), for people who keep their key in an agent or a
+   hardware token.
+3. **Rotation for roll's own resources from outside**: `roll secrets rotate --all-due`, for an
+   operator's maintenance window, rotating every managed credential due within a week in one run
+   and reporting what failed.
+4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
+   already seals such variables). One line once both are on #20.
+5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
+   token; the trust policy pins `sub`, as GCP's and Azure's do).
+6. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
+   notice.
+7. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
+   project can link their own databases, buckets and streams.
+8. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+   environment).
 
 Open pull requests after this one:
 
@@ -1649,15 +1685,19 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#48, failing rotations in health** (after #20): `rotation_failing` and `revoke_failing`
+  findings, with the reason, until roll succeeds; a rotations overview of every managed credential.
 - **#47, encryption keys** (after #20): encryption as a service, as Vault's Transit: named,
-  versioned keys that never leave roll; encrypt, decrypt (audited), rewrap, data keys.
+  versioned keys that never leave roll; encrypt, decrypt (audited), rewrap, data keys, Ed25519
+  signatures and HMACs; keys brought from outside, Vault's ciphertexts included.
 - **#46, sensitive keys** (after #20): a key tagged `sensitive` reaches only roll's runtimes, syncs
   and workload identities, never a person or a token; the tag is for good.
 - **#45, SSH certificates** (after #44): a project's SSH CA signs short-lived user certificates
   for the logins it allows, and `roll ssh` uses them for one session; OpenSSH's formats, checked
   with `ssh-keygen` and a real `sshd` login.
 - **#44, a project's own certificate authority** (after #20): short-lived TLS certificates for the
-  names its name-constrained CA allows, dynamic or managed; checked with a real TLS handshake.
+  names its name-constrained CA allows, dynamic or managed, and CSRs it signs; revocation and a
+  public CRL; checked with a real TLS handshake and `openssl verify -crl_check`.
 - **#43, dynamic GCP and Azure credentials** (after #20): roll as an OIDC issuer
   (`/v1/secrets/oidc`); GCP's workload identity federation and Azure's federated credentials trust
   its token for one project, checked with a decoy project at registration.
@@ -1666,7 +1706,7 @@ Open pull requests after this one:
   signature checked.
 - **#41, Redis outside roll** (after #39): two ACL users take turns (`#<sha256>` passwords), or a
   user per lease copying a template user's rules; the tenant's replies read by a bounded parser.
-- **#39, Postgres and MySQL outside roll** (after #20): two login roles take turns (rotation), or a
+- **#39, Postgres, MySQL and SQL Server outside roll** (after #20): two login roles take turns (rotation), or a
   login per lease in a group role (dynamic), over verified TLS to a public address rolld resolved
   itself (Postgres gets a SCRAM verifier, never the password).
 
