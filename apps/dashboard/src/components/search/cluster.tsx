@@ -20,6 +20,7 @@ import { AppShell } from "../app-shell";
 import { formatTime, fromLocalInput, now, POLL_MS, Segmented, toLocalInput } from "../redis/shared";
 import { ago, btn, Confirm, Connecting, CopyButton, EmptyPanel, ErrorNote, input, Offline, Panel, primary, Stats, useCopy } from "../ui";
 import { AnalyzeTab } from "./analyze";
+import { DataStreams } from "./data-streams";
 import { ImportPanel } from "./import";
 import { NewIndexPanel } from "./new-index";
 import { InferenceTab } from "./inference";
@@ -556,6 +557,7 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
           index to browse its documents, mapping and settings.
         </p>
       </Panel>
+      {rows && <DataStreams cluster={cluster} indices={rows} onSelect={setSelected} />}
       {creating && (
         <NewIndexPanel
           cluster={cluster}

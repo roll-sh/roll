@@ -256,7 +256,8 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    every byte forever. OpenSearch's ISM already runs as background jobs (`opensearch/ism.rs`):
    run DSL's rollover and retention and ILM's phases and actions the same way, with
    `_ilm/explain` and `_lifecycle/explain` as Elasticsearch prints them, waking a sleeping
-   cluster only when an action falls due.
+   cluster only when an action falls due. The dashboard's Data streams panel already sets a
+   stream's retention (and shows ILM-managed streams' policy); it takes effect once this lands.
 3. **Vector search's cost and speed** (scale to zero meets HNSW): RAM loaded and idle, cold start
    to the first `knn` answer, indexing, latency and recall@10 (filtered, in `rrf`), store bytes,
    against Elasticsearch 9.5.5 and OpenSearch 3.9 on 1M × 384 dims; then fix where roll loses. In
@@ -273,8 +274,9 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    run: the default ELSER needs machine learning nodes; the request shown or opened in the
    console), and a time-based index (`@timestamp`, `timestamp`, or its only top-level date field)
    browsed as Discover does: range presets, documents over time (`auto_date_histogram`, counted
-   from the points tree), a click on a bar narrows to it, newest first unless a column sorts.
-   Next: index templates and lifecycle policies listed per index, `_profile` of a
+   from the points tree), a click on a bar narrows to it, newest first unless a column sorts; and
+   a Data streams panel (backing indices, documents, size, the lifecycle's retention set in place
+   or the ILM policy that manages the stream). Next: index templates listed per index, `_profile` of a
    console search drawn as a tree, saved console requests. Signed-in users who aren't admins follow
    accounts' phase 2: today every product but code, agents and projects answers them 403
    (docs/accounts.md), search included.
