@@ -18,6 +18,42 @@ fn digest(pinned: &str) -> Option<&str> {
 }
 
 impl Apps {
+    /// Environments that redeploy when the project's secrets change (of the services this node
+    /// owns): roll secrets' digest against the one the live deployment went live with. Each
+    /// remembers the digest it last acted on, so a redeploy that failed isn't tried every minute;
+    /// one already on its way is left alone. The redeploys it started.
+    pub async fn watch_secrets(self: &Arc<Self>) -> Vec<String> {
+        let mut started = Vec::new();
+        let Ok(services) = self.db(|s| s.services(None)).await else { return started };
+        for svc in services.into_iter().filter(|s| self.owns(&s.id)) {
+            let sid = svc.id.clone();
+            let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
+            for env in envs.into_iter().filter(|e| e.redeploy_on_secrets) {
+                let Some(active) = env.active.clone() else { continue };
+                let Ok(Some(now)) = self.deps.secrets.digest(&svc.project, &env.name).await else { continue };
+                if env.secrets_seen.as_deref() == Some(now.as_str()) {
+                    continue;
+                }
+                let (sid, a) = (svc.id.clone(), active.clone());
+                let Ok((then, pending)) = self.db(move |s| Ok((s.secrets_digest(&a)?, s.pending_deployments(&sid)?))).await else { continue };
+                if pending.iter().any(|d| d.environment == env.name) {
+                    continue;
+                }
+                let (sid, e, n) = (svc.id.clone(), env.name.clone(), now.clone());
+                let _ = self.db(move |s| s.set_secrets_seen(&sid, &e, &n)).await;
+                // No digest kept with the live one (before it was kept): this one is where it starts.
+                if then.as_deref().is_none_or(|t| t == now) {
+                    continue;
+                }
+                match self.redeploy(&svc.id, &env.name, json!({ "message": "the project's secrets changed" }), Some("secrets watch".into())).await {
+                    Ok(d) => started.push(d.id),
+                    Err(e) => self.logs.sink(format!("env:{}/{}", svc.id, env.name), crate::logs::Stream::System).line(format!("redeploying for the project's new secrets: {e}")),
+                }
+            }
+        }
+        started
+    }
+
     /// Check every watched tag of the services this node owns; the deployments it started.
     pub async fn watch_tags(self: &Arc<Self>) -> Vec<String> {
         let mut started = Vec::new();

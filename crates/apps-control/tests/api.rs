@@ -2270,6 +2270,16 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
     VERSION.store(2, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(call(&w.api, "GET", &format!("{base}/pending"), None).await.1["secrets"], true);
     assert_eq!(call(&w.api, "GET", &base, None).await.1["needs_deploy"], true, "not after the minute's cache");
+    // Set to redeploy on a change: the owner's minute's watch does it, once.
+    assert!(w.apps.watch_secrets().await.is_empty(), "off by default");
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"redeploy_on_secrets": true}))).await;
+    assert_eq!((st, &env["redeploy_on_secrets"]), (StatusCode::OK, &json!(true)), "{env}");
+    let started = w.apps.watch_secrets().await;
+    assert_eq!(started.len(), 1);
+    let d = settled(&w, svc["id"].as_str().unwrap(), "production", &started[0]).await;
+    assert_eq!((d["status"].as_str(), d["trigger"].as_str()), (Some("active"), Some("settings")), "{d}");
+    assert_eq!(call(&w.api, "GET", &format!("{base}/pending"), None).await.1["secrets"], false);
+    assert!(w.apps.watch_secrets().await.is_empty(), "nothing moved since");
     assert_eq!(call(&w.api, "POST", &format!("{base}/shell/sessions"), None).await.0, StatusCode::FORBIDDEN);
     let (_, job) = call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "exit 0"}))).await;
     assert_eq!(call(&w.api, "GET", &format!("{base}/jobs/{}/logs", job["id"].as_str().unwrap()), None).await.0, StatusCode::FORBIDDEN);

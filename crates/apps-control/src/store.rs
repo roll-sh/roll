@@ -331,6 +331,10 @@ pub struct EnvRow {
     pub hook_hash: Option<String>,
     /// An image service's tag is watched: it deploys when the tag moves.
     pub follow_tag: bool,
+    /// Redeploys when the project's secrets change ([`crate::Apps::watch_secrets`]), and the
+    /// digest it last acted on.
+    pub redeploy_on_secrets: bool,
+    pub secrets_seen: Option<String>,
     /// The digest the watched tag pointed at when it was last acted on (deployed, or found
     /// where the live deployment already is): only a move past it deploys.
     pub tag_seen: Option<String>,
@@ -446,7 +450,7 @@ pub struct Store {
 }
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen";
 const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor";
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> code_sql::Result<T> {
@@ -506,6 +510,8 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         tcp_port: r.get::<_, Option<i64>>(17)?.map(|p| p as u16),
         firewall: r.get::<_, Option<String>>(18)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
         pages: r.get::<_, Option<String>>(19)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+        redeploy_on_secrets: r.get::<_, i64>(20)? != 0,
+        secrets_seen: r.get(21)?,
     })
 }
 
@@ -580,6 +586,8 @@ impl Store {
         db.add_column("variables", "write_only", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("services", "build_cache", "TEXT")?;
         db.add_column("environments", "pages", "TEXT")?;
+        db.add_column("environments", "redeploy_on_secrets", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("environments", "secrets_seen", "TEXT")?;
         db.add_column("environments", "feedback", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("links", "minted", "TEXT")?;
         db.add_column("environments", "maintenance", "TEXT")?;
@@ -749,7 +757,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -1661,6 +1669,16 @@ impl Store {
     }
 
     // ── pushes waiting for their checks ──
+
+    pub fn set_redeploy_on_secrets(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        self.db.execute("UPDATE environments SET redeploy_on_secrets = ?, secrets_seen = NULL WHERE service = ? AND name = ?", params![on as i64, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_secrets_seen(&self, service: &str, env: &str, digest: &str) -> Result<()> {
+        self.db.execute("UPDATE environments SET secrets_seen = ? WHERE service = ? AND name = ?", params![digest, service, env])?;
+        Ok(())
+    }
 
     pub fn set_follow_tag(&self, service: &str, env: &str, on: bool) -> Result<()> {
         // Turned on or off, it starts again from what the tag points at then.

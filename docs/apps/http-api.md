@@ -265,6 +265,9 @@ type EnvironmentPut = {
   wait_for_ci?: boolean;
   /** An image service whose image has a tag: deploy when the tag points at a new digest
    *  (checked every 5 minutes on the owner; actor `tag watch`). 400 otherwise. */
+  /** Redeploy (the same image, the new values) when the project's secrets change, checked each minute
+   *  on the owner against roll secrets' digest; off by default. */
+  redeploy_on_secrets?: boolean;
   follow_tag?: boolean;
   /** A preview environment (ephemeral) only, set by roll previews: a visitor who came in through
    *  its access link gets roll previews' feedback button on its pages (`/__roll/feedback.js`
@@ -314,6 +317,7 @@ type Environment = EnvironmentSummary & {
   run: { [field: string]: number }; // its own run settings over the service's ({}: the service's)
   hook: boolean;              // it has a deploy hook
   follow_tag: boolean;        // an image service's tag is watched: a new digest behind it deploys
+  redeploy_on_secrets: boolean; // the project's secrets changing redeploys it (same image, new values)
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
   maintenance: { message: string | null } | null; // in maintenance (null message: roll's words); null: serving
   pages?: { error?: string; maintenance?: string }; // its own pages (absent: roll's): error for the 502/503/504 while it can't answer or wake, maintenance while in maintenance

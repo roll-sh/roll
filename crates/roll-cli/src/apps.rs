@@ -523,6 +523,10 @@ pub enum AppsCmd {
         /// An image service: deploy when its tag points at a new image (`true`), or not.
         #[arg(long)]
         follow_tag: Option<bool>,
+        /// Redeploy (the same image, the new values) when the project's secrets change (`true`),
+        /// or not.
+        #[arg(long)]
+        redeploy_on_secrets: Option<bool>,
         /// Only visitors with its link get in (a new link, printed once; the old one stops).
         #[arg(long, conflicts_with = "open")]
         private: bool,
@@ -2288,7 +2292,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, private, open, maintenance, serve, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, error_page, maintenance_page, roll_pages } => {
+        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, private, open, maintenance, serve, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, error_page, maintenance_page, roll_pages } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -2302,6 +2306,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(w) = wait_for_ci {
                 body.insert("wait_for_ci".into(), json!(w));
+            }
+            if let Some(r) = redeploy_on_secrets {
+                body.insert("redeploy_on_secrets".into(), json!(r));
             }
             if let Some(f) = follow_tag {
                 body.insert("follow_tag".into(), json!(f));

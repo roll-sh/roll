@@ -829,6 +829,8 @@ pub struct Environment {
     /// An image service's tag is watched: a new digest behind it deploys (Railway's image auto
     /// updates).
     pub follow_tag: bool,
+    /// Redeploys (the same image, the new values) when the project's secrets change.
+    pub redeploy_on_secrets: bool,
     /// A preview's pages carry roll previews' feedback button for visitors who came in through
     /// its access link.
     pub feedback: bool,

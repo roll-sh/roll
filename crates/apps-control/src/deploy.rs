@@ -1357,6 +1357,13 @@ impl Apps {
                     this.scaling.store(false, std::sync::atomic::Ordering::SeqCst);
                 });
             }
+            if n.is_multiple_of(60) && !self.watching_secrets.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let this = self.clone();
+                tokio::spawn(async move {
+                    this.watch_secrets().await;
+                    this.watching_secrets.store(false, std::sync::atomic::Ordering::SeqCst);
+                });
+            }
             if n.is_multiple_of(300) && !self.watching.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 let this = self.clone();
                 tokio::spawn(async move {

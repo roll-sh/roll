@@ -127,6 +127,20 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </div>
         )}
 
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+          <div>
+            <p className="text-[13px] font-medium">Redeploy when secrets change</p>
+            <p className="mt-1 text-[12px] text-muted">
+              {env.redeploy_on_secrets
+                ? `When the project's ${env.name} secrets change (a rotated key), ${env.name} redeploys the same image with them, checked each minute.`
+                : "A changed project secret waits for the next deploy; the Redeploy banner says when one did."}
+            </p>
+          </div>
+          <button className={btn} disabled={busy} aria-pressed={!!env.redeploy_on_secrets} onClick={() => runner.run("secrets", () => appsApi.putEnvironment(service.id, env.name, { redeploy_on_secrets: !env.redeploy_on_secrets }))}>
+            {env.redeploy_on_secrets ? "Stop redeploying" : "Redeploy on changes"}
+          </button>
+        </div>
+
         <div className="space-y-3 px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>

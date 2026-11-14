@@ -204,6 +204,7 @@ pub struct Apps {
     backing_up: std::sync::atomic::AtomicBool,
     /// Watched tags are being checked (on their own task).
     watching: std::sync::atomic::AtomicBool,
+    watching_secrets: std::sync::atomic::AtomicBool,
     /// Scaling workers' backlogs are being read (on their own task).
     scaling: std::sync::atomic::AtomicBool,
     /// Static sites' file indexes, by image digest, as this node read them.
@@ -314,6 +315,7 @@ impl Apps {
             changes: tokio::sync::broadcast::channel(256).0,
             backing_up: std::sync::atomic::AtomicBool::new(false),
             watching: std::sync::atomic::AtomicBool::new(false),
+            watching_secrets: std::sync::atomic::AtomicBool::new(false),
             scaling: std::sync::atomic::AtomicBool::new(false),
             sites: Mutex::new(HashMap::new()),
             earlier_sites: Mutex::new(HashMap::new()),
@@ -839,6 +841,7 @@ impl Apps {
             run: r.run.clone(),
             hook: r.hook_hash.is_some(),
             follow_tag: r.follow_tag,
+            redeploy_on_secrets: r.redeploy_on_secrets,
             feedback: r.feedback,
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             pages: r.pages.clone(),
@@ -857,7 +860,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1004,7 +1007,7 @@ impl Apps {
                 svc.for_env(&row).map_err(|e| Error::BadRequest(e.to_string().replace("no longer fit", "don't fit")))?;
             }
         }
-        for k in ["feedback", "follow_tag", "wait_for_ci"] {
+        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets"] {
             if !matches!(o.get(k), None | Some(Value::Null | Value::Bool(_))) {
                 return Err(Error::BadRequest(format!("{k} is a boolean")));
             }
@@ -1083,6 +1086,10 @@ impl Apps {
             self.db(move |s| s.set_rate_limit(&sid, &e, limit.as_ref())).await?;
             self.live(service, env).forget_gate();
             self.changed(service);
+        }
+        if let Some(Value::Bool(on)) = o.get("redeploy_on_secrets") {
+            let (sid, e, on) = (service.to_string(), env.to_string(), *on);
+            self.db(move |s| s.set_redeploy_on_secrets(&sid, &e, on)).await?;
         }
         match o.get("follow_tag") {
             None | Some(Value::Null) => {}

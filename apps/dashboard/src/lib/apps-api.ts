@@ -271,6 +271,8 @@ export interface EnvironmentPut {
   wait_for_ci?: boolean;
   /** Deploy when the image's tag moves (an image service with a tag). */
   follow_tag?: boolean;
+  /** Redeploy (same image, new values) when the project's secrets change. */
+  redeploy_on_secrets?: boolean;
   /** Maintenance: its public names answer roll's page with the message; false ends it. */
   maintenance?: boolean | { message?: string | null };
   /** Its own HTML (at most 64 KiB) instead of roll's pages; null goes back to roll's, an absent field stays. */
@@ -342,6 +344,8 @@ export interface Environment extends EnvironmentSummary {
   scaling?: { backlog: number | null; wanted: number } | null;
   /** An image service's tag is watched: a new digest behind it deploys. */
   follow_tag?: boolean;
+  /** Redeploys (same image, new values) when the project's secrets change, checked each minute. */
+  redeploy_on_secrets?: boolean;
   /** A push deploys only once its commit's checks pass. */
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
