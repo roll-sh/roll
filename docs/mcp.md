@@ -198,6 +198,12 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
 - Results come back as `structuredContent` (the route's JSON; arrays as `{"items": […]}`) and a
   `text` block, cut at 256 KiB. Binary content comes back base64 (`content_b64`). An image (a preview's screenshot: PNG, JPEG or WebP, up to
   4 MiB) comes back as MCP image content the agent can look at.
+- Characters a person can't see but a model reads are escaped in the `text` block: tag characters
+  (ASCII smuggled as U+E0000–E007F), zero-width and bidi controls, and variation selectors. They
+  appear as JSON escapes (`\u200b`), so the text still parses to the same value, and
+  `structuredContent` stays exact. Results carry other people's text (review comments, a
+  preview's notes and mail, task messages, objects), and instructions hidden that way stay
+  visible to the model.
 - A route refusing a call is a result with `isError: true`, and its text says why ("not allowed:
   this token can't delete postgres prj_…"). Unknown tools and bad arguments are JSON-RPC errors.
 
@@ -533,7 +539,9 @@ by its maker, out of the list and caps) for secrets' identity logins; a person's
 mailed to them (an approval waiting on them, used from a new network, revoked as leaked, about to
 expire; only their own, never a secret); `previews_resolve_note` (a preview page's note, write by
 the prefix; previews-next), and `apps_logs` takes `before`, `instance`, `deployment` and `stream`
-(apps-next); plain-read answers checked for credentials (key listings: streams' are usernames,
+(apps-next); invisible characters (tag characters, zero-width and bidi controls, variation
+selectors) escaped in results' text, so instructions hidden in other people's text stay visible to
+the model; plain-read answers checked for credentials (key listings: streams' are usernames,
 storage's skip the secret, tasks' are hashes and prefixes); the fifteenth review: a list's
 credentials redacted item by item (a token with reveal on one Postgres database and read on all saw
 every database's password in `GET /v1/projects`; the same for every list with credential fields), a
