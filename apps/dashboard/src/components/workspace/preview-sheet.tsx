@@ -903,6 +903,25 @@ export function TextAgainst({ diff, branch, what = "words" }: { diff: TextDiff; 
   );
 }
 
+/** The project's endpoints timed on the preview's data (`github.endpoints`: the median of 10
+ * GETs) against main's, the clearly slower ones in red. */
+export function Endpoints({ items, branch }: { items: EndpointTime[]; branch: string }) {
+  if (!items.length) return null;
+  return (
+    <div className="mt-1.5 text-[11.5px]" aria-label={`Its endpoints against ${branch}`}>
+      <p className="text-muted">Its endpoints against {branch}</p>
+      <ul className="mt-0.5 space-y-0.5 font-mono text-[11px] tabular-nums">
+        {items.map((e) => (
+          <li key={e.path} className={endpointSlower(e) ? "text-danger" : "text-fg"}>
+            GET {e.path} {e.ms} ms{e.main_ms != null ? ` (${branch} ${e.main_ms} ms)` : ""}
+            {e.status === 0 ? ", no answer" : e.status >= 400 ? `, ${e.status}` : ""}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /** A roll apps service's build promoted to production (Vercel's promote): the preview
  * environment's live image deployed to production as is (no rebuild), with production's
  * variables (roll apps' `…/environments/production/promote`). It's the person's own call to roll
@@ -966,21 +985,6 @@ function Promote({ preview: p }: { preview: Preview }) {
           Production gets the image this preview runs for {asking.name}, with production's own variables and data; nothing is built again.
         </Confirm>
       )}
-/** The project's endpoints timed on the preview's data (`github.endpoints`: the median of 10
- * GETs) against main's, the clearly slower ones in red. */
-export function Endpoints({ items, branch }: { items: EndpointTime[]; branch: string }) {
-  if (!items.length) return null;
-  return (
-    <div className="mt-1.5 text-[11.5px]" aria-label={`Its endpoints against ${branch}`}>
-      <p className="text-muted">Its endpoints against {branch}</p>
-      <ul className="mt-0.5 space-y-0.5 font-mono text-[11px] tabular-nums">
-        {items.map((e) => (
-          <li key={e.path} className={endpointSlower(e) ? "text-danger" : "text-fg"}>
-            GET {e.path} {e.ms} ms{e.main_ms != null ? ` (${branch} ${e.main_ms} ms)` : ""}
-            {e.status === 0 ? ", no answer" : e.status >= 400 ? `, ${e.status}` : ""}
-          </li>
-        ))}
-      </ul>
     </div>
   );
 }
