@@ -243,6 +243,7 @@ except smtplib.SMTPAuthenticationError:
 PY
 MAIL=$(api GET "/v1/previews/$PV/mail" | jq_ "'%s to %s' % (d['mail'][0]['subject'], ','.join(d['mail'][0]['to'])) if d.get('mail') else ''")
 [ "$MAIL" = "Your order to ada@corp.example" ] || { echo "the preview's mail should be caught and listed: $MAIL"; exit 1; }
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview mail "$PV" | grep -q "to ada@corp.example  Your order" || { echo "roll preview mail should list it"; exit 1; }
 # A reviewer's connection from a laptop (`roll preview connect`): the same role, never the parent's.
 CONNECT=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview connect "$PV" --kind postgres | sed -n 's/^DATABASE_URL=//p')
 case "$CONNECT" in postgres://br_*) ;; *) echo "roll preview connect should hand out the branch's own role, not ${CONNECT%%@*}…"; exit 1;; esac
@@ -298,6 +299,7 @@ echo "$NOTES" | grep -q "The heading is cut off" || { echo "the page's notes sho
 # Resolved (what the page's Resolve opens roll to do), it folds away there.
 NOTE_ID=$(echo "$NOTES" | jq_ "d[0]['id']")
 [ "$(api GET "/v1/previews/$PV/notes" | jq_ "[n['id'] for n in d['notes']]")" = "['$NOTE_ID']" ] || { echo "the preview's open notes should list the page's, with its id"; exit 1; }
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview notes "$PV" | grep -q "^$NOTE_ID  / body > h1  by .*: The heading is cut off" || { echo "roll preview notes should list it: $(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview notes "$PV")"; exit 1; }
 [ "$(api POST "/v1/previews/$PV/notes/$NOTE_ID/resolve" '{}' | jq_ "d.get('resolved')")" = "$NOTE_ID" ] || { echo "resolving the page's note should answer with it"; exit 1; }
 RESOLVED=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F" | jq_ "len(d)")
 [ "$RESOLVED" = 0 ] && [ "$(api GET "/v1/previews/$PV/notes" | jq_ "len(d['notes'])")" = 0 ] || { echo "a resolved note should fold away on the page and from the open notes: $RESOLVED left"; exit 1; }

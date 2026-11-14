@@ -460,8 +460,8 @@ preview wrote a document with a price). With several such resources, each one's 
   roll's whatever the project or its secrets say (they're production's), and mail providers'
   API keys (`SENDGRID_API_KEY`, `POSTMARK_SERVER_TOKEN`, `RESEND_API_KEY`, …) are removed. With
   no catcher listening (its port taken) they point nowhere: mail fails rather than reaching
-  anyone. The sheet lists what was caught (`GET …/mail`; each opened as text, `…/mail/{id}`,
-  never rendered). `mail: "deliver"` hands the project's own settings through. A deploy on roll
+  anyone. The sheet and `roll preview mail` list what was caught (`GET …/mail`; each opened as
+  text, `…/mail/{id}` or `--read <id>`, never rendered). `mail: "deliver"` hands the project's own settings through. A deploy on roll
   apps gets the same overrides in its variables (and the `pv-` secrets environment's), with each
   provider key set to `roll-previews-mail-caught` over what roll secrets gives, since previews
   can't remove those there (`engine.rs::a_preview_s_mail_is_caught_never_sent`;
@@ -675,7 +675,8 @@ land on the change.
 - A note is resolved from the page too (Vercel Comments): its Resolve opens roll
   (`?fb_resolve=<review id>`), where the sheet shows the note and anyone on the project resolves
   it (`POST …/notes/{review}/resolve`, kept by previews: roll code's comment reviews aren't
-  dismissed), so the button stops listing it. The page holds no credential for this either
+  dismissed; from a terminal `roll preview notes` lists the open ones and `--resolve <id>`
+  resolves one), so the button stops listing it. The page holds no credential for this either
   (live: a resolved note folds away).
 - Previews deployed on roll apps go through apps' own proxy, which doesn't add it yet.
 - Public previews don't get it (anyone could see the button), and a branch's preview has no

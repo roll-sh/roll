@@ -126,6 +126,20 @@ pub enum Preview {
         #[arg(long)]
         kind: Option<String>,
     },
+    /// The mail its services sent, caught by roll and never delivered: who it was for and its
+    /// subject, or --read <mail> one message as it was sent.
+    Mail {
+        preview: String,
+        #[arg(long)]
+        read: Option<String>,
+    },
+    /// The notes left on its pages that nobody has resolved, or --resolve <note> one of them
+    /// (the page's button stops listing it).
+    Notes {
+        preview: String,
+        #[arg(long)]
+        resolve: Option<String>,
+    },
     /// Re-branch its data from the parents (every resource, or the ones named).
     Reset {
         preview: String,
@@ -492,6 +506,46 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 match v["vars"].as_object().filter(|m| !m.is_empty()) {
                     Some(m) => m.iter().for_each(|(k, v)| println!("{k}={}", v.as_str().unwrap_or_default())),
                     None => println!("no variables of its own (the project's `env` applies)"),
+                }
+                return Ok(());
+            }
+            v
+        }
+        Preview::Mail { preview, read } => {
+            if let Some(mail) = read {
+                let text = api.open_stream(&format!("/v1/previews/{preview}/mail/{mail}")).await?.text().await?;
+                print!("{text}");
+                return Ok(());
+            }
+            let v = api.get(&format!("/v1/previews/{preview}/mail")).await?;
+            if !as_json {
+                match v["mail"].as_array().filter(|m| !m.is_empty()) {
+                    Some(list) => list.iter().for_each(|m| {
+                        let to: Vec<&str> = m["to"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                        println!("{}  {}  to {}  {}", s(&m["id"]), until_utc(m["at"].as_i64().unwrap_or(0)), to.join(", "), m["subject"].as_str().unwrap_or("(no subject)"));
+                    }),
+                    None => println!("no mail caught"),
+                }
+                return Ok(());
+            }
+            v
+        }
+        Preview::Notes { preview, resolve } => {
+            let v = match &resolve {
+                Some(note) => api.post(&format!("/v1/previews/{preview}/notes/{note}/resolve"), json!({})).await?,
+                None => api.get(&format!("/v1/previews/{preview}/notes")).await?,
+            };
+            if !as_json {
+                match (&resolve, v["notes"].as_array()) {
+                    (Some(note), _) => println!("resolved {note}"),
+                    (None, Some(list)) if !list.is_empty() => list.iter().for_each(|n| {
+                        let on = match n["selector"].as_str().filter(|x| !x.is_empty()) {
+                            Some(sel) => format!("{} {sel}", s(&n["path"])),
+                            None => s(&n["path"]),
+                        };
+                        println!("{}  {}  by {}: {}", s(&n["id"]), on, s(&n["by"]), s(&n["note"]));
+                    }),
+                    _ => println!("no open notes"),
                 }
                 return Ok(());
             }
