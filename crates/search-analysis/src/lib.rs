@@ -35,14 +35,17 @@ mod error;
 mod filter;
 pub mod jregex;
 mod lregexp;
+mod phonetic;
 mod registry;
 mod settings;
 mod stack;
 mod stem;
+mod stempel;
 mod stopwords;
 mod stream;
 mod token;
 mod tokenizer;
+mod ukrainian;
 mod unicode;
 
 use std::sync::Arc;

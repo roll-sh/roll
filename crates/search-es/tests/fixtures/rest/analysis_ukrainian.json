@@ -1,0 +1,232 @@
+{
+  "description" : "analysis-ukrainian: the ukrainian analyzer's normalization and lemmas, stopwords and stem_exclusion",
+  "steps" : [
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "analyzer" : "ukrainian",
+        "text" : "Ця п’єса у свою чергу рухається по колу. Ґанок КОЛУ м`яч столи́ця"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "п'єса",
+            "start_offset" : 3,
+            "end_offset" : 8,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "черга",
+            "start_offset" : 16,
+            "end_offset" : 21,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "рухатися",
+            "start_offset" : 22,
+            "end_offset" : 31,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "кола",
+            "start_offset" : 35,
+            "end_offset" : 39,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          },
+          {
+            "token" : "коло",
+            "start_offset" : 35,
+            "end_offset" : 39,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          },
+          {
+            "token" : "кіл",
+            "start_offset" : 35,
+            "end_offset" : 39,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          },
+          {
+            "token" : "ганка",
+            "start_offset" : 41,
+            "end_offset" : 46,
+            "type" : "<ALPHANUM>",
+            "position" : 8
+          },
+          {
+            "token" : "кола",
+            "start_offset" : 47,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 9
+          },
+          {
+            "token" : "коло",
+            "start_offset" : 47,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 9
+          },
+          {
+            "token" : "кіл",
+            "start_offset" : 47,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 9
+          },
+          {
+            "token" : "м'яч",
+            "start_offset" : 52,
+            "end_offset" : 56,
+            "type" : "<ALPHANUM>",
+            "position" : 10
+          },
+          {
+            "token" : "столиця",
+            "start_offset" : 57,
+            "end_offset" : 65,
+            "type" : "<ALPHANUM>",
+            "position" : 11
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-uk",
+      "body" : {
+        "settings" : {
+          "analysis" : {
+            "analyzer" : {
+              "uk" : {
+                "type" : "ukrainian",
+                "stopwords" : [
+                  "колу"
+                ]
+              },
+              "uk2" : {
+                "type" : "ukrainian",
+                "stem_exclusion" : [
+                  "колу"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-uk"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-uk/_analyze",
+      "body" : {
+        "analyzer" : "uk",
+        "text" : "по колу кола"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "по",
+            "start_offset" : 0,
+            "end_offset" : 2,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "кола",
+            "start_offset" : 8,
+            "end_offset" : 12,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "коло",
+            "start_offset" : 8,
+            "end_offset" : 12,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "кіл",
+            "start_offset" : 8,
+            "end_offset" : 12,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-uk/_analyze",
+      "body" : {
+        "analyzer" : "uk2",
+        "text" : "по колу кола"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "колу",
+            "start_offset" : 3,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "кола",
+            "start_offset" : 8,
+            "end_offset" : 12,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "коло",
+            "start_offset" : 8,
+            "end_offset" : 12,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "кіл",
+            "start_offset" : 8,
+            "end_offset" : 12,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-uk",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

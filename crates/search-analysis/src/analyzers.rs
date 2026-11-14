@@ -165,6 +165,8 @@ pub(crate) fn analyzer_provider(ty: &str) -> Option<AnalyzerBuilder> {
         },
         // `ChineseAnalyzerProvider` ignores its settings.
         "chinese" => |_, name, _| standard(name, english_stop().clone(), 255),
+        "polish" => return crate::stempel::analyzer_provider(ty),
+        "ukrainian" => return crate::ukrainian::analyzer_provider(ty),
         _ => return crate::analyzers::language_provider(ty),
     })
 }
@@ -236,6 +238,7 @@ pub(crate) const BUILT_IN_ANALYZERS: &[&str] = &[
     "norwegian",
     "pattern",
     "persian",
+    "polish",
     "portuguese",
     "romanian",
     "russian",
@@ -249,6 +252,7 @@ pub(crate) const BUILT_IN_ANALYZERS: &[&str] = &[
     "swedish",
     "thai",
     "turkish",
+    "ukrainian",
     "whitespace",
 ];
 

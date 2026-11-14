@@ -131,6 +131,22 @@ branch instantly and keep their data on object storage.
   passes count nothing, so hits, ties and totals are a single pass's (`search-index`
   `collector/top_field.rs`, `Band`).
 
+## Language analysis data
+
+The analysis plugins' data ships inside the binary and is read in place: a table nobody uses is
+never paged in, and none of it is decoded onto the heap at startup.
+
+| data | used by | size | licence |
+| ---- | ------- | ---: | ------- |
+| Apache Commons Codec 1.15's Beider-Morse rules and Daitch-Mokotoff rules (`phonetic/data/`) | `phonetic` (parsed on first use per name type) | 234 KB | Apache-2.0 |
+| Lucene's Polish stemmer table `stemmer_20000.tbl`, converted by `tools/gen_stempel.py` | `polish_stem`, `polish` | 763 KB | Apache-2.0 |
+| Lucene's Polish stop words (from Carrot2) | `polish_stop`, `polish` | 2 KB | BSD |
+| `morfologik-ukrainian-search` 3.7.5's `ukrainian.dict` (from dict_uk; GPL/LGPL, CC BY-NC-SA 4.0 or Apache-2.0, used under Apache-2.0) | `ukrainian` | 6.6 MB | Apache-2.0 |
+| Lucene's Ukrainian stop words | `ukrainian` | 16 KB | Apache-2.0 |
+
+The code that reads them ports Apache Commons Codec (Apache-2.0), Lucene's Egothor stemmer
+(Apache-2.0) and Morfologik 2.1.1 (BSD).
+
 ## Idle cost
 
 - **A cluster** with no request for `--search-idle-unload` seconds (300) is unloaded: the node

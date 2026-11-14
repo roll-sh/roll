@@ -742,6 +742,8 @@ pub(crate) fn filter_provider(ty: &str) -> Option<Provider<FilterBuilder>> {
                 "The [standard] token filter has been removed.",
             ))
         }),
+        "phonetic" => crate::phonetic::provider(),
+        "polish_stem" | "polish_stop" => crate::stempel::filter_provider(ty),
         _ => crate::filter::extra_provider(ty),
     }
 }

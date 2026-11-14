@@ -451,7 +451,11 @@ fn info_inner(ctx: &Ctx) -> EsResult<Reply> {
             );
         }
         if want("plugins") {
-            n.insert("plugins".into(), Value::Arr(Vec::new()));
+            let plugins = match ctx.cluster.dialect {
+                crate::cluster::Dialect::Elasticsearch => PLUGINS.iter().map(|p| p.to_value()).collect(),
+                crate::cluster::Dialect::OpenSearch => Vec::new(),
+            };
+            n.insert("plugins".into(), Value::Arr(plugins));
             n.insert("modules".into(), Value::Arr(MODULES.iter().map(|m| m.to_value()).collect()));
         }
         if want("ingest") {
@@ -893,6 +897,39 @@ pub fn usage(ctx: &Ctx) -> EsResult<Reply> {
     out.insert("nodes".into(), Value::Obj(nodes));
     Reply::ok(Value::Obj(out))
 }
+
+/// A separately installed Elasticsearch plugin whose features roll search provides, as
+/// `GET _nodes/plugins` and `_cat/plugins` report it.
+pub(crate) struct Plugin {
+    pub name: &'static str,
+    pub description: &'static str,
+    classname: &'static str,
+}
+
+impl Plugin {
+    fn to_value(&self) -> Value {
+        obj! {
+            "name" => self.name,
+            "version" => crate::version::ES_VERSION,
+            "elasticsearch_version" => crate::version::ES_VERSION,
+            "java_version" => "21",
+            "description" => self.description,
+            "classname" => self.classname,
+            "extended_plugins" => Vec::<Value>::new(),
+            "has_native_controller" => false,
+            "licensed" => false,
+            "is_official" => true,
+        }
+    }
+}
+
+/// The official plugins roll search provides, in the order Elasticsearch 9.5.5 lists them in
+/// `GET _nodes/plugins` (`_cat/plugins` sorts them by name).
+pub(crate) const PLUGINS: &[Plugin] = &[
+    Plugin { name: "analysis-phonetic", description: "The Phonetic Analysis plugin integrates phonetic token filter analysis with elasticsearch.", classname: "org.elasticsearch.plugin.analysis.phonetic.AnalysisPhoneticPlugin" },
+    Plugin { name: "analysis-ukrainian", description: "The Ukrainian Analysis plugin integrates the Lucene UkrainianMorfologikAnalyzer into elasticsearch.", classname: "org.elasticsearch.plugin.analysis.ukrainian.AnalysisUkrainianPlugin" },
+    Plugin { name: "analysis-stempel", description: "The Stempel (Polish) Analysis plugin integrates Lucene stempel (polish) analysis module into elasticsearch.", classname: "org.elasticsearch.plugin.analysis.stempel.AnalysisStempelPlugin" },
+];
 
 /// A module Elasticsearch reports in `GET _nodes/plugins`.
 struct Module {
