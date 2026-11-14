@@ -97,7 +97,7 @@ SEARCH_URL_PARENT=$(echo "$SEARCH_C" | jq_ "d['url'].replace('://', '://' + d['u
 curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/1?refresh=true" -H 'content-type: application/json' -d '{"name":"parent"}' >/dev/null
 # An address inside an array of objects, and one under a literal dotted key: masks reach both.
 curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/3?refresh=true" -H 'content-type: application/json' -d '{"name":"other","owner":[{"email":"ada@corp.example"}]}' >/dev/null
-curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/4?refresh=true" -H 'content-type: application/json' -d '{"name":"dotted","owner.email":"bob@corp.example"}' >/dev/null
+curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/4?refresh=true" -H 'content-type: application/json' -d '{"name":"dotted","owner.email":"bob@corp.example","stock":3}' >/dev/null
 PG=$(api POST /v1/projects '{"name":"shop-db"}' | jq_ "d['id']")
 # A real-looking row in the parent, which previews mask.
 PG_PARENT_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['parent_id'] is None][0]")
@@ -139,6 +139,10 @@ api PUT "/v1/previews/projects/$PRJ/settings" "{\"env\":{\"SENDGRID_API_KEY\":\"
 KEY_MASK=$(curl -s -o /tmp/roll-previews-keymask.json -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' \
   -d "{\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\",\"app.users_by_email.email\":\"mask_default()\"}}}")
 [ "$KEY_MASK" = 400 ] && grep -q "app.users_by_email's primary key" /tmp/roll-previews-keymask.json || { echo "a NoSQL mask on a key column should be refused, not $KEY_MASK $(cat /tmp/roll-previews-keymask.json)"; exit 1; }
+# Nor can a string mask go into a search field that isn't text (a number, a vector): named too.
+NUM_MASK=$(curl -s -o /tmp/roll-previews-nummask.json -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' \
+  -d "{\"masking\":{\"search:$SEARCH\":{\"products.name\":\"redact\",\"products.owner.email\":\"redact\",\"products.stock\":\"redact\"}}}")
+[ "$NUM_MASK" = 400 ] && grep -q "products.stock is a long field" /tmp/roll-previews-nummask.json || { echo "a string mask on a number field should be refused, not $NUM_MASK $(cat /tmp/roll-previews-nummask.json)"; exit 1; }
 
 say "open a change"
 T0=$(now_ms)
@@ -679,7 +683,7 @@ cat <<EOF
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
 | NoSQL branch's mask on app.users.email / masks on the parent | $MASKED / $PARENT_MASKED |
 | NoSQL: app.users.email in the branch / a filter on the real address there | $NOSQL_READ / $NOSQL_FILTER |
-| NoSQL: a mask on app.users_by_email's key, set | $KEY_MASK |
+| NoSQL: a mask on app.users_by_email's key, set / search: a string mask on a number field, set | $KEY_MASK / $NUM_MASK |
 | What each branch hands the preview's code | $DATA |
 | Core Web Vitals of the first page (the screenshot's load) | $VITALS |
 | The first page's words against main's | $WORDS |

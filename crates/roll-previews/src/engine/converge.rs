@@ -46,21 +46,21 @@ impl Engine {
     }
 
     /// Refuses masks `new` adds or changes over `old` that a product says can't work (a NoSQL
-    /// key column). A product that can't be asked (not on this node, unreachable) doesn't hold
+    /// key column, a string mask on a search field that isn't text). A product that can't be asked (not on this node, unreachable) doesn't hold
     /// the settings up: its own read policy still applies.
     pub(crate) async fn check_masks(&self, old: &Settings, new: &Settings) -> crate::Result<()> {
         let mut problems = Vec::new();
         for (key, columns) in &new.masking {
-            let Some(parent) = key.strip_prefix("nosql:") else { continue };
+            let Some((kind, parent)) = key.strip_prefix("nosql:").map(|p| (Kind::Nosql, p)).or_else(|| key.strip_prefix("search:").map(|p| (Kind::Search, p))) else { continue };
             let added: std::collections::BTreeMap<String, String> =
                 columns.iter().filter(|(c, f)| old.masking.get(key).and_then(|o| o.get(*c)) != Some(f)).map(|(c, f)| (c.clone(), f.clone())).collect();
             if added.is_empty() {
                 continue;
             }
-            let Ok(b) = self.brancher(Kind::Nosql) else { continue };
+            let Ok(b) = self.brancher(kind) else { continue };
             match b.mask_problems(parent, &added).await {
                 Ok(p) => problems.extend(p.into_iter().map(|p| format!("masking: {key}: {p}"))),
-                Err(e) => tracing::warn!(error = %e, "checking NoSQL masks against {parent}'s schema"),
+                Err(e) => tracing::warn!(error = %e, "checking {} masks against {parent}'s schema", kind.as_str()),
             }
         }
         if problems.is_empty() { Ok(()) } else { Err(crate::Error::BadRequest(problems.join("; "))) }
