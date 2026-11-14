@@ -21,7 +21,9 @@ POST /v1/apps/services/{id}/environments/{env}/jobs
 GET /v1/apps/services/{id}/environments/{env}/jobs/{job}
 POST /v1/apps/services/{id}/environments/{env}/jobs/{job}/cancel
 GET /v1/apps/services/{id}/environments/{env}/runs/{run}
+GET /v1/apps/services/{id}/environments/{env}/runs/{run}/logs
 POST /v1/apps/services/{id}/environments/{env}/runs/{run}/cancel
+POST /v1/apps/services/{id}/environments/{env}/instances/{name}/restart
 GET /v1/apps/services/{id}/environments/{env}/logs
 GET /v1/apps/services/{id}/environments/{env}/metrics
 POST /v1/apps/services/{id}/environments/{env}/promote

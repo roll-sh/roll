@@ -437,6 +437,7 @@ previews are listed once those products are on.
 | `apps_wake` | Start a sleeping environment's instances. | `POST /v1/apps/services/{service}/environments/{env}/wake` |
 | `apps_usage` | An environment's usage and cost per day. | `GET /v1/apps/services/{service}/environments/{env}/usage` |
 | `apps_restart` | Restart an environment's instances. | `POST /v1/apps/services/{service}/environments/{env}/restart` |
+| `apps_restart_instance` | Replace one instance, a fresh one answering first (production: deploy). | `POST /v1/apps/services/{id}/environments/{env}/instances/{name}/restart` |
 | `apps_redeploy` | Deploy what's running again with the current settings and variables. | `POST /v1/apps/services/{service}/environments/{env}/redeploy` |
 | `apps_run_job` | Run a one-off command in an environment's image with its variables. | `POST /v1/apps/services/{service}/environments/{env}/jobs` |
 | `apps_job_logs` | A job's output. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}/logs` |
@@ -458,7 +459,7 @@ previews are listed once those products are on.
 | `apps_list_links` | What a service is linked to. | `GET /v1/apps/services/{service}/links` |
 | `apps_list_cron_runs` | A cron service's runs. | `GET …/environments/{env}/runs` |
 | `apps_get_cron_run` | One cron run: status, exit code, times. | `GET /v1/apps/services/{id}/environments/{env}/runs/{run}` |
-| `apps_cron_run_logs` | A cron run's output (reveal). | `GET /v1/apps/services/{id}/environments/{env}/runs/{run}/logs` |
+| `apps_cron_run_logs` | A cron run's output (read: its lines are in the environment's log). | `GET /v1/apps/services/{id}/environments/{env}/runs/{run}/logs` |
 | `apps_cancel_cron_run` | Stop a running cron run (production: deploy). | `POST /v1/apps/services/{id}/environments/{env}/runs/{run}/cancel` |
 | `apps_run_cron` | Run a cron job now (deploy in production). | `POST …/environments/{env}/runs` |
 | `apps_limits` | A project's apps spend limits. | `GET /v1/apps/projects/{project}/limits` |
@@ -539,14 +540,16 @@ by its maker, out of the list and caps) for secrets' identity logins; a person's
 mailed to them (an approval waiting on them, used from a new network, revoked as leaked, about to
 expire; only their own, never a secret); `previews_resolve_note` (a preview page's note, write by
 the prefix; previews-next), and `apps_logs` takes `before`, `instance`, `deployment` and `stream`
-(apps-next); invisible characters (tag characters, zero-width and bidi controls, variation
-selectors) escaped in results' text, so instructions hidden in other people's text stay visible to
-the model; plain-read answers checked for credentials (key listings: streams' are usernames,
-storage's skip the secret, tasks' are hashes and prefixes); the fifteenth review: a list's
-credentials redacted item by item (a token with reveal on one Postgres database and read on all saw
-every database's password in `GET /v1/projects`; the same for every list with credential fields), a
-preview's `share_url` redacted without reveal (its access token: the QR code's reveal row protected
-nothing), and a cron run's logs reveal on this branch too; `previews_list_notes` and
+(apps-next); a cron run's logs are read again, as apps-next decided (its lines were always in the
+read-level environment log); `apps_restart_instance` (apps-next, reviewed under the environment
+prefix: deploy in production); invisible characters (tag characters, zero-width and bidi controls,
+variation selectors) escaped in results' text, so instructions hidden in other people's text stay
+visible to the model; plain-read answers checked for credentials (key listings: streams' are
+usernames, storage's skip the secret, tasks' are hashes and prefixes); the fifteenth review: a
+list's credentials redacted item by item (a token with reveal on one Postgres database and read on
+all saw every database's password in `GET /v1/projects`; the same for every list with credential
+fields), a preview's `share_url` redacted without reveal (its access token: the QR code's reveal row
+protected nothing), and a cron run's logs reveal on this branch too; `previews_list_notes` and
 `previews_resolve_note` (a preview page's note, write by the prefix; previews-next), and `apps_logs`
 takes `before`, `instance`, `deployment` and `stream` (apps-next); apps-next's cron runs as tools
 (`apps_get_cron_run`, `apps_cron_run_logs`, `apps_cancel_cron_run`); a preview's caught mail as
