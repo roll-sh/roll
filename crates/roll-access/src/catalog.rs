@@ -988,6 +988,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/leaks", "secrets", R, one(&["project"], "project")).filters_itself(),
     // Rotators: URLs roll calls to issue and revoke values that live outside roll. Listing shows
     // names and hosts; adding one answers its signing secret once; both changes are admin.
+    // A customer-managed key wrapping the project's data key: seeing, setting and removing it are
+    // the project admin's (it decides whether roll can read the project at all).
+    row("*", "/v1/secrets/projects/{project}/kms", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/rotators", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/rotators", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/rotators/{id}", "secrets", ADMIN, one(&["project"], "project")),

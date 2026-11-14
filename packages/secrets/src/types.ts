@@ -236,7 +236,8 @@ export type SyncField = { name: string; label: string; required: boolean; placeh
 /** A kind the server registered: its target's fields, whether pushes carry values, whether it has a signing secret. */
 export type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: SyncField[] };
 /** `resealed`: "all", or how many projects still need the previous key (null without a key); `links`, `syncs`: the kinds registered. */
-export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; resealed: "all" | number | null; links: string[]; syncs: string[] };
+/** `customer_managed`: projects whose data key a customer's own KMS key wraps too. */
+export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; resealed: "all" | number | null; customer_managed: number; links: string[]; syncs: string[] };
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */

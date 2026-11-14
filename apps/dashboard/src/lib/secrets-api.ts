@@ -109,6 +109,12 @@ export function secretsApi(project: string) {
     purge: (env: string, key: string, path = "/", before_version?: number) => req<{ purged: number }>("POST", `${K(env, key)}/purge${qs({ path })}`, before_version ? { before_version } : {}),
     /** How long old values are kept (null: for good). */
     setHistoryDays: (history_days: number | null) => req<{ history_days: number | null }>("PATCH", P, { history_days }),
+    /** The customer-managed KMS key wrapping the project's data key (admin), if one does. */
+    kms: () => req<{ key: string | null }>("GET", `${P}/kms`),
+    /** Wrap the data key with a KMS key's ARN: roll encrypts and decrypts with it first. */
+    setKms: (key: string) => req<{ key: string }>("PUT", `${P}/kms`, { key }),
+    /** Back to roll's deployment key alone (the KMS key must still answer). */
+    removeKms: () => req<{ key: null }>("DELETE", `${P}/kms`),
 
     folders: (env: string, path = "/") => req<{ path: string; folders: Folder[] }>("GET", `${E(env)}/folders${qs({ path })}`),
     createFolder: (env: string, path: string) => req<Folder>("POST", `${E(env)}/folders`, { path }),

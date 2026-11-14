@@ -360,6 +360,7 @@ impl Secrets {
             }
         }
         self.expire_shares()?;
+        self.reseal_wrapped();
         self.sweep_retention()?;
         self.sweep_identity_tokens()?;
         self.sweep_reminders()?;
@@ -381,5 +382,21 @@ impl Secrets {
         let (_, failed) = self.sweep_sinks()?;
         out.failed += failed;
         Ok(out)
+    }
+}
+
+impl Secrets {
+    /// After a deployment-key rotation, customer-wrapped data keys sealed inside by the previous
+    /// key are resealed (opening a project does it): a batch per sweep, so the previous key can be
+    /// dropped once health says every one is done. A key KMS refuses stays as it is.
+    fn reseal_wrapped(&self) {
+        let Ok(keys) = self.keys() else { return };
+        let current = keys.current_id().to_string();
+        let rows: Vec<(String, String)> = self.db.read(|c| c.query("SELECT project_id, dek FROM projects WHERE dek LIKE 'kms:%' LIMIT 500", (), |r| Ok((r.get(0)?, r.get(1)?)))).unwrap_or_default();
+        for (project, _) in rows.into_iter().filter(|(_, d)| crate::kms::sealed_by(d).is_some_and(|id| id != current)).take(50) {
+            if let Err(e) = self.project(&project) {
+                tracing::warn!(%project, "resealing a customer-wrapped data key after a rotation: {e}");
+            }
+        }
     }
 }

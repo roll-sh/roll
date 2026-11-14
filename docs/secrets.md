@@ -86,6 +86,34 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
 
+## Customer-managed keys
+
+A project's data key can be wrapped once more by a KMS key in the customer's own AWS account, as
+Infisical's external KMS does (`PUT …/kms {key: "arn:aws:kms:…"}`, `roll secrets kms set ARN`;
+admin). Opening it then needs both roll's deployment key and the customer's key, so the customer
+can make the project's values unreadable to roll at once by revoking roll's grant or disabling the
+key. The values themselves aren't re-encrypted; only the data key is wrapped.
+
+- **The key policy** grants roll's role `kms:Encrypt` and `kms:Decrypt` with the conditions
+  `kms:EncryptionContext:roll = secrets` and `kms:EncryptionContext:project = prj_…`. Setting a key
+  encrypts and decrypts with it first, and also tries a made-up project: a key that would wrap any
+  project's data key (another customer's, which roll's role may be allowed to use) is refused, so
+  no tenant can bind their project to someone else's key.
+- **Format**: `kms:v1:<key>:<deployment key id>:<ciphertext>`, wrapping the data key as roll's
+  deployment key seals it; the KMS encryption context is `{roll: secrets, project: <id>}`, in the
+  key's own region.
+- **Revocation** takes effect within a minute: an unwrapped key (still sealed by the deployment
+  key) is kept in memory for 60 s, so a request doesn't wait on KMS. After that the project answers
+  423 `kms_denied`, naming the key and KMS's reason, never a value (and `roll run --fallback`
+  doesn't start from its file on it); a KMS that doesn't answer is 503. A refusal is remembered as
+  long, so a revoked project doesn't ask KMS at every request. Changing the wrapping (`PUT` or
+  `DELETE …/kms`) always asks KMS, never the memory: a revoked key can't be swapped out.
+- **Rotating the deployment key**: the id of the deployment key inside tells health which wrapped
+  projects are still sealed by the previous one, and the sweeper reseals them (50 a pass), so the
+  previous key is dropped only once health says `all`. A reseal KMS won't wrap leaves the project
+  readable and is tried again. `DELETE …/kms` unwraps it (KMS must still answer). Every change is
+  in the audit log (`project.kms`).
+
 ## Where it runs
 
 roll secrets is always on, like workspace projects: it is not a product in `ROLL_PRODUCTS`.
@@ -1416,6 +1444,9 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
 | `POST /leaks` | `{candidates: string[]}` (at most 20,000) | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
+| `GET /kms` | | `{key: string \| null}`: the customer-managed key wrapping the project's data key (admin) |
+| `PUT /kms` | `{key}` (a KMS key's ARN) | `{key}` after encrypting and decrypting with it (admin; 400 when roll can't use it) |
+| `DELETE /kms` | | `{key: null}`: the data key sealed by roll's deployment key alone again (admin) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |

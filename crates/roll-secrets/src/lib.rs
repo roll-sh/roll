@@ -41,6 +41,7 @@ pub mod suggestions;
 mod sweep;
 pub mod syncs;
 mod tokens;
+pub mod kms;
 mod write;
 
 pub use access::{Action, Caller, People, Person, Scope};
@@ -252,9 +253,13 @@ pub enum Error {
     /// 409 with a code: `conflict`, `approval_required`, `stale`, `last_environment`.
     #[error("{1}")]
     Conflict(&'static str, String),
-    /// 503: no deployment key.
+    /// 503: no deployment key, or a KMS that didn't answer.
     #[error("{0}")]
     Unavailable(String),
+    /// 423 `kms_denied`: a customer-managed key refused (revoked, disabled, deleted). Never an
+    /// outage: `roll run --fallback` doesn't start from its file on it.
+    #[error("{0}")]
+    KeyDenied(String),
     /// 429: too many attempts (`rate_limited`).
     #[error("{0}")]
     TooMany(String),
@@ -298,6 +303,9 @@ pub struct Options {
     /// People's accounts, looked up when what a person made acts (never cached). `None`: nothing a
     /// person made acts later.
     pub people: Option<std::sync::Arc<dyn access::People>>,
+    /// The customers' KMS, for projects whose data key they wrap with their own key; `None`: no
+    /// project can.
+    pub kms: Option<std::sync::Arc<dyn kms::ProjectKms>>,
     /// rolld has no operator token (loopback development): a request without a token is the
     /// operator's.
     pub open: bool,
@@ -319,6 +327,7 @@ pub struct Secrets {
     deliver: Option<Arc<dyn sinks::Deliver>>,
     grants: Option<Arc<dyn roll_auth::Grants>>,
     people: Option<Arc<dyn access::People>>,
+    unwrap: kms::Unwrapper,
     open: bool,
     trust_forwarded_for: bool,
     web_url: Option<String>,
@@ -390,10 +399,11 @@ impl Secrets {
         db.ensure_schema(rotators::SCHEMA)?;
         // Rotators are a link kind of roll secrets' own: they call out through rolld.
         let mut links = opts.links;
+        let unwrap = kms::Unwrapper::new(opts.kms.clone());
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
-            links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), deliver: deliver.clone() }));
+            links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -432,9 +442,27 @@ impl Secrets {
                 })?
             }
         };
-        let (dek, resealed) = keys.open_dek(project, &sealed)?;
-        if let Some(new) = resealed {
-            self.db.write(|c| c.execute("UPDATE projects SET dek = ? WHERE project_id = ? AND dek = ?", [new.as_str(), project, sealed.as_str()]))?;
+        let inner = self.unwrap.inner(project, &sealed)?;
+        let (dek, resealed) = keys.open_dek(project, &inner)?;
+        // Sealed by the previous deployment key (a rotation): resealed with the current one. A
+        // wrapped key stays wrapped by the same customer key; if KMS won't wrap it now, the key
+        // still opened, so the read goes on and the sweeper tries again.
+        let stale_wrap = kms::sealed_by(&sealed).is_some_and(|id| id != keys.current_id());
+        if let Some(new) = resealed.or_else(|| stale_wrap.then(|| inner.clone())) {
+            let new = match kms::wrapped_by(&sealed) {
+                Some(key) => match self.unwrap.rewrap(&key, project, keys.current_id(), &new) {
+                    Ok(w) => Some(w),
+                    Err(e) => {
+                        tracing::warn!(%project, "resealing a customer-wrapped data key: {e}");
+                        None
+                    }
+                },
+                None => Some(new),
+            };
+            if let Some(new) = new {
+                self.db.write(|c| c.execute("UPDATE projects SET dek = ? WHERE project_id = ? AND dek = ?", [new.as_str(), project, sealed.as_str()]))?;
+                self.unwrap.forget(&sealed);
+            }
         }
         Ok(dek)
     }
@@ -445,12 +473,20 @@ impl Secrets {
         let resealed = match &self.keys {
             Ok(keys) => {
                 let rows = self.db.read(|c| c.query("SELECT project_id, dek FROM projects", (), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
-                let old = rows.iter().filter(|(p, d)| keys.open_dek(p, d).map(|(_, r)| r.is_some()).unwrap_or(true)).count();
+                // A customer-wrapped key says which deployment key sealed it inside (KMS isn't asked).
+                let old = rows
+                    .iter()
+                    .filter(|(p, d)| match kms::sealed_by(d) {
+                        Some(id) => id != keys.current_id(),
+                        None => keys.open_dek(p, d).map(|(_, r)| r.is_some()).unwrap_or(true),
+                    })
+                    .count();
                 if old == 0 { serde_json::json!("all") } else { serde_json::json!(rows.len() - old) }
             }
             Err(_) => serde_json::Value::Null,
         };
-        Ok(serde_json::json!({ "ok": self.keys.is_ok(), "key": self.key_source, "resealed": resealed, "links": self.links.kinds().map(|p| p.kind().to_string()).collect::<Vec<_>>(), "syncs": self.syncs.kinds().map(|t| t.kind().to_string()).collect::<Vec<_>>() }))
+        let customer_managed = self.db.read(|c| c.query_row("SELECT COUNT(*) FROM projects WHERE dek LIKE 'kms:%'", (), |r| r.get::<_, i64>(0)))?;
+        Ok(serde_json::json!({ "ok": self.keys.is_ok(), "key": self.key_source, "resealed": resealed, "customer_managed": customer_managed, "links": self.links.kinds().map(|p| p.kind().to_string()).collect::<Vec<_>>(), "syncs": self.syncs.kinds().map(|t| t.kind().to_string()).collect::<Vec<_>>() }))
     }
 
     /// Forget everything about a project (its workspace project was deleted). What it issued is
