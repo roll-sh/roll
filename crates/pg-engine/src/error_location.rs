@@ -46,6 +46,9 @@ const KNOWN: &[(&str, &str, &str, &str, &str, u32)] = &[
     ("XX000", "cache lookup failed for type ", "", "getBaseTypeAndTypmod", "lsyscache.c", 2852),
     ("XX000", "cache lookup failed for type ", "", "getTypeInputInfo", "lsyscache.c", 3183),
     ("XX000", "cache lookup failed for type ", "", "getTypeBinaryInputInfo", "lsyscache.c", 3249),
+    ("XX000", "cache lookup failed for type ", "", "typeOrDomainTypeRelid", "parse_type.c", 699),
+    ("XX000", "cache lookup failed for type ", "", "format_type_extended", "format_type.c", 137),
+    ("42704", "type with OID ", " does not exist", "lookup_type_cache", "typcache.c", 471),
     ("08P01", "received unencrypted data after SSL request", "", "ProcessStartupPacket", "backend_startup.c", 626),
     ("08P01", "received unencrypted data after GSSAPI encryption request", "", "ProcessStartupPacket", "backend_startup.c", 694),
     ("0A000", "unsupported frontend protocol ", "", "ProcessStartupPacket", "backend_startup.c", 731),
@@ -99,6 +102,23 @@ const KNOWN: &[(&str, &str, &str, &str, &str, u32)] = &[
     ("40P01", "deadlock detected", "", "DeadLockReport", "deadlock.c", 1133),
     ("28P01", "password authentication failed for user", "", "auth_failed", "auth.c", 317),
     ("3D000", "database \"", "\" does not exist", "InitPostgres", "postinit.c", 1014),
+    // Transaction blocks and the transaction parameters' check hooks.
+    ("25P01", "SET LOCAL can only be used in transaction blocks", "", "CheckTransactionBlock", "xact.c", 3745),
+    ("25P01", "SET TRANSACTION can only be used in transaction blocks", "", "CheckTransactionBlock", "xact.c", 3745),
+    ("25P01", "SAVEPOINT can only be used in transaction blocks", "", "DefineSavepoint", "xact.c", 4420),
+    ("25P01", "there is no transaction in progress", "", "EndTransactionBlock", "xact.c", 4073),
+    ("25P01", "there is no transaction in progress", "", "UserAbortTransactionBlock", "xact.c", 4275),
+    ("25001", "", " cannot run inside a transaction block", "PreventInTransactionBlock", "xact.c", 3654),
+    ("25001", "SET TRANSACTION ISOLATION LEVEL must ", "", "call_enum_check_hook", "guc.c", 6977),
+    ("25001", "SET TRANSACTION [NOT] DEFERRABLE ", "", "call_bool_check_hook", "guc.c", 6825),
+    ("25001", "transaction read-write mode must be set before any query", "", "call_bool_check_hook", "guc.c", 6825),
+    ("25001", "cannot set transaction read-write mode inside a read-only transaction", "", "call_bool_check_hook", "guc.c", 6825),
+    ("22023", "role \"", "\" does not exist", "call_string_check_hook", "guc.c", 6936),
+    ("42501", "permission denied to set role \"", "", "call_string_check_hook", "guc.c", 6936),
+    // Division by zero: each type's routine names it (`BY_ROUTINE`).
+    ("22012", "division by zero", "", "int4div", "int.c", 870),
+    ("22012", "division by zero", "", "int2div", "int.c", 986),
+    ("22012", "division by zero", "", "int84div", "int8.c", 970),
     // VACUUM (VERBOSE) and ANALYZE (VERBOSE)'s INFO messages (each names its routine).
     ("00000", "aggressively vacuuming \"", "", "heap_vacuum_rel", "vacuumlazy.c", 814),
     ("00000", "vacuuming \"", "", "heap_vacuum_rel", "vacuumlazy.c", 819),
@@ -114,6 +134,9 @@ const KNOWN: &[(&str, &str, &str, &str, &str, u32)] = &[
     ("00000", "vacuuming \"", "", "copy_table_data", "cluster.c", 971),
     ("00000", "\"", "", "copy_table_data", "cluster.c", 998),
 ];
+
+/// Messages matched only by the routine an error names (each type has its own).
+const BY_ROUTINE: &[&str] = &["division by zero"];
 
 /// (file, line, routine) for an error.
 pub fn location(e: &Error) -> (&'static str, String, &'static str) {
@@ -136,8 +159,9 @@ pub fn location(e: &Error) -> (&'static str, String, &'static str) {
             _ => ("pg-engine", "0".into(), r),
         };
     }
-    // (The INFO messages only by their routine: their prefixes are too general.)
-    match KNOWN.iter().filter(|k| k.0 != "00000").find(matches) {
+    // (The INFO messages only by their routine: their prefixes are too general; so are
+    // messages every type's routine raises.)
+    match KNOWN.iter().filter(|k| k.0 != "00000" && !BY_ROUTINE.contains(&k.1)).find(matches) {
         Some(k) => (k.4, k.5.to_string(), k.3),
         None => ("pg-engine", "0".into(), ""),
     }

@@ -1164,6 +1164,10 @@ fn handle(
         c.error(&e.fatal());
         return c.flush();
     }
+    if let Err(e) = s.apply_startup_role() {
+        c.error(&e.fatal());
+        return c.flush();
+    }
     s.state.peer.set(peer);
     s.state.local_addr.set(c.wr.local_addr().ok().filter(|_| !unix));
     *s.state.log_conn.borrow_mut() = c.log.clone();

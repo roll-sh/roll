@@ -380,6 +380,9 @@ struct Stacked {
     prior: Option<String>,
     /// SET LOCAL after SET at the same level: the value SET gave.
     masked: Option<String>,
+    /// When the parameter was stacked (`Settings::stacked`): AtEOXact_GUC restores the
+    /// latest first (guc_stack_list), which orders their ParameterStatus.
+    seq: u64,
 }
 
 /// The parameters Postgres marks GUC_IS_NAME: a value is truncated to NAMEDATALEN - 1 bytes.
@@ -414,6 +417,8 @@ pub struct Settings {
     config: NameMap<String>,
     /// Saved values by nest level, per parameter (only while a transaction is open).
     stack: NameMap<Vec<Stacked>>,
+    /// How many stack entries have been made (`Stacked::seq`).
+    stacked: u64,
     /// The current (sub)transaction nest level: 1 in a transaction, +1 per savepoint.
     level: usize,
     /// Prefixes reserved by loaded modules (`MarkGUCPrefixReserved`).
@@ -469,6 +474,7 @@ impl Default for Settings {
             defaults: NameMap::default(),
             config: NameMap::default(),
             stack: NameMap::default(),
+            stacked: 0,
             level: 1,
             reserved: Vec::new(),
             changed: Vec::new(),
@@ -1786,6 +1792,16 @@ impl Settings {
         self.stats_fetch_assigned();
     }
 
+    /// `set_internal` by a parameter's assign hook (is_superuser by role's): in a
+    /// transaction, undone with it (and with `local`, at its end). Not marked for report.
+    pub fn set_internal_in(&mut self, name: &str, value: &str, local: bool, in_txn: bool) {
+        if in_txn {
+            let canon = canonical_name(name);
+            self.push_old(&canon, if local { StackState::Local } else { StackState::Set });
+        }
+        self.set_internal(name, value);
+    }
+
     /// A module reserves its prefix (`MarkGUCPrefixReserved`): placeholders under it go, with
     /// a WARNING each.
     pub fn reserve_prefix(&mut self, prefix: &'static str) -> Vec<Error> {
@@ -2111,6 +2127,7 @@ impl Settings {
                     state: StackState::Local,
                     prior,
                     masked: None,
+                    seq: 0,
                 }],
             );
         }
@@ -2138,11 +2155,13 @@ impl Settings {
             }
             return;
         }
+        self.stacked += 1;
         let entry = Stacked {
             level,
             state: action,
             prior: self.values.get(name).cloned(),
             masked: None,
+            seq: self.stacked,
         };
         match self.stack.get_mut(name) {
             Some(stack) => stack.push(entry),
@@ -2158,7 +2177,10 @@ impl Settings {
         if self.stack.is_empty() {
             return;
         }
-        for (name, mut stack) in std::mem::take(&mut self.stack) {
+        // (The parameter stacked last is restored first, as guc_stack_list has them.)
+        let mut stacks: Vec<_> = std::mem::take(&mut self.stack).into_iter().collect();
+        stacks.sort_unstable_by_key(|(_, s)| std::cmp::Reverse(s.first().map_or(0, |e| e.seq)));
+        for (name, mut stack) in stacks {
             // The value to go back to: that of the outermost entry ended (popped last).
             let mut restore: Option<Option<String>> = None;
             while let Some(top) = stack.last()
@@ -2353,6 +2375,18 @@ impl Settings {
             }
         }
         self.stats_fetch_assigned();
+    }
+
+    /// Whether a transaction's changes are pending (`end_transaction` has something to do).
+    pub fn in_transaction(&self) -> bool {
+        !self.stack.is_empty() || self.txn_start.is_some() || self.level != 1
+    }
+
+    /// An error aborts the (sub)transaction at the current nest level (AbortTransaction /
+    /// AbortSubTransaction's AtEOXact_GUC(false, level)): its changes are undone now, while
+    /// the failed block waits for its ROLLBACK.
+    pub fn abort_level(&mut self) {
+        self.at_eoxact(false, self.level);
     }
 
     /// Transaction end: undo SET LOCAL, and on abort undo every SET made in the transaction.
