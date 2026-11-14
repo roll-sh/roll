@@ -64,6 +64,9 @@ export interface Grant {
   not_before?: number | null;
   /** A person's token waiting for an admin's approval: it doesn't work until then. */
   pending?: boolean;
+  /** When an admin approved it, and who decided (an admin's id, or "operator"). */
+  approved_at?: number | null;
+  decided_by?: string | null;
   ip_allow: string[];
   /** "operator", or the grant that made it. */
   created_by: string;

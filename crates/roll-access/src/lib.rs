@@ -148,6 +148,7 @@ mod policy_tests {
             not_before: None,
             pending: false,
             approved_at: None,
+            decided_by: None,
             ip_allow: vec![],
             created_by: "operator".into(),
             created_at: created,
