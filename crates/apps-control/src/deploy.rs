@@ -1239,10 +1239,14 @@ impl Apps {
             .into_iter()
             .filter_map(|e| e.active.map(|a| crate::live::instance_prefix(service, &e.name, &a)))
             .collect();
+        // A cron run or a job this node started since it took the service (the schedule fires as
+        // soon as it owns it) is its own, not a leftover.
+        let own_runs: Vec<String> = self.running_runs.lock().iter().filter(|(_, s)| *s == service).map(|(id, _)| format!("run-{}", id.strip_prefix("run_").unwrap_or(id))).collect();
+        let own_jobs = self.running_jobs.lock().values().any(|k| k.starts_with(&format!("{service}/")));
         for name in self.deps.runtime.list(Some(service)).await {
             // A known instance's network sandbox (`<instance>-net`) and waker (`-wake`) are its own.
             let owner = name.strip_suffix("-net").or_else(|| name.strip_suffix("-wake")).unwrap_or(&name).to_string();
-            if known.contains(&name) || known.contains(&owner) {
+            if known.contains(&name) || known.contains(&owner) || own_runs.iter().any(|r| name.ends_with(r.as_str())) || (own_jobs && name.contains("-run")) {
                 continue;
             }
             // (Not asked whether it runs: that's the adopt's to find, and a runtime may not know
@@ -1854,11 +1858,16 @@ impl Apps {
         // Known here as running before its row says so: a takeover's cleanup never fails it.
         let rid = crate::model::new_id("run");
         self.running_runs.lock().insert(rid.clone(), service.to_string());
+        // Its cancel works from the moment its row says running (a cancel before it starts stops
+        // it at once rather than marking a run that then goes ahead).
+        let cancel = CancellationToken::new();
+        self.cancels.lock().insert(rid.clone(), cancel.clone());
         let r2 = rid.clone();
         let run = match self.db(move |s| s.start_run(&r2, &sid, &e, &a, t)).await {
             Ok(r) if r.status != RunStatus::Skipped => r,
             other => {
                 self.running_runs.lock().remove(&rid);
+                self.cancels.lock().remove(&rid);
                 return other;
             }
         };
@@ -1868,12 +1877,11 @@ impl Apps {
                 let r2 = rid.clone();
                 let _ = self.db(move |s| s.finish_run(&r2, RunStatus::Failed, None)).await;
                 self.running_runs.lock().remove(&rid);
+                self.cancels.lock().remove(&rid);
                 return Err(err);
             }
         };
         let (this, id, sid, run_dep) = (self.clone(), run.id.clone(), service.to_string(), run.deployment.clone());
-        let cancel = CancellationToken::new();
-        self.cancels.lock().insert(id.clone(), cancel.clone());
         tokio::spawn(async move {
             // Its output stays in the environment's log (drains read it there); its container's
             // name, its own id in it, is what picks its own lines out.

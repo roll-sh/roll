@@ -510,6 +510,30 @@ async fn one_instance_is_restarted_without_the_rest() {
     let now = running(&after);
     assert!(!now.contains(&old) && now.contains(&kept) && now.len() == 2, "{now:?}");
     assert_eq!(call(&w.api, "POST", &format!("{base}/instances/nope/restart"), None).await.0, StatusCode::NOT_FOUND);
+    // One with a volume stops first: never two on the volume at once.
+    let (svc, _) = image_service(&w, "db", json!({"port": 80, "min_instances": 1, "volume": {"mount": "/data", "size_gb": 1}})).await;
+    let vid = svc["id"].as_str().unwrap().to_string();
+    let vbase = format!("/v1/apps/services/{vid}/environments/production");
+    let env = get_until(&w.api, &vbase, |v| running(v).len() == 1).await;
+    let old = running(&env)[0].clone();
+    let watch = {
+        let (fake, vid, stop) = (w.fake.clone(), vid.clone(), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (s2, st2) = (seen.clone(), stop.clone());
+        tokio::spawn(async move {
+            while !st2.load(Ordering::SeqCst) {
+                let n = fake.instances(&vid).iter().filter(|(_, _, st)| *st == FakeState::Running).count();
+                s2.fetch_max(n, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        (seen, stop)
+    };
+    assert_eq!(call(&w.api, "POST", &format!("{vbase}/instances/{old}/restart"), None).await.0, StatusCode::OK);
+    let after = get_until(&w.api, &vbase, |v| running(v).len() == 1).await;
+    watch.1.store(true, Ordering::SeqCst);
+    assert!(!running(&after).contains(&old), "{after}");
+    assert_eq!(watch.0.load(Ordering::SeqCst), 1, "never two instances on the volume");
 }
 
 /// An environment's own headers (HSTS, a CSP) on its answers, by path; the app's own header of
@@ -1220,12 +1244,19 @@ async fn a_5xx_rate_past_the_alert_is_an_event_once() {
     if into > 50_000 {
         tokio::time::sleep(Duration::from_millis((60_000 - into + 100) as u64)).await;
     }
-    let now = code_sql::now_ms() / 60_000;
     let minute = |m: i64, errors: i64| apps_control::store::MinuteRow { minute: m, requests: 100, errors, instances: 1, memory_bytes: 64 << 20, ..Default::default() };
-    w.apps.store.put_minutes(&id, "production", &(1..=5).map(|i| minute(now - i, 20)).collect::<Vec<_>>()).unwrap();
     let live = w.apps.live(&id, "production");
-    w.apps.judge_alerts(&live).await;
-    w.apps.judge_alerts(&live).await;
+    let mut now;
+    // A loaded machine can cross into the next minute before the judging: written again then.
+    loop {
+        now = code_sql::now_ms() / 60_000;
+        w.apps.store.put_minutes(&id, "production", &(1..=5).map(|i| minute(now - i, 20)).collect::<Vec<_>>()).unwrap();
+        w.apps.judge_alerts(&live).await;
+        w.apps.judge_alerts(&live).await;
+        if code_sql::now_ms() / 60_000 == now {
+            break;
+        }
+    }
     let (_, ev) = call(&w.api, "GET", "/v1/apps/events?after=0", None).await;
     let alerts: Vec<&Value> = ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "alert.errors").collect();
     assert_eq!(alerts.len(), 1, "{ev}");
@@ -2342,6 +2373,8 @@ async fn a_private_caller_wakes_a_sleeping_service_and_keeps_it_awake() {
     let id = svc["id"].as_str().unwrap().to_string();
     let base = format!("/v1/apps/services/{id}/environments/production");
     let state = || async { call(&w.api, "GET", &base, None).await.1["state"].as_str().unwrap_or("").to_string() };
+    let (logs, logkey) = (&w.apps.logs, format!("env:{id}/production"));
+    let logkey = &logkey;
     let until = |want: &'static str| async move {
         for _ in 0..100 {
             if state().await == want {
@@ -2349,17 +2382,27 @@ async fn a_private_caller_wakes_a_sleeping_service_and_keeps_it_awake() {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        panic!("never {want}: {}", state().await);
+        let log: Vec<String> = logs.follow(logkey, 30).0.into_iter().map(|l| l.text).collect();
+        panic!("never {want}: {} {log:?}", state().await);
     };
-    assert_eq!(state().await, "stopped");
+    // Live in the store a moment before the environment has it.
+    until("stopped").await;
+    for _ in 0..100 {
+        if !w.fake.instances(&id).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let name = w.fake.instances(&id)[0].0.clone();
     let live = w.apps.live(&id, "production");
     // A caller connects while it's asleep.
     w.fake.connect(&name);
     until("running").await;
-    // Connected: in use, however long since rolld's last request.
+    // Connected: in use, however long since rolld's last request. Checked in its last two idle
+    // seconds before it would freeze (29 s of its 30), as the check runs every second there; a
+    // jump past 30 would let the reaper's own tick freeze it first.
     w.fake.set_private(&name, 1);
-    live.backdate(Duration::from_secs(31));
+    live.backdate(Duration::from_secs(29));
     live.answer_private(true).await;
     live.tick().await;
     assert_eq!(state().await, "running");

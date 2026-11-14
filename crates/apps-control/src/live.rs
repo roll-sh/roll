@@ -1476,37 +1476,59 @@ impl EnvLive {
         self.tick().await;
     }
 
-    /// Replace one instance (a stuck one, its pool leaked): on a web service a fresh one is
-    /// started and answering first, then this one leaves rotation and drains; a worker's stops
-    /// and the reaper starts what's wanted. If the fresh one doesn't start, this one stays.
+    /// Replace one instance (a stuck one, its pool leaked). A web service's, of the live
+    /// deployment, without a volume and below `max_instances`: a fresh one is started (outside
+    /// the wake lock, as a deploy's are) and answering first, then the two swap under the lock and
+    /// this one drains. Otherwise (a volume, a worker, an old deployment's or a canary's, at its
+    /// most) it stops first, as a volume rollout does, and the reaper or the next request starts
+    /// what's wanted. If the fresh one doesn't start, this one stays.
     pub async fn restart_instance(self: &Arc<Self>, name: &str) -> Result<(), String> {
-        let tpl = self.template().ok_or("nothing is deployed here")?;
-        let inst = self.instances().into_iter().find(|i| i.name == name).ok_or_else(|| format!("no instance {name} here"))?;
-        let replace = tpl.run.kind == RunType::Web && inst.awake() && inst.deployment == tpl.deployment;
+        self.may_wake().map_err(|e| e.to_string())?;
+        let (tpl, inst, replace) = {
+            let _g = self.wake.lock().await;
+            let tpl = self.template().ok_or("nothing is deployed here")?;
+            let inst = self.instances().into_iter().find(|i| i.name == name).ok_or_else(|| format!("no instance {name} here"))?;
+            let replace = tpl.run.kind == RunType::Web
+                && tpl.run.volume.is_none()
+                && inst.awake()
+                && inst.deployment == tpl.deployment
+                && self.canary.lock().is_none()
+                && (self.awake_of(&tpl.deployment) as u32) < tpl.run.max_instances;
+            if !replace {
+                self.insts.lock().retain(|i| !Arc::ptr_eq(i, &inst));
+                *inst.phase.lock() = Phase::Stopping;
+            }
+            (tpl, inst, replace)
+        };
+        if !replace {
+            self.log.stream(Stream::System).line(format!("restarting {name}: it stops first"));
+            let _ = self.runtime.stop(&inst.name, self.drain_of(&tpl.run)).await;
+            self.runtime.remove(&inst.name).await;
+            self.tick().await;
+            return Ok(());
+        }
+        let fresh = self.make(&tpl).await.map_err(|e| format!("a fresh instance couldn't be made: {e:#}"))?;
+        let deadline = Instant::now() + Duration::from_secs(tpl.run.health_timeout_s as u64);
+        if let Err(e) = self.start(&fresh, &tpl.run, tpl.run.health_path.as_deref(), deadline).await {
+            self.discard(&[fresh]).await;
+            return Err(format!("the fresh instance didn't start ({e}); {name} keeps serving"));
+        }
         {
             let _g = self.wake.lock().await;
-            if self.closed.load(Ordering::SeqCst) {
-                return Err("this environment was torn down".into());
+            // A deploy, a scale-in or a teardown meanwhile: the fresh one isn't wanted.
+            let still = !self.closed.load(Ordering::SeqCst) && self.template().is_some_and(|t| t.deployment == tpl.deployment) && self.insts.lock().iter().any(|i| Arc::ptr_eq(i, &inst));
+            if !still {
+                drop(_g);
+                self.discard(&[fresh]).await;
+                return Err(format!("{name} changed meanwhile (a deploy, a scale-in): nothing was restarted"));
             }
-            if replace {
-                let fresh = self.make(&tpl).await.map_err(|e| format!("a fresh instance couldn't be made: {e:#}"))?;
-                self.insts.lock().push(fresh.clone());
-                let deadline = Instant::now() + Duration::from_secs(tpl.run.health_timeout_s as u64);
-                if let Err(e) = self.start(&fresh, &tpl.run, tpl.run.health_path.as_deref(), deadline).await {
-                    return Err(format!("the fresh instance didn't start ({e}); {name} keeps serving"));
-                }
-            }
-            if !self.insts.lock().iter().any(|i| Arc::ptr_eq(i, &inst)) {
-                return Err(format!("{name} went meanwhile"));
-            }
-            self.insts.lock().retain(|i| !Arc::ptr_eq(i, &inst));
+            let mut insts = self.insts.lock();
+            insts.retain(|i| !Arc::ptr_eq(i, &inst));
+            insts.push(fresh);
             *inst.phase.lock() = Phase::Stopping;
         }
-        self.log.stream(Stream::System).line(format!("restarting {name}{}", if replace { ": a fresh instance answers in its place" } else { "" }));
+        self.log.stream(Stream::System).line(format!("restarting {name}: a fresh instance answers in its place"));
         self.drain(vec![inst], self.drain_of(&tpl.run));
-        if !replace {
-            self.tick().await;
-        }
         Ok(())
     }
 
