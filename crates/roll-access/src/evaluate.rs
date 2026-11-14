@@ -194,6 +194,23 @@ fn storage_account(row: &Row, query: Option<&str>, headers: &axum::http::HeaderM
     headers.get("x-roll-account").and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string()).or_else(from_query).filter(|a| !a.is_empty())
 }
 
+/// The lists of items a list answer holds: `items` names one (`{"items": [...]}`), else the answer
+/// is the list, or every list in it whose items have an `id_field` (`{"databases": [...], ...}`).
+fn item_lists<'a>(v: &'a mut Value, items: Option<&str>, id_field: &str) -> Vec<&'a mut Vec<Value>> {
+    match (items, v) {
+        (Some(k), v) => v.get_mut(k).and_then(Value::as_array_mut).into_iter().collect(),
+        (None, Value::Array(l)) => vec![l],
+        (None, Value::Object(o)) => o
+            .values_mut()
+            .filter_map(|x| match x {
+                Value::Array(l) if l.iter().any(|i| i.get(id_field).is_some()) => Some(l),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub(crate) fn describe(t: &Target) -> Option<String> {
     match t {
         // Indices of a resource read as `cl_1/logs-*`.
@@ -532,6 +549,12 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // A list filtered, an answer's credentials redacted, a create placed: the answer is read.
     let filter_list = matches!(row.target, Tgt::List { .. }) && narrowed(&scope, row.product, action);
     let redact_fields = !row.reveals.is_empty() && scope.outcome(&target, Action::Reveal) != Outcome::Allow;
+    // A list's items are each their own resource: a token that may reveal some of them, not all of
+    // the product's, sees credentials in only those (redact_fields can't tell, it judges the list).
+    let redact_items = !redact_fields
+        && !row.reveals.is_empty()
+        && matches!(row.target, Tgt::List { .. })
+        && scope.outcome(&Target::Product { product: row.product.to_string() }, Action::Reveal) != Outcome::Allow;
     let place = match (&row.target, &target) {
         (Tgt::Create { place: Some(kind), id_field, .. }, Target::Create { project: Some(p), .. }) => Some((*kind, *id_field, p.clone())),
         _ => None,
@@ -542,8 +565,8 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     };
     let resp = next.run(Request::from_parts(parts, body)).await;
     let status = resp.status();
-    let resp = if status.is_success() && (filter_list || redact_fields || place.is_some()) {
-        post_process(&ctx, row, action, &scope, resp, filter_list, redact_fields, place).await
+    let resp = if status.is_success() && (filter_list || redact_fields || redact_items || place.is_some()) {
+        post_process(&ctx, row, action, &scope, resp, filter_list, redact_fields, redact_items, place).await
     } else {
         resp
     };
@@ -871,6 +894,7 @@ async fn post_process(
     resp: Response,
     filter_list: bool,
     redact_fields: bool,
+    redact_items: bool,
     place: Option<(&'static str, &'static str, String)>,
 ) -> Response {
     let (mut parts, body) = resp.into_parts();
@@ -881,7 +905,7 @@ async fn post_process(
     };
     let Some(mut v) = is_json.then(|| serde_json::from_slice::<Value>(&bytes).ok()).flatten() else {
         // Not JSON: nothing to filter. A list or a credential we can't see into isn't passed on.
-        if filter_list || redact_fields {
+        if filter_list || redact_fields || redact_items {
             return deny(StatusCode::FORBIDDEN, "unfilterable", "this answer can't be checked for this token".into(), json!({}));
         }
         return Response::from_parts(parts, Body::from(bytes));
@@ -899,36 +923,28 @@ async fn post_process(
             }
         }
     }
-    if filter_list && let Tgt::List { items, id_field, kind } = row.target {
-        let (a, s, product, prefix) = (ctx.access.clone(), scope.clone(), row.product, ctx.list_prefix.clone());
+    if (filter_list || redact_items) && let Tgt::List { items, id_field, kind } = row.target {
+        let (a, s, product, prefix, fields) = (ctx.access.clone(), scope.clone(), row.product, ctx.list_prefix.clone(), row.reveals);
         let kind = kind.unwrap_or(product);
         v = tokio::task::spawn_blocking(move || {
-            let keep = |item: &Value| {
-                let Some(id) = item.get(id_field).and_then(Value::as_str) else { return false };
+            // Each item is its own resource: the token keeps the ones it may `action`, and sees
+            // the credentials of only the ones it may reveal.
+            let resource = |item: &Value| {
+                let id = item.get(id_field).and_then(Value::as_str)?;
                 let named = prefix.as_ref().map(|p| format!("{p}/{id}"));
                 let id = named.as_deref().unwrap_or(id);
-                let r = if product == "workspace" { Resource { project: Some(id.into()), ..Resource::new("workspace", id) } } else { a.resource(product, kind, id) };
-                s.outcome(&Target::One(r), action) == Outcome::Allow
+                Some(if product == "workspace" { Resource { project: Some(id.into()), ..Resource::new("workspace", id) } } else { a.resource(product, kind, id) })
             };
-            let filter = |list: &mut Vec<Value>| list.retain(&keep);
-            match (items, &mut v) {
-                (Some(k), _) => {
-                    if let Some(Value::Array(l)) = v.get_mut(k) {
-                        filter(l);
+            let may = |item: &Value, act: Action| resource(item).is_some_and(|r| s.outcome(&Target::One(r), act) == Outcome::Allow);
+            for list in item_lists(&mut v, items, id_field) {
+                if filter_list {
+                    list.retain(|item| may(item, action));
+                }
+                if redact_items {
+                    for item in list.iter_mut().filter(|i| !may(i, Action::Reveal)) {
+                        redact::fields(item, fields);
                     }
                 }
-                (None, Value::Array(l)) => filter(l),
-                // `{"databases": [...], ...}`: every list of items with ids.
-                (None, Value::Object(o)) => {
-                    for x in o.values_mut() {
-                        if let Value::Array(l) = x
-                            && l.iter().any(|i| i.get(id_field).is_some())
-                        {
-                            filter(l);
-                        }
-                    }
-                }
-                _ => {}
             }
             v
         })
