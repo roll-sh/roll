@@ -644,6 +644,9 @@ impl Apps {
         if self.capped(&e.service) {
             attention.push("capped");
         }
+        if e.paused {
+            attention.push("paused");
+        }
         if e.maintenance.is_some() {
             attention.push("maintenance");
         }
@@ -926,6 +929,7 @@ impl Apps {
             redeploy_on_secrets: r.redeploy_on_secrets,
             feedback: r.feedback,
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
+            paused: r.paused,
             pages: r.pages.clone(),
             allow_ips: r.allow_ips.clone(),
             rate_limit: r.rate_limit,
@@ -943,11 +947,16 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
         // The new settings are checked before anything is written: a 400 changes nothing.
+        let paused = match o.get("paused") {
+            None => None,
+            Some(Value::Bool(b)) => Some(*b),
+            Some(_) => return Err(Error::BadRequest("paused is a boolean".into())),
+        };
         // Maintenance: true or {message?} turns it on, false or null off.
         let maintenance: Option<Option<String>> = match o.get("maintenance") {
             None => None,
@@ -1149,6 +1158,20 @@ impl Apps {
             }
             Some(_) => return Err(Error::BadRequest("feedback is a boolean".into())),
         }
+        if let Some(on) = paused {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_paused(&sid, &e, on)).await?;
+            // At once on its owner: what runs stops, and the next tick keeps no floor; resumed,
+            // the next tick (or request) starts what it wants again.
+            let live = self.live(service, env);
+            live.set_paused(on);
+            if on {
+                live.sleep().await;
+            } else {
+                live.tick().await;
+            }
+            self.changed(service);
+        }
         if let Some(m) = maintenance {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_maintenance(&sid, &e, m.as_deref())).await?;
@@ -1349,6 +1372,8 @@ impl Apps {
             return Err(Error::Unavailable("the service is moving to another node; try again in a moment".into()));
         }
         let live = self.live(service, env);
+        // Paused before anything starts: an owner taking over keeps it paused.
+        live.set_paused(row.paused);
         let Some(active) = row.active.clone() else { return Ok(live) };
         let dep = self.db(move |s| s.deployment(&active)).await?;
         let sid = service.to_string();

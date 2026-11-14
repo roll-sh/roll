@@ -2327,10 +2327,19 @@ async fn a_crowd_wakes_one_instance_and_a_slow_start_says_when_to_retry() {
         (resp.status(), resp.headers().get("retry-after").map(|v| v.to_str().unwrap().to_string()))
     };
     let created = Fake::count(&w.fake.counts.creates);
+    let before: Vec<(String, apps_control::model::InstanceState)> = w.apps.live(&id, "production").instances().iter().map(|i| (i.name.clone(), i.state())).collect();
     let crowd = futures::future::join_all((0..8).map(|_| get())).await;
     // The one that woke it waits for its start; those behind it give up at the timeout.
     let waited = crowd.iter().filter(|(st, retry)| *st == StatusCode::SERVICE_UNAVAILABLE && retry.is_some()).count();
-    assert!(waited >= 7 && crowd.iter().all(|(st, _)| *st == StatusCode::OK || *st == StatusCode::SERVICE_UNAVAILABLE), "{crowd:?}");
+    // It failed once (all eight 200 at once, an instance already up): what was there says why.
+    let c = &w.fake.counts;
+    assert!(
+        waited >= 7 && crowd.iter().all(|(st, _)| *st == StatusCode::OK || *st == StatusCode::SERVICE_UNAVAILABLE),
+        "{crowd:?}; instances before the crowd {before:?}; fake creates {} starts {} resumes {}",
+        Fake::count(&c.creates),
+        Fake::count(&c.starts),
+        Fake::count(&c.resumes)
+    );
     let mut ok = None;
     for _ in 0..50 {
         let (st, _) = get().await;
@@ -3173,4 +3182,35 @@ async fn a_repo_service_made_with_a_branch_follows_it_from_the_first_deploy() {
     assert_eq!(env["branch"], "release", "{env}");
     let (st, v) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "img", "source": {"kind": "image", "image": "nginx:1.27"}, "branch": "main" }))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "a branch is a repo's: {v}");
+}
+
+/// A paused environment (Render's Suspend): a worker's instances stop and stay stopped through
+/// the reaper's passes, nothing deploys, runs or wakes, and resuming brings it back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paused_worker_stays_stopped_until_its_resumed() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "billing", json!({"type": "worker", "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    get_until(&w.api, &env, |e| e["state"] == "running").await;
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({ "paused": true }))).await;
+    assert_eq!((st, &e["paused"]), (StatusCode::OK, &json!(true)), "{e}");
+    get_until(&w.api, &env, |e| e["state"] == "stopped").await;
+    // The reaper passes and keeps no floor.
+    for _ in 0..5 {
+        w.apps.live(&id, "production").tick().await;
+    }
+    let (_, e) = call(&w.api, "GET", &env, None).await;
+    assert_eq!(e["state"], "stopped", "{e}");
+    let (_, list) = call(&w.api, "GET", "/v1/apps/services", None).await;
+    assert!(list[0]["environments"][0]["attention"].as_array().unwrap().contains(&json!("paused")), "{list}");
+    let (st, v) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "nothing deploys: {v}");
+    let (st, v) = call(&w.api, "POST", &format!("{env}/jobs"), Some(json!({ "command": "true" }))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "nothing runs: {v}");
+    // Resumed: back at its floor.
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({ "paused": false }))).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    assert!(e.get("paused").is_none(), "{e}");
+    get_until(&w.api, &env, |e| e["state"] == "running").await;
 }

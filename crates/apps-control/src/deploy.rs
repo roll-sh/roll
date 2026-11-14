@@ -51,6 +51,7 @@ impl Apps {
     /// With `key` (an `Idempotency-Key`), a retry answers the deployment the first call queued.
     pub async fn deploy(self: &Arc<Self>, service: &str, env: &str, body: Value, by: By, upload: Option<Bytes>, key: Option<&str>) -> Result<Deployment> {
         self.refuse_capped(service)?;
+        self.refuse_paused(service, env).await?;
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
             if !["revision", "image", "message", "no_traffic", "no_cache"].contains(&k.as_str()) {
@@ -184,6 +185,7 @@ impl Apps {
     /// deploy's does (one table of keys per environment for both).
     pub async fn redeploy(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>, key: Option<&str>) -> Result<Deployment> {
         self.refuse_capped(service)?;
+        self.refuse_paused(service, env).await?;
         if let Some(k) = key {
             if k.is_empty() || k.len() > 200 || !k.bytes().all(|b| b.is_ascii_graphic()) {
                 return Err(Error::BadRequest("Idempotency-Key is 1–200 printable ASCII characters".into()));
@@ -241,6 +243,7 @@ impl Apps {
     /// service's current settings (Railway's promotion: staging's tested image to production).
     pub async fn promote(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>) -> Result<Deployment> {
         self.refuse_capped(service)?;
+        self.refuse_paused(service, env).await?;
         let o = body.as_object().cloned().unwrap_or_default();
         if let Some(k) = o.keys().find(|k| !["from", "message"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
@@ -287,6 +290,7 @@ impl Apps {
     /// change in the audit trail. A deployment that never went live has none kept.
     pub async fn rollback(self: &Arc<Self>, service: &str, env: &str, dep: &str, actor: Option<String>, keep_variables: bool) -> Result<Deployment> {
         self.refuse_capped(service)?;
+        self.refuse_paused(service, env).await?;
         let old = self.deployment(service, env, dep).await?;
         let Some(image) = old.image.clone() else { return Err(Error::Conflict(format!("{dep} never built an image, so there's nothing to roll back to"))) };
         if old.pruned_at.is_some() {
@@ -569,6 +573,8 @@ impl Apps {
         anyhow::ensure!(!self.capped(&d.service), "the project reached its spending limit for the month");
         let (sid, e) = (d.service.clone(), d.environment.clone());
         let (svc, env) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
+        // Queued before it was paused: it doesn't build or start now.
+        anyhow::ensure!(!env.paused, "the environment is paused");
         // The environment's own size and scale over the service's, before roll.toml.
         let svc = svc.for_env(&env)?;
         let id = d.id.clone();
@@ -1774,6 +1780,10 @@ impl Apps {
             // block first), else the service's setting; none: every push counts.
             let file = self.app_config_at(svc, &l.revision.sha).await;
             for e in envs.iter().filter(|e| e.service == svc.id && !e.ephemeral && e.branch.as_deref() == Some(l.branch.as_str())) {
+                if e.paused {
+                    self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {} not deployed: the environment is paused", &l.revision.sha[..l.revision.sha.len().min(12)]));
+                    continue;
+                }
                 let watch = file.as_ref().and_then(|f| f.watch_for(&e.name)).or_else(|| svc.build.watch.clone()).filter(|w| !w.is_empty());
                 if let Some(patterns) = &watch
                     && !self.push_touches(svc, e, &l.revision.sha, patterns).await
@@ -1827,7 +1837,8 @@ impl Apps {
             let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s, svc.run.timezone.as_deref()).ok()) else { continue };
             let sid = svc.id.clone();
             let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
-            for e in envs.into_iter().filter(|e| e.active.is_some()) {
+            // A paused one is skipped, its runs not made up when it's resumed.
+            for e in envs.into_iter().filter(|e| e.active.is_some() && !e.paused) {
                 let key = format!("cron:{}/{}", svc.id, e.name);
                 let k = key.clone();
                 let last: i64 = self.db(move |s| s.get_state(&k)).await.ok().flatten().and_then(|v| v.parse().ok()).unwrap_or(now);
@@ -1858,6 +1869,9 @@ impl Apps {
             return Err(Error::Conflict("only a cron service has runs".into()));
         }
         let Some(active) = row.active.clone() else { return Err(Error::Conflict("this environment has no deployment yet".into())) };
+        if row.paused {
+            return Err(Error::Conflict("this environment is paused: resume it to run".into()));
+        }
         let timeout = Duration::from_secs(svc.run.timeout_s.unwrap_or(3600) as u64);
         let (sid, e, a, t) = (service.to_string(), env.to_string(), active.clone(), timeout.as_millis() as i64 + 60_000);
         // Known here as running before its row says so: a takeover's cleanup never fails it.

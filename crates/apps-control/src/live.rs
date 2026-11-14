@@ -181,6 +181,8 @@ pub enum WakeError {
     Busy,
     #[error("this project reached its spending limit for the month")]
     Capped,
+    #[error("this environment is paused")]
+    Paused,
 }
 
 /// [`EnvLive::hold_asleep`]'s hold: let go when dropped, whatever happened.
@@ -330,6 +332,8 @@ pub struct EnvLive {
     released: Arc<AtomicBool>,
     /// Its project reached its spend limit: nothing starts, and the tick stops what runs.
     capped: AtomicBool,
+    /// Paused by its owner: the same, until it's resumed.
+    paused: AtomicBool,
     /// Its volume is being restored: nothing starts until it's done.
     held: AtomicBool,
     /// A scaling worker's instances for its backlog ([`crate::model::Scale`]); 0: its floor.
@@ -405,6 +409,7 @@ impl EnvLive {
             closed: AtomicBool::new(false),
             released: Arc::default(),
             capped: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
             held: AtomicBool::new(false),
             wanted: AtomicU32::new(0),
             backlog: AtomicU64::new(u64::MAX),
@@ -752,6 +757,9 @@ impl EnvLive {
         }
         if self.capped.load(Ordering::SeqCst) {
             return Err(WakeError::Capped);
+        }
+        if self.paused.load(Ordering::SeqCst) {
+            return Err(WakeError::Paused);
         }
         if self.held.load(Ordering::SeqCst) {
             return Err(WakeError::Busy);
@@ -1411,6 +1419,14 @@ impl EnvLive {
         self.capped.store(on, Ordering::SeqCst);
     }
 
+    pub fn set_paused(&self, on: bool) {
+        self.paused.store(on, Ordering::SeqCst);
+    }
+
+    pub fn paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+
     /// A scaling worker's instances for its backlog now.
     pub fn set_wanted(&self, n: u32, backlog: Option<u64>) {
         self.wanted.store(n, Ordering::SeqCst);
@@ -1640,10 +1656,10 @@ impl EnvLive {
         if self.held.load(Ordering::SeqCst) {
             return;
         }
-        if self.capped.load(Ordering::SeqCst) {
-            // Capped: stop what still runs, keep no floor.
+        if self.capped.load(Ordering::SeqCst) || self.paused.load(Ordering::SeqCst) {
+            // Capped or paused: stop what still runs, keep no floor.
             if insts.iter().any(|i| i.awake()) {
-                self.log.stream(Stream::System).line("the project reached its spending limit: stopped");
+                self.log.stream(Stream::System).line(if self.capped.load(Ordering::SeqCst) { "the project reached its spending limit: stopped" } else { "paused: stopped" });
                 self.sleep().await;
             }
             return;

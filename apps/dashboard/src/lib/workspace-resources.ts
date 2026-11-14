@@ -258,7 +258,7 @@ export function service(s: Service): ResourceView {
   // What wants its owner's eye, over the instances' state: crashing reads failed even between
   // restarts, a capped project paused, maintenance said.
   const attention = env?.attention ?? [];
-  const flagged = attention.includes("crash_loop") ? ({ state: "failed", label: "Crashing" } as const) : attention.includes("capped") ? ({ state: "idle", label: "Paused (spend limit)" } as const) : attention.includes("maintenance") ? ({ state: "idle", label: "In maintenance" } as const) : null;
+  const flagged = attention.includes("crash_loop") ? ({ state: "failed", label: "Crashing" } as const) : attention.includes("capped") ? ({ state: "idle", label: "Paused (spend limit)" } as const) : attention.includes("paused") ? ({ state: "idle", label: "Paused" } as const) : attention.includes("maintenance") ? ({ state: "idle", label: "In maintenance" } as const) : null;
   const instances = s.run.min_instances === s.run.max_instances ? `${s.run.min_instances}` : `${s.run.min_instances}–${s.run.max_instances}`;
   return {
     kind: "service",

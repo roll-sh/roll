@@ -949,6 +949,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         Err(WakeError::NotWeb) => return by("not_deployed", page(StatusCode::NOT_FOUND, "Not a web service", "This service is a worker or a cron job: it doesn't answer HTTP.")),
         Err(WakeError::Busy) => return by("wake", retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Busy starting", "Too many requests are waiting for this service to start. Try again in a moment."))),
         Err(WakeError::Capped) => return by("capped", page(StatusCode::PAYMENT_REQUIRED, "Paused", "This project reached its spending limit for the month. Its owner can raise the limit to bring it back.")),
+        Err(WakeError::Paused) => return by("paused", page(StatusCode::SERVICE_UNAVAILABLE, "Paused", "This service is paused. Its owner can resume it.")),
         Err(e) => {
             live.log.stream(crate::logs::Stream::System).line(format!("a request couldn't wake the service: {e}"));
             return by("wake", page(StatusCode::SERVICE_UNAVAILABLE, "Starting up", "The service is waking up or failing to start. Try again in a few seconds."));
@@ -1226,7 +1227,7 @@ impl Seen {
 }
 
 /// Marks an answer roll gave itself before any instance: `by` what (`allow_list`, `firewall`,
-/// `rate_limit`, `private`, `maintenance`, `wake`, `capped`, `not_deployed`, `moving`,
+/// `rate_limit`, `private`, `maintenance`, `wake`, `capped`, `paused`, `not_deployed`, `moving`,
 /// `unavailable`), for [`proxy`] to log and meter.
 #[derive(Clone, Copy)]
 struct By(&'static str);

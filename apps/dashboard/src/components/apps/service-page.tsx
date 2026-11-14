@@ -1,6 +1,6 @@
 import { HorizonMark } from "@roll/brand";
 import { useNavigate } from "@tanstack/react-router";
-import { ArrowLeft, ChevronDown, ExternalLink, Moon, Play, RotateCw, Rocket, Sun } from "lucide-react";
+import { ArrowLeft, ChevronDown, ExternalLink, Moon, Pause, Play, Rocket, RotateCw, Sun } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import {
@@ -218,6 +218,16 @@ function Conditions({ service, env, runner, go }: { service: Service; env: Envir
         </button>
       ),
     });
+  if (env.paused)
+    lines.push({
+      key: "paused",
+      text: "Paused: nothing runs, wakes, deploys or is scheduled here until it's resumed.",
+      action: (
+        <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => runner.run("resume", () => appsApi.putEnvironment(service.id, env.name, { paused: false }))}>
+          Resume
+        </button>
+      ),
+    });
   if (env.maintenance)
     lines.push({
       key: "maintenance",
@@ -371,12 +381,21 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
               <Play className="size-3.5" /> Run now
             </button>
           )}
-          {asleep ? (
+          {env?.paused ? (
+            <button className={`${btn} shrink-0`} disabled={busy} onClick={() => runner.run("resume", () => appsApi.putEnvironment(service.id, envName, { paused: false }))} title="Run, wake, deploy and schedule again">
+              <Play className="size-3.5" /> Resume
+            </button>
+          ) : service.run.type !== "web" ? (
+            // A worker's floor (and a schedule) would start it again: sleeping isn't stopping.
+            <SureButton className={`${btn} shrink-0`} disabled={busy || !env} sure="Sure? Pause it" onSure={() => runner.run("pause", () => appsApi.putEnvironment(service.id, envName, { paused: true }))} title="Stop its instances; nothing runs, deploys or is scheduled until it's resumed">
+              <Pause className="size-3.5" /> Pause
+            </SureButton>
+          ) : asleep ? (
             <button className={`${btn} shrink-0`} disabled={busy || !env?.active} onClick={() => runner.run("wake", () => appsApi.wake(service.id, envName))} title="Start an instance now">
               <Sun className="size-3.5" /> Wake
             </button>
           ) : (
-            <SureButton className={`${btn} shrink-0`} disabled={busy || st !== "running"} sure="Sure? Stop it now" onSure={() => runner.run("sleep", () => appsApi.sleep(service.id, envName))} title="Scale to zero now">
+            <SureButton className={`${btn} shrink-0`} disabled={busy || st !== "running"} sure="Sure? Stop it now" onSure={() => runner.run("sleep", () => appsApi.sleep(service.id, envName))} title="Scale to zero now (the next request wakes it)">
               <Moon className="size-3.5" /> Sleep
             </SureButton>
           )}

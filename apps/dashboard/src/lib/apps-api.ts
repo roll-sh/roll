@@ -102,8 +102,8 @@ export interface EnvironmentSummary {
   url: string | null;
   active: { id: string; revision: string | null; created_at: number } | null;
   latest: { id: string; status: DeployStatus } | null;
-  /** What wants its owner's eye: a crash loop, the project capped by its spend limit, maintenance, its latest deploy failed. */
-  attention?: ("crash_loop" | "capped" | "maintenance" | "deploy_failed")[];
+  /** What wants its owner's eye: a crash loop, the project capped by its spend limit, paused, maintenance, its latest deploy failed. */
+  attention?: ("crash_loop" | "capped" | "paused" | "maintenance" | "deploy_failed")[];
 }
 
 export interface Service {
@@ -340,6 +340,8 @@ export interface EnvironmentPut {
   follow_tag?: boolean;
   /** Redeploy (same image, new values) when the project's secrets change. */
   redeploy_on_secrets?: boolean;
+  /** Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until false. */
+  paused?: boolean;
   /** Maintenance: its public names answer roll's page with the message; false ends it. */
   maintenance?: boolean | { message?: string | null };
   /** Its own HTML (at most 64 KiB) instead of roll's pages; null goes back to roll's, an absent field stays. */
@@ -418,6 +420,8 @@ export interface Environment extends EnvironmentSummary {
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
   waiting_for_ci?: string | null;
+  /** Paused: nothing runs, wakes, deploys or is scheduled. Absent: not paused. */
+  paused?: boolean;
   /** In maintenance: what visitors read (null: roll's words). Null: serving. */
   maintenance?: { message: string | null } | null;
   /** Its own pages (Heroku's): `error` for the 502/503/504 while the app can't answer or wake, `maintenance` while in maintenance. Absent: roll's. */
@@ -846,7 +850,7 @@ export interface AccessLine {
   cold?: boolean;
   waited_ms?: number;
   /** An answer roll gave itself, before any instance, and why. */
-  by?: "allow_list" | "firewall" | "rate_limit" | "private" | "maintenance" | "wake" | "capped" | "not_deployed" | "moving" | "unavailable";
+  by?: "allow_list" | "firewall" | "rate_limit" | "private" | "maintenance" | "wake" | "capped" | "paused" | "not_deployed" | "moving" | "unavailable";
 }
 
 /** Follows a service's changes (`…/changes`): `onChange` for each tick, `onOpen` as the stream comes and goes. */

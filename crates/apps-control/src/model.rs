@@ -870,6 +870,9 @@ pub struct Environment {
     /// In maintenance (Render's maintenance mode): its public names answer a 503 page with the
     /// message, and nothing wakes. Null: serving.
     pub maintenance: Option<Maintenance>,
+    /// Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until it's resumed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
     /// Its own pages for what roll would otherwise answer (Heroku's error and maintenance pages).
     #[serde(skip_serializing_if = "Pages::is_empty")]
     pub pages: Pages,

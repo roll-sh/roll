@@ -247,7 +247,7 @@ type EnvironmentSummary = {
   url: string | null;
   active: { id: string; revision: string | null; created_at: number } | null;
   latest: { id: string; status: DeployStatus } | null;
-  attention?: ("crash_loop" | "capped" | "maintenance" | "deploy_failed")[]; // what wants its owner's eye (absent: nothing)
+  attention?: ("crash_loop" | "capped" | "paused" | "maintenance" | "deploy_failed")[]; // what wants its owner's eye (absent: nothing)
 };
 
 type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
@@ -286,6 +286,10 @@ type EnvironmentPut = {
    *  answer roll's 503 page (Retry-After 30) with the message, waking nothing; a deployment's own
    *  URL still answers. `false` or null serves again. */
   maintenance?: boolean | { message?: string | null } | null;
+  /** Paused (Render's Suspend): its instances stop, and nothing runs, wakes (a request gets roll's
+   *  503 "Paused" page), deploys (409), is scheduled (a cron run is skipped, not made up) or takes
+   *  a job (409) until `false`. A push to its branch is logged, not deployed. */
+  paused?: boolean;
   /** Its own HTML instead of roll's pages, each at most 64 KiB (400 past it or empty); null goes back
    *  to roll's, a field left out stays. */
   pages?: { error?: string | null; maintenance?: string | null };
@@ -329,6 +333,7 @@ type Environment = EnvironmentSummary & {
   redeploy_on_secrets: boolean; // the project's secrets changing redeploys it (same image, new values)
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
   maintenance: { message: string | null } | null; // in maintenance (null message: roll's words); null: serving
+  paused?: true;              // paused (absent: not)
   pages?: { error?: string; maintenance?: string }; // its own pages (absent: roll's): error for the 502/503/504 while it can't answer or wake, maintenance while in maintenance
   allow_ips: { cidr: string; description?: string }[]; // only these networks get in through its public names ([]: anyone)
   tcp: string | null; // a TCP service's address, host:port (null until it has its port)
@@ -475,7 +480,7 @@ type AccessLine = {
   // An instance's answer:
   instance?: string; request_id?: string; cold?: boolean; waited_ms?: number;
   // Or one roll gave itself, before any instance, and why (metered: a failed wake counts as an error):
-  by?: "allow_list" | "firewall" | "rate_limit" | "private" | "maintenance" | "wake" | "capped" | "not_deployed" | "moving" | "unavailable";
+  by?: "allow_list" | "firewall" | "rate_limit" | "private" | "maintenance" | "wake" | "capped" | "paused" | "not_deployed" | "moving" | "unavailable";
 };
 /** A volume's backup: a tar in object storage (`apps/volumes/<service>/<env>/<id>.tar`). */
 type Backup = { id: string; at: number; size: number };

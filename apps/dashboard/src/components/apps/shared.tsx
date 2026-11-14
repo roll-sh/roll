@@ -123,6 +123,7 @@ const BY: Record<NonNullable<AccessLine["by"]>, string> = {
   maintenance: "maintenance",
   wake: "couldn't wake",
   capped: "spending limit",
+  paused: "paused",
   not_deployed: "not deployed",
   moving: "moving nodes",
   unavailable: "settings unreadable",
