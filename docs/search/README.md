@@ -250,14 +250,13 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    A/B; Rally rerun pending) and `terms_enum`; a full rerun of every Rally track with variance;
    one allocator policy (rolld's against search-dev's purge governor); `terms_enum`'s per-request
    overhead.
-2. **Elasticsearch's lifecycles run** (in progress, `wip/search-lifecycle`). ILM policies and the
-   data stream lifecycle (`data_retention`) are stored and explained but never acted on
-   (`xpack/ilm.rs`: "roll doesn't run the lifecycle steps"), so a retention someone set keeps
-   every byte forever. OpenSearch's ISM already runs as background jobs (`opensearch/ism.rs`):
-   run DSL's rollover and retention and ILM's phases and actions the same way, with
-   `_ilm/explain` and `_lifecycle/explain` as Elasticsearch prints them, waking a sleeping
-   cluster only when an action falls due. The dashboard's Data streams panel already sets a
-   stream's retention (and shows ILM-managed streams' policy); it takes effect once this lands.
+2. **Elasticsearch's lifecycles: what's left.** The data stream lifecycle (rollover, retention,
+   failure stores, the error store) and ILM run now (`api/data_stream_lifecycle.rs`,
+   `xpack/ilm_run.rs`; compatibility.md, "Known gaps"). They run time-based work at its due time
+   and wake a sleeping cluster only for that. Left: ILM's `shrink` to fewer shards and
+   `downsample` (roll has both APIs; the steps that swap the new index in aren't written),
+   `searchable_snapshot`, `wait_for_snapshot` (needs SLM), and the `ilm-history-*` data stream.
+   The data stream lifecycle's force merges and downsampling rounds aren't run either.
 3. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
    Elasticsearch 9.5.5 and OpenSearch 3.9). Roll leads on indexing (4,735 docs/s against 3,585
    and 2,978 at 8 clients), merged `knn` (1.9 ms CPU against 6.1 and 4.9), `rrf` (3.2 against 13.8
