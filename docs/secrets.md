@@ -1072,7 +1072,8 @@ provider: the cluster calls roll, and roll never calls the cluster.
 apply -f -` makes a token for the environment and folder and prints all three objects below; the
 dashboard's Export menu has the same ("External Secrets Operator…", the manifests shown once). One
 `SecretStore` per project serves a whole environment (`dataFrom`) and single keys (`data` with
-`property`):
+`property`). For a tokenless setup, roll's own operator (#36) pulls with the cluster's
+identity instead; this is for clusters that already run ESO for their other managers:
 
 ```yaml
 apiVersion: v1
