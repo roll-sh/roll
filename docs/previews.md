@@ -925,7 +925,14 @@ type Settings = {
     Chromatic's `diffThreshold` and Percy's sensitivity): a page that differs from the
     baseline's by less doesn't count as changed for the review, and a push that moves a page by
     less keeps its acceptance, for what `github.hide` can't name (live: the change's 0.1%
-    differences are `unchanged` under 5%). The percentages shown stay the real ones. GitHub's branch protection can require
+    differences are `unchanged` under 5%). The percentages shown stay the real ones.
+    Its words too (Chromatic's DOM snapshots): the same load reads the first page's visible text
+    (`innerText`, at most 400 lines of 200 characters, one printable line each), kept with the
+    screenshot and with main's at each head, and a comparison with main says which lines it
+    gained and lost (`base_change.text`: in page order, 20 each, with counts), on the sheet, the
+    change page and folded in the comment as a diff block nothing on the page can close ("text +1
+    −1 against main"). It's the page's own text, shown as text (live: the change's line in,
+    `main` out). GitHub's branch protection can require
     `roll/visual`; with `required` roll's own landing does too (a `visual` blocker in
     `Code::blockers`, from the project's rule, never the change's). A review is someone else's:
     the change's author can't accept it (403 in roll, ignored from GitHub, and an older such
@@ -1077,6 +1084,7 @@ Ranked by what a person notices first. Done so far:
 - previews never email real people (a mail catcher in rolld, every service's SMTP roll's, mail
   providers' keys removed, what was caught on the sheet);
 - feedback resolved from the page (its Resolve opens roll, where it's resolved for the page);
+- the first page's words against main's (`base_change.text`, lines gained and lost);
 - a phone-width screenshot with its own visual change;
 - every change compared with the default branch, whose preview roll keeps itself (`github.baseline`);
 - the comment's page checks folded under one line of counts;
@@ -1162,33 +1170,33 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
+1. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+   wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
+   second copy of the project's variables. (A preview's cost now uses the memory its live
+   deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
+2. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
    a preview reaches real people, but its code can still call any API (a payment provider's
    sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
    (today), `"roll"` (only roll's own products and the preview's branches) or a list of hosts;
    roll's runtime puts the containers on a network that allows only that (Docker's internal
    networks plus a small forwarding proxy), and what was refused is said in the activity.
-2. **What changed, in words** (Chromatic's DOM snapshots): beside the pixel diff, the page's
-   visible text against main's at the same width, as lines added and removed ("Checkout" →
-   "Pay now"), on the sheet and folded in the comment; it's the page's own text, so it's shown
-   as text and bounded.
-3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
-   wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
-   second copy of the project's variables. (A preview's cost now uses the memory its live
-   deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+   Ranked down after a look: enforcement needs either per-container firewall rules (not on a
+   host whose firewall roll mustn't touch) or an internal network with a forwarding sidecar for
+   every product port (an image of its own, and roll code's runner changed); on the cloud fleet
+   it's security groups, with the cloud thread.
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+5. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-7. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1201,7 +1209,7 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

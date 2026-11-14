@@ -532,6 +532,32 @@ pub struct BaseChange {
     pub a11y_added: Option<u32>,
     /// How many more errors and failed requests it had while it loaded than the branch's.
     pub errors_added: Option<u32>,
+    /// Its first page's words against the branch's (lines added and removed).
+    pub text: Option<TextDiff>,
+}
+
+/// A page's visible text against another's, by line (`visual::text_diff`): the page's own words,
+/// shown as text only.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct TextDiff {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub added_n: usize,
+    pub removed_n: usize,
+}
+
+/// The visible text the screenshot's browser read off a page (`text` in what it wrote): one
+/// printable line each, at most 400 lines of 200 characters.
+pub fn page_text(json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json.trim()).ok()?;
+    let t = v.get("text")?.as_str()?;
+    let lines: Vec<String> = t
+        .lines()
+        .map(|l| l.chars().map(|c| if c.is_control() { ' ' } else { c }).take(200).collect::<String>().trim().to_string())
+        .filter(|l| !l.is_empty())
+        .take(400)
+        .collect();
+    Some(lines.join("\n"))
 }
 
 /// An earlier push of a change's service, still reachable at a URL of its own (on the preview's

@@ -97,7 +97,7 @@ export interface Preview {
   /** How much the page changed since the screenshot at an earlier head (`since`). */
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
   /** How much its page differs from the project's preview of the default branch. */
-  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null } | null;
+  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: TextDiff | null } | null;
   /** The project's other pages (`github.pages`) at the latest screenshot. */
   pages?: PageCheck[];
   /** Its visual review (`github.visual_review`): whether how its pages look against the baseline was accepted at this head. */
@@ -212,6 +212,14 @@ export function a11yWords(a: { issues: A11yIssue[]; lang: boolean; title: boolea
   if (!a.lang) words.push("no page language");
   if (!a.title) words.push("no title");
   return words;
+}
+
+/** A page's visible text against another's, by line: the page's own words, shown as text only. */
+export interface TextDiff {
+  added: string[];
+  removed: string[];
+  added_n: number;
+  removed_n: number;
 }
 
 /** A message a preview's services sent, caught instead of delivered. */

@@ -410,6 +410,17 @@ pub struct PreviewBaseChange {
     /// Errors and failed requests past the branch's while its first page loaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub errors_added: Option<u32>,
+    /// Its first page's words against the branch's, by line (untrusted: the page's own text).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<PreviewTextDiff>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewTextDiff {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub added_n: usize,
+    pub removed_n: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

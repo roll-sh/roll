@@ -153,6 +153,8 @@ pub struct Shot {
     pub phone: Option<Vec<u8>>,
     /// The project's other pages (`github.pages`) the backend took, in the same session.
     pub pages: Vec<PageShot>,
+    /// The first page's visible text, as the browser read it (`page_text`).
+    pub text: Option<String>,
 }
 
 /// What a screenshot run takes: the project's other pages, and what it blanks first.

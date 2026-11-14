@@ -2,7 +2,7 @@ import { Boxes, Check, Copy, Database, ExternalLink, Eye, Inbox, ListChecks, Moo
 import { useEffect, useState } from "react";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
-import { a11yWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
+import { a11yWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, type PreviewFeedback } from "./preview-feedback";
@@ -267,6 +267,7 @@ export function PreviewSheet({
             )}
 
             {p.screenshot_at ? <Screenshot id={p.id} at={p.screenshot_at} change={p.visual_change} phone={p.phone_screenshot} base={p.base_change} pages={p.pages} /> : null}
+            {p.base_change?.text && <TextAgainst diff={p.base_change.text} branch={p.base_change.branch} />}
             {p.visual_review && p.visual_review.state !== "unchanged" && (
               <div className="mt-1.5 flex items-center gap-2 text-[11.5px]">
                 {p.visual_review.state === "accepted" ? (
@@ -784,6 +785,33 @@ function Screenshot({
         <p className="text-[11.5px] text-muted">No screenshot of {path} yet.</p>
       )}
     </>
+  );
+}
+
+/** The first page's words against the default branch's (Chromatic's DOM snapshots, in words):
+ * lines it lost and gained, as text. */
+export function TextAgainst({ diff, branch }: { diff: TextDiff; branch: string }) {
+  if (diff.added_n + diff.removed_n === 0) return null;
+  const more = diff.added_n + diff.removed_n - diff.added.length - diff.removed.length;
+  return (
+    <div className="mt-1.5 text-[11.5px]" aria-label={`Its words against ${branch}`}>
+      <p className="text-muted">
+        Its words against {branch}: {diff.added_n} new, {diff.removed_n} gone
+      </p>
+      <ul className="mt-0.5 space-y-0.5 font-mono text-[11px] [overflow-wrap:anywhere]">
+        {diff.removed.map((l, i) => (
+          <li key={`-${i}`} className="text-subtle line-through decoration-white/20">
+            − {l}
+          </li>
+        ))}
+        {diff.added.map((l, i) => (
+          <li key={`+${i}`} className="text-fg">
+            + {l}
+          </li>
+        ))}
+      </ul>
+      {more > 0 && <p className="mt-0.5 text-subtle">and {more} more lines</p>}
+    </div>
   );
 }
 

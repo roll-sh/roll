@@ -73,6 +73,7 @@ const SPEED = `JSON.stringify((() => {
   return {
     ttfb_ms: Math.round(n.responseStart || 0), fcp_ms: fcp ? Math.round(fcp.startTime) : null, load_ms: Math.round(n.loadEventEnd || n.duration || 0), bytes,
     lcp_ms: v && typeof v.lcp === "number" ? Math.round(v.lcp) : null, cls: v && typeof v.cls === "number" ? Math.round(v.cls * 1000) / 1000 : null,
+    text: document.body ? String(document.body.innerText || "").slice(0, 40000) : "",
   };
 })())`;
 const errors = [];

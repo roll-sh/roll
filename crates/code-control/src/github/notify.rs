@@ -563,6 +563,10 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
         let branch = branch_name(&b.branch);
         summary.push(if b.percent <= 0.0 { format!("the same as {branch}") } else { format!("differs from {branch} by {}", pct(b.percent)) });
         details.push_str(&base_line(b));
+        if let Some(t) = b.text.as_ref().filter(|t| t.added_n + t.removed_n > 0) {
+            summary.push(format!("text +{} −{} against {branch}", t.added_n, t.removed_n));
+            details.push_str(&text_block(t, &branch));
+        }
         // roll's own signed link (a public preview's); nothing in it can end the image's markdown.
         if let Some(url) = e.diff_url.as_ref().filter(|u| (u.starts_with("https://") || u.starts_with("http://")) && !u.contains([')', ' ', '\n'])) {
             details.push_str(&format!("![Where it differs from {}]({url})\n\n", branch_name(&b.branch)));
@@ -645,6 +649,23 @@ fn base_line(b: &crate::model::PreviewBaseChange) -> String {
     } else {
         format!("Against `{branch}`, the page differs by {}{phone}.\n\n", pct(b.percent))
     }
+}
+
+/// The first page's words against the branch's, as a diff block: the page's own text, so every
+/// line is one printable line with no backticks (nothing can close the fence) and the block says
+/// how many weren't shown.
+fn text_block(t: &crate::model::PreviewTextDiff, branch: &str) -> String {
+    let line = |prefix: char, l: &str| format!("{prefix} {}\n", l.chars().filter(|c| !c.is_control() && *c != '`').take(120).collect::<String>());
+    let mut out = format!("**Its words against `{branch}`:**\n\n```diff\n");
+    t.removed.iter().take(10).for_each(|l| out.push_str(&line('-', l)));
+    t.added.iter().take(10).for_each(|l| out.push_str(&line('+', l)));
+    out.push_str("```\n");
+    let more = (t.added_n + t.removed_n).saturating_sub(t.added.len().min(10) + t.removed.len().min(10));
+    if more > 0 {
+        out.push_str(&format!("\n{more} more lines differ (the sheet lists them).\n"));
+    }
+    out.push('\n');
+    out
 }
 
 /// The comment's line on how much the page changed since the screenshot at an earlier head.
@@ -840,8 +861,11 @@ mod preview_tests {
         (contrast.impact, contrast.help) = (Some("serious".into()), Some("[click](javascript:x)".into()));
         let ax = crate::model::PreviewPageA11y { issues: vec![contrast], lang: true, title: true };
         assert_eq!(a11y_line(&ax), "**Accessibility:** 4 elements failing `color-contrast`, serious (first: `<p>`).\n\n");
-        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, lcp_ms: None, a11y_added: None, errors_added: None };
+        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, lcp_ms: None, a11y_added: None, errors_added: None, text: None };
         assert_eq!(base_line(&b), "Against `mainx`, the page differs by 8.0%, at a phone's width the same.\n\n");
+        // Its words against main's: a diff block nothing in the page can close.
+        let words = crate::model::PreviewTextDiff { added: vec!["Pay ```now".into()], removed: vec!["Checkout".into()], added_n: 1, removed_n: 1 };
+        assert_eq!(text_block(&words, "main"), "**Its words against `main`:**\n\n```diff\n- Checkout\n+ Pay now\n```\n\n");
         // In the comment, one folded block whose summary is counts only.
         let mut e = p.environment.clone().unwrap();
         (e.page_health, e.page_a11y, e.base_change, e.visual_change, e.page_speed) = (Some(h(2, 1)), Some(a), Some(b), Some(v(12.34)), Some(sp(1200, Some(900))));
@@ -874,7 +898,7 @@ mod preview_tests {
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, over its budget</summary>"));
         // Against main's load where it was compared: only a difference past the noise counts.
         timed.speed_budget = None;
-        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), lcp_ms: None, a11y_added: None, errors_added: None });
+        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), lcp_ms: None, a11y_added: None, errors_added: None, text: None });
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, 300 ms slower than main</summary>"));
         // Core Web Vitals: in the line, against main's paint, and in the budget.
         let ps = timed.page_speed.as_mut().unwrap();

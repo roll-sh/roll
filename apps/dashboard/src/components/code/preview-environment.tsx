@@ -2,7 +2,7 @@ import { ArrowUpRight, ExternalLink, Smartphone } from "lucide-react";
 import { useState } from "react";
 import type { PreviewEnvironment } from "@/lib/code-api";
 import type { PreviewKind } from "@/lib/previews-api";
-import { PhoneCode, PREVIEW_KIND_ICON } from "../workspace/preview-sheet";
+import { PhoneCode, PREVIEW_KIND_ICON, TextAgainst } from "../workspace/preview-sheet";
 import { host, money, STATE_LABEL, StateDot } from "../workspace/previews-common";
 import { a11yWords, previewsApi, thanMain } from "@/lib/previews-api";
 import { errorText } from "../workspace/previews-common";
@@ -118,6 +118,7 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
           {env.base_change.percent > 0 ? `Differs ${Math.max(env.base_change.percent, 0.1).toFixed(1)}% from ${env.base_change.branch}.` : `Looks the same as ${env.base_change.branch}.`}
         </p>
       )}
+      {env.base_change?.text && <TextAgainst diff={env.base_change.text} branch={env.base_change.branch} />}
       {env.visual_review && env.visual_review.state !== "unchanged" && <VisualReview previewId={env.id} review={env.visual_review} />}
       {env.release_ms != null && (
         <p className="font-mono text-[11px] text-subtle tabular-nums" title="The project's release (migrations), run on the preview's data">

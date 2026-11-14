@@ -529,6 +529,9 @@ SWAPPED="/${SHOT_NOW#*://*/}"; SWAPPED="${SWAPPED/screenshot.png?/screenshot.png
 [ "$(curl -s -o /dev/null -w '%{http_code}' "http://$API$SWAPPED")" = 403 ] || { echo "the screenshot's signature shouldn't open the diff"; exit 1; }
 api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
 # Main's load where it was compared comes along (to say "300 ms slower than main").
+# Its words against main's: the change's line in, main's out.
+WORDS=$(api GET "/v1/previews/$PV" | jq_ "(lambda t: '+%s -%s' % (t['added'], t['removed']))(d['base_change'].get('text') or {'added': [], 'removed': []})")
+case "$WORDS" in "+['preview of change 1"*"-['main']") ;; *) echo "the page's words should be compared with main's: $WORDS"; exit 1;; esac
 MAIN_LOAD=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('load_ms')")
 case "$MAIN_LOAD" in [0-9]*) ;; *) echo "the comparison with main should carry main's load time: $MAIN_LOAD"; exit 1;; esac
 # Main's page misses a language and a title too: none of that is the change's.
@@ -628,6 +631,7 @@ cat <<EOF
 | NoSQL: a mask on app.users_by_email's key, set | $KEY_MASK |
 | What each branch hands the preview's code | $DATA |
 | Core Web Vitals of the first page (the screenshot's load) | $VITALS |
+| The first page's words against main's | $WORDS |
 | Visual review under a 5% visual threshold | $UNDER |
 | X-Robots-Tag on the service's page / on the 401 without the link | $ROBOTS / $ROBOTS_LOCKED |
 | The release's time on the preview's data (at its head) / on the change | $RELEASE / $CHG_RELEASE ms |

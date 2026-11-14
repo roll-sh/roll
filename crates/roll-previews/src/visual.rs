@@ -71,8 +71,46 @@ pub fn diff(before: &[u8], after: &[u8]) -> Option<Vec<u8>> {
     Some(png.into_inner())
 }
 
+/// Lines a text comparison names, each way.
+const TEXT_LINES: usize = 20;
+
+/// A page's visible text against the baseline's (Chromatic's DOM snapshots, in words): the lines
+/// it has that the baseline's doesn't, and the other way, in page order, at most 20 each with
+/// how many in all. Lines are compared whole, as many times as they appear.
+pub fn text_diff(then: &str, now: &str) -> crate::TextDiff {
+    use std::collections::HashMap;
+    let lines = |t: &str| t.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect::<Vec<_>>();
+    let (then, now) = (lines(then), lines(now));
+    let only = |a: &[String], b: &[String]| -> Vec<String> {
+        let mut left: HashMap<&str, usize> = HashMap::new();
+        for l in b {
+            *left.entry(l.as_str()).or_default() += 1;
+        }
+        a.iter()
+            .filter(|l| match left.get_mut(l.as_str()) {
+                Some(n) if *n > 0 => {
+                    *n -= 1;
+                    false
+                }
+                _ => true,
+            })
+            .cloned()
+            .collect()
+    };
+    let (added, removed) = (only(&now, &then), only(&then, &now));
+    crate::TextDiff { added_n: added.len(), removed_n: removed.len(), added: added.into_iter().take(TEXT_LINES).collect(), removed: removed.into_iter().take(TEXT_LINES).collect() }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_page_s_words_against_main_s() {
+        let d = super::text_diff("Shop\nCheckout\nHelp\nHelp", "Shop\nPay now\n\n  Help  ");
+        assert_eq!((d.added, d.removed, d.added_n, d.removed_n), (vec!["Pay now".to_string()], vec!["Checkout".to_string(), "Help".to_string()], 1, 2));
+        let many: String = (0..30).map(|i| format!("line {i}\n")).collect();
+        let d = super::text_diff("", &many);
+        assert_eq!((d.added.len(), d.added_n), (20, 30), "bounded, with the count");
+    }
     use super::{changed, diff};
     use image::{ImageFormat, Rgba, RgbaImage};
 
