@@ -480,6 +480,7 @@ previews are listed once those products are on.
 | `previews_connect` | Each data branch's connection as the preview's services get it (the branches' own credentials; reveal). | `GET /v1/previews/{id}/connect` |
 | `previews_list_mail` | The mail a preview's services sent, caught and never delivered (reveal). | `GET /v1/previews/{id}/mail` |
 | `previews_read_mail` | One caught message as text (reveal). | `GET /v1/previews/{id}/mail/{mail}` |
+| `previews_list_notes` | Notes left on a preview's pages that nobody has resolved yet (read). | `GET /v1/previews/{id}/notes` |
 | `previews_resolve_note` | A note from the preview page's feedback button marked dealt with (write). | `POST /v1/previews/{id}/notes/{note}/resolve` |
 | `previews_screenshot` | A preview's page as an image the agent can look at (`diff`, `page`, `view`); accepting a visual change stays a person's (admin, no tool). | `GET /v1/previews/{id}/screenshot` |
 | `previews_sleep` | Stop a preview's services until it's woken. | `POST /v1/previews/{id}/sleep` |
@@ -532,6 +533,8 @@ by its maker, out of the list and caps) for secrets' identity logins; a person's
 mailed to them (an approval waiting on them, used from a new network, revoked as leaked, about to
 expire; only their own, never a secret); `previews_resolve_note` (a preview page's note, write by
 the prefix; previews-next), and `apps_logs` takes `before`, `instance`, `deployment` and `stream`
+(apps-next); `previews_list_notes` and `previews_resolve_note` (a preview page's note, write by the
+prefix; previews-next), and `apps_logs` takes `before`, `instance`, `deployment` and `stream`
 (apps-next); apps-next's cron runs as tools (`apps_get_cron_run`, `apps_cron_run_logs`,
 `apps_cancel_cron_run`); a preview's caught mail as reveal, with `previews_list_mail` and
 `previews_read_mail` (previews-next); the connect panel says what a choice of toolsets costs (tools
