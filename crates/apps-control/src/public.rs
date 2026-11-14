@@ -95,6 +95,12 @@ fn maintenance_page(message: &str) -> Response {
     r
 }
 
+/// How a request's lease was had: another of the same kind if its instance is gone.
+enum Again {
+    Deployment(Box<crate::live::Template>),
+    Route(Arc<crate::live::Template>),
+}
+
 /// Which of roll's pages a response is (never an app's own answer), so an environment's own
 /// page can take its place ([`their_page`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -684,11 +690,16 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         getrandom::fill(&mut b).expect("system randomness");
         bucket = Some(b[0] % 100);
     }
+    // How the lease was had, to have another if its instance turns out gone.
+    let mut again: Option<Again> = None;
     let acquired = match deployment {
         // One deployment's own URL: that deployment, whatever is live.
         Some(d) => match apps.deployment_template(service, env, d).await {
             Ok(t) if t.site.is_some() => return with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await),
-            Ok(t) => live.acquire_deployment(t).await,
+            Ok(t) => {
+                again = Some(Again::Deployment(Box::new(t.clone())));
+                live.acquire_deployment(t).await
+            }
             Err(e) => return page(StatusCode::NOT_FOUND, "No such deployment", &e.to_string()),
         },
         None => match live.may_wake().map(|_| live.route(bucket)) {
@@ -703,12 +714,15 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
                 }
                 return r;
             }
-            Ok(Some(t)) => live.acquire_preferring(t, affine.as_deref()).await,
+            Ok(Some(t)) => {
+                again = Some(Again::Route(t.clone()));
+                live.acquire_preferring(t, affine.as_deref()).await
+            }
             Ok(None) => Err(WakeError::NoDeployment),
             Err(e) => Err(e),
         },
     };
-    let lease = match acquired {
+    let mut lease = match acquired {
         Ok(l) => l,
         Err(WakeError::NoDeployment) => return page(StatusCode::NOT_FOUND, "Not deployed yet", "This service has no deployment in this environment yet."),
         Err(WakeError::NotWeb) => return page(StatusCode::NOT_FOUND, "Not a web service", "This service is a worker or a cron job: it doesn't answer HTTP."),
@@ -767,7 +781,15 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         h.insert(HeaderName::from_static("x-request-id"), v);
     }
     let request_id = h.get("x-request-id").and_then(|v| v.to_str().ok()).unwrap_or("").chars().take(64).collect::<String>();
-    let (instance, cold, waited_ms) = (lease.inst.name.clone(), lease.cold, lease.waited.as_millis() as u64);
+    // A request with nothing to send again (a GET, HEAD or OPTIONS without a body) that finds
+    // its instance gone (killed, out of memory: nothing listens) is sent once more, to a fresh
+    // one, as Fly's proxy does: the app never saw it.
+    let bodiless = !upgrade
+        && matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS)
+        && !req.headers().contains_key(header::TRANSFER_ENCODING)
+        && req.headers().get(header::CONTENT_LENGTH).is_none_or(|v| v == "0");
+    let replay = bodiless.then(|| (req.method().clone(), pq.clone(), req.headers().clone(), req.version()));
+    let (mut instance, mut cold, mut waited_ms) = (lease.inst.name.clone(), lease.cold, lease.waited.as_millis() as u64);
     let send = async { if h2 { apps.client_h2.request(req).await } else { apps.client.request(req).await } };
     // Its timeout runs to the answer's head: an upgrade, or a stream that has begun, is the
     // app's to keep.
@@ -782,6 +804,40 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             }
         },
         None => send.await,
+    };
+    let sent = match (sent, replay, again) {
+        (Err(e), Some((method, pq, headers, version)), Some(how)) if e.is_connect() => {
+            live.connect_failed(&lease.inst);
+            live.log.stream(crate::logs::Stream::System).line(format!("{instance} stopped answering: the request goes to a fresh instance"));
+            let next = match how {
+                Again::Deployment(t) => live.acquire_deployment(*t).await,
+                Again::Route(t) => live.acquire_tpl(t).await,
+            };
+            match next {
+                Ok(l) => {
+                    lease = l;
+                    (instance, cold, waited_ms) = (lease.inst.name.clone(), lease.cold, lease.waited.as_millis() as u64);
+                    let mut r = Request::new(Body::empty());
+                    (*r.method_mut(), *r.headers_mut(), *r.version_mut()) = (method, headers, version);
+                    *r.uri_mut() = format!("http://{}{pq}", lease.addr).parse().unwrap_or_default();
+                    let send = async { if h2 { apps.client_h2.request(r).await } else { apps.client.request(r).await } };
+                    match lease.timeout {
+                        Some(t) => match tokio::time::timeout(t, send).await {
+                            Ok(r) => r,
+                            Err(_) => {
+                                live.answered(&lease.inst, 504);
+                                live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 504, 0);
+                                access.write(504, began, 0, &instance, &request_id, cold, waited_ms);
+                                return page(StatusCode::GATEWAY_TIMEOUT, "Timed out", &format!("The service didn't answer within its {} s.", t.as_secs()));
+                            }
+                        },
+                        None => send.await,
+                    }
+                }
+                Err(_) => Err(e),
+            }
+        }
+        (sent, _, _) => sent,
     };
     let mut resp = match sent {
         Ok(r) => r,

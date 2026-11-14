@@ -405,6 +405,26 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     assert_eq!(count().await, before + 1);
 }
 
+/// A GET that finds its instance gone (killed: nothing listens, and roll doesn't know yet) goes
+/// to a fresh instance instead of a 503; a request with a body isn't sent twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_get_to_a_vanished_instance_goes_to_a_fresh_one() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let h = host(&svc["environments"][0]["url"]);
+    let (st, body) = visit(&w, &h, "/").await;
+    assert_eq!(st, StatusCode::OK);
+    let first = body["instance"].as_str().unwrap().to_string();
+    w.fake.crash(&first);
+    let (st, body) = visit(&w, &h, "/").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let second = body["instance"].as_str().unwrap().to_string();
+    assert_ne!(second, first);
+    w.fake.crash(&second);
+    let post = Request::post("/").header("host", h.as_str()).header("content-length", "1").body(Body::from("x")).unwrap();
+    assert_eq!(w.public.clone().oneshot(post).await.unwrap().status(), StatusCode::SERVICE_UNAVAILABLE, "not sent again");
+}
+
 /// A newer push stops a push's build that's still running (superseded, its minutes saved); the
 /// newer one goes live.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
