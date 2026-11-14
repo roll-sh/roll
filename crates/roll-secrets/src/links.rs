@@ -66,8 +66,9 @@ impl Link {
         self.option_u64("grace_minutes").unwrap_or(60).min(7 * 24 * 60)
     }
 
+    /// Days between rotations of a managed credential (ten years at most).
     pub fn rotate_days(&self) -> Option<u64> {
-        self.option_u64("rotate_days").filter(|d| *d > 0)
+        self.option_u64("rotate_days").filter(|d| *d > 0).map(|d| d.min(3650))
     }
 }
 
@@ -139,6 +140,12 @@ pub trait LinkProvider: Send + Sync {
     fn exclusive(&self) -> bool {
         false
     }
+    /// Refuse a link this kind can't serve as asked (its options, its mode, its resource's
+    /// policy), when it's written rather than at its first issue.
+    fn check(&self, link: &Link) -> Result<()> {
+        let _ = link;
+        Ok(())
+    }
 }
 
 /// The providers rolld registered, by kind.
@@ -193,7 +200,7 @@ impl Links {
                 return Err(Error::BadRequest(format!("unknown link option {k}")));
             }
         }
-        Ok(())
+        p.check(l)
     }
 }
 
