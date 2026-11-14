@@ -25,7 +25,7 @@ pub mod tighten;
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use roll_auth::scope::{Resource, Scope};
+use roll_auth::scope::{Action, Resource, Scope};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -146,6 +146,7 @@ mod policy_tests {
             rules: Default::default(),
             expires_at: None,
             not_before: None,
+            pending: false,
             ip_allow: vec![],
             created_by: "operator".into(),
             created_at: created,
@@ -886,9 +887,43 @@ pub struct Policy {
     /// are a risk with nothing to show for it.
     #[serde(default)]
     pub max_idle_days: Option<u32>,
+    /// A person's token whose rules reach any of these (or ask for anything else) waits for an
+    /// admin's approval, as GitHub's organizations approve fine-grained tokens.
+    #[serde(default)]
+    pub approve_people: Actions,
+}
+
+/// Some actions: a list on the wire (`["reveal", "admin"]`), bits inside (so `Policy` stays `Copy`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Actions(u8);
+
+impl Actions {
+    pub fn has(self, a: Action) -> bool {
+        self.0 & (1 << a as u8) != 0
+    }
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl serde::Serialize for Actions {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        Action::ALL.iter().filter(|a| self.has(**a)).collect::<Vec<_>>().serialize(s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Actions {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        Ok(Actions(Vec::<Action>::deserialize(d)?.into_iter().fold(0, |bits, a| bits | (1 << a as u8))))
+    }
 }
 
 impl Policy {
+    /// Whether a person's token with these rules waits for an admin.
+    pub fn needs_approval(&self, rules: &Scope, ask_otherwise: bool) -> bool {
+        !self.approve_people.is_empty() && (ask_otherwise || rules.0.iter().any(|r| r.actions.keys().any(|a| self.approve_people.has(*a))))
+    }
+
     /// Whether `g` has gone unused too long: since its last use, or since it was made.
     pub fn idle(&self, g: &store::Grant, now: i64) -> bool {
         self.max_idle_days.is_some_and(|d| now - g.last_used_at.unwrap_or(g.created_at) > i64::from(d) * 86_400_000)

@@ -62,6 +62,8 @@ export interface Grant {
   expires_at: number | null;
   /** It works only from then on (Cloudflare's TTL start); before, it's refused. */
   not_before?: number | null;
+  /** A person's token waiting for an admin's approval: it doesn't work until then. */
+  pending?: boolean;
   ip_allow: string[];
   /** "operator", or the grant that made it. */
   created_by: string;
@@ -252,7 +254,12 @@ export interface Policy {
   require_expiry?: boolean;
   /** Tokens unused this many days stop working. */
   max_idle_days?: number | null;
+  /** A person's token reaching any of these waits for an admin's approval (GitHub's organizations' rule). */
+  approve_people?: Action[];
 }
+
+/** The actions an admin may require approval for in people's tokens, strongest first. */
+export const APPROVABLE: Action[] = ["admin", "reveal", "deploy", "delete"];
 
 export interface Consent {
   client_id: string;
@@ -336,6 +343,9 @@ export const accessApi = {
   applyTighten: (id: string, from: Rule[], days?: number) => call<Grant>("POST", `${token(id)}/tighten`, { from, days }),
   /** A new secret, the same rules; the old one stops at once. Shown this once. */
   rotate: (id: string) => call<{ grant: Grant; token: string }>("POST", `${token(id)}/rotate`),
+  /** An admin decides a person's pending token: approved it works, denied it's revoked. */
+  approveToken: (id: string) => call<Grant>("POST", `${token(id)}/approve`),
+  denyToken: (id: string) => call<Grant>("POST", `${token(id)}/deny`),
   /** What the evaluator would decide for a request, without running it (`token`: the operator asks for one). */
   check: (method: string, path: string, opts: { body?: unknown; token?: string } = {}) =>
     call<{ decision: "allow" | "ask" | "deny"; product?: string; action?: Action; resource?: string | null; route?: string; why?: string }>(

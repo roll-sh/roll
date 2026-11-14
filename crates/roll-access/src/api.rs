@@ -25,6 +25,8 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/tokens", get(list).post(create))
         .route("/v1/access/tokens/{id}", get(get_one).patch(update).delete(revoke))
         .route("/v1/access/tokens/{id}/rotate", post(rotate))
+        .route("/v1/access/tokens/{id}/approve", post(approve_token))
+        .route("/v1/access/tokens/{id}/deny", post(deny_token))
         .route("/v1/access/tokens/{id}/tighten", get(tighten).post(apply_tighten))
         .route("/v1/access/tokens/{id}/networks", get(networks))
         .route("/v1/access/checkup", get(checkup))
@@ -425,9 +427,15 @@ impl Access {
         self.create_for(ext, new).await
     }
 
-    async fn create_for(self: &Arc<Self>, ext: &Extensions, new: NewGrant) -> crate::Result<(crate::store::Grant, String)> {
+    async fn create_for(self: &Arc<Self>, ext: &Extensions, mut new: NewGrant) -> crate::Result<(crate::store::Grant, String)> {
         // A user's token is theirs, and so is one their token makes: it acts as them.
-        let (by, user) = match who(self, ext)? {
+        let who = who(self, ext)?;
+        // A person's own token past what the policy has an admin approve waits for one (one their
+        // token makes is within that token, which was approved).
+        if matches!(who, Who::User(_)) && self.policy_now().needs_approval(&new.rules, new.ask_otherwise) {
+            new.pending = true;
+        }
+        let (by, user) = match who {
             // An admin's token is theirs too: it acts as the operator while they're an admin, and
             // stops (or narrows to their own reach) when they aren't.
             Who::Operator => (actor(ext), ext.get::<roll_auth::SignedIn>().map(|u| u.user.clone())),
@@ -508,6 +516,7 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
     let change: GrantChange = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
     let who = who(&a, &ext)?;
     let target = visible_grant(&a, &who, &id).await?;
+    let person = matches!(who, Who::User(_));
     if let Who::Grant(g) = who {
         // What the token is now, and what it would become, must both be within the caller's; a
         // token never widens its own addresses.
@@ -526,7 +535,46 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
     if change.rules.is_some() || change.expires_at.is_some() || change.ip_allow.is_some() {
         a.check_policy(change.expires_at.unwrap_or(target.expires_at))?;
     }
-    Ok(Json(json!(blocking(a, move |a| a.store.update(&id, &change)).await?)))
+    // A person widening their own token past what the policy has an admin approve: it waits again.
+    let again = person
+        && (change.rules.is_some() || change.ask_otherwise.is_some())
+        && a.policy_now().needs_approval(change.rules.as_ref().unwrap_or(&target.rules), change.ask_otherwise.unwrap_or(target.ask_otherwise));
+    let updated = blocking(a, move |a| {
+        a.store.update(&id, &change)?;
+        if again {
+            a.store.set_pending(&id)?;
+        }
+        a.store.get(&id)
+    })
+    .await?;
+    Ok(Json(json!(updated)))
+}
+
+/// `POST /v1/access/tokens/{id}/approve`: an admin lets a person's pending token work (GitHub's
+/// organization approval of fine-grained tokens). An admin's call, never a token's.
+async fn approve_token(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    decide_token(a, &ext, id, true).await
+}
+
+/// `POST /v1/access/tokens/{id}/deny`: it's revoked, saying an admin denied it.
+async fn deny_token(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    decide_token(a, &ext, id, false).await
+}
+
+async fn decide_token(a: Arc<Access>, ext: &Extensions, id: String, approve: bool) -> crate::Result<Json<Value>> {
+    if !matches!(who(&a, ext)?, Who::Operator) {
+        return Err(Error::Forbidden("only an admin approves people's tokens".into()));
+    }
+    let g = blocking(a.clone(), move |a| a.store.decide_pending(&id, approve)).await?;
+    if let Some(user) = g.user.as_deref() {
+        let (subject, text) = if approve {
+            (format!("Your roll token \"{}\" was approved", g.name), "An admin approved it: it works now.\n".to_string())
+        } else {
+            (format!("Your roll token \"{}\" was denied", g.name), "An admin denied it, so it's revoked. Make one that reaches less, or ask them.\n".to_string())
+        };
+        a.tell(Some(user), None, subject, text);
+    }
+    Ok(Json(json!(g)))
 }
 
 async fn revoke(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {

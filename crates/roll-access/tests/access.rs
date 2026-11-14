@@ -818,6 +818,50 @@ async fn the_audit_log_streams_to_a_sink() {
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/audit/sinks/{id}"), None).await.0, StatusCode::NO_CONTENT);
 }
 
+/// A person's token that reaches what the policy has an admin approve waits for one (GitHub's
+/// organization approval of fine-grained tokens): it doesn't work, says why, and only an admin
+/// decides; widening an approved one waits again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_persons_token_past_the_policy_waits_for_an_admin() {
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "approve_people": ["reveal", "admin"] }))).await.0, StatusCode::OK);
+    let read = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]);
+    let reveal = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "reveal": "allow" } }]);
+    // Within the policy: it works at once.
+    let (_, plain) = d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "reader", "rules": read }))).await;
+    assert!(plain["grant"]["pending"].is_null(), "{plain}");
+    // Past it: made, but waiting.
+    let (s, made) = d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "revealer", "rules": reveal }))).await;
+    assert_eq!((s, made["grant"]["pending"].as_bool()), (StatusCode::CREATED, Some(true)), "{made}");
+    let (token, id) = (made["token"].as_str().unwrap().to_string(), made["grant"]["id"].as_str().unwrap().to_string());
+    let (s, e) = d.call(&token, Method::GET, "/v1/workspace/projects", None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::UNAUTHORIZED, Some("pending_approval")), "{e}");
+    // She can't approve her own, nor can a token; an admin can.
+    assert_eq!(d.as_user("usr_alice", Method::POST, &format!("/v1/access/tokens/{id}/approve"), None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(d.call(plain["token"].as_str().unwrap(), Method::POST, &format!("/v1/access/tokens/{id}/approve"), None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{id}/approve"), None).await.0, StatusCode::OK);
+    assert_eq!(d.call(&token, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::OK, "approved, it works");
+    // Widening the approved one past the policy waits again.
+    let admin = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "admin": "allow" } }]);
+    let plain_id = plain["grant"]["id"].as_str().unwrap();
+    let (_, widened) = d.as_user("usr_alice", Method::PATCH, &format!("/v1/access/tokens/{plain_id}"), Some(json!({ "rules": admin }))).await;
+    assert_eq!(widened["pending"].as_bool(), Some(true), "{widened}");
+    // Denied, it's revoked and says why; she hears both decisions.
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{plain_id}/deny"), None).await.0, StatusCode::OK);
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{plain_id}"), None).await;
+    assert_eq!(g["revoked_why"].as_str(), Some("an admin denied it"), "{g}");
+    let mails = || d.people.1.lock().unwrap().clone();
+    for _ in 0..50 {
+        if mails().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let got = mails();
+    assert!(got.iter().any(|m| m.contains("\"revealer\" was approved")) && got.iter().any(|m| m.contains("\"reader\" was denied")), "{got:?}");
+}
+
 /// A signed-in user's own token acts as them (docs/permissions.md, "Users' own tokens"): it
 /// reaches only what their account does, whatever its rules say; they see and manage only their
 /// own tokens and decide their own token's approvals; and it stops when their account does.
