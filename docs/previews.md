@@ -1137,6 +1137,8 @@ Ranked by what a person notices first. Done so far:
 - the first page's checks on the project's other pages, against main's same page;
 - the sheet's checks under one heading that counts problems and what's new against main;
 - the Previews tab tags a preview with the problems its page added against main;
+- a look at the sheet from screenshots of a live preview with today's checks (desktop and phone):
+  the data branch rows kept their names whole and their notes in word groups;
 - a phone-width screenshot with its own visual change;
 - every change compared with the default branch, whose preview roll keeps itself (`github.baseline`);
 - the comment's page checks folded under one line of counts;
