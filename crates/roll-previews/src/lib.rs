@@ -595,6 +595,16 @@ pub struct Resource {
     pub data: Data,
 }
 
+/// A data branch's connection, as the preview's services get it (`GET …/connect`).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Connection {
+    pub kind: Kind,
+    /// The resource in the project it branches.
+    pub parent: String,
+    /// `DATABASE_URL`, `REDIS_URL`, …: the branch's own credentials.
+    pub vars: std::collections::BTreeMap<String, String>,
+}
+
 /// A run of the project's `release` on a preview's data.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ReleaseRun {

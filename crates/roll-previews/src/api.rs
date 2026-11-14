@@ -30,6 +30,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/shares/{share}", axum::routing::delete(unshare))
         .route("/v1/previews/{id}/screenshot", get(screenshot))
         .route("/v1/previews/{id}/qr.png", get(qr))
+        .route("/v1/previews/{id}/connect", get(connect))
         .route("/v1/previews/{id}/screenshot.png", get(screenshot_link))
         .route("/v1/previews/{id}/reset", post(reset))
         // These act on running services, which live on the preview's holder in a cluster.
@@ -285,6 +286,13 @@ async fn vars(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serde
     })
     .await?;
     Ok(Json(serde_json::json!({ "vars": vars })))
+}
+
+/// Each data branch's connection (its own credentials), to query what the preview sees.
+async fn connect(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serde_json::Value>> {
+    check_id(&id)?;
+    let branches = e.connections(&id).await?;
+    Ok(Json(serde_json::json!({ "branches": branches })))
 }
 
 async fn put_vars(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Result<Json<serde_json::Value>> {

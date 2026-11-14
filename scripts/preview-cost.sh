@@ -222,6 +222,11 @@ ROBOTS_LOCKED=$(curl -sS -o /dev/null -D - -H "Host: $HOST" "http://$API/" | tr 
 # from before the mask are) and isn't a superuser.
 APP_DB=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
 case "$APP_DB" in postgres://br_*) ;; *) echo "the service's DATABASE_URL should be the branch's own role, not ${APP_DB%%@*}…"; exit 1;; esac
+# A reviewer's connection from a laptop (`roll preview connect`): the same role, never the parent's.
+CONNECT=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview connect "$PV" --kind postgres | sed -n 's/^DATABASE_URL=//p')
+case "$CONNECT" in postgres://br_*) ;; *) echo "roll preview connect should hand out the branch's own role, not ${CONNECT%%@*}…"; exit 1;; esac
+role() { echo "$1" | sed 's#^postgres://\([^:@]*\)[:@].*#\1#'; }
+[ "$(role "$CONNECT")" = "$(role "$APP_DB")" ] || { echo "the connection's role should be the service's: $(role "$CONNECT") / $(role "$APP_DB")"; exit 1; }
 # The service's ELASTICSEARCH_URL is the branch's: it reads the parent's document; a write stays in
 # the branch.
 APP_ES=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^ELASTICSEARCH_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
@@ -600,6 +605,7 @@ cat <<EOF
 | X-Robots-Tag on the service's page / on the 401 without the link | $ROBOTS / $ROBOTS_LOCKED |
 | The release's time on the preview's data (at its head) / on the change | $RELEASE / $CHG_RELEASE ms |
 | The preview's link as a QR code (PNG, no-store) | $QR |
+| \`roll preview connect --kind postgres\`: the branch's own role | $(role "$CONNECT") |
 | Postgres users.email in the branch / in the parent | $PG_MASKED / $PG_PARENT |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |

@@ -668,6 +668,7 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
     assert_eq!(call(other, format!("/v1/previews/{}", p.id)).await.0, 404);
     assert_eq!(call(other, format!("/v1/previews/{}/env", p.id)).await.0, 404);
     assert_eq!(call(other, format!("/v1/previews/{}/qr.png", p.id)).await.0, 404, "its link with the access token, as a QR code");
+    assert_eq!(call(other, format!("/v1/previews/{}/connect", p.id)).await.0, 404, "its branches' credentials");
     assert_eq!(call(other, format!("/v1/previews/projects/{}/settings", e.project)).await.0, 404);
     // Their own project's: there.
     let mine = e.ws.create("usr_b", "mine", "", None).unwrap();
@@ -677,6 +678,11 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
     assert_eq!(call(Some(("usr_c", true)), format!("/v1/previews/{}", p.id)).await.0, 200);
     let (status, png) = call(None, format!("/v1/previews/{}/qr.png", p.id)).await;
     assert_eq!((status, png.contains("PNG")), (200, true), "a phone opens it by scanning");
+    // Each branch's own connection, as its services get it.
+    let (status, body) = call(None, format!("/v1/previews/{}/connect", p.id)).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert!(v["branches"].as_array().unwrap().iter().any(|b| b["kind"] == "postgres" && b["vars"]["DATABASE_URL"].as_str().is_some_and(|u| u.starts_with("fake://"))), "{body}");
 }
 
 /// A variable set while a deploy is still going, then removed, is removed from the backend too:

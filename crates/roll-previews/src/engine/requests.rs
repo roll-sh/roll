@@ -211,6 +211,19 @@ impl Engine {
         self.store.view(self.store.row(id)?)
     }
 
+    /// Each data branch's connection, as the preview's services get it (Neon's connection
+    /// strings), so a reviewer queries what the preview sees: the branch's own credentials (a
+    /// Postgres branch's role), never the parent's or a superuser's. Read from the products each
+    /// time, as converges do; nothing is stored.
+    pub async fn connections(&self, id: &str) -> Result<Vec<crate::Connection>> {
+        let r = self.store.row(id)?;
+        if r.desired == Desired::Deleted {
+            return Err(Error::Conflict("the preview is being deleted".into()));
+        }
+        let vars = self.branch_vars(id).await.map_err(|e| Error::Internal(format!("{e:#}")))?;
+        Ok(vars.into_iter().map(|(kind, parent, vars)| crate::Connection { kind, parent, vars: vars.into_iter().collect() }).collect())
+    }
+
     /// Set (`Some`) or remove (`None`) the preview's own variables, over the project's `env`
     /// (Vercel's branch-scoped variables, Railway's per-environment ones). Its services redeploy
     /// with them. roll's own (`ROLL_*`, `PORT`) and its branches' are refused: those always win.

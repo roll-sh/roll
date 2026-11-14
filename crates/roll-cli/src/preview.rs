@@ -118,6 +118,14 @@ pub enum Preview {
         #[arg(long)]
         unset: Vec<String>,
     },
+    /// Each data branch's connection, as its services get it (its own credentials, never the
+    /// parent's): `NAME=value` lines per branch, or --kind postgres for that kind's only, e.g.
+    /// `psql "$(roll preview connect pv_… --kind postgres | sed -n 's/^DATABASE_URL=//p')"`.
+    Connect {
+        preview: String,
+        #[arg(long)]
+        kind: Option<String>,
+    },
     /// Re-branch its data from the parents (every resource, or the ones named).
     Reset {
         preview: String,
@@ -484,6 +492,25 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 match v["vars"].as_object().filter(|m| !m.is_empty()) {
                     Some(m) => m.iter().for_each(|(k, v)| println!("{k}={}", v.as_str().unwrap_or_default())),
                     None => println!("no variables of its own (the project's `env` applies)"),
+                }
+                return Ok(());
+            }
+            v
+        }
+        Preview::Connect { preview, kind } => {
+            let v = api.get(&format!("/v1/previews/{preview}/connect")).await?;
+            if !as_json {
+                let branches: Vec<&Value> = v["branches"].as_array().into_iter().flatten().filter(|b| kind.as_deref().is_none_or(|k| b["kind"] == k)).collect();
+                if branches.is_empty() {
+                    anyhow::bail!("no {}branch in this preview", kind.as_deref().map(|k| format!("{k} ")).unwrap_or_default());
+                }
+                for b in &branches {
+                    if kind.is_none() {
+                        println!("# {} {}", s(&b["kind"]), s(&b["parent"]));
+                    }
+                    for (k, val) in b["vars"].as_object().into_iter().flatten() {
+                        println!("{k}={}", val.as_str().unwrap_or_default());
+                    }
                 }
                 return Ok(());
             }

@@ -1,4 +1,4 @@
-import { Boxes, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Smartphone, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
+import { Boxes, Check, Copy, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Smartphone, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Confirm } from "@/components/ui";
 import { a11yWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type PageCheck, type Preview, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
@@ -218,6 +218,7 @@ export function PreviewSheet({
                         </div>
                         {r.error && <p className="mt-0.5 text-[11px] break-words text-danger">{r.error}</p>}
                       </div>
+                      {!gone && r.ref && <CopyConnection previewId={p.id} kind={r.kind} parent={r.parent} name={names.get(id) ?? r.parent} />}
                       {!gone && (
                         <button
                           disabled={busy !== null}
@@ -773,6 +774,36 @@ function Screenshot({
         <p className="text-[11.5px] text-muted">No screenshot of {path} yet.</p>
       )}
     </>
+  );
+}
+
+/** Copy a data branch's connection (`DATABASE_URL`, …: the branch's own credentials), to query
+ * what the preview sees from a laptop (Neon's connection strings). Fetched only when asked. */
+function CopyConnection({ previewId, kind, parent, name }: { previewId: string; kind: PreviewKind; parent: string; name: string }) {
+  const [state, setState] = useState<"idle" | "busy" | "copied" | "none">("idle");
+  return (
+    <button
+      type="button"
+      disabled={state === "busy"}
+      onClick={async () => {
+        setState("busy");
+        try {
+          const { branches } = await previewsApi.connections(previewId);
+          const url = Object.values(branches.find((b) => b.kind === kind && b.parent === parent)?.vars ?? {})[0];
+          if (!url) return setState("none");
+          await navigator.clipboard.writeText(url);
+          setState("copied");
+          setTimeout(() => setState("idle"), 1500);
+        } catch {
+          setState("none");
+        }
+      }}
+      aria-label={`Copy ${name}'s connection`}
+      title={state === "copied" ? "Copied" : state === "none" ? "No connection to copy" : "Copy its connection (the branch's own credentials)"}
+      className="grid size-6 shrink-0 place-items-center rounded-md text-muted hover:bg-white/[0.06] hover:text-fg disabled:opacity-40"
+    >
+      {state === "copied" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+    </button>
   );
 }
 

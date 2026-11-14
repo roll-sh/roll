@@ -345,6 +345,8 @@ export const previewsApi = {
   unshare: (id: string, share: string) => call<void>("DELETE", `${one(id)}/shares/${encodeURIComponent(share)}`),
   /** Its own variables, over the project's `env`. */
   vars: (id: string) => call<{ vars: Record<string, string> }>("GET", `${one(id)}/env`),
+  /** Each data branch's connection, as its services get it (its own credentials, never the parent's). */
+  connections: (id: string) => call<{ branches: { kind: PreviewKind; parent: string; vars: Record<string, string> }[] }>("GET", `${one(id)}/connect`),
   /** Set or (`null`) remove some of its own variables; its services redeploy with them. */
   setVars: (id: string, vars: Record<string, string | null>) => call<{ vars: Record<string, string> }>("PUT", `${one(id)}/env`, { vars }),
   sleep: (id: string) => call<Preview>("POST", `${one(id)}/sleep`),
