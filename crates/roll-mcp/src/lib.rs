@@ -15,7 +15,7 @@
 //!   resource metadata, so clients start the OAuth flow (`roll_access::oauth`).
 //! - Requests from a browser (`Origin`) must come from the dashboard or the API (DNS rebinding).
 //! - Toolsets: `/v1/mcp?toolsets=postgres,code` (or `X-MCP-Toolsets`) lists only those products'
-//!   tools, as GitHub's server does: every product's tools are ~35k tokens of an agent's context.
+//!   tools, as GitHub's server does: every product's tools are ~33k tokens of an agent's context.
 //! - Read-only: `?readonly=1` (or `X-MCP-Readonly: true`) lists and runs only read-only tools, as
 //!   GitHub's server's read-only mode does; the token's rules still decide each call.
 
