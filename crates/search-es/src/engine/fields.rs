@@ -817,6 +817,18 @@ impl FieldTable {
                     let psa = sa.with_shingles(max).map_err(es_error)?;
                     self.sub_text(&sub, n, &info, pa, psa, IndexOptions::DocsAndFreqsAndPositions.min(opts), sim.clone())?;
                     info.prefix_field = Some((n, 1, 19));
+                    // Each shingle subfield's prefix queries go to the same prefix field
+                    // (`ShingleFieldType.setPrefixFieldType`).
+                    for &(size, sn) in &info.shingle_fields {
+                        let name = format!("{path}._{size}gram");
+                        if let Some(sf) = self.fields.get(&name) {
+                            let mut sf = (**sf).clone();
+                            sf.prefix_field = Some((n, 1, 19));
+                            let sf = Arc::new(sf);
+                            self.by_number.insert(sn, sf.clone());
+                            self.fields.insert(name, sf);
+                        }
+                    }
                 }
                 if let Some(Value::Obj(p)) = f.raw("index_prefixes") {
                     let min = p.get("min_chars").and_then(Value::as_i64).unwrap_or(2) as usize;
