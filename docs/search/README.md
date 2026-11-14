@@ -205,6 +205,7 @@ Measured on the tree merged with `main` (2026-11-12), on ai-server (a shared 18-
 | differential suite against Elasticsearch 9.5.5 (seed 1, 60 random workloads) | 2,325 of 2,333 steps equal (99.7%); the 8 others are 2 known differences (soft-delete tombstones in phrase-suggester and term statistics), none new or open; 69 replayed fixtures equal |
 | client matrix (unmodified official clients in Docker) | **11 of 11**: Python, JavaScript, Java, Go, Ruby and PHP clients, the OpenSearch Python and JavaScript clients, django-elasticsearch-dsl, Laravel Scout, and searchkick's own suite (540 runs, 0 failures) |
 | x-pack REST fixtures (`search-es/tests/xpack_fixtures.rs`) | 1,097 of 1,097 steps equal Elasticsearch |
+| inference API (`_inference`, against a private Elasticsearch 9.5.5 and a mock of the services) | OpenAI flows, 42 error and update cases and region policies answer the same; `platinum/inference` 12 of 23 (was 1); `inference` suite (the test plugin's services, no Elasticsearch baseline) 14 of 305 |
 
 The failures on the merged tree, all fixed: rolld tests that collided on search's default port;
 two tests that depended on timing; three behaviours the uncommitted round-6 work had broken (SQL
@@ -217,13 +218,17 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
 1. **Semantic search** (the largest gap against Elasticsearch 9 and Elastic Cloud after machine
-   learning): the `_inference` API (`PUT/GET/DELETE _inference/{task_type}/{id}`, `POST` to
-   run one, `_services`) for `text_embedding`, `sparse_embedding`, `rerank` and `completion`
-   with OpenAI-compatible, Cohere and Anthropic services, keys sealed in cluster state
-   (`search-es` `seal.rs`) and fetched through `roll_net::PublicOnly`; the test services
-   Elasticsearch's YAML suites use, on test clusters only; then `semantic_text` fields (chunking,
-   embeddings at index time, the `semantic` query, `match` on them, retrievers' simplified
-   form). In progress (a delegate, `wip/search-inference`).
+   learning). The `_inference` API has landed (compatibility.md, "Inference"): `openai` (with
+   `url`: any OpenAI-compatible server), `cohere` and `anthropic` endpoints for
+   `text_embedding`, `sparse_embedding`, `rerank`, `completion` and streamed `chat_completion`,
+   keys sealed and fetched through `roll_net::PublicOnly`, Elasticsearch's preconfigured
+   endpoints answering as a cluster without ML nodes, region policies, and the
+   `inference-service-test` plugin's services on YAML test clusters (`inference` suite).
+   In progress: `semantic_text` fields (the mapping type and model settings, inference at
+   bulk time in batches into `_inference_fields`, chunk vectors in hidden nested documents,
+   the `semantic` query and `match`/`knn`/`sparse_vector` on them, highlighting chunks, the
+   retrievers' simplified form), then the `random_reranker` retriever and the multimodal
+   `embedding` task type. A delegate, `wip/search-inference`.
 2. **Indexing CPU and benchmarks on a quiet host** (docs/benchmarks/search.md). Indexing: the
    direct document parser now takes float types, plain objects and the opensearch dialect
    (nyc_taxis 8 clients 90k docs/s against Elasticsearch's 66k and OpenSearch's 60k; an ECS log

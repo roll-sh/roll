@@ -309,12 +309,13 @@ the discovery/store plugins.
 <!-- test-search: watcher >= 89 -->
 <!-- test-search: watcher-security >= 9 -->
 <!-- test-search: wildcard >= 9 -->
-<!-- test-search: platinum >= 1030 -->
+<!-- test-search: platinum >= 1040 -->
+<!-- test-search: inference >= 14 -->
 <!-- test-search: esql >= 544 -->
 
 `platinum` by directory (roll / Elasticsearch passes): `ml` 340/618, `analytics` 113/114, `spatial`
 92/105, `security` 97/101, `rollup` 52/52, `exponential_histogram` 44/44, `vector-tile` 34/34,
-`api_key` 32/32, `aggregate-metrics` 26/28, `inference` 1/23, `search.vectors` 22/23, `wildcard`
+`api_key` 32/32, `aggregate-metrics` 26/28, `inference` 12/23, `search.vectors` 22/23, `wildcard`
 22/22, `terms_enum` 20/20, `rank_vectors` 0/15, `users` 15/15, `constant_keyword` 13/13,
 `counted_keyword` 8/11, `data_streams` 11/11, `migrate` 0/11, `change_password` 8/8, `roles` 8/8,
 `text_structure` 5/8, `enrich` 6/7, `privileges` 7/7, `profiling` 0/7, `token` 6/6, `versionfield`
@@ -866,6 +867,54 @@ Checked against Elasticsearch 9.5.5 (captures in
   `model_inference`, `eql_sequence` and `parent` in Elasticsearch's order with live numbers.
   The `request` breaker's messages carry the documentation link too. `fielddata` accounts
   nothing yet.
+
+## Inference (`_inference`)
+
+The inference API of Elasticsearch 9.5.5's inference plugin (`crates/search-es/src/xpack/inference`):
+`PUT/GET/DELETE _inference[/{task_type}]/{id}`, `PUT …/_update`, `POST _inference[/{task_type}]/{id}`
+to run one, `POST …/_stream` (completion and the unified `chat_completion`), `GET _inference/_services[/{task_type}]`,
+the region policy (`_inference/_region_policy`) and the `inference` section of `_xpack/usage`.
+Task types `text_embedding`, `sparse_embedding`, `rerank`, `completion`, `chat_completion`.
+Measured against a private Elasticsearch 9.5.5 calling a mock of the services: the OpenAI flows
+(create with its validation call, get, run, stream, update, delete), 42 error and update cases and
+the region policy CRUD answer the same, and the requests sent upstream are byte for byte
+Elasticsearch's (headers, `encoding_format: base64`, `n: 1`, `stream_options`).
+
+| service | task types | notes |
+|---|---|---|
+| `openai` | `text_embedding`, `completion`, `chat_completion` | `url` points it at any OpenAI-compatible server (vLLM, Ollama, LiteLLM, roll's model gateway). Not supported: OAuth2 client credentials (`client_secret`) and the multimodal `embedding` task type |
+| `cohere` | `text_embedding`, `rerank`, `completion` | the V2 API Elasticsearch uses for new endpoints; `service_settings.url` (Elasticsearch reads it too) or the node's `roll.inference.cohere.url` move the host off `api.cohere.ai` |
+| `anthropic` | `completion`, `chat_completion` | the Messages API; the unified chat stream is translated to and from it. The node's `roll.inference.anthropic.url` moves the host off `api.anthropic.com` |
+| `elasticsearch` | (needs ML nodes) | the three preconfigured endpoints (`.elser-2-elasticsearch`, `.multilingual-e5-small-elasticsearch`, `.rerank-v1-elasticsearch`) are listed, and running them or creating an endpoint of the service answers what a cluster without ML nodes answers (captured: 429, `Could not start deployment because no ML nodes with sufficient capacity were found`; such an endpoint is stored first, as there). roll never makes up their output |
+
+Creating and updating an endpoint calls the service once (`how big`, as Elasticsearch's model
+validators do), which also learns a text embedding model's dimensions and similarity;
+`xpack.inference.skip_validate_and_start` (node setting) skips the call.
+
+Security: API keys are secrets, stored apart from the endpoint (`.secrets-inference`) and sealed
+with the deployment key (`seal.rs`, kind `inference api key`); nothing prints them (`GET` shows the
+service settings without `api_key`, as Elasticsearch does) and they're opened only to send a
+request. Every URL is fetched through `roll_net::PublicOnly` with no redirects and no proxy,
+refusing private IP literals and `localhost`, reading at most 32 MiB
+(`roll.inference.allow_private_hosts` lifts the address rule, for test clusters only). Calls are
+authorized by the one security evaluator (`monitor_inference`, `manage_inference`). Answers are
+parsed as untrusted data: shapes are checked (a rerank index outside the inputs, a missing field
+or a wrong embedding count fail the call).
+
+Differences: streamed answers are read whole before they're sent (the same events, all at the
+end); `rate_limit` is stored and printed but not enforced (requests go out at once, and the
+service's own 429s are retried at most twice); `max_input_tokens` doesn't truncate inputs;
+Cohere's settings are read with roll's settings reader, so a malformed one fails with
+`validation_exception` instead of Cohere's object parser's `x_content_parse_exception`.
+
+YAML: `platinum/inference` 12 of the 23 tests that pass on Elasticsearch (the rest need
+`semantic_text`, and one the `random_reranker` retriever). The `inference` extended suite runs the
+same directory on a cluster with the `inference-service-test` plugin's services, which
+`search-dev --yaml-test-cluster` provides (`services/test.rs`: `test_service`,
+`text_embedding_test_service`, `test_reranking_service`, `completion_test_service`,
+`streaming_completion_test_service`, reproduced exactly) and real clusters never have; the plugin
+isn't in Elasticsearch's release, so there is no Elasticsearch baseline (roll 14 of 305).
+Tests: `crates/search-es/tests/inference.rs` runs every service against a mock server.
 
 ## Per area
 
