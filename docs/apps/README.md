@@ -1404,6 +1404,10 @@ feature/roll-search 7f92c2f28, the held apps work being wip/roll-apps-next (pair
     reads as no secrets (previews ensures its `pv-` ones with their base and trust; ensuring
     again with other values would be a 409 `mismatch`), and a person adds one in roll secrets
     when they want secrets there.
+  - Done on apps' side: `SecretVar.sensitive` (secrets' #46: a key tagged `sensitive` reaches only
+    runtimes, as Vercel's sensitive variables): apps treats it as a sealed variable, in builds and
+    instances, never in an answer (`sealed` in the listing, out of `…/variables/values` for
+    everyone, references to it sealed too). Secrets' `ForApps` sets it from the key's tags.
   - Done on apps' side: `GET …/variables/values` asks `SecretSource::may_reveal(who, project,
     env)` (false by default) when any value comes from roll secrets, and answers 403 naming them
     if not; so do reading a job's output (`…/jobs/{job}/logs`: a job can print them) and opening

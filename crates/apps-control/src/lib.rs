@@ -1244,9 +1244,13 @@ impl Apps {
                 Err(e) => tracing::warn!(service = %svc.id, kind = kind.as_str(), r#ref = %r, error = %e, "apps: a link's variables couldn't be read"),
             }
         }
+        let mut sensitive = BTreeSet::new();
         match self.deps.secrets.resolve(&svc.project, &env.name, &svc.id).await {
             Ok(secrets) => {
                 for s in secrets {
+                    if s.sensitive {
+                        sensitive.insert(s.name.clone());
+                    }
                     // A linked resource's address, rewritten for the container as apps' own links.
                     let v = if s.linked { self.deps.runtime.reach(&s.value) } else { s.value };
                     vars.insert(s.name, (v, "secret"));
@@ -1259,6 +1263,8 @@ impl Apps {
         for (k, v) in own {
             vars.insert(k, (v, "service"));
         }
+        // A sensitive secret is as a sealed variable (unless the service's own takes its name).
+        sealed.extend(sensitive.into_iter().filter(|k| vars.get(k).is_some_and(|(_, s)| *s == "secret")));
         // Reference variables, one level deep: against what resolved above, and other services'.
         let unresolved = self.fill_references(svc, &env.name, &mut vars, &mut sealed).await;
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
@@ -1373,7 +1379,8 @@ impl Apps {
         let (svc, row) = self.service_env(service, env).await?;
         let r = self.resolve_vars(&svc, &row, row.active.as_deref().unwrap_or("")).await?;
         if let Some(who) = reveal {
-            let secret: Vec<&String> = r.sources.iter().filter(|(_, s)| **s == "secret").map(|(k, _)| k).collect();
+            // Sensitive ones are left out for everyone, so they need no one's leave.
+            let secret: Vec<&String> = r.sources.iter().filter(|(k, s)| **s == "secret" && !r.sealed.contains(*k)).map(|(k, _)| k).collect();
             if !secret.is_empty() && !self.deps.secrets.may_reveal(who, &svc.project, env).await {
                 return Err(Error::Forbidden(format!("{} come from roll secrets, which you may not reveal in {env}", secret.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", "))));
             }

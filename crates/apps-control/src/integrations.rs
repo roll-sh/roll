@@ -126,6 +126,10 @@ pub struct SecretVar {
     /// It's a linked resource's address as rolld sees it (`Values.linked`: `127.0.0.1`, a
     /// node's own host name): apps rewrites it for the container, as its own links.
     pub linked: bool,
+    /// Only for runtimes (roll secrets' `sensitive` keys, Vercel's sensitive variables): it goes
+    /// to builds and instances, and no answer ever holds it, as a sealed variable (shown
+    /// `sealed`, left out of `…/variables/values` for everyone, references to it sealed too).
+    pub sensitive: bool,
 }
 
 /// Who asks for variables' values: what rolld's gate put on the request.

@@ -2197,7 +2197,10 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
             "fake"
         }
         async fn resolve(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
-            Ok(vec![apps_control::integrations::SecretVar { name: "DB_PASSWORD".into(), value: "s3cret".into(), linked: false }])
+            Ok(vec![
+                apps_control::integrations::SecretVar { name: "DB_PASSWORD".into(), value: "s3cret".into(), linked: false, sensitive: false },
+                apps_control::integrations::SecretVar { name: "SIGNING_KEY".into(), value: "only-for-runtimes".into(), linked: false, sensitive: true },
+            ])
         }
         async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, _: &str, _: &str) -> bool {
             who.operator
@@ -2215,6 +2218,10 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
     assert_eq!(resp.status(), StatusCode::OK);
     let v: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(v["DB_PASSWORD"], "s3cret");
+    // A sensitive one: to runtimes only, never in an answer, the operator's either.
+    assert!(v.get("SIGNING_KEY").is_none() && !v.to_string().contains("only-for-runtimes"), "{v}");
+    let (_, listed) = call(&w.api, "GET", values.trim_end_matches("/values"), None).await;
+    assert!(listed["vars"].as_array().unwrap().iter().any(|x| x["name"] == "SIGNING_KEY" && x["sealed"] == true && x["source"] == "secret"), "{listed}");
     // A shell reads them all and a job can print them: the same rule.
     let base = values.trim_end_matches("/variables/values").to_string();
     assert_eq!(call(&w.api, "POST", &format!("{base}/shell/sessions"), None).await.0, StatusCode::FORBIDDEN);
