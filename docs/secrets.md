@@ -1644,6 +1644,13 @@ asks (`digest=1`, #49), since that costs about a read.
 Then reach (#61): for a folder or key, the tokens and identities that reach it, whether untrusted
 code can, where it flows (syncs, shares, imports), and who read it in 30 days.
 
+A tenth independent review (2026-11-14, of ESO, renewing logins, pinned keys and the ninth review's
+fixes) found no high-severity issue; it found ESO writing an unresolved key as an empty value and
+taking a query through its key (#55: `strict=1`, `urlquery`, checked live on k3s), stdout unmasked in
+Jenkins, Buildkite, pods and units and a JSON value's secret fields (#54), a login with no timeout
+that dropped a working token and ignored 401s (#56), and no way to rotate pinned keys in place
+(#57): all fixed. roll MCP has `secrets_reach` and `secrets_folder_policies` tools for #61 and #53.
+
 Then (2026-11-14, latest): `roll run` masks values in what the command prints when it isn't a
 terminal (#54), as 1Password's `op run` and GitHub Actions do; pulling into Kubernetes with External
 Secrets Operator (#55: its webhook provider, checked against ESO 2.15 on k3s) and
@@ -1750,8 +1757,8 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A tenth independent review** of ESO (#55), renewing identity logins (#56), pinned issuer keys
-   (#57) and the ninth review's fixes, and its fixes.
+1. **An eleventh independent review** of VS Code (#58), completions (#59), browser-bundle names
+   (#60), reach (#61) and the tenth review's fixes, and its fixes.
 2. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
    #49 and #54 meet, `watch` keeps both (answered digests, streams and signals).
 3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
@@ -1766,12 +1773,15 @@ user's call).
    token; the trust policy pins `sub`, as GCP's and Azure's do).
 7. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
    notice.
-8. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
+8. *Waits on #30 meeting #24/#25:* the Access tab shows roll-access tokens waiting for an admin's
+   approval (`pending`) and rotations that keep the old secret working (`keep_old_for_s`), and
+   reach (#61) lists roll-access grants too.
+9. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
    installs list Slack user ids and act as the owner's automation; a review must count as the
    person who pressed the button (their permissions, the request's gates), never as the app.
-9. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
+10. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
    project can link their own databases, buckets and streams.
-10. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+11. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
    environment).
 
 Open pull requests after this one:
