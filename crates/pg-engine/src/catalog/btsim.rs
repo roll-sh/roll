@@ -511,6 +511,19 @@ impl<'a> LeafView<'a> {
     }
 }
 
+/// A leaf as `Btree::leaf_summaries` gives it.
+#[derive(Clone, Debug, Default)]
+pub struct LeafSummary {
+    pub first: Vec<u8>,
+    pub last: Vec<u8>,
+    pub used: usize,
+    pub tuples: usize,
+    pub tids: usize,
+    pub keys: usize,
+    /// Its items' plain sizes (each as a tuple of one heap TID), summed.
+    pub plain: usize,
+}
+
 /// What a btvacuumscan did (its IndexBulkDeleteResult): the heap TIDs it removed, the
 /// index's pages, those it deleted, those deleted now, those it recorded as free to reuse.
 #[derive(Clone, Copy, Debug, Default)]
@@ -1706,6 +1719,38 @@ impl Btree {
         let nkey = self.opts.nkey;
         let high = p.high.as_ref().and_then(|h| Some((h.key.as_ref()?.key_bytes(h.natts.min(nkey)), h.natts < nkey)));
         Some(LeafView { high: high.map(|h| h.0), truncated: high.is_some_and(|h| h.1), right: p.right, entries: &p.items, nkey })
+    }
+
+    /// Each leaf in key order, summarized for `sizing`'s estimate of a table that grew too
+    /// big to model: its first and last keys' attributes, its items' bytes (line pointers
+    /// included), tuples, heap TIDs and distinct keys.
+    pub fn leaf_summaries(&self) -> Vec<LeafSummary> {
+        let nkey = self.opts.nkey;
+        let mut out = Vec::new();
+        let mut at = self.scan_leaf(&[]);
+        while let Some(blk) = at {
+            let Some(p) = self.pages.get(blk as usize).and_then(Option::as_ref) else { break };
+            let mut s = LeafSummary::default();
+            let mut prev: Option<&[u8]> = None;
+            for it in p.items.iter() {
+                let k = it.key.key_bytes(nkey);
+                if prev != Some(k) {
+                    s.keys += 1;
+                }
+                if s.tuples == 0 {
+                    s.first = k.to_vec();
+                }
+                prev = Some(k);
+                s.tuples += 1;
+                s.tids += it.tids.len();
+                s.used += it.size() + 4;
+                s.plain += it.key.size();
+            }
+            s.last = prev.map(<[u8]>::to_vec).unwrap_or_default();
+            out.push(s);
+            at = p.right;
+        }
+        out
     }
 
     pub fn scan_leaf(&self, lo: &[u8]) -> Option<u32> {

@@ -1049,6 +1049,11 @@ impl Heap {
         self.pages.last().map_or(0, Page::heap_free)
     }
 
+    /// The pages at the end a bulk extension added and nothing used yet (all zeroes).
+    pub fn trailing_fresh(&self) -> u32 {
+        self.pages.iter().rev().take_while(|p| p.new && p.lps.len() == 0).count() as u32
+    }
+
     pub fn vm_blocks(&self) -> u32 {
         self.vm_blocks
     }

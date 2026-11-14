@@ -24,6 +24,7 @@ use crate::exec::fasthash::{HashMap as FastMap, HashSet as FastSet};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub mod btest;
 pub mod gistlog;
 pub mod kept;
 
@@ -182,6 +183,8 @@ pub struct RelFiles {
     dropped: HashSet<u32>,
     /// Their heaps' estimated sizes.
     estimated: HashMap<u32, EstHeap>,
+    /// Their btree indexes' leaves, summarized (`btest`), by index.
+    est_btrees: FastMap<u32, btest::BtEst>,
     /// Bulk loads (COPY) in progress, by (table, transaction).
     bulk: FastMap<(u32, u64), Bulk>,
     /// Hash indexes: the heap's estimated tuples when each was built (its initial
@@ -237,31 +240,47 @@ struct EstHeap {
     room: usize,
     /// Free bytes in the pages before it.
     reusable: usize,
+    /// Bytes of the pages a bulk extension added at the end and nothing used yet: filled
+    /// before the file grows (the free space map has them), as new pages, not as space a
+    /// VACUUM freed.
+    fresh: usize,
 }
 
 impl EstHeap {
     fn from_heap(h: &Heap) -> EstHeap {
+        let fresh = h.trailing_fresh() as usize;
         EstHeap {
             pages: h.nblocks(),
-            room: h.last_page_free(),
+            room: if fresh > 0 { 0 } else { h.last_page_free() },
             reusable: 0,
+            fresh: fresh * (heapsim::BLCKSZ - heapsim::PAGE_HEADER),
         }
     }
 
     /// A tuple of `len` bytes written (RelationGetBufferForTuple keeps a page's fillfactor
     /// free for updates; a new page takes any tuple).
-    fn add(&mut self, len: usize, fillfactor: usize) {
+    /// True: it went in space a VACUUM found free (where an update's new version can stay
+    /// on its old one's page).
+    fn add(&mut self, len: usize, fillfactor: usize) -> bool {
         let need = heapsim::maxalign(len) + heapsim::ITEM_ID;
         if self.reusable >= need {
             self.reusable -= need;
-            return;
+            return true;
         }
         let reserve = heapsim::BLCKSZ * (100 - fillfactor.min(100)) / 100;
+        if self.fresh > 0 && need + reserve > self.room {
+            // (The next fresh page.)
+            let page = heapsim::BLCKSZ - heapsim::PAGE_HEADER;
+            self.fresh = self.fresh.saturating_sub(page);
+            self.room = page - need;
+            return false;
+        }
         if self.pages == 0 || need + reserve > self.room {
             self.pages += 1;
             self.room = heapsim::BLCKSZ - heapsim::PAGE_HEADER;
         }
         self.room = self.room.saturating_sub(need);
+        false
     }
 }
 
@@ -1614,7 +1633,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
         None
     };
     if let Some(pages) = known_big {
-        set_estimated(db, t, Some(EstHeap { pages, room: 0, reusable: 0 }));
+        set_estimated(db, t, Some(EstHeap { pages, ..Default::default() }));
         return Ok(false);
     }
     // One never measured that was too big to model when its database last had it open: the
@@ -1623,7 +1642,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
         && ctx.catalog().relstats.get(&t.oid).is_none_or(|s| s.tuples < 0.0)
         && let Some(pages) = stored_estimate(t, ctx)
     {
-        set_estimated(db, t, Some(EstHeap { pages, room: 0, reusable: 0 }));
+        set_estimated(db, t, Some(EstHeap { pages, ..Default::default() }));
         return Ok(false);
     }
     // A table first used since its database last closed cleanly: the models that close
@@ -1865,6 +1884,13 @@ fn set_estimated(db: &Database, t: &Table, est: Option<EstHeap>) -> EstHeap {
         .unwrap_or_default();
     db.relfiles.note_untracked(t.oid);
     rf.untracked.insert(t.oid);
+    // (Its btrees' shapes go on as estimates: `btest`.)
+    for i in t.indexes.iter().chain(&t.pkey_index) {
+        if let Some(b) = rf.btrees.get(i) {
+            let e = btest::BtEst::from_model(b.leaf_summaries(), b.opts.dedup, b.nblocks());
+            rf.est_btrees.insert(*i, e);
+        }
+    }
     forget(&mut rf, t);
     rf.estimated.insert(t.oid, est);
     est
@@ -2023,8 +2049,10 @@ pub fn inserted_stored(t: &Table, len: usize, ctx: &ExecCtx) -> bool {
 
 fn untracked_write(
     t: &Table,
+    indexes: &[BoundIndex],
     row: &[Value],
     old: Option<&[Value]>,
+    vals: Option<&[Option<Vec<Value>>]>,
     ctx: &ExecCtx,
     len: Option<usize>,
 ) -> Result<()> {
@@ -2035,10 +2063,114 @@ fn untracked_write(
     {
         lock_toast(t, ctx)?;
     }
-    if let Some(e) = ctx.sess.db.relfiles.of(t.oid).write().estimated.get_mut(&t.oid) {
-        e.add(len, heap_fillfactor(t));
+    // The new version's btree entries, where their leaves are summarized (`btest`): every
+    // index of an insert, of an update all but where it stays on its page (heap_update's
+    // HOT: space a VACUUM freed, no indexed column changed).
+    let entries = est_entries(t, indexes, row, old, vals, ctx)?;
+    let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
+    let reused = rf.estimated.get_mut(&t.oid).is_some_and(|e| e.add(len, heap_fillfactor(t)));
+    let hot = reused && old.is_some() && entries.iter().all(|e| e.3);
+    if !hot {
+        for (ix, key, size, dup) in entries {
+            if let Some(b) = rf.est_btrees.get_mut(&ix) {
+                b.insert(key, size, dup);
+            }
+        }
     }
     Ok(())
+}
+
+/// The btree entries a version of `row` of a table too big to model gets in those of
+/// `indexes` whose leaves are summarized: (index, key's prefix, tuple size, whether the
+/// key is the old version's, `old`), as an index build measures them (`btree_pages_est`).
+/// `vals`: the row's index values, when known (one per index).
+fn est_entries(
+    t: &Table,
+    indexes: &[BoundIndex],
+    row: &[Value],
+    old: Option<&[Value]>,
+    vals: Option<&[Option<Vec<Value>>]>,
+    ctx: &ExecCtx,
+) -> Result<Vec<(u32, u128, usize, bool)>> {
+    let mut out = Vec::new();
+    let any = {
+        let rf = ctx.sess.db.relfiles.of(t.oid).read();
+        !rf.est_btrees.is_empty() && indexes.iter().any(|b| rf.est_btrees.contains_key(&b.index.oid))
+    };
+    if !any {
+        return Ok(out);
+    }
+    let fmt = ctx.fmt();
+    let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt);
+    let mut sort = Vec::new();
+    for (i, bix) in indexes.iter().enumerate() {
+        if bix.index.method != "btree" {
+            continue;
+        }
+        let v = match vals {
+            Some(k) => k.get(i).cloned().flatten(),
+            None => index_values(bix, row, ctx)?,
+        };
+        let Some(mut v) = v else { continue };
+        sort.clear();
+        for x in &v {
+            encode_value(&mut sort, x, false);
+        }
+        let key = btest::key_prefix(&sort);
+        let mut types: Vec<DataType> = bix.keys.iter().map(|k| k.ty()).collect();
+        types.extend(bix.index.include.iter().map(|&c| t.columns[c].ty.clone()));
+        v.extend(bix.index.include.iter().map(|&c| row.get(c).cloned().unwrap_or(Value::Null)));
+        let size = relsize::index_tuple(&types, &v, &text);
+        let dup = old.is_some_and(|o| columns_unchanged(bix, o, row));
+        out.push((bix.index.oid, key, size, dup));
+    }
+    Ok(out)
+}
+
+/// An index build measured btree `index` of a table too big to model: its leaves as the
+/// build laid them out (`btest`), what its writes then grow.
+pub fn btree_estimated(table: u32, index: u32, est: btest::BtEst, db: &Database) {
+    let mut rf = db.relfiles.of(table).write();
+    if rf.untracked.contains(&table) {
+        rf.est_btrees.insert(index, est);
+    }
+}
+
+/// Btree `index`'s blocks as its summarized leaves have them (a table too big to model).
+fn est_btree_blocks(rf: &RelFiles, index: u32) -> Option<u32> {
+    rf.est_btrees.get(&index).map(btest::BtEst::blocks)
+}
+
+/// VACUUM of a table too big to model found `live` rows: the dead entries go from its
+/// btrees' summarized leaves (all of a non-partial index's entries but the live rows'; a
+/// partial index's at the share the others lose). (index, blocks, entries left).
+pub fn est_btrees_vacuumed(t: &Table, partial: &[u32], live: f64, db: &Database) -> Vec<(u32, u32, f64)> {
+    let cat_partial = |oid: u32| partial.contains(&oid);
+    let mut rf = db.relfiles.of(t.oid).write();
+    let mut out = Vec::new();
+    let mut keep: Option<f64> = None;
+    let ixs: Vec<u32> = t.indexes.iter().chain(&t.pkey_index).copied().collect();
+    for &i in ixs.iter().filter(|i| !cat_partial(**i)) {
+        if let Some(b) = rf.est_btrees.get_mut(&i) {
+            let before = b.entries();
+            keep = Some(keep.unwrap_or(1.0).min(if before > 0.0 { (live / before).min(1.0) } else { 1.0 }));
+            // (No dead entry: btvacuumcleanup skips the index, its stats stay.)
+            if before > live + 0.5 {
+                let blocks = b.vacuum(live);
+                out.push((i, blocks, b.entries().round()));
+            }
+        }
+    }
+    for &i in ixs.iter().filter(|i| cat_partial(**i)) {
+        if let Some(b) = rf.est_btrees.get_mut(&i)
+            && let Some(k) = keep.filter(|k| *k < 1.0)
+        {
+            let left = b.entries() * k;
+            let blocks = b.vacuum(left);
+            out.push((i, blocks, b.entries().round()));
+        }
+    }
+    out
 }
 
 /// Whether a version of a table too big to model has out-of-line values that go
@@ -2127,7 +2259,7 @@ pub fn inserted_with(
     };
     note_compression_len(t, row, Some(key), ctx, Some(tuple));
     if !ensure(t, indexes, ctx)? {
-        untracked_write(t, row, None, ctx, Some(tuple))?;
+        untracked_write(t, indexes, row, None, vals, ctx, Some(tuple))?;
         return Ok(None);
     }
     let (len, exts) = layout_len(t, row, ctx, &HashSet::new(), Some(tuple));
@@ -2312,7 +2444,7 @@ pub fn updated(
     };
     note_compression_len(t, new, Some(new_key), ctx, Some(tuple));
     if !ensure(t, indexes, ctx)? {
-        untracked_write(t, new, Some(old), ctx, Some(tuple))?;
+        untracked_write(t, indexes, new, Some(old), None, ctx, Some(tuple))?;
         return Ok(None);
     }
     let db = &ctx.sess.db;
@@ -3178,6 +3310,9 @@ pub fn truncated(t: &Table, db: &Database) {
     let mut rf = db.relfiles.of(t.oid).write();
     rf.untracked.remove(&t.oid);
     rf.estimated.remove(&t.oid);
+    for i in t.indexes.iter().chain(&t.pkey_index) {
+        rf.est_btrees.remove(i);
+    }
     forget(&mut rf, t);
     rf.heaps.insert(t.oid, Heap::new(heap_fillfactor(t)));
 }
@@ -3985,6 +4120,7 @@ fn forget_dropped(rf: &mut RelFiles, o: &u32) {
     rf.btrees.remove(o);
     rf.untracked.remove(o);
     rf.estimated.remove(o);
+    rf.est_btrees.remove(o);
     rf.toast.remove(o);
     rf.hash_est.remove(o);
     rf.gin_built.remove(o);
@@ -5546,7 +5682,9 @@ pub fn main_blocks_known(oid: u32, cat: &Catalog, db: &Database) -> Option<u64> 
             }
             let rf = db.relfiles.of(t.oid).read();
             if rf.untracked.contains(&t.oid) {
-                Some(cat.relstats.get(&oid).map_or(1, |s| s.pages.max(1) as u64))
+                est_btree_blocks(&rf, oid)
+                    .map(u64::from)
+                    .or_else(|| Some(cat.relstats.get(&oid).map_or(1, |s| s.pages.max(1) as u64)))
             } else if modelled(&rf, cat, &t) {
                 rf.btrees.get(&oid).map(|b| b.nblocks() as u64)
             } else {
@@ -5709,8 +5847,12 @@ fn fork_blocks_bound(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>>
                 if fork == Fork::Fsm {
                     return Ok(Some(0));
                 }
-                // A table too big to model: its index as last measured (CREATE INDEX,
-                // VACUUM, ANALYZE: `btree_build_blocks`).
+                // A table too big to model: its leaves' summary as its writes grew it
+                // (`btest`), else its index as last measured (CREATE INDEX, VACUUM,
+                // ANALYZE: `btree_build_blocks`).
+                if let Some(n) = est_btree_blocks(&ctx.sess.db.relfiles.of(t.oid).read(), ix) {
+                    return Ok(Some(n as u64));
+                }
                 let pages = ctx.catalog().relstats.get(&ix).map_or(1, |s| s.pages.max(1) as u64);
                 return Ok(Some(pages));
             }

@@ -1047,6 +1047,17 @@ impl Ddl<'_, '_> {
         );
         if !vacuum {
             self.store_index_measures(m.indexes);
+        } else if crate::exec::sizing::is_estimated(t.oid, &self.ctx.sess.db) {
+            // Its btrees as their summarized leaves have them, the dead entries gone
+            // (btbulkdelete; the file keeps its pages).
+            let partial: Vec<u32> = t
+                .indexes
+                .iter()
+                .copied()
+                .filter(|i| self.cat.indexes.get(i).is_some_and(|ix| ix.predicate.is_some()))
+                .collect();
+            let ixs = crate::exec::sizing::est_btrees_vacuumed(t, &partial, tuples, &self.ctx.sess.db);
+            self.store_index_measures(ixs.into_iter().map(|(i, pages, n)| (i, pages as i32, n)).collect());
         }
         Ok(tuples)
     }
@@ -1517,7 +1528,7 @@ impl Ddl<'_, '_> {
     /// Whether building index `ix` of `t` measures them in the build's own pass over the
     /// rows (`measure_rows_with`): an index of a built-in method on a table too big to
     /// model, whose measure is the rows' stored sizes and the index's keys sorted
-    /// (`btree_pages_of`, for every method), none of which the build changes.
+    /// (`btree_pages_est`, for every method), none of which the build changes.
     pub(super) fn measures_in_build(&self, t: &Table, ix: &crate::catalog::Index) -> bool {
         let db = &self.ctx.sess.db;
         ix.id != 0
@@ -1840,7 +1851,13 @@ impl Ddl<'_, '_> {
                 (None, Some(own)) => own.pages(live as u32),
                 (None, None) => match ix.big.take().map(|b| b.pages(t, &ix.bix, self.ctx)) {
                     Some(n) => n.min(i32::MAX as u64) as i32,
-                    None => btree_pages_of(&ix.bix, &ix.types, std::mem::take(&mut ix.keys)),
+                    None => {
+                        let (pages, est) = btree_pages_est(&ix.bix, &ix.types, &mut ix.keys);
+                        if ix.bix.index.method == "btree" {
+                            crate::exec::sizing::btree_estimated(t.oid, ix.bix.index.oid, est, db);
+                        }
+                        pages
+                    }
                 },
             };
             measured.push((ix.bix.index.oid, pages, ix.tuples as f64));
@@ -1980,43 +1997,58 @@ impl RowMeasure {
 
 /// A btree's pages by its keys (sort key, key bytes, index tuple size; `measure_rows_with`):
 /// sorted, deduplicated where PostgreSQL's btree would, packed as its build packs them.
-pub(super) fn btree_pages_of(bix: &crate::sql::plan::BoundIndex, types: &[DataType], mut keys: Vec<MeasureKey>) -> i32 {
+/// The pages of a btree built over these keys (`relsize::btree_pages`), with the build's
+/// leaves summarized (`sizing::btest`).
+pub(super) fn btree_pages_est(
+    bix: &crate::sql::plan::BoundIndex,
+    types: &[DataType],
+    keys: &mut Vec<MeasureKey>,
+) -> (i32, crate::exec::sizing::btest::BtEst) {
     // (By the first 8 bytes, then the key, then the size: the keys' order, the prefix
     // compared without reading the key. Unstable: entries equal as (key, size) are
     // interchangeable.)
     keys.sort_unstable();
     let n = keys.len();
-    btree_pages_sorted(bix, types, keys.into_iter(), n)
+    btree_pages_sorted(bix, types, std::mem::take(keys).into_iter(), n)
 }
 
-/// `btree_pages_of` of keys given in their order (`n` of them): a parallel build's
+/// `btree_pages_est` of keys given in their order (`n` of them): a parallel build's
 /// participants' sorted keys merged, without putting them in one list first.
 pub(super) fn btree_pages_sorted(
     bix: &crate::sql::plan::BoundIndex,
     types: &[DataType],
     keys: impl Iterator<Item = MeasureKey>,
-    n: usize,
-) -> i32 {
+    _n: usize,
+) -> (i32, crate::exec::sizing::btest::BtEst) {
     let dedup = !bix.index.unique
         && bix.index.include.is_empty()
         && types.iter().all(relsize::equal_image)
         && bix.colls.iter().flatten().all(|k| k.coll.deterministic);
-    let mut sizes = Vec::with_capacity(n);
+    let mut b = crate::exec::sizing::btest::EstBuilder::new(dedup);
     let mut group: Option<(MeasureKey, usize)> = None;
+    let mut emit = |g: &MeasureKey, count: usize| {
+        let key = (g.0[0] as u128) << 64 | g.0[1] as u128;
+        let base = g.2 as usize;
+        let mut first = true;
+        relsize::posting_split(base, count, |size, pivot, tids| {
+            b.push(size, pivot, key, tids, first, base);
+            first = false;
+        });
+    };
     for k in keys {
         match &mut group {
             Some((g, count)) if dedup && g.0 == k.0 && g.1 == k.1 => *count += 1,
             _ => {
                 if let Some((g, count)) = group.replace((k, 1)) {
-                    relsize::posting_tuples(g.2 as usize, count, &mut sizes);
+                    emit(&g, count);
                 }
             }
         }
     }
     if let Some((g, count)) = group {
-        relsize::posting_tuples(g.2 as usize, count, &mut sizes);
+        emit(&g, count);
     }
-    relsize::btree_pages(&sizes)
+    b.finish()
 }
 
 impl Ddl<'_, '_> {
