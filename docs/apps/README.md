@@ -1681,54 +1681,52 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (a second product review of the experience, a product review of what one engineer can close here now, bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **Request log filters in the UI**: status class, slower than N ms, deployment (the API and CLI
-   have them; a 5xx alert can't be followed to its requests).
-2. **A timeline**: `GET /v1/apps/events` (deploys, failures, crash loops, alerts, domains) merged
+1. **A timeline**: `GET /v1/apps/events` (deploys, failures, crash loops, alerts, domains) merged
    with the activity log as an Events view (Render's Events tab); the dashboard never reads it.
-3. **Mobile, keyboard, copy**: the notification form's checkboxes don't wrap and can't pick a
+2. **Mobile, keyboard, copy**: the notification form's checkboxes don't wrap and can't pick a
    service; every service tab is titled "Service"; a deployment row is a button holding buttons;
    two fields called "Protocol", two "Start command"s.
-4. **Settings in sections**: the Run panel's 35 fields split (scaling, health and alerts,
+3. **Settings in sections**: the Run panel's 35 fields split (scaling, health and alerts,
    networking, rollout) with an anchor nav; Notifications, Drains and Spend on the project's own
    settings.
-5. **The CLI and dashboard reach the same things**: no CLI for build settings, rename, source,
+4. **The CLI and dashboard reach the same things**: no CLI for build settings, rename, source,
    health timeout, alerts, the plan preview, past jobs, a notification's Test; no dashboard for
    deploying another image tag, a deploy message, a shell's instance, the Prometheus URL, older
    deployments' pages, health path at creation.
-6. **From roll.toml or Compose in the dashboard** (Railway's templates, Render's Blueprints): the
+5. **From roll.toml or Compose in the dashboard** (Railway's templates, Render's Blueprints): the
    plan `roll up --all` and `import-compose` make, shown and applied.
-7. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+6. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-8. **Region**: the region shown on the overview and each environment, defaulting to the project's
+7. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-9. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+8. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-10. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+9. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-11. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+10. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-12. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+11. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-13. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-14. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+12. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+13. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-15. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+14. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-16. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+15. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-17. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+16. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-18. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+17. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
