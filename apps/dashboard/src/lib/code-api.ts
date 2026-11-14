@@ -377,7 +377,7 @@ export interface PreviewEnvironment {
     pages?: { path: string; percent: number; by: string | null }[];
   };
   /** What a screen reader can't name on that page. */
-  page_a11y?: { issues: { kind: "images" | "fields" | "buttons" | "links"; count: number; first: string | null }[]; lang: boolean; title: boolean };
+  page_a11y?: { issues: { kind: string; count: number; first: string | null; impact?: "minor" | "moderate" | "serious" | "critical" | null; help?: string | null }[]; lang: boolean; title: boolean };
 }
 
 export interface Change {

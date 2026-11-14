@@ -908,6 +908,16 @@ type Settings = {
     language and a title (`page_a11y`, counts and the first one's markup, bounded; "**Accessibility:**
     3 images without alt text …" in the comment), the most common WCAG failures, as Vercel's
     toolbar and Netlify's checks show.
+    With axe-core (4.14.0, vendored under `crates/roll-previews/vendor/axe-core`, MPL-2.0; what
+    Lighthouse's accessibility audit runs) the session checks its WCAG rules instead: contrast,
+    ARIA, landmarks, headings, duplicate ids and the rest, one issue per rule that fails (its id,
+    how many elements, the first one's markup, its impact and axe's words for it; at most 50).
+    It's 640 KB, so it reaches the browser container on stdin, not in an environment variable,
+    and DevTools evaluates it outside the page's CSP. The page's session reports all of it, so
+    rule ids and impacts are checked against axe's own shapes and the words never go in a pull
+    request comment ("4 elements failing `color-contrast`, serious"); the dashboard shows them as
+    text. If axe doesn't load, the four checks above run as before. Against main the same way:
+    rules main fails already aren't the change's.
     The same session catches what went wrong while the page loaded: uncaught exceptions,
     `console.error`s, and requests that failed or answered 4xx/5xx (`page_health`, counts and the
     first of each, one bounded line each because they're the page's own words; "**While its
@@ -1027,6 +1037,8 @@ Ranked by what a person notices first. Done so far:
   `[skip preview]`);
 - each change's page compared with the default branch's preview (Chromatic's baseline);
 - accessibility per push (what a screen reader can't name, a missing language or title);
+- accessibility by axe-core's WCAG rules (vendored, on stdin; the rule ids and impacts checked,
+  its words kept out of comments);
 - a phone-width screenshot with its own visual change;
 - every change compared with the default branch, whose preview roll keeps itself (`github.baseline`);
 - the comment's page checks folded under one line of counts;
@@ -1112,31 +1124,26 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Accessibility from axe-core** (what Lighthouse's accessibility audit on Netlify and Vercel
-   runs): previews' own check names images, fields, buttons and links without a name, a
-   missing `lang` and `title`. axe-core (MPL-2.0, run in the screenshot's session) adds about
-   90 WCAG rules: contrast, ARIA, landmarks, headings, duplicate ids. Its violations by rule and
-   impact go where the current ones go (against main's too), bounded like them.
-2. **Open a preview on a phone** (Vercel's toolbar shows a QR code): the sheet and the change
+1. **Open a preview on a phone** (Vercel's toolbar shows a QR code): the sheet and the change
    page show the preview's link, with its access, as a QR code to scan, so a phone opens it
    without typing a token. Drawn in the dashboard, nothing sent anywhere.
-3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+5. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-7. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1149,7 +1156,7 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

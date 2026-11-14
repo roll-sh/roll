@@ -82,6 +82,29 @@ pub const SCREENSHOT_IMAGE: &str = "mcr.microsoft.com/playwright:v1.64.1-noble";
 /// (`shot.js`, in `$ROLL_SHOT_JS`). A command of an operator's own only needs to write `$OUT`.
 pub const SCREENSHOT_COMMAND: &str = r#"CHROME="$(ls -d /ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell | head -1)" node -e "$ROLL_SHOT_JS""#;
 const SHOT_JS: &str = include_str!("shot.js");
+/// axe-core's WCAG rules for the screenshot's session (vendored, MPL-2.0): 640 KB, past what one
+/// environment variable may hold, so it goes in on the container's stdin.
+const AXE_JS: &str = include_str!("../vendor/axe-core/axe.min.js");
+
+/// `docker` with `input` on its stdin, written while its output is read.
+async fn docker_with_input(args: &[&str], input: &'static [u8]) -> anyhow::Result<String> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("docker")
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("docker's stdin"))?;
+    let feed = tokio::spawn(async move {
+        let _ = stdin.write_all(input).await;
+    });
+    let out = child.wait_with_output().await?;
+    let _ = feed.await;
+    anyhow::ensure!(out.status.success(), "docker {}: {}", args.first().unwrap_or(&""), String::from_utf8_lossy(&out.stderr).trim());
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
@@ -899,7 +922,7 @@ impl Runtime {
             code_preview::docker::docker(&["pull", "--quiet", &self.cfg.screenshot_image]).await?;
         }
         let shot = format!("roll-previews-shot-{}", name.trim_start_matches("roll-previews-"));
-        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), shot.clone(), "--network".into(), format!("container:{name}")];
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--name".into(), shot.clone(), "--network".into(), format!("container:{name}")];
         // Cleaned up with the runtime's own containers after a crash.
         args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL)]);
         if let Some(l) = code_preview::docker::home_label() {
@@ -909,7 +932,7 @@ impl Runtime {
         args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=256m".into()]);
         args.extend(code_preview::docker::limits(1024, 1.0));
         args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into(), "--env".into(), "HOME=/tmp".into()]);
-        args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}")]);
+        args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}"), "--env".into(), "AXE=/tmp/axe.js".into()]);
         let pages: Vec<&String> = opts.pages.iter().filter(|p| crate::settings::page_path_ok(p)).take(crate::settings::MAX_PAGES).collect();
         args.extend(["--env".into(), format!("PAGES={}", serde_json::to_string(&pages)?)]);
         let hide: Vec<&String> = opts.hide.iter().filter(|s| crate::settings::selector_ok(s)).take(crate::settings::MAX_HIDE).collect();
@@ -922,14 +945,14 @@ impl Runtime {
             "sh".into(),
             "-c".into(),
             format!(
-                "{} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
+                "cat > /tmp/axe.js; {} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
                  && echo && (cat /tmp/s.png.pages.json 2>/dev/null || true) && for n in 0 1 2 3 4; do echo; base64 -w0 /tmp/s.png.$n.png 2>/dev/null || true; done",
                 self.cfg.screenshot_command
             ),
         ]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let within = Duration::from_secs(90 + 12 * pages.len() as u64);
-        let out = match tokio::time::timeout(within, code_preview::docker::docker(&argv)).await {
+        let out = match tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes())).await {
             Ok(r) => r?,
             Err(_) => {
                 code_preview::docker::remove(&shot).await;

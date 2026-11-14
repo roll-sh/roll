@@ -334,14 +334,20 @@ fn a11y_line(a: &crate::model::PreviewPageA11y) -> String {
         .filter(|i| i.count > 0)
         .map(|i| {
             let what = match (i.kind.as_str(), i.count == 1) {
-                ("images", true) => "image without alt text",
-                ("images", false) => "images without alt text",
-                ("fields", true) => "form field without a label",
-                ("fields", false) => "form fields without a label",
-                ("buttons", true) => "button without a name",
-                ("buttons", false) => "buttons without a name",
-                ("links", true) => "link without a name",
-                (_, _) => "links without a name",
+                ("images", true) => "image without alt text".to_string(),
+                ("images", false) => "images without alt text".to_string(),
+                ("fields", true) => "form field without a label".to_string(),
+                ("fields", false) => "form fields without a label".to_string(),
+                ("buttons", true) => "button without a name".to_string(),
+                ("buttons", false) => "buttons without a name".to_string(),
+                ("links", true) => "link without a name".to_string(),
+                ("links", false) => "links without a name".to_string(),
+                // An axe-core rule: its id (checked: letters, digits and dashes) and impact only.
+                (rule, one) => {
+                    let rule: String = rule.chars().filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-').take(60).collect();
+                    let impact = i.impact.as_deref().filter(|x| ["minor", "moderate", "serious", "critical"].contains(x)).map(|x| format!(", {x}")).unwrap_or_default();
+                    format!("{} failing `{rule}`{impact}", if one { "element" } else { "elements" })
+                }
             };
             let first = i.first.as_deref().map(|t| t.replace('`', "").replace('\n', " ").chars().take(120).collect::<String>()).filter(|t| !t.trim().is_empty()).map(|t| format!(" (first: `{t}`)")).unwrap_or_default();
             format!("{} {what}{first}", i.count)
@@ -825,10 +831,15 @@ mod preview_tests {
         let h = |errors, failed| crate::model::PreviewPageHealth { errors, first_error: Some("TypeError: `x` is undefined".into()), failed, first_failed: Some("500 http://x/api".into()) };
         assert_eq!(health_line(&h(2, 1)), "**While its first page loaded:** 2 errors (first: `TypeError: x is undefined`); 1 failed request (first: `500 http://x/api`).\n\n");
         assert_eq!(health_line(&h(0, 0)), "Its first page loaded without errors.\n\n");
-        let issue = |kind: &str, count, first: &str| crate::model::PreviewA11yIssue { kind: kind.into(), count, first: Some(first.into()) };
+        let issue = |kind: &str, count, first: &str| crate::model::PreviewA11yIssue { kind: kind.into(), count, first: Some(first.into()), impact: None, help: None };
         let a = crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img src=`x`>"), issue("buttons", 1, "<button></button>")], lang: false, title: true };
         assert_eq!(a11y_line(&a), "**Accessibility:** 3 images without alt text (first: `<img src=x>`); 1 button without a name (first: `<button></button>`); no page language.\n\n");
         assert_eq!(a11y_line(&crate::model::PreviewPageA11y { issues: vec![], lang: true, title: true }), "No accessibility problems found on its first page.\n\n");
+        // An axe-core rule: its id and impact, never the words its page-side run reported.
+        let mut contrast = issue("color-contrast", 4, "<p>");
+        (contrast.impact, contrast.help) = (Some("serious".into()), Some("[click](javascript:x)".into()));
+        let ax = crate::model::PreviewPageA11y { issues: vec![contrast], lang: true, title: true };
+        assert_eq!(a11y_line(&ax), "**Accessibility:** 4 elements failing `color-contrast`, serious (first: `<p>`).\n\n");
         let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, lcp_ms: None, a11y_added: None, errors_added: None };
         assert_eq!(base_line(&b), "Against `mainx`, the page differs by 8.0%, at a phone's width the same.\n\n");
         // In the comment, one folded block whose summary is counts only.

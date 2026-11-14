@@ -323,9 +323,17 @@ pub struct PageA11y {
 
 #[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct A11yIssue {
+    /// One of the four kinds above, or an axe-core rule (`color-contrast`).
     pub kind: String,
     pub count: u32,
     pub first: Option<String>,
+    /// axe-core's: `minor`, `moderate`, `serious` or `critical`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impact: Option<String>,
+    /// axe-core's words for the rule (from the page's session: shown as text only, never in a
+    /// pull request comment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
 }
 
 impl PageA11y {
@@ -349,26 +357,50 @@ impl PageA11y {
             first: Option<String>,
         }
         #[derive(serde::Deserialize)]
-        struct Raw {
-            images: Kind,
-            fields: Kind,
-            buttons: Kind,
-            links: Kind,
-            lang: bool,
-            title: bool,
+        struct Rule {
+            kind: String,
+            count: u32,
+            first: Option<String>,
+            #[serde(default)]
+            impact: Option<String>,
+            #[serde(default)]
+            help: Option<String>,
+        }
+        // axe-core's violations by rule, else the session's own four kinds.
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Axe { issues: Vec<Rule>, lang: bool, title: bool },
+            Own { images: Kind, fields: Kind, buttons: Kind, links: Kind, lang: bool, title: bool },
         }
         #[derive(serde::Deserialize)]
         struct Report {
             a11y: Raw,
         }
         let r = serde_json::from_str::<Report>(json.trim()).ok()?.a11y;
-        let line = |s: Option<String>| s.map(|s| s.chars().map(|c| if c.is_control() { ' ' } else { c }).filter(|c| *c != '`').take(120).collect::<String>()).filter(|s| !s.trim().is_empty());
-        let issues = [("images", r.images), ("fields", r.fields), ("buttons", r.buttons), ("links", r.links)]
-            .into_iter()
-            .filter(|(_, k)| k.count > 0)
-            .map(|(kind, k)| A11yIssue { kind: kind.into(), count: k.count.min(10_000), first: line(k.first) })
-            .collect();
-        Some(PageA11y { issues, lang: r.lang, title: r.title })
+        // The page's session wrote all of it: one printable line each, bounded.
+        let text = |s: Option<String>, n: usize| s.map(|s| s.chars().map(|c| if c.is_control() { ' ' } else { c }).filter(|c| *c != '`').take(n).collect::<String>()).filter(|s| !s.trim().is_empty());
+        let rule_id = |k: &str| (!k.is_empty() && k.len() <= 60 && k.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')).then(|| k.to_string());
+        let impact = |i: Option<String>| i.filter(|i| ["minor", "moderate", "serious", "critical"].contains(&i.as_str()));
+        match r {
+            Raw::Axe { issues, lang, title } => {
+                let issues = issues
+                    .into_iter()
+                    .filter(|r| r.count > 0)
+                    .filter_map(|r| Some(A11yIssue { kind: rule_id(&r.kind)?, count: r.count.min(10_000), first: text(r.first, 120), impact: impact(r.impact), help: text(r.help, 200) }))
+                    .take(50)
+                    .collect();
+                Some(PageA11y { issues, lang, title })
+            }
+            Raw::Own { images, fields, buttons, links, lang, title } => {
+                let issues = [("images", images), ("fields", fields), ("buttons", buttons), ("links", links)]
+                    .into_iter()
+                    .filter(|(_, k)| k.count > 0)
+                    .map(|(kind, k)| A11yIssue { kind: kind.into(), count: k.count.min(10_000), first: text(k.first, 120), impact: None, help: None })
+                    .collect();
+                Some(PageA11y { issues, lang, title })
+            }
+        }
     }
 }
 
@@ -709,9 +741,13 @@ mod tests {
         assert_eq!(a.issues[1].first.as_deref(), Some("<button> </button>"));
         assert!(!a.lang && a.title);
         // Against main's page: only what this one added (more images, the language lost).
-        let main = PageA11y { issues: vec![A11yIssue { kind: "images".into(), count: 2, first: None }], lang: true, title: true };
+        let main = PageA11y { issues: vec![A11yIssue { kind: "images".into(), count: 2, first: None, impact: None, help: None }], lang: true, title: true };
         assert_eq!((a.problems(), a.added_since(&main)), (5, 3));
         assert_eq!(main.added_since(&a), 0);
+        // axe-core's rules: ids and impacts as axe names them, anything else from the page dropped.
+        let x = PageA11y::parse(r#"{"a11y":{"issues":[{"kind":"color-contrast","count":4,"first":"<p class=\"x\">","impact":"serious","help":"Elements must meet minimum color contrast ratio thresholds"},{"kind":"](javascript:x)","count":1,"first":null},{"kind":"region","count":2,"first":null,"impact":"<b>"}],"lang":true,"title":true}}"#).unwrap();
+        assert_eq!(x.issues.iter().map(|i| (i.kind.as_str(), i.count, i.impact.as_deref())).collect::<Vec<_>>(), [("color-contrast", 4, Some("serious")), ("region", 2, None)]);
+        assert_eq!(x.problems(), 6);
         let health = |errors, failed| PageHealth { errors, first_error: None, failed, first_failed: None };
         assert_eq!((health(3, 1).added_since(&health(2, 4)), health(0, 0).added_since(&health(5, 5))), (1, 0));
         assert_eq!(PageSpeed::parse(""), None);

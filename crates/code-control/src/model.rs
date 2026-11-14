@@ -422,9 +422,17 @@ pub struct PreviewPageA11y {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PreviewA11yIssue {
+    /// `images`, `fields`, `buttons`, `links`, or an axe-core rule id (`color-contrast`).
     pub kind: String,
     pub count: u32,
     pub first: Option<String>,
+    /// axe-core's impact: `minor`, `moderate`, `serious` or `critical`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impact: Option<String>,
+    /// axe-core's words for the rule: untrusted (the page's session), shown as text, never in a
+    /// comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

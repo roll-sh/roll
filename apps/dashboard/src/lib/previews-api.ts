@@ -119,7 +119,7 @@ export interface Preview {
   /** What went wrong while that page loaded (the page's own words: shown as text only). */
   page_health?: { errors: number; first_error: string | null; failed: number; first_failed: string | null } | null;
   /** What a screen reader can't name on that page (`first`: its markup, shown as text only). */
-  page_a11y?: { issues: { kind: "images" | "fields" | "buttons" | "links"; count: number; first: string | null }[]; lang: boolean; title: boolean } | null;
+  page_a11y?: { issues: A11yIssue[]; lang: boolean; title: boolean } | null;
   /** Earlier pushes of the change's services, still reachable on the same data (newest first). */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number }[];
   /** When its screenshot was taken (`screenshot` below), if it has one. */
@@ -190,10 +190,25 @@ export interface PageSpeed {
 }
 
 /** A preview page's accessibility problems in words ("3 images without alt text", "no title"). */
-export function a11yWords(a: NonNullable<Preview["page_a11y"]>): string[] {
-  const what = { images: "without alt text", fields: "without a label", buttons: "without a name", links: "without a name" } as const;
-  const noun = { images: ["image", "images"], fields: ["form field", "form fields"], buttons: ["button", "buttons"], links: ["link", "links"] } as const;
-  const words = a.issues.filter((i) => i.count > 0).map((i) => `${i.count} ${noun[i.kind][i.count === 1 ? 0 : 1]} ${what[i.kind]}`);
+/** One kind of accessibility problem: one of the session's own four, or an axe-core rule (`color-contrast`, with its impact and words). */
+export interface A11yIssue {
+  kind: string;
+  count: number;
+  first: string | null;
+  impact?: "minor" | "moderate" | "serious" | "critical" | null;
+  help?: string | null;
+}
+
+export function a11yWords(a: { issues: A11yIssue[]; lang: boolean; title: boolean }): string[] {
+  const what: Record<string, string> = { images: "without alt text", fields: "without a label", buttons: "without a name", links: "without a name" };
+  const noun: Record<string, [string, string]> = { images: ["image", "images"], fields: ["form field", "form fields"], buttons: ["button", "buttons"], links: ["link", "links"] };
+  const words = a.issues
+    .filter((i) => i.count > 0)
+    .map((i) =>
+      noun[i.kind]
+        ? `${i.count} ${noun[i.kind][i.count === 1 ? 0 : 1]} ${what[i.kind]}`
+        : `${i.count} ${i.count === 1 ? "element" : "elements"} failing ${i.help ? `“${i.help}”` : i.kind}${i.impact ? ` (${i.impact})` : ""}`,
+    );
   if (!a.lang) words.push("no page language");
   if (!a.title) words.push("no title");
   return words;

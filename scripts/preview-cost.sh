@@ -456,8 +456,9 @@ for _ in $(seq 1 120); do
 done
 case "$HEALTH" in *boom*) ;; *) echo "the page's console.error should be caught: $(api GET "/v1/previews/$PV" | jq_ "d.get('page_health')")"; exit 1;; esac
 # The test page has no language and no title: the screenshot's browser says so.
-A11Y=$(api GET "/v1/previews/$PV" | jq_ "('lang %s, title %s, %d issue kinds' % (d['page_a11y']['lang'], d['page_a11y']['title'], len(d['page_a11y']['issues']))) if d.get('page_a11y') else ''")
-[ "$A11Y" = "lang False, title False, 0 issue kinds" ] || { echo "the page's accessibility should be checked (no lang, no title): $A11Y"; exit 1; }
+# By axe-core's rules (a bare text page breaks its landmark ones), with no lang and no title.
+A11Y=$(api GET "/v1/previews/$PV" | jq_ "('lang %s, title %s, axe %s: %s' % (d['page_a11y']['lang'], d['page_a11y']['title'], any(i.get('impact') for i in d['page_a11y']['issues']), ' '.join(sorted(i['kind'] for i in d['page_a11y']['issues'])))) if d.get('page_a11y') else ''")
+case "$A11Y" in "lang False, title False, axe True: "?*) ;; *) echo "the page's accessibility should be checked by axe-core (no lang, no title): $A11Y"; exit 1;; esac
 [ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?previous=1")" = image/png ] || { echo "the screenshot before should be there"; exit 1; }
 # And at a phone's width, with its own change.
 [ "$(api GET "/v1/previews/$PV" | jq_ "d.get('phone_screenshot')")" = True ] || { echo "a phone-width screenshot should be taken too"; exit 1; }

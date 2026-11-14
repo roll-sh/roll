@@ -100,6 +100,33 @@ const A11Y = `JSON.stringify((() => {
   const links = [...document.querySelectorAll("a[href]")].filter((a) => !named(a) && !text(a));
   return { images: out(images), fields: out(fields), buttons: out(buttons), links: out(links), lang: !!document.documentElement.getAttribute("lang"), title: !!document.title.trim() };
 })())`;
+// axe-core's WCAG rules (vendor/axe-core, handed to the container in $AXE), when it's there:
+// the violations by rule (a language and a title are read as above, so not twice), else the
+// checks above. The page can't stop it loading (DevTools evaluation is outside its CSP).
+const AXE_SRC = (() => {
+  try {
+    return process.env.AXE ? fs.readFileSync(process.env.AXE, "utf8") : "";
+  } catch {
+    return "";
+  }
+})();
+const AXE_RUN = `axe.run(document, { resultTypes: ["violations"] }).then((r) => JSON.stringify({
+  issues: r.violations.filter((v) => v.id !== "html-has-lang" && v.id !== "document-title").slice(0, 50).map((v) => ({
+    kind: v.id, count: v.nodes.length, first: v.nodes[0] ? String(v.nodes[0].html).slice(0, 120) : null, impact: v.impact || null, help: String(v.help || "").slice(0, 200),
+  })),
+  lang: !!document.documentElement.getAttribute("lang"), title: !!document.title.trim(),
+}))`;
+const axeReport = async (sessionId) => {
+  if (!AXE_SRC) return null;
+  const loaded = await send("Runtime.evaluate", { expression: AXE_SRC + "\n;typeof axe === 'object'", returnByValue: true }, sessionId).catch(() => null);
+  if (loaded?.result?.value !== true) return null;
+  const ran = await Promise.race([send("Runtime.evaluate", { expression: AXE_RUN, awaitPromise: true, returnByValue: true }, sessionId).catch(() => null), sleep(20000).then(() => null)]);
+  try {
+    return JSON.parse(ran?.result?.value || "null");
+  } catch {
+    return null;
+  }
+};
 // Before each capture: animations, transitions and the caret stopped, videos paused, and the
 // project's $HIDE selectors blanked (their box kept), so only real changes count.
 const HIDE = (() => {
@@ -142,10 +169,13 @@ const still = async (sessionId) => {
   } catch {}
   report.errors = errors;
   report.failed = failed;
-  const a11y = await send("Runtime.evaluate", { expression: A11Y, returnByValue: true }, sessionId).catch(() => null);
-  try {
-    report.a11y = JSON.parse(a11y?.result?.value || "null");
-  } catch {}
+  report.a11y = await axeReport(sessionId);
+  if (!report.a11y) {
+    const a11y = await send("Runtime.evaluate", { expression: A11Y, returnByValue: true }, sessionId).catch(() => null);
+    try {
+      report.a11y = JSON.parse(a11y?.result?.value || "null");
+    } catch {}
+  }
   fs.writeFileSync(process.env.OUT + ".json", JSON.stringify(report));
   // The same page at a phone's width (390 × 844, at twice the density), to $OUT.phone.png. Best
   // effort: the desktop one is kept whatever happens here.

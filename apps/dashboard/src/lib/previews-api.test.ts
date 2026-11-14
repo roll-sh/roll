@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { parseSse, previewsApi, unmaskedNote } from "./previews-api";
+import { a11yWords, parseSse, previewsApi, unmaskedNote } from "./previews-api";
 import { ROLL_API } from "./roll-api";
 
 /** A fetch that answers from a table (`METHOD /path?query`) and records what it was asked. */
@@ -95,5 +95,20 @@ describe("unmaskedNote", () => {
     expect(unmaskedNote("redis", "branch", 0)).toMatch(/can't be masked.*seed/);
     expect(unmaskedNote("stream", "branch", 0)).toMatch(/Schema only/);
     for (const [kind, mode] of [["stream", "schema"], ["bucket", "skip"], ["queue", "branch"], ["repo", "branch"]] as const) expect(unmaskedNote(kind, mode, 0)).toBeNull();
+  });
+});
+
+describe("a11yWords", () => {
+  it("says the session's own kinds and axe-core's rules in words", () => {
+    const words = a11yWords({
+      issues: [
+        { kind: "images", count: 2, first: null },
+        { kind: "color-contrast", count: 1, first: "<p>", impact: "serious", help: "Elements must meet minimum color contrast ratio thresholds" },
+        { kind: "region", count: 3, first: null },
+      ],
+      lang: false,
+      title: true,
+    });
+    expect(words).toEqual(["2 images without alt text", "1 element failing “Elements must meet minimum color contrast ratio thresholds” (serious)", "3 elements failing region", "no page language"]);
   });
 });
