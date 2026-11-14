@@ -555,6 +555,113 @@ only the host is shown. An answer is read once, never logged, and never part of 
 a key still links to can't be deleted, nor one with a retired credential still waiting out its
 grace period (its revocation goes through the rotator).
 
+### Databases outside roll
+
+A Postgres or MySQL server roll doesn't run (Amazon RDS, Supabase, Neon, PlanetScale, a server of the customer's own)
+has its logins rotated by roll itself, with no rotator to write, as Infisical's secret rotation
+does, and issues a login per lease, as Vault's database engine does. A project registers it
+(`POST …/outside-databases {name, url, roles?, group?, ca?}`, `admin`; `roll secrets databases add
+NAME --role a --role b --group g`, the URL on stdin): `url` is an admin connection
+(`postgres://admin:…@host:5432/db`, `mysql://admin:…@host:3306/db`,
+`sqlserver://admin:…@host:1433/db`, `clickhouse://admin:…@host:8443/db` or
+`rabbitmq://admin:…@host:15671/vhost`, a user that may alter both
+roles and create roles in the group), sealed with the project's data key like a rotator's (only `host:port` is shown); `roles` are
+two login roles that take turns (managed links); `group` is a role whose grants dynamic logins get;
+one or both. `ca` is the server's CA certificates (PEM) when the system's don't cover it (RDS).
+Registering connects once and checks the roles exist (and can log in).
+
+It's the link kind `outside_database` with fields `username` and `password`, one credential
+(`login`), `managed` or `dynamic`.
+
+**Managed** (two roles taking turns): each issue (linking, every `rotate_days`, `…/rotate`) gives the role not
+handed out last a new 40-character password and hands it out, so the role in use keeps working
+until its grace period ends; then its password is replaced by one nobody knows. Each role's
+generation is kept with the database and carried in the credential's handle, so a retirement that
+ends after the same role was handed out again does nothing. An issue never takes a busy role: the
+one a stored credential uses, one an unrevoked lease still covers (the previous login in its
+grace), or one another issue or retirement is changing (each holds its role for two minutes at
+most), all worked out in the write that claims it. So two rotations racing (two nodes' sweepers, a
+person and the schedule) can't reset the login in use; rotating again within the grace period is
+a 409 until it ends. A rotation the server refuses changes nothing, and a role whose handout is
+retired (its grace ended, or the write that issued it failed) is free again.
+The two roles serve one credential, so a database is linked in one environment only (409 elsewhere;
+a link provider says so with `exclusive()`): give staging and production a pair of roles each.
+
+**Dynamic** (a login per lease): each resolve creates `roll_<random>` with `CREATE ROLE … LOGIN
+PASSWORD <verifier> VALID UNTIL <lease end + 5 min> IN ROLE <group>`, so it has the group's grants
+and the server refuses it after the lease even if roll is down; the username and password keys share
+it. Renewing the lease moves `VALID UNTIL`. Ending it (expiry, `DELETE …/leases/{id}`) ends the
+login's sessions where the admin may (`pg_signal_backend`) and drops the role; a role that owns
+something the app made (a table) is kept, unable to log in (`NOLOGIN`, `VALID UNTIL '-infinity'`), for
+the customer to reassign. Dynamic links work in any number of environments.
+
+rolld connects the way it fetches anything a tenant chose: it resolves the host itself, refuses a
+private address (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE` allows them for local development), and connects
+to the address it checked. The URL may set `sslmode` and little else (no socket paths, several
+hosts or `sslrootcert` files); TLS is required (`prefer` is treated as `require`, certificates are
+verified) and `sslmode=disable` works only where private addresses do. The new password goes as a
+SCRAM-SHA-256 verifier (`ALTER ROLE … PASSWORD 'SCRAM-SHA-256$4096:…'`), so neither the connection
+nor the server's statement log ever holds it. One project can't register the same role on one host
+twice (the two would undo each other's passwords), and a database a key links to, or with a
+retired password still to replace, can't be deleted.
+
+**MySQL** works the same way through the same guards (`mysql://…`; the URL may set `ssl-mode` and
+nothing else; TLS verified against the URL's host, never a socket). Accounts are `'<name>'@'%'`:
+rotation is `ALTER USER … IDENTIFIED BY` (the password in the statement, over TLS; MySQL rewrites it
+out of its logs), and a dynamic login is `CREATE USER`, `GRANT <group>` and `SET DEFAULT ROLE
+<group>`. MySQL has no `VALID UNTIL`, so a dynamic login lasts until roll ends its lease (renewing
+changes nothing on the server); ending it kills its sessions where the admin may
+(`CONNECTION_ADMIN`) and drops the account.
+
+**ClickHouse** too, over its HTTPS interface (`clickhouse://admin:…@host:8443/db`, ClickHouse
+Cloud's port; no settings): rolld pins the address it checked, verifies the certificate against
+the URL's host (the system's roots and `ca`), follows no redirect and uses no proxy, and reads at
+most 64 KiB of an answer. Values go as query parameters (`{n:String}`), never into SQL. Passwords
+go as `IDENTIFIED WITH sha256_hash`, so the server never sees one (its query log holds the hash):
+rotation is `ALTER USER` on two users that take turns; a dynamic login is `CREATE USER`, `GRANT
+<group>` and `DEFAULT ROLE <group>` (the group is a role); ending it drops the user, then stops
+what it's still running (`KILL QUERY`). ClickHouse has no expiry for a user, so a dynamic login lasts until
+roll ends its lease. Users made over SQL need the admin's `access_management`; on a self-managed
+cluster, keep users in replicated access storage. Checked against ClickHouse 25.8: rotation (the old
+password refused, the new one taken), a dynamic login that signs in with the role and can't once
+dropped, an untrusted certificate and a wrong admin password refused, and no password in the
+server's query log.
+
+**RabbitMQ** too, as Vault's and Infisical's RabbitMQ engines, through its management HTTPS API
+(`rabbitmq://admin:…@host:15671/vhost`; no vhost is `/`; no settings), with the same guards as
+ClickHouse (the checked address pinned, the certificate verified, no redirects or proxy, answers
+read up to 256 KiB). The admin needs the `administrator` tag (checked at registration, with the
+vhost and the users). Passwords go as RabbitMQ's own salted SHA-256 (`password_hash`), so the
+broker never sees one. Rotation sets a new password on two users that take turns, keeping their
+tags; `group` names a template user whose permissions and topic permissions on the vhost a
+dynamic user copies (no tags), all of them or none: an exchange without a topic permission is open
+to every routing key, so a template with more than 100 is refused rather than copied in part, and
+a grant that fails undoes the user. RabbitMQ has no expiry for a user: ending a lease deletes it, then
+closes its connections where the broker has that route (3.11 and later). Checked against RabbitMQ
+4: rotation (tags kept, the old password refused), a dynamic user with the template's permissions
+that's gone once dropped, and an untrusted certificate, a wrong password and a user without the
+administrator tag refused.
+
+**SQL Server** (and Azure SQL Managed Instance) too, as Vault's MSSQL engine (`sqlserver://…`; the
+URL may set `encrypt=true` and nothing else). Everything is encrypted and the certificate verified
+against the URL's host (TDS 7.4 with `Encrypt=Required`; nothing in plain text, even where private
+addresses are allowed; TDS 8 `strict` isn't offered: SQL Server 2022 on Linux refused it in testing),
+and a redirect to another server (Azure's gateway) is refused, since roll connects only to the
+address it checked. Rotation is `ALTER LOGIN [name] WITH PASSWORD` on two SQL logins that take
+turns; a dynamic login is `CREATE LOGIN`, then `CREATE USER … FOR LOGIN` and `ALTER ROLE <group> ADD
+MEMBER` in the URL's database (the group is a database role). It has no `VALID UNTIL` either:
+ending a lease disables the login first (that works while it's connected, so nothing can log in
+with it even if a lingering session makes the drop fail and the sweeper retries), kills its
+sessions, then drops the user and the login. Registering checks the admin login's server
+permissions: `ALTER ANY LOGIN`, and for dynamic logins `VIEW SERVER STATE` and `ALTER ANY
+CONNECTION`. roll's passwords mix upper- and lowercase letters and digits, which SQL Server's
+password policy requires (a lowercase-and-digits one is refused, as checked live). A conversation reads at most 4 MiB from the server, on top of the
+driver's own bounds. Checked against SQL Server 2022 in Docker with a certificate from a private CA:
+rotation (the rotated login signs in), a dynamic login that signs in with the group's rights and
+can't once dropped, and an untrusted certificate refused. With TLS 1.3 enabled on the server as
+well (`tlsprotocols = 1.2,1.3`), SQL Server 2022 on Linux refused TDS 7.4 logins, Microsoft's own
+`sqlcmd` included: such a server needs TLS 1.2 allowed.
+
 ## Consumption
 
 ### `roll secrets` and `roll run`
@@ -583,6 +690,7 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
+roll secrets databases ls | add NAME [--role A --role B] [--group G] [--ca FILE] (admin URL on stdin) | rm ID
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -1419,6 +1527,9 @@ isn't in the workspace is 404.
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
+| `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
+| `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
 
