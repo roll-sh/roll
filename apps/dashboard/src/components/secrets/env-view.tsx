@@ -1,9 +1,10 @@
-import { Clock, Dices, Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, Trash2, Upload, User } from "lucide-react";
+import { Clock, Copy, Dices, Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, Trash2, Upload, User } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
 import { canRotate, needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Import, type KeyInsight, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
 import { generateValue } from "@/lib/secrets-generate";
 import { childPath, folderName } from "@/lib/secrets-grid";
+import { rollRef } from "@/lib/secrets-ref";
 import { misfit } from "@/lib/secrets-required";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../agents/ui/menu";
 import { Segmented } from "../agents/ui/toggle-group";
@@ -349,6 +350,7 @@ export function EnvView({ env }: { env: Environment }) {
                     onWrite={write}
                     onHistory={() => setDrawer({ kind: "versions", key: s.key, type: s.type })}
                     onShare={() => setSharing({ kind: "secret", env: env.slug, key: s.key, path })}
+                    onCopied={(text) => setNote({ text, warnings: [] })}
                     onSource={(src) => (src.kind === "import" ? setImportsOpen({ highlight: { ...(src.project && { project: src.project }), environment: src.environment, path: src.path } }) : go({ env: src.environment, path: p, key: s.key }))}
                   />
                 ))}
@@ -493,6 +495,7 @@ function SecretRow({
   onHistory,
   onShare,
   onSource,
+  onCopied,
 }: {
   env: Environment;
   secret: Secret;
@@ -509,6 +512,8 @@ function SecretRow({
   onHistory: () => void;
   onShare: () => void;
   onSource: (source: Exclude<Secret["source"], { kind: "own" }>) => void;
+  /** Says what was copied. */
+  onCopied: (text: string) => void;
 }) {
   const { api, project, resourceName } = useSecrets();
   const [editing, setEditing] = useState<null | EditMode>(null);
@@ -635,6 +640,21 @@ function SecretRow({
                   {!own && (
                     <MenuItem onClick={() => setEditing("own")}>
                       <Pencil className="size-3.5" /> Set here (own value)
+                    </MenuItem>
+                  )}
+                  {!personal && rollRef(env.slug, path, s.key) && (
+                    <MenuItem
+                      onClick={() => {
+                        const ref = rollRef(env.slug, path, s.key) ?? "";
+                        // No clipboard on a page that isn't https: then the note shows it to copy.
+                        const copy = navigator.clipboard?.writeText(ref) ?? Promise.reject(new Error("no clipboard"));
+                        copy.then(
+                          () => onCopied(`Copied ${ref}: in an env file, roll run --env-file reads it`),
+                          () => onCopied(`${ref}: in an env file, roll run --env-file reads it`),
+                        );
+                      }}
+                    >
+                      <Copy className="size-3.5" /> Copy reference
                     </MenuItem>
                   )}
                   {s.link?.mode !== "dynamic" && (

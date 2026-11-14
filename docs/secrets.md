@@ -583,7 +583,7 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
-roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
+roll run [-p project] [-e production] [--path /] [--env-file .env]… [--allow-unresolved] [--watch] -- <command…>
 ```
 
 - The project is `-p`/`ROLL_PROJECT` (a name or id), the environment `-e`/`ROLL_ENV`, the path
@@ -603,8 +603,13 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
   SIGKILL after 10 s) when the environment changes. It polls `…/digest`, a hash of the folder's
   effective keys, versions, fingerprints and links, and of what their references reach (in this
   environment or another), that decrypts nothing, issues nothing and isn't audited
-  (`Secrets::digest` in process). A change that doesn't resolve keeps the running command. A live
-  link's resource rotating doesn't change the digest.
+  (`Secrets::digest` in process). It compares from the digest each `…/values?digest=1` answer
+  carries, which the server takes just before that read (asked for, since it costs about as much
+  as the read): a write that lands while the command's values are
+  being read (or re-read, or newly referenced) is still a change, never folded into what it
+  compares against. The message names the folders that moved (`production:/ changed`). A change
+  that doesn't resolve keeps the running command. A live link's resource rotating doesn't change
+  the digest.
 - `roll secrets edit` opens the folder's own keys as a `.env` in `$EDITOR` (a 0600 file under
   `$XDG_RUNTIME_DIR` when there is one, removed after) and applies what changed as one change
   (`import` with `replace`: a removed line deletes its key; linked and personal keys aren't in the
@@ -848,6 +853,35 @@ as a warning, by name. Disaster recovery, and moving a project between roll serv
 included, by name only: it reads no value, so `read` is enough. It lists each `missing` key and each
 `extra` one, and fails when one is missing (with `--strict`, also when there's an extra), so a CI
 step catches a variable the code started reading before an environment has it.
+
+### References in files
+
+As 1Password's `op://`: a file committed to the repository holds `roll://` references where values
+would go, so it carries the shape of the configuration and no value.
+
+- `roll://ENV/KEY` is a key in this project's environment, `roll://ENV/folder/sub/KEY` one in a
+  folder, `roll://PROJECT@ENV/KEY` one in another project (its name, or its `prj_…` id with a
+  scoped token; a name that more than one project has, under different owners, is refused: give
+  the id). Segments are letters, digits, `-`, `_` and `.` (never `.` or `..`).
+- In the dashboard, a key's menu has **Copy reference**: the reference to the folder it's shown
+  in, so it resolves to what that folder reads (its own value, an import, an inherited one). On a
+  page that isn't https the browser has no clipboard, and the note shows the reference to copy.
+  (The desktop app's deep links also start `roll://`, as `roll://agents/thread/…`; the two never
+  meet: references are read from files and templates, deep links from the OS.)
+- `roll run --env-file .env` (repeatable) adds a dotenv file's entries to the environment's:
+  plain values as written, references resolved, and the file's entries win over the environment's
+  (the shell's own variables still win over both unless `--override`). A file such as
+  `DB_URL=roll://production/DATABASE_URL` and `PORT=8080` runs with production's value and 8080.
+- `roll secrets render` resolves references in a template where they stand (a reference runs to
+  the first space, quote, bracket or comma) and fills `${KEY}` around them; neither kind of value is
+  read again as a template.
+- Each environment and folder is one read through the same audited `values` route, under the
+  caller's own access: a reference to an environment the token can't read fails, naming it, and so
+  does one to a key that isn't set or doesn't resolve. Nothing new runs on the server.
+- `roll run --watch` and `roll secrets render --watch` follow every environment a file references
+  too (their digests), and renew each dynamic credential's lease at its own project.
+- A dotenv file is one `KEY=value` per line (quoted values on one line; a quote that runs past its
+  line is refused), and its errors name the line, never its text.
 
 ### Templates
 
@@ -1400,7 +1434,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
-| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&name=&namespace=&seq=&at=` | | `Values` (with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
+| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&digest=&name=&namespace=&seq=&at=` | | `Values` (with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked}` |
@@ -1501,7 +1535,7 @@ type Change = { seq: number; environment: string; path: string; message: string;
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
 // what: added | changed | deleted | comment | tags | link | rotated
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; digest?: string }; // digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */ };

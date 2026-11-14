@@ -83,6 +83,17 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let out = ok(&api, &[("PORT", "6000")], &["run", "-p", "shop", "-e", "production", "--", "sh", "-c", "echo $DATABASE_URL $PORT"], None).await;
     assert_eq!(out.trim(), "postgres://app:s3cret@db.internal:5432/shop 6000");
 
+    // An env file committed with references and no value: `roll://ENV/KEY` resolved at run time,
+    // plain values as written, and the file's entries win over the environment's.
+    let files = tempfile::tempdir().unwrap();
+    let env_file = files.path().join(".env");
+    std::fs::write(&env_file, "# app\nPORT=7000\nDB=roll://production/DATABASE_URL\nOTHER=roll://shop@production/HOST\n").unwrap();
+    let out = ok(&api, &[], &["run", "-p", "shop", "-e", "production", "--env-file", env_file.to_str().unwrap(), "--", "sh", "-c", "echo $DB $OTHER $PORT"], None).await;
+    assert_eq!(out.trim(), "postgres://app:s3cret@db.internal:5432/shop db.internal 7000");
+    std::fs::write(&env_file, "MISSING=roll://production/NOPE\n").unwrap();
+    let refused = roll(&api, &[], &["run", "-p", "shop", "-e", "production", "--env-file", env_file.to_str().unwrap(), "--", "true"], None).await;
+    assert!(refused.code != Some(0) && refused.stderr.contains("roll://production/NOPE"), "{}", refused.stderr);
+
     // A scoped token implies its project and reaches only its environments.
     let token = ok(&api, &[], &["secrets", "-p", "shop", "tokens", "create", "ci", "--for-env", "production"], None).await;
     let t = [("ROLL_TOKEN", token.trim())];
@@ -119,6 +130,9 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let tpl = "url: http://${HOST}:${PORT}\nliteral: \\${HOST} ${HOME:-x} $PORT\n";
     let filled = ok(&api, &[], &[&at[..], &["render", "-"]].concat(), Some(tpl)).await;
     assert_eq!(filled, "url: http://db.internal:5432\nliteral: ${HOST} ${HOME:-x} $PORT\n");
+    // References stand where they are; neither kind of value is read again as a template.
+    let mixed = ok(&api, &[], &[&at[..], &["render", "-"]].concat(), Some("host: ${HOST}\nurl: \"roll://production/DATABASE_URL\"\n")).await;
+    assert_eq!(mixed, "host: db.internal\nurl: \"postgres://app:s3cret@db.internal:5432/shop\"\n");
     let unset = roll(&api, &[], &[&at[..], &["render", "-"]].concat(), Some("${HOST} ${MISSING}")).await;
     assert!(unset.code != Some(0) && unset.stderr.contains("MISSING isn't set") && !unset.stdout.contains("db.internal"), "{}", unset.stderr);
 
