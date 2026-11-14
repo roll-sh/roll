@@ -771,10 +771,12 @@ impl Store {
     }
 
     /// Whether `secret` is a token's old one a rotation left working for a while (only those carry
-    /// an end; OAuth access tokens are their own kind).
+    /// an end: OAuth access tokens are their own kind, and a workload's token ends with its grant).
     pub fn in_grace(&self, secret: &str) -> Result<bool> {
         let h = hash(secret);
-        let end: Option<Option<i64>> = self.db.read(|c| c.query_row("SELECT expires_at FROM grant_secrets WHERE hash = ? AND kind = 'token'", [&h], |r| r.get(0)).optional())?;
+        let end: Option<Option<i64>> = self.db.read(|c| {
+            c.query_row("SELECT s.expires_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id WHERE s.hash = ? AND s.kind = 'token' AND g.kind <> 'workload'", [&h], |r| r.get(0)).optional()
+        })?;
         Ok(end.flatten().is_some())
     }
 
