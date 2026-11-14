@@ -564,6 +564,11 @@ every deployment is immutable with instant rollback.
   one needs what reading them would (a token's `reveal` on that service); once set, the value is
   part of this service's own (its reveal shows it, as with a link). The listing shows the
   template (names, never a value), and the dashboard edits that, not what it resolves to.
+- The variables panel edits one at a time, stages a pasted `.env` for review, copies another
+  environment's (as a reveal there), or edits them all as one `.env` text (Railway's raw editor:
+  `toEnv` writes what `parseEnv` reads back exactly, quotes and line breaks included; saved as
+  the difference, a line removed is unset; links, secrets, roll's own and sealed ones aren't in
+  it).
 - Sealed variables (Railway's): `PATCH …/variables {seal: [names]}` (`roll apps vars --seal
   NAME`, the lock on a row) seals one of the environment's own variables for good. The app's
   builds and instances get it as before; nothing shows it again: `…/variables/values` leaves it

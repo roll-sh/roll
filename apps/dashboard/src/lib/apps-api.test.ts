@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deployChange, describePending, formatFirewall, parseEnv, parseFirewall, stepDurations, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
+import { deployChange, describePending, formatFirewall, parseEnv, parseFirewall, stepDurations, toEnv, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
 import { service } from "./workspace-resources";
 
 const svc = (env: Partial<EnvironmentSummary>, id = "svc_a"): Service => ({
@@ -57,6 +57,12 @@ describe("pasted .env text", () => {
     const { vars, errors } = parseEnv('# db\nexport DATABASE_URL=postgres://x?a=b\n\nNAME="a \\"b\\"\\nc"\nRAW=\'$HOME\'\n1BAD=x\nno equals\n');
     expect(vars).toEqual({ DATABASE_URL: "postgres://x?a=b", NAME: 'a "b"\nc', RAW: "$HOME" });
     expect(errors).toEqual([6, 7]);
+  });
+
+  it("writes variables as text that reads back exactly (the raw editor)", () => {
+    const vars = { URL: "postgres://u:p@h:5432/db?ssl=true", SPACED: " a b ", QUOTE: `it's "x"`, PEM: "-----BEGIN-----\nabc\\n\t\r\n-----END-----", EMPTY: "", HASH: "a #b", DOLLAR: "$HOME" };
+    expect(parseEnv(toEnv(vars))).toEqual({ vars, errors: [] });
+    expect(toEnv({ A: "plain", B: "two words" })).toBe("A=plain\nB='two words'\n");
   });
 });
 

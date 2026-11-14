@@ -1,6 +1,6 @@
-import { ClipboardPaste, Copy, Eye, EyeOff, Link2, Lock, LockOpen, Plus, Rocket, Trash2, Undo2 } from "lucide-react";
+import { ClipboardPaste, Copy, Eye, EyeOff, FileText, Link2, Lock, LockOpen, Plus, Rocket, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { appsApi, describePending, parseEnv, VARIABLE_NAME, type Environment, type Link, type LinkKind, type VariableSource, type Variables } from "@/lib/apps-api";
+import { appsApi, describePending, parseEnv, toEnv, VARIABLE_NAME, type Environment, type Link, type LinkKind, type VariableSource, type Variables } from "@/lib/apps-api";
 import { KIND_LABEL, resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { btn, input, panel, primary } from "../ui";
@@ -62,6 +62,10 @@ export function VariablesTab({
     };
   }, [service, env.name, env.needs_deploy, env.active?.id, vars]);
   const parsed = useMemo(() => parseEnv(pasted), [pasted]);
+  // Railway's raw editor: the environment's own variables as one `.env` text, saved as the
+  // difference (a line gone is unset). Sealed ones aren't in it and stay.
+  const [raw, setRaw] = useState<{ base: Record<string, string>; text: string } | null>(null);
+  const rawParsed = useMemo(() => (raw ? parseEnv(raw.text) : null), [raw]);
 
   /** Stage `set` for review: an existing service variable becomes an edit, a new name a row. */
   const stage = (set: Record<string, string>) => {
@@ -91,6 +95,26 @@ export function VariablesTab({
     setAdded([]);
     void load();
   }, [load]);
+
+  const editRaw = async () => {
+    if (raw) return setRaw(null);
+    const own = (vars?.vars ?? []).filter((v) => (v.source === "service" || v.source === "reference") && !v.sealed);
+    const v = own.some((x) => !x.reference) ? await runner.run("reveal", () => appsApi.reveal(service, env.name)) : {};
+    if (!v) return;
+    const base = Object.fromEntries(own.map((x) => [x.name, x.reference ?? v[x.name] ?? ""]));
+    setRaw({ base, text: toEnv(base) });
+  };
+  const saveRaw = async () => {
+    if (!raw || !rawParsed || rawParsed.errors.length) return;
+    const set = Object.fromEntries(Object.entries(rawParsed.vars).filter(([k, v]) => raw.base[k] !== v));
+    const unset = Object.keys(raw.base).filter((k) => !(k in rawParsed.vars));
+    const out = await runner.run("variables", () => appsApi.setVariables(service, env.name, { set, unset }));
+    if (out) {
+      setVars(out);
+      setRaw(null);
+      setValues(null);
+    }
+  };
 
   const reveal = async () => {
     if (values) return setValues(null);
@@ -165,6 +189,9 @@ export function VariablesTab({
             <button className={btn} onClick={() => setPasting((p) => !p)} aria-pressed={pasting}>
               <ClipboardPaste className="size-3.5" /> Paste .env
             </button>
+            <button className={btn} onClick={editRaw} aria-pressed={!!raw} disabled={runner.busy !== null || !vars || dirty} title="Edit the environment's own variables as one .env text">
+              <FileText className="size-3.5" /> {raw ? "Back to the list" : "Edit as .env"}
+            </button>
             <button className={btn} onClick={reveal} disabled={runner.busy !== null || !vars?.vars.length}>
               {values ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
               {values ? "Hide" : "Reveal"}
@@ -205,7 +232,34 @@ export function VariablesTab({
         )}
         {error && <p className="px-5 py-4 text-[13px] text-danger">{error}</p>}
         {!vars && !error && <p className="px-5 py-4 text-[13px] text-subtle"><span className="shimmer">Loading…</span></p>}
-        {vars && (
+        {vars && raw && rawParsed && (
+          <div className="rise space-y-2 px-5 py-4">
+            <textarea
+              value={raw.text}
+              onChange={(e) => setRaw({ ...raw, text: e.target.value })}
+              rows={Math.min(24, Math.max(6, raw.text.split("\n").length + 1))}
+              spellCheck={false}
+              className={`${input} w-full font-mono text-[12px]`}
+              aria-label="The environment's variables as .env text"
+            />
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <span className={`text-[12px] ${rawParsed.errors.length ? "text-danger" : "text-subtle"}`}>
+                {rawParsed.errors.length
+                  ? `Lines ${rawParsed.errors.join(", ")} aren't KEY=value.`
+                  : `A line removed is unset. Links, secrets and roll's own aren't here${vars.vars.some((v) => v.sealed) ? "; sealed ones aren't either, and stay" : ""}.`}
+              </span>
+              <div className="flex gap-2">
+                <button className={btn} onClick={() => setRaw(null)}>
+                  Cancel
+                </button>
+                <button className={primary} disabled={runner.busy !== null || rawParsed.errors.length > 0 || toEnv(rawParsed.vars) === toEnv(raw.base)} onClick={saveRaw}>
+                  {runner.busy === "variables" ? <span className="shimmer">Saving…</span> : "Save"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {vars && !raw && (
           <ul className="divide-y divide-line">
             {vars.vars.length === 0 && added.length === 0 && <li className="px-5 py-4 text-[13px] text-muted">No variables yet. roll sets PORT and ROLL_* on every deploy.</li>}
             {vars.vars.map((v) => {

@@ -135,8 +135,8 @@ export interface NewService {
 
 /**
  * `.env` text as variables: `KEY=value` lines (`export` allowed, `#` comments and blank lines
- * skipped, a value in single quotes as is, in double quotes with `\n` for a line break). Lines it
- * can't read are named in `errors` (1-based).
+ * skipped, a value in single quotes as is, in double quotes with `\n`, `\r`, `\t`, `\"` and `\\`
+ * as Compose's env files read them). Lines it can't read are named in `errors` (1-based).
  */
 export function parseEnv(text: string): { vars: Record<string, string>; errors: number[] } {
   const vars: Record<string, string> = {};
@@ -154,11 +154,23 @@ export function parseEnv(text: string): { vars: Record<string, string>; errors: 
     const q = value[0];
     if ((q === '"' || q === "'") && value.length >= 2 && value.endsWith(q)) {
       value = value.slice(1, -1);
-      if (q === '"') value = value.replace(/\\n/g, "\n").replace(/\\"/g, '"');
+      if (q === '"') value = value.replace(/\\([nrt"\\])/g, (_, c: string) => ({ n: "\n", r: "\r", t: "\t" })[c] ?? c);
     }
     vars[key] = value;
   });
   return { vars, errors };
+}
+
+/** Variables as `.env` text that {@link parseEnv} reads back as they are: plain when safe, else quoted. */
+export function toEnv(vars: Record<string, string>): string {
+  const quote = (v: string) => {
+    if (/^[A-Za-z0-9_\-./:@,+=%?&~]*$/.test(v)) return v;
+    if (!/['\r\n]/.test(v)) return `'${v}'`;
+    return `"${v.replace(/[\\"\n\r\t]/g, (c) => ({ "\n": "\\n", "\r": "\\r", "\t": "\\t" })[c] ?? `\\${c}`)}"`;
+  };
+  return Object.entries(vars)
+    .map(([k, v]) => `${k}=${quote(v)}\n`)
+    .join("");
 }
 
 /** A field set to `null` goes back to its default (apps-control's `merge`). */
