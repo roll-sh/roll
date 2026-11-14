@@ -67,7 +67,8 @@ export function SshCas() {
     >
       <p className="mb-2 text-[11.5px] text-muted">
         Short-lived SSH user certificates instead of long-lived keys on every server: servers trust the CA&apos;s public key (<span className="font-mono">TrustedUserCAKeys</span>), and each lease of{" "}
-        <span className="font-mono">SSH_CERT</span> and <span className="font-mono">SSH_KEY</span> gets a key and certificate for the logins you link, ending with it.
+        <span className="font-mono">SSH_CERT</span> and <span className="font-mono">SSH_KEY</span> gets a key and certificate for the logins you link, ending with it. With host domains, it also signs
+        servers&apos; host keys (<span className="font-mono">roll secrets ssh-cas sign-host</span>), and clients trust them through its <span className="font-mono">known_hosts</span> line instead of on first use.
       </p>
       <ErrorNote error={error ?? list.error} onDismiss={error ? () => setError(null) : undefined} className="mb-2" />
       {adding && (
