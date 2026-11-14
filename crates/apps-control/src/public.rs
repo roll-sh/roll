@@ -19,10 +19,7 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
     axum::Router::new().fallback(move |mut req: Request| {
         let apps = apps.clone();
         async move {
-            // A rewrite's request another node sent on (signed): to the service it names.
-            if let Some((service, env)) = rewritten_to(&mut req) {
-                return serve(apps, service, env, None, req).await;
-            }
+            strip_ours(&mut req);
             let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             // A domain that redirects (www → apex): a 308 to the same path and query there.
             if let Some(to) = apps.redirect_for_host(&host).await {
@@ -47,39 +44,73 @@ pub fn port_router(apps: Arc<Apps>, service: String, env: String) -> axum::Route
     axum::Router::new().fallback(move |mut req: Request| {
         let (apps, service, env) = (apps.clone(), service.clone(), env.clone());
         async move {
-            if let Some((service, env)) = rewritten_to(&mut req) {
-                return serve(apps, service, env, None, req).await;
-            }
+            strip_ours(&mut req);
             serve(apps, service, env, None, req).await
         }
     })
 }
 
-/// Where a static site's rewrite sends a request (`x-roll-rewrite-to: <service>/<env>`), when
-/// another roll node sent it (signed). From a visitor, roll's rewrite headers are taken off here,
-/// the first node, so on any later hop they're a node's own.
-fn rewritten_to(req: &mut Request) -> Option<(String, String)> {
-    if req.extensions().get::<roll_cluster::Forwarded>().is_none() {
-        for h in [REWRITE_TO, VIA_SITE, PUBLIC] {
-            req.headers_mut().remove(h);
-        }
-        return None;
+/// roll's own request headers, off a visitor's request where it comes in: from here on, one is
+/// roll's ([`VIA_SITE`] lets a rewrite past its target's access check).
+fn strip_ours(req: &mut Request) {
+    for h in [VIA_SITE, TARGET, ORIGINAL] {
+        req.headers_mut().remove(h);
     }
-    let to = req.headers().get(REWRITE_TO)?.to_str().ok()?;
-    let (s, e) = to.split_once('/')?;
-    Some((s.to_string(), e.to_string()))
 }
 
 /// Run the request where the service lives (`deployment`: one deployment's own URL). A forward
-/// to its owner is marked as public traffic ([`PUBLIC`]): the owner's internal API hands it to
-/// this router ([`with_forwarded`]), which finds the service again by its `Host` (or a rewrite's
-/// [`REWRITE_TO`]).
-pub async fn serve(apps: Arc<Apps>, service: String, env: String, deployment: Option<String>, mut req: Request) -> Response {
-    req.headers_mut().insert(HeaderName::from_static(PUBLIC), HeaderValue::from_static("1"));
+/// to its owner goes to the owner's own route for it ([`INTERNAL`], signed by the cluster, the
+/// service and the visitor's path in headers), never as a call to its API: an app's paths aren't
+/// the API's, and only a node can send to that route.
+pub async fn serve(apps: Arc<Apps>, service: String, env: String, deployment: Option<String>, req: Request) -> Response {
+    let req = match to_internal(req, &service, &env, deployment.as_deref()) {
+        Ok(r) => r,
+        Err(r) => return *r,
+    };
     let cluster = apps.deps.cluster.clone();
     cluster
-        .dispatch(&lease_key(&service), req, move |req, _guard| async move { proxy(apps, &service, &env, deployment.as_deref(), req).await })
+        .dispatch(&lease_key(&service), req, move |req, _guard| async move {
+            let req = from_internal(req);
+            proxy(apps, &service, &env, deployment.as_deref(), req).await
+        })
         .await
+}
+
+/// The owner's route for public traffic another node sends it ([`serve`]).
+const INTERNAL: &str = "/internal/apps/public";
+/// On it: the service, environment and deployment (`<service>/<env>[/<deployment>]`), and the
+/// visitor's own path and query.
+const TARGET: &str = "x-roll-apps-target";
+const ORIGINAL: &str = "x-roll-apps-uri";
+
+/// Address a visitor's request to [`INTERNAL`] (its own path and query in [`ORIGINAL`]).
+fn to_internal(mut req: Request, service: &str, env: &str, deployment: Option<&str>) -> std::result::Result<Request, Box<Response>> {
+    let original = req.extensions().get::<axum::extract::OriginalUri>().map_or(req.uri(), |o| &o.0).clone();
+    let pq = original.path_and_query().map_or("/", |p| p.as_str());
+    let target = match deployment {
+        Some(d) => format!("{service}/{env}/{d}"),
+        None => format!("{service}/{env}"),
+    };
+    let (Ok(pq), Ok(target)) = (HeaderValue::from_str(pq), HeaderValue::from_str(&target)) else {
+        return Err(Box::new(page(StatusCode::BAD_REQUEST, "Bad address", "This address isn't one.")));
+    };
+    let h = req.headers_mut();
+    h.insert(HeaderName::from_static(ORIGINAL), pq);
+    h.insert(HeaderName::from_static(TARGET), target);
+    req.extensions_mut().remove::<axum::extract::OriginalUri>();
+    *req.uri_mut() = Uri::from_static(INTERNAL);
+    Ok(req)
+}
+
+/// Undo [`to_internal`]: the visitor's path and query back.
+fn from_internal(mut req: Request) -> Request {
+    if let Some(uri) = req.headers_mut().remove(ORIGINAL).and_then(|v| v.to_str().ok().and_then(|s| s.parse::<Uri>().ok())) {
+        *req.uri_mut() = uri;
+    }
+    req.headers_mut().remove(TARGET);
+    // The route it came in on is roll's, not the visitor's.
+    req.extensions_mut().remove::<axum::extract::OriginalUri>();
+    req
 }
 
 /// The Horizon mark, `@roll/brand`'s export (`packages/brand/assets/horizon-dark.svg`) drawn in
@@ -147,27 +178,32 @@ async fn rewrite_of(apps: &Arc<Apps>, key: String, path: String, query: Option<S
 }
 
 /// Marks a request a site's rewrite sent on (roll's own: `x-roll-*` never reaches an app, and a
-/// visitor's is taken off where it came in, [`rewritten_to`]).
+/// visitor's is taken off where it came in, [`strip_ours`]).
 const VIA_SITE: &str = "x-roll-via-site";
-/// The service and environment a rewrite sends a request to, for the node that owns it.
-const REWRITE_TO: &str = "x-roll-rewrite-to";
-/// On a forward: public traffic for a service this node owns, not a call to its API.
-const PUBLIC: &str = "x-roll-apps-public";
 
 /// rolld's internal API (where [`Cluster::dispatch`](roll_cluster::Cluster::dispatch) forwards to
-/// a service's owner), with roll apps' public traffic that another node sent here (signed, and
-/// marked [`PUBLIC`] by roll's own public router) handed to [`router`] instead of the API: the
-/// API has no route for an app's paths. Layered inside `accept_forwarded`, which says a request
-/// came from a node.
+/// a service's owner) with the route roll apps' public traffic is forwarded to ([`INTERNAL`]):
+/// only a request another node signed gets in (`require_signed`), and it's served as the visitor
+/// sent it, to the service it names.
 pub fn with_forwarded(api: axum::Router, apps: Arc<Apps>) -> axum::Router {
-    api.layer(axum::middleware::from_fn_with_state(router(apps), forwarded_public))
+    let cluster = apps.deps.cluster.clone();
+    let route = axum::Router::new()
+        .route(INTERNAL, axum::routing::any(forwarded_public))
+        .with_state(apps)
+        .layer(axum::middleware::from_fn_with_state(cluster, roll_cluster::require_signed));
+    api.merge(route)
 }
 
-async fn forwarded_public(axum::extract::State(public): axum::extract::State<axum::Router>, req: Request, next: axum::middleware::Next) -> Response {
-    if req.extensions().get::<roll_cluster::Forwarded>().is_some() && req.headers().contains_key(PUBLIC) {
-        return tower::ServiceExt::oneshot(public, req).await.unwrap_or_else(|e| match e {});
-    }
-    next.run(req).await
+async fn forwarded_public(axum::extract::State(apps): axum::extract::State<Arc<Apps>>, req: Request) -> Response {
+    let Some(target) = req.headers().get(TARGET).and_then(|v| v.to_str().ok()).map(str::to_string) else {
+        return page(StatusCode::BAD_REQUEST, "Bad request", "No service named.");
+    };
+    let mut parts = target.splitn(3, '/');
+    let (Some(service), Some(env)) = (parts.next(), parts.next()) else { return page(StatusCode::BAD_REQUEST, "Bad request", "No service named.") };
+    let deployment = parts.next().map(str::to_string);
+    let (service, env) = (service.to_string(), env.to_string());
+    // As it came, to its service where it lives (here, unless it moved on the way).
+    serve(apps, service, env, deployment, from_internal(req)).await
 }
 
 /// Send `req` to the project's service `to.0` in `env` at `to.1`, where that service lives,
@@ -191,10 +227,13 @@ fn rewrite_to(apps: Arc<Apps>, service: &str, env: &str, to: (String, String), m
         *req.uri_mut() = uri;
         // A forward to the target's owner carries this path, not the one the visitor asked for.
         req.extensions_mut().remove::<axum::extract::OriginalUri>();
-        let h = req.headers_mut();
-        h.insert(HeaderName::from_static(VIA_SITE), HeaderValue::from_static("1"));
-        if let Ok(v) = HeaderValue::from_str(&format!("{target}/{env}")) {
-            h.insert(HeaderName::from_static(REWRITE_TO), v);
+        req.headers_mut().insert(HeaderName::from_static(VIA_SITE), HeaderValue::from_static("1"));
+        // Another service's lease from here: its own routing, as a fresh request (its hops
+        // counted anew: it can't be rewritten again), the visitor's address kept.
+        if let Some(f) = req.extensions_mut().remove::<roll_cluster::Forwarded>()
+            && let Some(c) = f.client
+        {
+            req.extensions_mut().insert(roll_cluster::ClientAddr(c));
         }
         serve(apps, target, env, None, req).await
     })

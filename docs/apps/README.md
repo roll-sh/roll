@@ -667,12 +667,18 @@ The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`,
 
 - Ownership: lease `apps:service:<id>`. The owner runs the service's deploy queue, waking proxy,
   autoscaler, cron schedule and meter. Any node accepts a request for a service's hostname and
-  hands it to the owner with `Cluster::dispatch` (WebSockets included). The forward lands on the
-  owner's internal API, which has no route for an app's paths: roll's public router marks what
-  it dispatches (`x-roll-apps-public`, taken off a visitor's request where it comes in), and
-  `public::with_forwarded`, inside `accept_forwarded` in rolld, hands a signed, marked request
-  to the public router there (by its `Host`, or a rewrite's `x-roll-rewrite-to`). Without it a
-  visitor who reached a node not owning the service got the API's 404
+  hands it to the owner with `Cluster::dispatch` (WebSockets included). The forward goes to the
+  owner's own route for it, `/internal/apps/public` (`public::with_forwarded`, merged into
+  rolld's internal API behind `require_signed`: only a node's signed request gets in), with the
+  service, environment and deployment (`x-roll-apps-target`) and the visitor's own path and
+  query (`x-roll-apps-uri`) in its headers, as storage's internal routes carry theirs; roll's own
+  headers are taken off a visitor's request where it comes in. Never as a call to the API (an
+  app's paths aren't the API's), and never trusting a header another product's forward could
+  carry: a first version marked public traffic with a plain header that any product's forward
+  (S3, deploy hooks, roll code) passed on from a visitor, which would have reached any
+  service by id past a private environment's access (an independent review found it before it
+  reached main; `a_visitor_cant_reach_a_service_through_the_internal_route` keeps it out).
+  Without the route at all, a visitor who reached a node not owning the service got the API's 404
   (`apps-control/tests/cluster.rs`: two nodes in one process, each with its own server and fake
   runtime, sharing a store: a visitor and an API call through the other node, a static site's
   rewrite to a service the other node owns, a killed owner's service woken and deployed on the
@@ -947,8 +953,9 @@ no CORS. It goes through that service's own gates (its access, allow list, firew
 maintenance) and wakes it as any request does. A private target is reachable this way: its visitors passed
 the site's own access, and the project's own rule sends them on (a visitor who claims to be a
 rewrite never is: roll's rewrite headers are taken off where a request comes in). On a fleet the
-request goes to the target's owner naming it (`x-roll-rewrite-to`, signed as every forward) with
-the rewritten path; the decision is made before the site reads its gradual-rollout and affinity
+request goes to the target's owner as any public request does, to its internal route, naming it,
+with the rewritten path, routed as a fresh request for the target's lease (the visitor's address
+kept); the decision is made before the site reads its gradual-rollout and affinity
 cookies, so the target reads them. A path with a `.` or `..` segment is refused; a request a
 rewrite sent is never rewritten again (no loops); a name the project has no web service for is a
 502, said in the site's log.

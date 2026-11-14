@@ -445,3 +445,34 @@ async fn a_cron_service_runs_on_the_node_that_takes_it_over() {
     assert!(apps_control::runtime::fake::Fake::count(&left.fake.counts.creates) > made, "the run's container was made on the node left");
     drop(dead);
 }
+
+/// Only a node reaches a service through another node's route for public traffic: a visitor
+/// who calls it, or who puts roll's headers on a request another product forwards (an API
+/// call), gets no app and no way past a private environment's access.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_visitor_cant_reach_a_service_through_the_internal_route() {
+    let f = fleet(2).await;
+    let (id, _) = f.image_service(&f.nodes[0], "web").await;
+    let (owner, other) = f.owner_and_other(&id);
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    assert_eq!(call(&owner.api, "PUT", &base, Some(json!({"access": {"token": "private-token-0123456789"}}))).await.0, StatusCode::OK);
+    let target = format!("{id}/production");
+    // Straight at the owner's route, unsigned.
+    let direct = reqwest::Client::new().get(format!("http://{}/internal/apps/public", owner.addr)).header("x-roll-apps-target", &target).header("x-roll-apps-uri", "/").header("x-roll-via-site", "1").send().await.unwrap();
+    assert_eq!(direct.status().as_u16(), 401, "only a node's signed request gets in");
+    // On an API call another node forwards to the owner: answered by the API, not the app.
+    // (Before 2026-11-14's fix the owner trusted these as plain headers on any forward.)
+    let (st, env) = call_with(&other.api, &base, &[("x-roll-apps-target", &target), ("x-roll-apps-uri", "/"), ("x-roll-via-site", "1"), ("x-roll-apps-public", "1"), ("x-roll-rewrite-to", &target)]).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(env["name"] == "production" && env.get("instance").is_none(), "the API's answer: {env}");
+}
+
+async fn call_with(r: &axum::Router, path: &str, headers: &[(&str, &str)]) -> (StatusCode, Value) {
+    let mut req = Request::builder().uri(path);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let resp = r.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+    let status = resp.status();
+    (status, serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+}
