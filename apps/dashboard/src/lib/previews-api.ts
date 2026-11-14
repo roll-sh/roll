@@ -168,6 +168,11 @@ export interface PageCheck {
   since: string | null;
   percent: number | null;
   base_percent: number | null;
+  /** The first page's checks, read on this page too (accessibility with SEO, broken links). */
+  a11y?: { issues: A11yIssue[]; lang: boolean; title: boolean; seo?: PageSeo | null } | null;
+  links?: { checked: number; broken: { path: string; status: number }[] } | null;
+  /** Against main's page at the same path. */
+  against?: { a11y_added: number | null; links_added: number | null; seo_added: number | null; text: TextDiff | null } | null;
 }
 
 /** How slow and heavy the first page may get (0: no limit): over it, `roll/speed` fails. */

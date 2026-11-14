@@ -297,6 +297,8 @@ struct Shots {
     text: Option<String>,
     /// Its broken links (`PageLinks` JSON).
     links: Option<String>,
+    /// The other pages' reports by path (`PageReport` JSON).
+    page_reports: std::collections::BTreeMap<String, String>,
 }
 
 /// Who made a baseline (`created_by`).
@@ -482,9 +484,14 @@ impl Store {
         if !db.has_column("resources", "mask_digest")? {
             db.add_column("resources", "mask_digest", "TEXT")?;
         }
-        for col in ["text", "links"] {
+        for col in ["text", "links", "page_reports"] {
             if !db.has_column("base_history", col)? {
                 db.add_column("base_history", col, "TEXT")?;
+            }
+        }
+        for col in ["report", "against"] {
+            if !db.has_column("page_shots", col)? {
+                db.add_column("page_shots", col, "TEXT")?;
             }
         }
         if !db.has_column("previews", "vars")? {
@@ -1129,13 +1136,14 @@ impl Store {
     pub fn keep_base_history(&self, id: &str, head: &str) -> Result<()> {
         let Some(shots) = self.latest_shots(id)? else { return Ok(()) };
         let pages = serde_json::to_string(&shots.pages).map_err(|e| Error::Internal(e.to_string()))?;
+        let page_reports = serde_json::to_string(&shots.page_reports).map_err(|e| Error::Internal(e.to_string()))?;
         let now = self.now_ms()?;
         self.db.write(|c| {
             c.execute(
-                "INSERT INTO base_history (preview_id, head, png, phone_png, pages, at, speed, a11y, health, text, links) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                "INSERT INTO base_history (preview_id, head, png, phone_png, pages, at, speed, a11y, health, text, links, page_reports) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT (preview_id, head) DO UPDATE SET png = excluded.png, phone_png = excluded.phone_png, pages = excluded.pages, at = excluded.at, speed = excluded.speed, \
-                 a11y = excluded.a11y, health = excluded.health, text = excluded.text, links = excluded.links",
-                params![id, head, shots.png, shots.phone, pages, now, shots.speed, shots.a11y, shots.health, shots.text, shots.links],
+                 a11y = excluded.a11y, health = excluded.health, text = excluded.text, links = excluded.links, page_reports = excluded.page_reports",
+                params![id, head, shots.png, shots.phone, pages, now, shots.speed, shots.a11y, shots.health, shots.text, shots.links, page_reports],
             )?;
             let old: Vec<String> = c.query(&format!("SELECT head FROM base_history WHERE preview_id = ? ORDER BY at DESC LIMIT -1 OFFSET {BASE_HISTORY}"), [id], |r| r.get(0))?;
             for h in &old {
@@ -1155,20 +1163,21 @@ impl Store {
             .optional()
         })?;
         let Some((head, png, phone, speed, a11y, health, text, links)) = row else { return Ok(None) };
-        let pages: Vec<(String, String)> = self.db.read(|c| c.query("SELECT path, png FROM page_shots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))))?;
-        Ok(Some(Shots { head, png, phone, pages: pages.into_iter().collect(), speed, a11y, health, text, links }))
+        let pages: Vec<(String, String, Option<String>)> = self.db.read(|c| c.query("SELECT path, png, report FROM page_shots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
+        let page_reports = pages.iter().filter_map(|(p, _, r)| Some((p.clone(), r.clone()?))).collect();
+        Ok(Some(Shots { head, png, phone, pages: pages.into_iter().map(|(p, png, _)| (p, png)).collect(), speed, a11y, health, text, links, page_reports }))
     }
 
     /// Baseline `id`'s screenshots at `head`, from its history.
     fn shots_at(&self, id: &str, head: &str) -> Result<Option<Shots>> {
-        type Raw = (String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
+        type Raw = (String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
         let row: Option<Raw> = self.db.read(|c| {
-            c.query_row("SELECT png, phone_png, pages, speed, a11y, health, text, links FROM base_history WHERE preview_id = ? AND head = ?", [id, head], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+            c.query_row("SELECT png, phone_png, pages, speed, a11y, health, text, links, page_reports FROM base_history WHERE preview_id = ? AND head = ?", [id, head], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
             })
             .optional()
         })?;
-        Ok(row.map(|(png, phone, pages, speed, a11y, health, text, links)| Shots {
+        Ok(row.map(|(png, phone, pages, speed, a11y, health, text, links, page_reports)| Shots {
             head: head.to_string(),
             png,
             phone,
@@ -1178,6 +1187,7 @@ impl Store {
             health,
             text,
             links,
+            page_reports: page_reports.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default(),
         }))
     }
 
@@ -1204,6 +1214,16 @@ impl Store {
         let (change, phone) = (bp(Some(&ours.png), Some(&theirs.png)), bp(ours.phone.as_ref(), theirs.phone.as_ref()));
         // The other pages, each against the baseline's page at the same path.
         let page_bps: Vec<(String, Option<i64>)> = ours.pages.iter().map(|(path, png)| (path.clone(), bp(Some(png), theirs.pages.get(path)))).collect();
+        // Each other page's checks against main's page at the same path.
+        let report = |m: &std::collections::BTreeMap<String, String>, p: &str| m.get(p).and_then(|r| serde_json::from_str::<crate::PageReport>(r).ok());
+        let page_against: Vec<(String, Option<String>)> = ours
+            .pages
+            .keys()
+            .map(|path| {
+                let against = report(&ours.page_reports, path).zip(report(&theirs.page_reports, path)).map(|(a, b)| a.against(&b));
+                (path.clone(), against.and_then(|a| serde_json::to_string(&a).ok()))
+            })
+            .collect();
         // The first page's words against the baseline's (Chromatic's DOM snapshots), when both were read.
         let text = ours.text.as_deref().zip(theirs.text.as_deref()).and_then(|(now, then)| serde_json::to_string(&crate::visual::text_diff(then, now)).ok());
         self.db.write(|c| {
@@ -1214,6 +1234,9 @@ impl Store {
             )?;
             for (path, bp) in &page_bps {
                 c.execute("UPDATE page_shots SET base_bp = ? WHERE preview_id = ? AND path = ?", params![bp, id, path])?;
+            }
+            for (path, against) in &page_against {
+                c.execute("UPDATE page_shots SET against = ? WHERE preview_id = ? AND path = ?", params![against, id, path])?;
             }
             Ok::<_, Error>(())
         })
@@ -1304,21 +1327,22 @@ impl Store {
             let before: Option<(String, String)> = self.db.read(|c| c.query_row("SELECT head, png FROM page_shots WHERE preview_id = ? AND path = ?", [id, &p.path], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
             let before = before.filter(|(h, _)| h != head);
             let change_bp = before.as_ref().and_then(|(_, old)| crate::visual::changed(&b64e.decode(old).ok()?, &p.png)).map(|f| (f * 10_000.0).round() as i64);
-            rows.push((p.path.clone(), b64e.encode(&p.png), p.errors as i64, before, change_bp));
+            let report = serde_json::to_string(&p.report).ok();
+            rows.push((p.path.clone(), b64e.encode(&p.png), p.errors as i64, before, change_bp, report));
         }
         self.db.write(|c| {
-            for (path, png, errors, before, change_bp) in &rows {
+            for (path, png, errors, before, change_bp, report) in &rows {
                 match before {
                     Some((prev_head, prev_png)) => c.execute(
-                        "INSERT INTO page_shots (preview_id, path, head, png, prev_head, prev_png, change_bp, errors) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                        "INSERT INTO page_shots (preview_id, path, head, png, prev_head, prev_png, change_bp, errors, report) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
                          ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, prev_head = excluded.prev_head, prev_png = excluded.prev_png, \
-                         change_bp = excluded.change_bp, errors = excluded.errors, base_bp = NULL",
-                        params![id, path, head, png, prev_head, prev_png, change_bp, errors],
+                         change_bp = excluded.change_bp, errors = excluded.errors, base_bp = NULL, report = excluded.report, against = NULL",
+                        params![id, path, head, png, prev_head, prev_png, change_bp, errors, report],
                     )?,
                     None => c.execute(
-                        "INSERT INTO page_shots (preview_id, path, head, png, errors) VALUES (?, ?, ?, ?, ?) \
-                         ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, errors = excluded.errors, base_bp = NULL",
-                        params![id, path, head, png, errors],
+                        "INSERT INTO page_shots (preview_id, path, head, png, errors, report) VALUES (?, ?, ?, ?, ?, ?) \
+                         ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, errors = excluded.errors, base_bp = NULL, report = excluded.report, against = NULL",
+                        params![id, path, head, png, errors, report],
                     )?,
                 };
             }
@@ -1332,18 +1356,27 @@ impl Store {
 
     /// The other pages' screenshots, by path: how each changed and compares with the baseline's.
     pub fn page_checks(&self, id: &str) -> Result<Vec<crate::PageCheck>> {
-        type Raw = (String, i64, Option<String>, Option<i64>, Option<i64>);
+        type Raw = (String, i64, Option<String>, Option<i64>, Option<i64>, Option<String>, Option<String>);
         let rows: Vec<Raw> = self.db.read(|c| {
-            c.query("SELECT path, errors, prev_head, change_bp, base_bp FROM page_shots WHERE preview_id = ? ORDER BY path", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            c.query("SELECT path, errors, prev_head, change_bp, base_bp, report, against FROM page_shots WHERE preview_id = ? ORDER BY path", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+            })
         })?;
         Ok(rows
             .into_iter()
-            .map(|(path, errors, since, change, base)| crate::PageCheck {
+            .map(|(path, errors, since, change, base, report, against)| {
+                let report: crate::PageReport = report.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default();
+                (path, errors, since, change, base, report, against.and_then(|a| serde_json::from_str(&a).ok()))
+            })
+            .map(|(path, errors, since, change, base, report, against)| crate::PageCheck {
                 path,
                 errors: errors as u32,
                 since: since.filter(|_| change.is_some()),
                 percent: change.map(|bp| bp as f64 / 100.0),
                 base_percent: base.map(|bp| bp as f64 / 100.0),
+                a11y: report.a11y,
+                links: report.links,
+                against,
             })
             .collect())
     }

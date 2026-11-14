@@ -394,6 +394,18 @@ pub struct PreviewPageCheck {
     pub errors: u32,
     pub percent: Option<f64>,
     pub base_percent: Option<f64>,
+    /// Its accessibility problems, SEO problems (roll's words) and broken links, as the first
+    /// page's are read, and what of each is new against the branch's page at the same path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a11y_problems: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seo: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub broken_links: Vec<PreviewBrokenLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a11y_added: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links_added: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -620,6 +620,18 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
             if p.errors > 0 {
                 said.push(plural(p.errors as u64, "error while it loaded", "errors while it loaded"));
             }
+            // The first page's checks, on this page: what's new against main's same page said.
+            let new = |n: Option<u32>| n.map(|n| if n == 0 { " (none new)".to_string() } else { format!(" ({n} new)") }).unwrap_or_default();
+            if !p.broken_links.is_empty() {
+                let paths: Vec<String> = p.broken_links.iter().take(5).map(|b| format!("`{}`", page_path(&b.path))).collect();
+                said.push(format!("{}: {}{}", plural(p.broken_links.len() as u64, "broken link", "broken links"), paths.join(", "), new(p.links_added)));
+            }
+            if let Some(n) = p.a11y_problems.filter(|n| *n > 0) {
+                said.push(format!("{}{}", plural(n as u64, "accessibility problem", "accessibility problems"), new(p.a11y_added)));
+            }
+            if !p.seo.is_empty() {
+                said.push(format!("SEO: {}", p.seo.iter().map(|s| s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == ' ').collect::<String>()).collect::<Vec<_>>().join(", ")));
+            }
             if said.is_empty() {
                 said.push("taken".into());
             }
@@ -902,7 +914,17 @@ mod preview_tests {
             comment.starts_with("<details><summary>Page checks: 2 errors, 1 failed request · 5 accessibility problems · differs from mainx by 8.0% · changed 12.3% since the push before · loads in 1.2 s</summary>\n\n**While its first page loaded:**"),
             "{comment}"
         );
-        let page = |path: &str, percent, base_percent, errors| crate::model::PreviewPageCheck { path: path.into(), errors, percent, base_percent };
+        let page = |path: &str, percent, base_percent, errors| crate::model::PreviewPageCheck {
+            path: path.into(),
+            errors,
+            percent,
+            base_percent,
+            a11y_problems: None,
+            seo: vec![],
+            broken_links: vec![],
+            a11y_added: None,
+            links_added: None,
+        };
         e.pages = vec![page("/pricing", Some(40.0), Some(2.0), 1), page("/about", Some(0.0), None, 0)];
         let review = |state: &str, by: Option<&str>| crate::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.04, by: by.map(Into::into), required: false, head: None, pages: Vec::new() };
         assert_eq!(visual_status(&review("changed", None)), ("pending", "Differs from main by 8.0%: accept it in roll".into()));
@@ -961,6 +983,12 @@ mod preview_tests {
         assert_eq!(than_main(500, 900, "main").as_deref(), Some("400 ms faster than main"));
         let comment = page_checks(&e).unwrap();
         assert!(comment.contains(" · 2 more pages, most changed /pricing by 40.0%, 1 error on them · "), "{comment}");
+        // The first page's checks on another page, with what's new against main's same page.
+        let mut checked = e.clone();
+        (checked.pages[0].broken_links, checked.pages[0].links_added, checked.pages[0].a11y_problems, checked.pages[0].a11y_added) =
+            (vec![crate::model::PreviewBrokenLink { path: "/gone".into(), status: 404 }], Some(1), Some(2), Some(0));
+        let block = page_checks(&checked).unwrap();
+        assert!(block.contains("1 broken link: `/gone` (1 new)") && block.contains("2 accessibility problems (none new)"), "{block}");
         assert!(comment.contains("`/pricing`: changed 40.0% since the push before, differs from `mainx` by 2.0%, 1 error while it loaded.\n\n`/about`: unchanged since the push before."), "{comment}");
     }
 }

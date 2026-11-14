@@ -766,6 +766,7 @@ function Screenshot({
           {other.errors} {other.errors === 1 ? "error" : "errors"} while it loaded.
         </p>
       )}
+      {other && <PageChecks page={other} branch={baseChange?.branch ?? "main"} />}
       {baseChange && (
         <p className="mb-1 text-[11.5px] text-subtle">
           {main
@@ -798,6 +799,38 @@ function Screenshot({
         <p className="text-[11.5px] text-muted">No screenshot of {path} yet.</p>
       )}
     </>
+  );
+}
+
+/** Another page's checks (the first page's, read on it too), with what's new against main's. */
+function PageChecks({ page, branch }: { page: PageCheck; branch: string }) {
+  const new_ = (n: number | null | undefined) => (n == null ? "" : n === 0 ? " (none new)" : ` (${n} new)`);
+  const a11y = page.a11y ? a11yWords(page.a11y) : [];
+  const seo = page.a11y?.seo ? seoWords(page.a11y.seo) : [];
+  const broken = page.links?.broken ?? [];
+  if (!a11y.length && !seo.length && !broken.length && !page.against?.text?.added_n && !page.against?.text?.removed_n) return null;
+  return (
+    <div className="mb-1.5 space-y-0.5 text-[11.5px]">
+      {broken.length > 0 && (
+        <p className="break-words text-danger">
+          {broken.length} broken {broken.length === 1 ? "link" : "links"}: <span className="font-mono text-[11px]">{broken.map((b) => `${b.path} ${b.status || "no answer"}`).join(", ")}</span>
+          {new_(page.against?.links_added)}
+        </p>
+      )}
+      {a11y.length > 0 && (
+        <p className="text-muted">
+          Accessibility: {a11y.join(", ")}
+          {new_(page.against?.a11y_added)}
+        </p>
+      )}
+      {seo.length > 0 && (
+        <p className="text-muted">
+          SEO: {seo.join(", ")}
+          {new_(page.against?.seo_added)}
+        </p>
+      )}
+      {page.against?.text && <TextAgainst diff={page.against.text} branch={branch} />}
+    </div>
   );
 }
 

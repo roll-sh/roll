@@ -257,7 +257,22 @@ const still = async (sessionId) => {
       await still(sessionId);
       const shot = await send("Page.captureScreenshot", { format: "png" }, sessionId);
       fs.writeFileSync(`${process.env.OUT}.${n}.png`, Buffer.from(shot.data, "base64"));
-      pages.push({ path, errors: errors.length + failed.length - before });
+      const page = { path, errors: errors.length + failed.length - before };
+      // The same checks as the first page's, each bounded in time.
+      const value = async (expression, wait) => {
+        const r = await Promise.race([send("Runtime.evaluate", { expression, awaitPromise: !!wait, returnByValue: true }, sessionId).catch(() => null), sleep(wait || 5000).then(() => null)]);
+        try {
+          return JSON.parse(r?.result?.value || "null");
+        } catch {
+          return null;
+        }
+      };
+      const textOf = await value(`JSON.stringify(document.body ? String(document.body.innerText || "").slice(0, 40000) : "")`);
+      if (typeof textOf === "string") page.text = textOf;
+      page.seo = await value(SEO);
+      page.links = await value(LINKS, 20000);
+      page.a11y = (await axeReport(sessionId)) || (await value(A11Y));
+      pages.push(page);
     }
   } catch {}
   fs.writeFileSync(process.env.OUT + ".pages.json", JSON.stringify(pages));

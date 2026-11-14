@@ -955,7 +955,8 @@ impl Runtime {
             ),
         ]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        let within = Duration::from_secs(90 + 12 * pages.len() as u64);
+        // Each other page is taken and checked too (accessibility, links up to 20 s, SEO, words).
+        let within = Duration::from_secs(90 + 30 * pages.len() as u64);
         let out = match tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes())).await {
             Ok(r) => r?,
             Err(_) => {
@@ -1014,13 +1015,27 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
         path: String,
         #[serde(default)]
         errors: u32,
+        #[serde(default)]
+        a11y: Option<serde_json::Value>,
+        #[serde(default)]
+        seo: Option<serde_json::Value>,
+        #[serde(default)]
+        links: Option<serde_json::Value>,
+        #[serde(default)]
+        text: Option<String>,
     }
     let said: Vec<Said> = serde_json::from_str(said.trim()).unwrap_or_default();
     let mut out: Vec<crate::ports::PageShot> = Vec::new();
     for (s, b64) in said.into_iter().zip(pngs).take(asked.len()) {
         let Ok(png) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else { continue };
         if png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX && asked.iter().any(|a| **a == s.path) && !out.iter().any(|p| p.path == s.path) {
-            out.push(crate::ports::PageShot { path: s.path, png, errors: s.errors.min(10_000) });
+            // Read as the first page's are (the same bounds), from what this page's run wrote.
+            let report = crate::PageReport {
+                a11y: s.a11y.and_then(|a| crate::PageA11y::parse(&serde_json::json!({ "a11y": a, "seo": s.seo }).to_string())),
+                links: s.links.and_then(|l| crate::PageLinks::parse(&serde_json::json!({ "links": l }).to_string())),
+                text: s.text.and_then(|t| crate::page_text(&serde_json::json!({ "text": t }).to_string())),
+            };
+            out.push(crate::ports::PageShot { path: s.path, png, errors: s.errors.min(10_000), report });
         }
     }
     out

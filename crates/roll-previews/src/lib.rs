@@ -521,6 +521,40 @@ pub struct PageCheck {
     pub since: Option<String>,
     pub percent: Option<f64>,
     pub base_percent: Option<f64>,
+    /// What its session found besides its picture (accessibility with SEO, broken links).
+    pub a11y: Option<PageA11y>,
+    pub links: Option<PageLinks>,
+    /// Against main's page at the same path.
+    pub against: Option<PageAgainst>,
+}
+
+/// What a page's session found besides its picture: the first page's checks, for another page.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, serde::Deserialize)]
+pub struct PageReport {
+    pub a11y: Option<PageA11y>,
+    pub links: Option<PageLinks>,
+    pub text: Option<String>,
+}
+
+/// A page's checks against main's page at the same path.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, serde::Deserialize)]
+pub struct PageAgainst {
+    pub a11y_added: Option<u32>,
+    pub links_added: Option<u32>,
+    pub seo_added: Option<u32>,
+    pub text: Option<TextDiff>,
+}
+
+impl PageReport {
+    /// This page against main's at the same path, for whatever both read.
+    pub fn against(&self, main: &PageReport) -> PageAgainst {
+        PageAgainst {
+            a11y_added: self.a11y.as_ref().zip(main.a11y.as_ref()).map(|(a, b)| a.added_since(b)),
+            links_added: self.links.as_ref().zip(main.links.as_ref()).map(|(a, b)| a.added_since(b)),
+            seo_added: self.a11y.as_ref().and_then(|a| a.seo.as_ref()).zip(main.a11y.as_ref().and_then(|a| a.seo.as_ref())).map(|(a, b)| a.added_since(b)),
+            text: self.text.as_deref().zip(main.text.as_deref()).map(|(now, then)| crate::visual::text_diff(then, now)),
+        }
+    }
 }
 
 /// A change's visual review (Chromatic's UI Review): `percent` is the most any of its pages

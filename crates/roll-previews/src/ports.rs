@@ -183,6 +183,8 @@ pub struct PageShot {
     pub path: String,
     pub png: Vec<u8>,
     pub errors: u32,
+    /// What its session found besides the picture.
+    pub report: crate::PageReport,
 }
 
 /// roll code, as previews read it and report to it.

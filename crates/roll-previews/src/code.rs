@@ -136,7 +136,17 @@ impl CodeSource {
                 pages: p
                     .pages
                     .iter()
-                    .map(|x| code_control::model::PreviewPageCheck { path: x.path.clone(), errors: x.errors, percent: x.percent, base_percent: x.base_percent })
+                    .map(|x| code_control::model::PreviewPageCheck {
+                        path: x.path.clone(),
+                        errors: x.errors,
+                        percent: x.percent,
+                        base_percent: x.base_percent,
+                        a11y_problems: x.a11y.as_ref().map(|a| a.problems()),
+                        seo: x.a11y.as_ref().and_then(|a| a.seo.as_ref()).map(|s| s.problems().into_iter().map(String::from).collect()).unwrap_or_default(),
+                        broken_links: x.links.as_ref().map(|l| l.broken.iter().map(|b| code_control::model::PreviewBrokenLink { path: b.path.clone(), status: b.status }).collect()).unwrap_or_default(),
+                        a11y_added: x.against.as_ref().and_then(|a| a.a11y_added),
+                        links_added: x.against.as_ref().and_then(|a| a.links_added),
+                    })
                     .collect(),
                 visual_review: p.visual_review.as_ref().map(|v| code_control::model::PreviewVisualReview {
                     state: match v.state {

@@ -264,7 +264,7 @@ impl Apps for FakeApps {
     async fn screenshot(&self, preview: &str, _: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
         let Some(png) = self.shot.lock().clone() else { return Ok(None) };
         self.shots.lock().push(preview.to_string());
-        let pages = opts.pages.iter().map(|p| roll_previews::ports::PageShot { path: p.clone(), png: png.clone(), errors: 0 }).collect();
+        let pages = opts.pages.iter().map(|p| roll_previews::ports::PageShot { path: p.clone(), png: png.clone(), errors: 0, report: Default::default() }).collect();
         Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None, pages, text: None, links: None }))
     }
     fn status(&self, _: &str, _: &str) -> Option<ServiceState> {

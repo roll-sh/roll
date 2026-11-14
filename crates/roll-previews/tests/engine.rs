@@ -213,7 +213,7 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     let chg = e.engine.store.row_by_change("chg_1").unwrap().unwrap();
     let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
     // The first page and /pricing, against main's (Chromatic reviews each snapshot).
-    let pricing = |v: u8| vec![roll_previews::ports::PageShot { path: "/pricing".into(), png: png(v), errors: 0 }];
+    let pricing = |v: u8| vec![roll_previews::ports::PageShot { path: "/pricing".into(), png: png(v), errors: 0, report: Default::default() }];
     e.engine.store.set_page_shots(&base.id, "cs_main", &pricing(0), &["/pricing".into()]).unwrap();
     let shoot = |head: &str, first: u8, page: u8| {
         e.engine.store.set_screenshot(&chg.id, head, &png(first), None, None).unwrap();
@@ -266,6 +266,22 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     e.engine.store.put_settings(&e.project, &s).unwrap();
     assert_eq!(review().map(|v| v.state), Some(VisualState::Unchanged));
     assert!(e.engine.store.settings(&e.project).unwrap().patched(&json!({ "github": { "visual_threshold": 60.0 } })).is_err(), "past 50%");
+    // Another page gets the first page's checks, against main's page at the same path.
+    let with_links = |broken: &[&str]| {
+        let report = roll_previews::PageReport {
+            links: Some(roll_previews::PageLinks { checked: 3, broken: broken.iter().map(|p| roll_previews::BrokenLink { path: p.to_string(), status: 404 }).collect() }),
+            text: Some(format!("Pricing\n{}", broken.join("\n"))),
+            ..Default::default()
+        };
+        vec![roll_previews::ports::PageShot { path: "/pricing".into(), png: png(255), errors: 0, report }]
+    };
+    e.engine.store.set_page_shots(&base.id, "cs_main2", &with_links(&[]), &["/pricing".into()]).unwrap();
+    e.engine.store.keep_base_history(&base.id, "cs_main2").unwrap();
+    e.engine.store.set_page_shots(&chg.id, "cs_1e", &with_links(&["/gone"]), &["/pricing".into()]).unwrap();
+    e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
+    let pricing = e.engine.store.page_checks(&chg.id).unwrap().into_iter().find(|p| p.path == "/pricing").unwrap();
+    let against = pricing.against.unwrap();
+    assert_eq!((pricing.links.map(|l| l.broken.len()), against.links_added, against.text.map(|t| t.added)), (Some(1), Some(1), Some(vec!["/gone".to_string()])));
 }
 
 #[tokio::test]
