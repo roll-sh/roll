@@ -90,6 +90,21 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let denied = roll(&api, &t, &["run", "-e", "staging", "--", "true"], None).await;
     assert_ne!(denied.code, Some(0));
 
+    // Through an outage: the last values fetched (kept encrypted with --fallback) start the
+    // command, and only with the key they were kept with.
+    let fallback = dir.path().join("production.fallback");
+    let fb = fallback.to_str().unwrap();
+    let key = [("ROLL_FALLBACK_KEY", "fallback-key-of-at-least-32-chars")];
+    let echo = ["run", "-p", "shop", "-e", "production", "--fallback", fb, "--", "sh", "-c", "echo $HOST"];
+    assert_eq!(ok(&api, &key, &echo, None).await.trim(), "db.internal");
+    assert!(!std::fs::read_to_string(&fallback).unwrap().contains("s3cret"), "kept encrypted");
+    let down = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://127.0.0.1:{}", l.local_addr().unwrap().port())
+    };
+    assert_eq!(ok(&down, &key, &echo, None).await.trim(), "db.internal");
+    assert_ne!(roll(&down, &[("ROLL_FALLBACK_KEY", "another-key-of-at-least-32-chars!")], &echo, None).await.code, Some(0));
+
     // `roll secrets setup` remembers the project and environment for a directory and the ones
     // under it, in the user's config: then `roll run` needs no flags there.
     let home = tempfile::tempdir().unwrap();
