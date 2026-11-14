@@ -536,6 +536,21 @@ export function SettingsTab({
         <button className={btn} onClick={() => setForm(formOf(service))}>
           Discard
         </button>
+        {env?.active && (
+          <button
+            className={btn}
+            disabled={!dirty || !SERVICE_NAME.test(form.name) || rolloutSteps(form.rolloutSteps) === null || runner.busy !== null}
+            onClick={() =>
+              runner.run("settings", async () => {
+                await appsApi.update(service.id, patch);
+                return appsApi.redeploy(service.id, env.name);
+              })
+            }
+            title="Save, then run the live image again with them (no build)"
+          >
+            Save and redeploy
+          </button>
+        )}
         <button
           className={primary}
           disabled={!dirty || !SERVICE_NAME.test(form.name) || rolloutSteps(form.rolloutSteps) === null || runner.busy !== null}

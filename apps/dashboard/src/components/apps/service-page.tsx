@@ -30,7 +30,7 @@ import { MetricsTab } from "./metrics";
 import { SettingsTab } from "./settings";
 import { clock, RunnerError, StateBadge, SureButton, until, useRunner, type Runner } from "./shared";
 import { UsageTab } from "./usage";
-import { VariablesTab } from "./variables";
+import { RedeployBanner, VariablesTab } from "./variables";
 
 export const SERVICE_TABS = ["deployments", "logs", "metrics", "variables", "jobs", "shell", "domains", "usage", "settings"] as const;
 export type ServiceTab = (typeof SERVICE_TABS)[number];
@@ -506,6 +506,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
 
       <RunnerError runner={runner} />
       {env && <Conditions service={service} env={env} runner={runner} go={go} />}
+      {env && <RedeployBanner service={service.id} env={env} runner={runner} onRedeploy={redeploy} />}
       {env?.crash_loop && (
         <div role="alert" className="rise mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-danger/40 bg-danger/[0.06] px-4 py-3 text-[13px]">
           <span className="font-medium text-danger">Crashing</span>
