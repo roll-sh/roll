@@ -587,6 +587,7 @@ static TOOLS: &[Tool] = &[
         b("allow_ips", Ty::Arr, "Only these addresses get in: [cidr or {cidr, description}]"),
         b("rate_limit", Ty::Obj, "{per_minute, burst?}: requests a client address may make"),
         b("firewall", Ty::Arr, "[{action: allow|deny, path?, methods?, user_agent?}], first match wins"),
+        b("headers", Ty::Any, "Response header rules: [{path?, set: {name: value}, replace?}] (at most 20), or null for none"),
     ]),
     t("apps_update_service", "Update a service", "Change a service's name, source, build or run settings (fields given are changed; run takes alerts {memory_pct, error_pct, p95_ms} for metric alerts).", "apps", "PATCH", "/v1/apps/services/{service}", &[
         SERVICE,
@@ -628,7 +629,7 @@ static TOOLS: &[Tool] = &[
     t("apps_wake", "Wake", "Start a sleeping environment's instances.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/wake", &[SERVICE, ENV]),
     t("apps_usage", "Service usage", "An environment's usage and cost per day.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/usage", &[SERVICE, ENV, q("days", Ty::Int, "Days back")]),
     t("apps_restart", "Restart", "Restart an environment's instances.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/restart", &[SERVICE, ENV]),
-    t("apps_restart_instance", "Restart one instance", "Replace one instance of a web service (a fresh one answers before this one drains; if it doesn't start, this one keeps serving). Instance names are in apps_get_environment. Production is a \"deploy\" action.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/instances/{name}/restart", &[SERVICE, ENV, req("name", "Instance name")]),
+    t("apps_restart_instance", "Restart one instance", "Replace one instance of a web service (a fresh one answers before this one drains; if it doesn't start, this one keeps serving). Instance names are in apps_get_environment. Production is a \"deploy\" action.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/instances/{name}/restart", &[SERVICE, ENV, req("name", "Instance id (instances[].id in apps_get_environment)")]),
     t("apps_redeploy", "Redeploy", "Deploy what's running again with the current settings and variables (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/redeploy", &[SERVICE, ENV, b("message", Ty::Str, "Why")]),
     t(
         "apps_run_job",
