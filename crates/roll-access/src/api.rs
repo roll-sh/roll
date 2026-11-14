@@ -831,9 +831,23 @@ async fn audit(State(a): S, ext: Extensions, Query(mut q): Query<AuditQuery>) ->
 /// names and resources are anyone's text, so a cell that would start a formula (`=`, `+`, `-`, `@`,
 /// a tab or a carriage return) is prefixed with `'`, as OWASP's CSV injection advice says.
 pub fn audit_csv(events: &[crate::store::AuditEvent]) -> String {
+    // Every cell quoted; a formula character is defused at the start and after anything a
+    // spreadsheet may split a cell on (`;` in many locales, a tab, `|`), past any spaces.
     fn cell(s: &str) -> String {
-        let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{s}") } else { s.to_string() };
-        if s.contains([',', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s }
+        let mut out = String::with_capacity(s.len() + 2);
+        let mut at_start = true;
+        for c in s.chars() {
+            if at_start && matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r') {
+                out.push('\'');
+            }
+            out.push(c);
+            if matches!(c, ';' | '\t' | '|') {
+                at_start = true;
+            } else if c != ' ' {
+                at_start = false;
+            }
+        }
+        format!("\"{}\"", out.replace('"', "\"\""))
     }
     let mut out = String::from("at,token,token_name,source,tool,method,route,product,action,resource,decision,approval,status,ip,duration_ms,client\n");
     for e in events {
@@ -916,9 +930,13 @@ mod csv_tests {
             duration_ms: 3,
             client: Some("@evil".into()),
         };
-        let csv = super::audit_csv(&[e]);
+        let csv = super::audit_csv(std::slice::from_ref(&e));
         let row = csv.lines().nth(1).unwrap();
-        assert!(row.starts_with("1970-01-01T00:00:00Z,tok_1,\"'=HYPERLINK(\"\"https://x.example\"\",\"\"click\"\")\""), "{row}");
-        assert!(row.contains(",\"a,b\",") && row.ends_with(",'@evil"), "{row}");
+        assert!(row.starts_with("\"1970-01-01T00:00:00Z\",\"tok_1\",\"'=HYPERLINK(\"\"https://x.example\"\",\"\"click\"\")\""), "{row}");
+        assert!(row.contains(",\"a,b\",") && row.ends_with(",\"'@evil\""), "{row}");
+        // A separator inside a cell starts another cell in some spreadsheets: defused there too.
+        let e2 = crate::store::AuditEvent { grant_name: Some("x; =HYPERLINK(1)|@a".into()), ..e };
+        let row2 = super::audit_csv(&[e2]);
+        assert!(row2.lines().nth(1).unwrap().contains("\"x; '=HYPERLINK(1)|'@a\""), "{row2}");
     }
 }

@@ -925,6 +925,10 @@ impl roll_auth::Grants for Access {
     /// evaluator answers their requests. Blocking; looked up on every call.
     fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
         let g = self.store.get(id).ok()?;
+        // Stopped for being idle (the token policy), as the evaluator answers its requests.
+        if self.policy_now().idle(&g, code_sql::now_ms()) {
+            return None;
+        }
         if let Some(user) = g.user.as_deref() {
             let people = self.people.get()?;
             people.person_now(user).ok()??;
