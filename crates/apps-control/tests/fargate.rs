@@ -658,6 +658,9 @@ async fn a_private_image_pulls_with_its_registry_secret() {
     for op in ["RegisterTaskDefinition", "RunTask"] {
         assert!(!w.fake.calls(op).iter().any(|c| c.to_string().contains("ghp-registry-s3cr3t")), "the password is in {op}");
     }
+    // The login goes with the service: no password left in Secrets Manager.
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
+    assert!(!w.fake.aws.lock().secrets.contains_key(&format!("roll-apps/registry/{short}")), "the login's secret is deleted");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

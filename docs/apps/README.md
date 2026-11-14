@@ -1395,8 +1395,9 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   `code/runs/` rule is the model), and the `ROLL_APPS_*` node settings. A private image pulls with the service's
   login as a Secrets Manager secret `roll-apps/registry/<service>` named in the task definition
   (repository credentials; tested against the fake AWS): the fleet role needs
-  `CreateSecret`/`PutSecretValue` there and the execution role `GetSecretValue`; the secret
-  isn't deleted with its service yet. Still missing on the fleet: private networking (Cloud
+  `CreateSecret`/`PutSecretValue`/`DeleteSecret` there and the execution role `GetSecretValue`;
+  the secret is deleted (without recovery) when the login is removed or the service deleted
+  (`Runtime::drop_registry_login`). Still missing on the fleet: private networking (Cloud
   Map), volumes (EFS; a service with a volume is refused), shells (ECS Exec), and multi-line
   variable values.
 - The edge routes `*.up.<site domain>` and unknown hosts (custom domains) to roll apps.

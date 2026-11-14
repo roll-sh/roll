@@ -552,6 +552,7 @@ impl Apps {
     pub async fn delete_registry(self: &Arc<Self>, service: &str) -> Result<Service> {
         let sid = service.to_string();
         self.db(move |s| s.delete_registry(&sid)).await?;
+        self.deps.runtime.drop_registry_login(service).await;
         self.service(service).await
     }
 
@@ -641,6 +642,7 @@ impl Apps {
         for name in self.deps.runtime.list(Some(id)).await {
             self.deps.runtime.remove(&name).await;
         }
+        self.deps.runtime.drop_registry_login(id).await;
         // Links to it from the project's other services go (their next deploy drops the URLs).
         let sid = id.to_string();
         if self.db(move |s| s.delete_links_to(LinkKind::Service, &sid)).await? > 0 {

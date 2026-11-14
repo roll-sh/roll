@@ -678,6 +678,15 @@ impl Runtime for Fargate {
         true
     }
 
+    async fn drop_registry_login(&self, service: &str) {
+        let name = format!("roll-apps/registry/{}", short(service));
+        match self.secrets.delete_secret().secret_id(&name).force_delete_without_recovery(true).send().await {
+            Ok(_) => {}
+            Err(e) if e.as_service_error().is_some_and(|s| s.is_resource_not_found_exception()) => {}
+            Err(e) => warn!(secret = %name, error = %aws_sdk_secretsmanager::error::DisplayErrorContext(e), "apps: deleting a service's registry login"),
+        }
+    }
+
     /// Environment files (variables, secrets among them) a node wrote for a task and died
     /// before deleting: older than twice the start timeout, a task either read it long ago or
     /// never will. This node's own still waiting are spared.
