@@ -8,6 +8,8 @@ import { card, errorText, ErrorNote, ghost, Section, sized, useLoad } from "./ui
 
 const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: boolean }[] = [
   { issue: "expired", title: "Expired", what: "Their values stopped working outside roll.", serious: true },
+  { issue: "rotation_failing", title: "Rotation failing", what: "Their scheduled rotation fails: the database, vendor or rotator refused or didn't answer. The old credential keeps working; roll tries again.", serious: true },
+  { issue: "revoke_failing", title: "Not revoked yet", what: "Credentials roll retired or that expired but couldn't revoke yet: they still work until it can. roll keeps trying.", serious: true },
   { issue: "missing", title: "Missing", what: "Required keys an environment doesn't define.", serious: true },
   { issue: "exposed", title: "Exposed", what: "A protected environment's value, also set where more people and less vetted code read it.", serious: true },
   { issue: "weak", title: "Weak", what: "Credentials easy to guess: New value replaces one with 48 random characters.", serious: false },

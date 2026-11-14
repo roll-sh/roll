@@ -144,7 +144,9 @@ impl Secrets {
         let handle: Json = serde_json::from_str(&handle).unwrap_or_default();
         if let Err(e) = self.links.get(&link.kind).and_then(|p| p.revoke(&link.r#ref, &handle)) {
             // Give it back to the sweeper, which tries again.
-            self.db.write(|c| c.execute("UPDATE leases SET revoked_at = NULL, expires_at = ? WHERE id = ?", params![now + 60_000, id]))?;
+            // Kept for health (`revoke_failing`) while the sweeper retries.
+            let why: String = e.to_string().chars().take(300).collect();
+            self.db.write(|c| c.execute("UPDATE leases SET revoked_at = NULL, expires_at = ?, revoke_error = ? WHERE id = ?", params![now + 60_000, why, id]))?;
             return Err(Error::Link(format!("revoking {id}: {e}")));
         }
         Ok(true)
@@ -213,6 +215,31 @@ impl Secrets {
     /// Rotate a managed link's credential (with every secret that shares it), or a live link's
     /// resource credential. A rotation doesn't need approval on a protected environment.
     pub fn rotate(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller) -> Result<Applied> {
+        let out = self.rotate_now(project, slug, path, key, caller);
+        if out.is_ok() {
+            self.note_rotation(project, slug, path, key, None);
+        }
+        out
+    }
+
+    /// A scheduled rotation's failure, kept on the key for health (`rotation_failing`) until one
+    /// succeeds; `None` clears it.
+    fn note_rotation(&self, project: &str, slug: &str, path: &str, key: &str, failure: Option<&str>) {
+        let now = self.db.now_ms().unwrap_or_default();
+        let failure = failure.map(|f| f.chars().take(300).collect::<String>());
+        let at = failure.as_ref().map(|_| now);
+        let done = self.db.write(|c| {
+            c.execute(
+                "UPDATE secrets SET rotation_error = ?, rotation_failed_at = ? WHERE project_id = ? AND path = ? AND key = ? AND owner = '' AND env_id = (SELECT id FROM environments WHERE project_id = ? AND slug = ?)",
+                params![failure, at, project, path, key, project, slug],
+            )
+        });
+        if let Err(e) = done {
+            tracing::warn!(%project, env = %slug, %key, "keeping a rotation's outcome failed: {e}");
+        }
+    }
+
+    fn rotate_now(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller) -> Result<Applied> {
         let path = names::path(path)?;
         caller.need(Action::Write, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
@@ -356,6 +383,7 @@ impl Secrets {
                 Err(e) => {
                     out.failed += 1;
                     tracing::warn!(%project, env = %slug, %key, "a scheduled rotation failed: {e}");
+                    self.note_rotation(&project, &slug, &path, &key, Some(&e.to_string()));
                 }
             }
         }

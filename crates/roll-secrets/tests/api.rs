@@ -986,6 +986,35 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
     let (s, _) = api.call(Method::DELETE, &format!("/rotators/{}", r["id"].as_str().unwrap()), None).await;
     assert_eq!(s, StatusCode::CONFLICT);
 
+    // A scheduled rotation and a revocation that fail show in health until they succeed.
+    api.sent.2.store(true, std::sync::atomic::Ordering::Relaxed);
+    let p = api.project.clone();
+    api.db
+        .write(move |c| {
+            // Due now (rotate_days 1, issued long ago) and the retired key's grace over.
+            let state: String = c.query_row("SELECT link_state FROM secrets WHERE project_id = ? AND key = 'STRIPE_KEY'", [p.as_str()], |r| r.get(0))?;
+            let mut state: Value = serde_json::from_str(&state).unwrap();
+            state["issued_at"] = json!(0);
+            c.execute("UPDATE secrets SET link_state = ?, link = replace(link, '\"mode\":\"managed\"', '\"mode\":\"managed\",\"options\":{\"rotate_days\":1}') WHERE project_id = ? AND key = 'STRIPE_KEY'", [state.to_string().as_str(), p.as_str()])?;
+            c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ?", [p.as_str()])
+        })
+        .unwrap();
+    let sweep = || {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap() }
+    };
+    sweep().await;
+    let health = api.ok(Method::GET, "/health", None).await;
+    let issues: Vec<&str> = health.as_array().unwrap().iter().filter_map(|f| f["issue"].as_str()).collect();
+    assert!(issues.contains(&"rotation_failing") && issues.contains(&"revoke_failing"), "{health}");
+    assert!(health.to_string().contains("connection refused"), "the reason: {health}");
+    api.sent.2.store(false, std::sync::atomic::Ordering::Relaxed);
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ? AND revoked_at IS NULL", [p.as_str()])).unwrap();
+    sweep().await;
+    let health = api.ok(Method::GET, "/health", None).await;
+    assert!(!health.to_string().contains("failing"), "both cleared once they succeed: {health}");
+
     // The project goes while the rotator is down: what it issued is still revoked, by the
     // sweeper, which keeps the rotator (and the project's key) until then.
     api.sent.2.store(true, std::sync::atomic::Ordering::Relaxed);
