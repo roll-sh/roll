@@ -557,7 +557,7 @@ grace period (its revocation goes through the rotator).
 
 ### Databases outside roll
 
-A Postgres or MySQL server roll doesn't run (Amazon RDS, Supabase, Neon, PlanetScale, a server of the customer's own)
+A Postgres, MySQL or Redis server roll doesn't run (Amazon RDS, Supabase, Neon, PlanetScale, ElastiCache, Upstash, a server of the customer's own)
 has its logins rotated by roll itself, with no rotator to write, as Infisical's secret rotation
 does, and issues a login per lease, as Vault's database engine does. A project registers it
 (`POST …/outside-databases {name, url, roles?, group?, ca?}`, `admin`; `roll secrets databases add
@@ -612,6 +612,17 @@ out of its logs), and a dynamic login is `CREATE USER`, `GRANT <group>` and `SET
 <group>`. MySQL has no `VALID UNTIL`, so a dynamic login lasts until roll ends its lease (renewing
 changes nothing on the server); ending it kills its sessions where the admin may
 (`CONNECTION_ADMIN`) and drops the account.
+
+**Redis** (`rediss://user:password@host:6379`, ACL users; `redis://` only where private addresses
+are allowed; no path or settings). Passwords go as `#<sha256>` (`ACL SETUSER <role> resetpass
+#…`), so the server never sees one. Redis has no roles, so `group` names a template user (off, no
+password) whose rules a dynamic login copies: `ACL SETUSER roll_… reset on #… <its commands, keys
+and channels>`; a template with selectors is refused. Ending the lease is `ACL DELUSER`, which also
+closes the user's connections; Redis has no expiry for a user, so a dynamic login lasts until roll
+ends its lease. Every change is kept across a restart the way the server keeps its users: `ACL
+SAVE` with an ACL file (a failure fails the change, or a restart would bring back a retired
+password), else `CONFIG REWRITE` where there's a config file. The server is the tenant's, so its replies are read by a small parser that bounds
+nesting, counts and lengths by the bytes present.
 
 **ClickHouse** too, over its HTTPS interface (`clickhouse://admin:…@host:8443/db`, ClickHouse
 Cloud's port; no settings): rolld pins the address it checked, verifies the certificate against
