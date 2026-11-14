@@ -719,6 +719,13 @@ async fn a_roll_apps_preview_costs_what_it_runs_with() {
     let p = e.engine.store.row_by_change("chg_m").unwrap().unwrap();
     let web = e.engine.store.services(&p.id).unwrap().into_iter().find(|s| s.name == "web").unwrap();
     assert_eq!(web.memory_mb, 256);
+    // Its feedback button rides along (link access, a change's), and turning it off redeploys.
+    assert_eq!(e.apps.feedback.lock().get(&(p.id.clone(), "web".to_string())), Some(&true));
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "feedback": false })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.feedback.lock().get(&(p.id.clone(), "web".to_string())), Some(&false));
 }
 
 /// The notes on a page, by the preview's environment name (how roll apps' proxy asks for them):

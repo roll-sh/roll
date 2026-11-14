@@ -247,6 +247,9 @@ pub struct Target {
     /// With `access_token`: the project's bypass secret's SHA-256 (hex), which opens it for
     /// automation too (`x-roll-preview-bypass`).
     pub bypass_sha256: Option<String>,
+    /// The feedback button on its pages (the project's `feedback`, a change's preview, link
+    /// access): a backend that serves the pages itself (roll apps) adds it as the runtime does.
+    pub feedback: bool,
 }
 
 /// A deploy the backend accepted that hasn't finished (a build, a rollout): the converge leaves

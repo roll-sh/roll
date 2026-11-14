@@ -355,7 +355,9 @@ impl Engine {
             // Access and the bypass only matter to a backend that checks access itself (roll
             // apps): the runtime's gate reads them on each request, so turning a project public or
             // private, or a rotation, restarts nothing there (nor cuts a screenshot short).
-            let fingerprint = config_fingerprint(&vars, access_token.is_some() && on_apps, bypass.as_deref().filter(|_| on_apps), trusted);
+            // The feedback button: the runtime's proxy adds it per request; roll apps at deploy.
+            let feedback = s.feedback && r.change_id.is_some() && access_token.is_some();
+            let fingerprint = config_fingerprint(&vars, access_token.is_some() && on_apps, bypass.as_deref().filter(|_| on_apps), trusted, feedback && on_apps);
             let config_moved = self.store.service_config(&r.id, &spec.name)?.as_deref() != Some(fingerprint.as_str());
             // The head it ran stays reachable at a URL of its own (Vercel's per-push URLs): the
             // change's own services on the runtime, a trusted change's.
@@ -387,6 +389,7 @@ impl Engine {
                     branches: branches.clone(),
                     access_token: access_token.clone(),
                     bypass_sha256: bypass.clone(),
+                    feedback,
                 };
                 self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
                 match self.apps.deploy(&t).await {
