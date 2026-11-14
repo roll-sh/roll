@@ -1257,7 +1257,8 @@ In short:
   one after another.
 - **Footprint**: an idle roll node holds 34 MiB and answers the first `knn` 36 ms after a wake
   (213 ms with the page cache dropped), against 25–29 s for a node start of the others. roll's
-  store is 56% larger than Elasticsearch's, all of it vectors kept in `_source`.
+  store was 56% larger than Elasticsearch's, all of it vectors kept in `_source`; since roll
+  stores `_source` without them (below) it is 1.74 GB against Elasticsearch's 1.71.
 
 
 ### Default index options (roll and Elasticsearch: `bbq_hnsw`; OpenSearch: faiss HNSW float32)
@@ -1474,13 +1475,14 @@ float vectors it rescores, which is still two orders of magnitude below a node s
   anonymous memory in roll (`RssAnon` sampled every 0.5 s on a native instance; the 5.3 GiB
   `VmHWM` above is mostly the mapped inputs, the spilled raw vectors and the output in the
   page cache).
-- **Store.** roll's index is 2.66–2.67 GB against Elasticsearch's 1.70 GB and OpenSearch's
-  3.28 GB (default config). The difference to Elasticsearch is the vectors kept in roll's
-  stored `_source`: Elasticsearch 9 takes them out of `_source` at index time
+- **Store.** In these rounds roll's index was 2.66–2.67 GB against Elasticsearch's 1.70 GB and
+  OpenSearch's 3.28 GB (default config). The difference to Elasticsearch was the vectors kept
+  in roll's stored `_source`: Elasticsearch 9 takes them out of `_source` at index time
   (`index.mapping.exclude_source_vectors`) and rebuilds them from the vector field when asked;
-  roll stores them and hides them at fetch. They cost 967 bytes per document zstd-compressed
+  roll stored them and hid them at fetch. They cost 967 bytes per document zstd-compressed
   (20,000 documents in 16 KiB chunks: 980 bytes per document with the vector, 13 without),
-  0.97 GB here. In object storage (the data directory's `objects/`) the bytes are the same plus
+  0.97 GB here. roll now does as Elasticsearch does: 1.74 GB force-merged ("Storing vectors
+  once" below). In object storage (the data directory's `objects/`) the bytes are the same plus
   segments that merges replaced, which the collector keeps for its one-hour grace period.
 
 ### What changed
@@ -1511,6 +1513,49 @@ column repeats the default round above:
 8-client load ran at 4,162 docs/s and 898 µs/doc against 4,735 and 787 in the first round; the
 change touches no indexing code, and the lane's host load drifted between the two.)
 
+### Storing vectors once (`_source` without them)
+
+roll now stores `_source` without the values of indexed `dense_vector` fields outside `nested`
+objects when `index.mapping.exclude_source_vectors` is true (Elasticsearch 9's default), and
+patches them back from the vector field for the readers that need them, as Elasticsearch does
+(`search-es` `engine/source_vectors.rs`): gets (realtime from the indexing buffer too),
+`_update`, update by query, reindex, hits that show vectors or read them for `fields`, script
+fields' `params._source`, `top_hits` and `inner_hits`, the knn `lookup` builder, and the
+copies resize and snapshot restore make. Values print as Elasticsearch's: at the end of their
+object (an array of objects: in its first object), a `cosine` field's floats normalized and
+multiplied back by their magnitude, `bfloat16` rounded, `sparse_vector` features sorted and as
+their postings keep them (checked against Elasticsearch 9.5.5 on 1,400 random cosine vectors of
+3 to 384 dims, all identical; `tests/fixtures/docs/source_vectors.json`). Documents written
+before keep their vectors in the stored source and read as before.
+
+The same harness as the rounds above (one `search-dev` container on `10,11,28,29`, 6 GiB,
+clients on `12,13,30,31`), roll only, default config: release builds of `370d29a04` (before)
+and the same tree with only this change (after), each a fresh 1M load at 8 clients, settled,
+force-merged to one segment. Fetch: `knn` (k 10, `num_candidates` 100) on the merged index,
+200 queries after 30 warm-up queries, 3 rounds alternating the two builds; server CPU ms per
+query, min–max:
+
+| measure | before | after |
+|---|---:|---:|
+| store bytes, not merged | 2,670,866,087 | 1,724,865,995 |
+| store bytes, force-merged | 2,673,566,106 | 1,740,417,321 (Elasticsearch: 1,709,711,301) |
+| data directory (with objects merges replaced) | 13.3 GB | 10.1 GB |
+| 1M docs at 8 clients: docs/s, CPU µs/doc | 4,026, 926.5 | 5,496, 703.2 |
+| 200k docs at 8 clients, 2 runs: CPU µs/doc | 657.3, 642.3 | 660.9, 544.0 |
+| force-merge: s, CPU s | 112, 213 | 105, 311 |
+| fetch, `_source: false` | 2.04–2.34 | 2.13–2.70 |
+| fetch, `_source` (vectors left out) | 7.42–8.70 | 1.92–2.11 |
+| fetch, `exclude_vectors: false` (vectors shown) | 12.21–15.60 | 8.48–8.98 |
+
+Indexing costs no more (a stored source a third the size, less to compress and merge; the
+1M load was faster, the 200k runs overlap). Fetching `_source` got cheaper both ways: with
+vectors hidden there are no 384 numbers to parse and drop per hit, and with vectors shown each
+float is converted to its printed form once (the first version of the change converted it three
+times and cost 12.5–16.9 ms there against 9.3–10.0 before; fixed before landing). The host was
+busier during the fetch rounds than in the earlier ones, so compare the columns, not the rows
+above. Recall@10 was 0.825 before and 0.863 after on the merged index: HNSW construction isn't
+deterministic, the graph differs between loads.
+
 ### Measured, not adopted
 
 | idea | result |
@@ -1521,10 +1566,10 @@ change touches no indexing code, and the lane's host load drifted between the tw
 
 ### Where roll still loses
 
-- **Store bytes**: vectors in the stored `_source` (above), +56% over Elasticsearch for this
-  corpus. Taking them out at index time needs every reader of `_source` (fetch, `get`,
-  `update`, reindex, realtime get from the buffer, scripts) to splice them back from the
-  vector field, and old segments to keep working: the next change for this lane.
+- **Store bytes**: no longer: 1.74 GB against Elasticsearch's 1.71 since `_source` is stored
+  without its vectors ("Storing vectors once"). Still kept in `_source`: vectors inside `nested`
+  objects and `sparse_vector` values (Elasticsearch rebuilds those from the nested documents and
+  the feature postings).
 - **Float HNSW indexing**: 1,250 µs of CPU per document against Elasticsearch's 1,174 (3,104 vs
   3,312 docs/s); with quantized graphs roll is ahead (bbq 787 vs 1,088, int8 718 vs 1,072).
   The float distance kernels are AVX2; this Xeon has AVX-512, which Elasticsearch's Panama
@@ -1552,6 +1597,7 @@ Numbers: geonames subset (1.1M docs, 5 shards, force-merged), server CPU time pe
 | `_source` moves into the hit instead of being cloned when no `fields` option reads it again | `search-es` `search/hits.rs` | `Value::clone` 6% of scroll CPU | 0 |
 | one-numeric-key sorts with `search_after` take the fast path too: a doc worse than the queue's bottom costs one value read and one comparison | `search-index` `collector/top_field.rs` | `asc_sort_with_after_geonameid` 14.8 ms, `desc_…` 33 ms | 12.1 ms, 30 ms |
 | merges BP-reorder only segments of at least 65,536 docs (Lucene's `BPReorderingMergePolicy` default) instead of 16,384: while indexing, BP was 42% of merge CPU and merges 31% of all CPU, every merge level reordering the same docs again | `search-index` `shard/mod.rs` | see Rally `index-append` | |
+| `_source` stored without indexed vectors (`index.mapping.exclude_source_vectors`), patched back from the vector field where a reader needs them; a hit converts each shown float once (vector search corpus, 1M × 384, "Storing vectors once") | `search-es` `engine/source_vectors.rs`, `search/hits.rs`, `write.rs`; `search-index` `Shard::get_with_vectors` | store 2.67 GB force-merged; fetch CPU 7.4–8.7 ms (vectors hidden), 12.2–15.6 (shown) | 1.74 GB; 1.9–2.1 ms, 8.5–9.0 |
 
 
 Round 2 of this lane (geonames subset as above, roll pinned to the 8 hardware threads
