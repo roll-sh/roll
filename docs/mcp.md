@@ -358,6 +358,13 @@ previews are listed once those products are on.
 | `secrets_list_cloud_accounts` | A project's GCP and Azure accounts for dynamic credentials (no secrets; adding one is admin, in the dashboard). | `GET /v1/secrets/projects/{project}/cloud-accounts` |
 | `secrets_list_cas` | A project's own certificate authorities (public certificates, domains, limits; never a key; adding one is admin). | `GET /v1/secrets/projects/{project}/cas` |
 | `secrets_list_ssh_cas` | A project's SSH CAs (public keys, principals, limits; never a private key; adding one is admin). | `GET /v1/secrets/projects/{project}/ssh-cas` |
+| `secrets_changes` | What changed in an environment (who, when, which keys; never values). | `GET …/environments/{env}/changes` |
+| `secrets_versions` | A secret's history (fingerprints, never values). | `GET …/environments/{env}/secrets/{name}/versions` |
+| `secrets_compare` | Which keys differ between two environments (never values). | `GET /v1/secrets/projects/{project}/compare` |
+| `secrets_rotate` | A new value for a secret with a rotator, switched to. | `POST …/environments/{env}/secrets/{name}/rotate` |
+| `secrets_promote` | Copy another environment's secrets in (a change request into a protected one). | `POST …/environments/{env}/promote` |
+| `secrets_list_requests` | An environment's change requests. | `GET …/environments/{env}/requests` |
+| `secrets_propose` | Propose changes for a person to review and apply: the way to change a protected environment. | `POST …/environments/{env}/requests` |
 | `secrets_health` | What needs fixing in a project's secrets, by name, in the environments you may read (`code`: keys no repository mentions). | `GET /v1/secrets/projects/{project}/health` |
 | `secrets_findings` | Every project's secrets health findings you may read. | `GET /v1/secrets/findings` |
 | `secrets_find` | Where a key is set across the projects you may read. | `GET /v1/secrets/search` |
@@ -442,20 +449,22 @@ start and pre-deploy commands, schedule, kind, port, volume and `run.public`, ar
 a day or less); workload tokens (`Access::mint_workload`: minutes, within an identity's scope, owned
 by its maker, out of the list and caps) for secrets' identity logins; a person's own tokens' news is
 mailed to them (an approval waiting on them, used from a new network, revoked as leaked, about to
-expire; only their own, never a secret); `previews_revoke_share` and `previews_settings`
-(previews-next #28); `apps_pending` and `apps_deploy_commits` (what the next deploy changes, what a
-deploy brought; apps-next #26), and `debug_failing_service` uses them; `roll token tools <id>` (what
-an agent sees, from the CLI); roll code's stream and device-login caps take the client the trusted
-proxy saw (the right-most `X-Forwarded-For` entry that isn't the proxy, over every line, only an
-address), not the left-most a client wrote; apps-next's head passes the per-method check with #25;
-the thirteenth review (X-Forwarded-For only from listed proxies, every line, a bad entry stopping
-the walk, IPv4-mapped addresses matched; nothing listed, the header counts for nothing; MCP tool
-calls carry the gate's address; unconsented client ids good for 90 days and kept ids small enough
-for Postgres); `ROLL_TRUSTED_PROXIES` (X-Forwarded-For only from the edge's addresses, the client
-the right-most entry that isn't one: a direct request can't name its own address for IP allowlists
-or registration's limit); sealed apps variables explained to agents (apps-next #26); the prefix
-check per method (rolld logs each route's methods; 194 `METHOD route` lines reviewed, 7 newly found
-and looked at: a route with its own row for one method can't gain another a prefix decides unseen);
+expire; only their own, never a secret); secrets' history and workflow as MCP tools (changes,
+versions, compare, rotate, promote, change requests and proposing one: how an agent changes a
+protected environment); `previews_revoke_share` and `previews_settings` (previews-next #28);
+`apps_pending` and `apps_deploy_commits` (what the next deploy changes, what a deploy brought;
+apps-next #26), and `debug_failing_service` uses them; `roll token tools <id>` (what an agent sees,
+from the CLI); roll code's stream and device-login caps take the client the trusted proxy saw (the
+right-most `X-Forwarded-For` entry that isn't the proxy, over every line, only an address), not the
+left-most a client wrote; apps-next's head passes the per-method check with #25; the thirteenth
+review (X-Forwarded-For only from listed proxies, every line, a bad entry stopping the walk,
+IPv4-mapped addresses matched; nothing listed, the header counts for nothing; MCP tool calls carry
+the gate's address; unconsented client ids good for 90 days and kept ids small enough for Postgres);
+`ROLL_TRUSTED_PROXIES` (X-Forwarded-For only from the edge's addresses, the client the right-most
+entry that isn't one: a direct request can't name its own address for IP allowlists or
+registration's limit); sealed apps variables explained to agents (apps-next #26); the prefix check
+per method (rolld logs each route's methods; 194 `METHOD route` lines reviewed, 7 newly found and
+looked at: a route with its own row for one method can't gain another a prefix decides unseen);
 sensitive secrets explained to agents (`secrets_reveal` and `roll://guide`: a 403 and `withheld` are
 expected; secrets #46); open registration stores nothing (a client's id is the client, signed; kept
 once a person consents, else good for a day), so a flood has nothing to fill; the twelfth review's
