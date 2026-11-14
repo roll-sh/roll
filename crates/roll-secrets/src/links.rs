@@ -224,6 +224,9 @@ impl crate::Secrets {
                 Some(Target { kind: r.kind.as_str().into(), name: provider.name(&r.r#ref).unwrap_or_else(|| r.r#ref.clone()), r#ref: r.r#ref, fields: provider.fields().to_vec() })
             })
             .collect();
+        if let Some(provider) = self.links.0.get(crate::aws::KIND) {
+            out.extend(self.aws_role_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::aws::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+        }
         if let Some(provider) = self.links.0.get(crate::rotators::KIND) {
             out.extend(self.rotator_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::rotators::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
         }

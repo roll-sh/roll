@@ -14,6 +14,7 @@ pub mod access;
 mod alerts;
 pub mod api;
 pub mod health;
+pub mod aws;
 pub mod rotators;
 mod strength;
 mod audit;
@@ -298,6 +299,8 @@ pub struct Options {
     /// People's accounts, looked up when what a person made acts (never cached). `None`: nothing a
     /// person made acts later.
     pub people: Option<std::sync::Arc<dyn access::People>>,
+    /// STS, for dynamic AWS credentials from roles projects register (aws.rs); `None`: none.
+    pub sts: Option<std::sync::Arc<dyn aws::Sts>>,
     /// rolld has no operator token (loopback development): a request without a token is the
     /// operator's.
     pub open: bool,
@@ -319,6 +322,7 @@ pub struct Secrets {
     deliver: Option<Arc<dyn sinks::Deliver>>,
     grants: Option<Arc<dyn roll_auth::Grants>>,
     people: Option<Arc<dyn access::People>>,
+    sts: Option<Arc<dyn aws::Sts>>,
     open: bool,
     trust_forwarded_for: bool,
     web_url: Option<String>,
@@ -388,12 +392,16 @@ impl Secrets {
         db.ensure_schema(notices::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
+        db.ensure_schema(aws::SCHEMA)?;
         // Rotators are a link kind of roll secrets' own: they call out through rolld.
         let mut links = opts.links;
+        if let Some(sts) = &opts.sts {
+            links.register(Arc::new(aws::Provider { db: db.clone(), sts: sts.clone() }));
+        }
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
             links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), deliver: deliver.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, sts: opts.sts.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -498,7 +506,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators"];
+const REGISTRIES: &[&str] = &["rotators", "aws_roles"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked.
 fn forget_if_done(c: &code_sql::Conn<'_>, project: &str) -> Result<()> {

@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, Finding, ProjectFindings, SyncPreview, FileDiff } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff } from "@roll/secrets/types";
 import { withSession } from "./code-token";
 import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 
@@ -201,6 +201,10 @@ export function secretsApi(project: string) {
     scanLeaks: (candidates: string[]) => req<{ index: number; key: string; environment: string; path: string }[]>("POST", `${P}/leaks`, { candidates }),
     /** `code`: also the keys no repository on the canvas mentions (a search per key: on request). */
     health: (code = false) => req<Finding[]>("GET", `${P}/health${qs({ code: code ? 1 : undefined })}`),
+    /** AWS roles for dynamic credentials: registering one assumes it (its trust policy must pin the ExternalId). */
+    awsRoles: () => req<AwsRole[]>("GET", `${P}/aws-roles`),
+    addAwsRole: (r: { name: string; role_arn: string }) => req<AwsRole>("POST", `${P}/aws-roles`, r),
+    deleteAwsRole: (id: string) => req<null>("DELETE", `${P}/aws-roles/${enc(id)}`),
     rotators: () => req<Rotator[]>("GET", `${P}/rotators`),
     /** The answer holds its signing secret, once. */
     addRotator: (r: { name: string; url: string }) => req<Rotator & { secret: string }>("POST", `${P}/rotators`, r),
