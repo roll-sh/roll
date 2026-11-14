@@ -494,6 +494,23 @@ async fn every_write_is_a_version_and_an_environment_rolls_back_to_any_change() 
     tokio::task::spawn_blocking(move || sec.sweep().unwrap()).await.unwrap();
     assert_eq!(api.values("production", "/").await["values"]["A"], "10");
     assert_eq!(api.ok(Method::GET, "", None).await["history_days"], 1);
+    // Check-and-set: two writers read A at one version; the second's change is refused whole.
+    let b = api.ok(Method::GET, "/environments/production/secrets/A", None).await["version"].as_i64().unwrap();
+    api.ok(Method::PUT, "/environments/production/secrets/A", Some(json!({ "value": "first", "if_version": b }))).await;
+    let (st, e) = api.call(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "D", "value": "4" }, { "op": "set", "key": "A", "value": "second", "if_version": b }] }))).await;
+    assert!(st == StatusCode::CONFLICT && e["code"] == "stale" && e["error"].as_str().unwrap().contains("A changed since version"), "{e}");
+    assert_eq!((api.values("production", "/").await["values"]["A"].clone(), api.values("production", "/").await["values"]["D"].clone()), (json!("first"), Value::Null), "nothing of the refused change");
+    // 0: only if it doesn't exist yet.
+    assert_eq!(api.call(Method::PUT, "/environments/production/secrets/A", Some(json!({ "value": "x", "if_version": 0 }))).await.0, StatusCode::CONFLICT);
+    api.ok(Method::PUT, "/environments/production/secrets/NEWKEY", Some(json!({ "value": "x", "if_version": 0 }))).await;
+    // Protected: a stale read is told so, not sent to a request; a request keeps the check.
+    let now = api.ok(Method::GET, "/environments/production/secrets/A", None).await["version"].as_i64().unwrap();
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true }))).await;
+    let (st, e) = api.call(Method::PUT, "/environments/production/secrets/A", Some(json!({ "value": "y", "if_version": now - 1 }))).await;
+    assert!(st == StatusCode::CONFLICT && e["code"] == "stale", "{e}");
+    let (st, e) = api.call(Method::POST, "/environments/production/requests", Some(json!({ "ops": [{ "op": "set", "key": "A", "value": "y", "if_version": now - 1 }] }))).await;
+    assert!(st == StatusCode::CONFLICT && e["code"] == "stale", "{e}");
+    api.ok(Method::POST, "/environments/production/requests", Some(json!({ "ops": [{ "op": "set", "key": "A", "value": "y", "if_version": now }] }))).await;
 }
 
 #[tokio::test]

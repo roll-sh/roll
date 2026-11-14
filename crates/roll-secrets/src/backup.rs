@@ -189,6 +189,7 @@ impl Secrets {
                     link: s.link.clone().map(Some),
                     path: None,
                     expires_at: s.expires_at.map(Some),
+                    if_version: None,
                 });
             }
             for (path, ops) in by_path {

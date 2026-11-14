@@ -436,6 +436,9 @@ struct SetBody {
     message: Option<String>,
     #[serde(default, deserialize_with = "some")]
     expires_at: Option<Option<i64>>,
+    /// Check-and-set: only if the key is still at this version (0: only if it doesn't exist).
+    #[serde(default)]
+    if_version: Option<i64>,
 }
 
 fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
@@ -443,14 +446,15 @@ fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<O
 }
 
 async fn set_secret(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q, b: Bytes) -> crate::Result<Response> {
-    let SetBody { value, comment, tags, kind, link, message, expires_at } = body(&b)?;
-    let op = Op::Set { key: key.clone(), value, comment, tags, kind, link, path: None, expires_at };
+    let SetBody { value, comment, tags, kind, link, message, expires_at, if_version } = body(&b)?;
+    let op = Op::Set { key: key.clone(), value, comment, tags, kind, link, path: None, expires_at, if_version };
     Ok(ok(blocking(s, move |s| s.set_secret(&project, &env, &path_of(&q), &key, op, message, &c)).await?))
 }
 
 async fn delete_secret(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q) -> crate::Result<Response> {
     let kind = kind_of(&q)?;
-    Ok(ok(blocking(s, move |s| s.delete_secret(&project, &env, &path_of(&q), &key, kind, &c)).await?))
+    let if_version = q.get("if_version").map(|v| v.parse::<i64>().map_err(|_| crate::Error::BadRequest("if_version is a number".into()))).transpose()?;
+    Ok(ok(blocking(s, move |s| s.delete_secret(&project, &env, &path_of(&q), &key, kind, if_version, &c)).await?))
 }
 
 async fn reveal(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q) -> crate::Result<Response> {
@@ -657,7 +661,7 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
         let own: Vec<&crate::Secret> = mine.iter().filter(|x| x.kind == crate::SecretType::Shared).collect();
         let in_file: std::collections::HashSet<String> = entries.iter().map(|e| e.key.clone()).collect();
         let removed: Vec<Op> = if i.replace {
-            own.iter().filter(|x| x.link.is_none() && !in_file.contains(&x.key)).map(|x| Op::Delete { key: x.key.clone(), kind: None, path: None }).collect()
+            own.iter().filter(|x| x.link.is_none() && !in_file.contains(&x.key)).map(|x| Op::Delete { key: x.key.clone(), kind: None, path: None, if_version: None }).collect()
         } else {
             vec![]
         };
@@ -681,6 +685,7 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
                 link: None,
                 path: None,
                 expires_at: None,
+                if_version: None,
             })
             .chain(removed)
             .collect();
