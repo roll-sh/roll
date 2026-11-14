@@ -1,7 +1,7 @@
 import { HorizonMark } from "@roll/brand";
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowLeft, ChevronDown, ExternalLink, Moon, Play, RotateCw, Rocket, Sun } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import {
   appsApi,
@@ -28,7 +28,7 @@ import { anyPending, POLL_BUSY_MS, POLL_IDLE_MS, POLL_STREAMED_MS, useDeployMark
 import { RuntimeLogs } from "./logs";
 import { MetricsTab } from "./metrics";
 import { SettingsTab } from "./settings";
-import { clock, StateBadge, SureButton, until, useRunner } from "./shared";
+import { clock, StateBadge, SureButton, until, useRunner, type Runner } from "./shared";
 import { UsageTab } from "./usage";
 import { VariablesTab } from "./variables";
 
@@ -186,6 +186,83 @@ function NewEnvironment({
         Cancel
       </button>
     </form>
+  );
+}
+
+/**
+ * Why the environment isn't serving as usual, one line each with its fix: paused by the
+ * project's spending limit, in maintenance, private, waiting for a commit's checks, a domain or
+ * its certificate failing (Render's and Railway's banners on the service itself).
+ */
+function Conditions({ service, env, runner, go }: { service: Service; env: Environment; runner: Runner; go: (next: { env?: string; tab?: ServiceTab }) => void }) {
+  const [capped, setCapped] = useState(false);
+  useEffect(() => {
+    let live = true;
+    appsApi.limits(service.project).then((l) => live && setCapped(l.capped), () => {});
+    return () => {
+      live = false;
+    };
+  }, [service.project, env.state]);
+  const lines: { key: string; danger?: boolean; text: ReactNode; action?: ReactNode }[] = [];
+  if (capped)
+    lines.push({
+      key: "capped",
+      danger: true,
+      text: "Paused: the project reached its spending limit for the month, so its services are stopped and nothing deploys.",
+      action: (
+        <button type="button" className={btn} onClick={() => go({ tab: "settings" })}>
+          Raise the limit
+        </button>
+      ),
+    });
+  if (env.maintenance)
+    lines.push({
+      key: "maintenance",
+      text: "In maintenance: visitors get the maintenance page (its own URLs still answer).",
+      action: (
+        <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => runner.run("maintenance", () => appsApi.putEnvironment(service.id, env.name, { maintenance: false }))}>
+          End maintenance
+        </button>
+      ),
+    });
+  if (env.private)
+    lines.push({
+      key: "private",
+      text: "Private: only visitors who bring its link get in.",
+      action: (
+        <button type="button" className={btn} onClick={() => go({ tab: "settings" })}>
+          Access settings
+        </button>
+      ),
+    });
+  if (env.waiting_for_ci)
+    lines.push({ key: "ci", text: <>Waiting for the checks on <span className="font-mono">{env.waiting_for_ci.slice(0, 8)}</span> before it deploys.</> });
+  for (const d of env.domains.filter((d) => d.kind === "custom" && (d.status === "failed" || d.tls === "failed")))
+    lines.push({
+      key: `domain:${d.hostname}`,
+      danger: true,
+      text: (
+        <>
+          <span className="font-mono">{d.hostname}</span>: {d.tls === "failed" ? `its certificate failed${d.tls_error ? `: ${d.tls_error}` : ""}` : (d.error ?? "it doesn't verify")}
+        </>
+      ),
+      action: (
+        <button type="button" className={btn} onClick={() => go({ tab: "domains" })}>
+          Open Domains
+        </button>
+      ),
+    });
+  if (lines.length === 0) return null;
+  return (
+    <ul className="rise mt-4 divide-y divide-line overflow-hidden rounded-xl border border-line bg-panel" aria-label="Why it isn't serving as usual">
+      {lines.map((l) => (
+        <li key={l.key} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 text-[13px]">
+          <i className={`size-1.5 shrink-0 rounded-full ${l.danger ? "bg-danger" : "bg-accent"}`} />
+          <span className={`min-w-0 flex-1 ${l.danger ? "text-fg" : "text-muted"}`}>{l.text}</span>
+          {l.action}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -428,6 +505,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
       )}
 
       <ErrorNote error={runner.error} />
+      {env && <Conditions service={service} env={env} runner={runner} go={go} />}
       {env?.crash_loop && (
         <div role="alert" className="rise mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-danger/40 bg-danger/[0.06] px-4 py-3 text-[13px]">
           <span className="font-medium text-danger">Crashing</span>
