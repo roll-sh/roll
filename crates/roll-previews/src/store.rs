@@ -1328,7 +1328,9 @@ impl Store {
     /// it looks exactly as it did there (Chromatic carries accepted baselines forward), so a push
     /// that changes nothing visible isn't reviewed again, and one that changes a page asks only
     /// about that page. `true` when an acceptance moved.
-    pub fn carry_acceptance(&self, id: &str) -> Result<bool> {
+    /// `threshold`: the project's `github.visual_threshold`; a page that changed less is as it was.
+    pub fn carry_acceptance(&self, id: &str, threshold: f64) -> Result<bool> {
+        let as_was = move |bp: Option<i64>| bp.is_some_and(|bp| bp as f64 / 100.0 <= threshold);
         self.db.write(|c| {
             // (head, the head before, desktop change, phone change)
             type Shot = (String, Option<String>, Option<i64>, Option<i64>);
@@ -1337,11 +1339,11 @@ impl Store {
             let Some((head, Some(prev), desktop, phone)) = shot else { return Ok(false) };
             // Each page's (path, the head before, change): the first page's at both widths.
             let mut same: Vec<String> = Vec::new();
-            if desktop == Some(0) && phone.is_none_or(|p| p == 0) {
+            if as_was(desktop) && (phone.is_none() || as_was(phone)) {
                 same.push(String::new());
             }
             let pages: Vec<(String, Option<String>, Option<i64>)> = c.query("SELECT path, prev_head, change_bp FROM page_shots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-            same.extend(pages.into_iter().filter(|(_, h, bp)| h.as_deref() == Some(prev.as_str()) && *bp == Some(0)).map(|(p, _, _)| p));
+            same.extend(pages.into_iter().filter(|(_, h, bp)| h.as_deref() == Some(prev.as_str()) && as_was(*bp)).map(|(p, _, _)| p));
             let mut moved = false;
             for path in same {
                 moved |= c.execute("UPDATE visual_page_accepts SET head = ? WHERE preview_id = ? AND path = ? AND head = ?", [head.as_str(), id, path.as_str(), prev.as_str()])? > 0;
@@ -1353,7 +1355,7 @@ impl Store {
     /// The visual review of a change's preview (`github.visual_review`), once its pages were
     /// compared with the baseline's: each page that differs, who accepted it at this head, and
     /// the change accepted once every one of them is.
-    fn visual_review(&self, r: &Row, rule: crate::settings::VisualReviewRule, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck], shot: Option<String>) -> Result<Option<crate::VisualReview>> {
+    fn visual_review(&self, r: &Row, rule: crate::settings::VisualReviewRule, threshold: f64, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck], shot: Option<String>) -> Result<Option<crate::VisualReview>> {
         if r.change_id.is_none() || rule == crate::settings::VisualReviewRule::Off {
             return Ok(None);
         }
@@ -1362,7 +1364,7 @@ impl Store {
         let accepted = |path: &str| accepts.iter().find(|(p, h, _, _)| p == path && shot.as_deref() == Some(h.as_str())).map(|(_, _, by, at)| (by.clone(), *at));
         let first = base.percent.max(base.phone_percent.unwrap_or(0.0));
         let changed: Vec<(String, f64)> =
-            std::iter::once((String::new(), first)).chain(pages.iter().filter_map(|p| Some((p.path.clone(), p.base_percent?)))).filter(|(_, pct)| *pct > 0.0).collect();
+            std::iter::once((String::new(), first)).chain(pages.iter().filter_map(|p| Some((p.path.clone(), p.base_percent?)))).filter(|(_, pct)| *pct > threshold).collect();
         let reviews: Vec<crate::PageReview> = changed
             .iter()
             .map(|(path, percent)| {
@@ -1747,7 +1749,7 @@ impl Store {
             a11y_added: page_a11y.as_ref().zip(b.a11y.as_ref()).map(|(ours, main)| ours.added_since(main)),
             errors_added: page_health.as_ref().zip(b.health.as_ref()).map(|(ours, main)| ours.added_since(main)),
         });
-        let visual_review = self.visual_review(&r, settings.visual_review, base_change.as_ref(), &pages, f.head)?;
+        let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, f.head)?;
         let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
         let screenshot_link = screenshot_at.map(|at| self.link_at(&r.id, at, None)).transpose()?;
         let diff_link = match screenshot_at.filter(|_| base_differs) {

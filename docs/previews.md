@@ -879,7 +879,12 @@ type Settings = {
     accepted, accept the rest in roll" meanwhile), and GitHub's button accepts them all. On the
     next push each accepted page that looks exactly as it did (the first page at both widths,
     each other page) keeps its acceptance, as Chromatic carries accepted baselines forward, so
-    only the pages the push changed are asked about again. GitHub's branch protection can require
+    only the pages the push changed are asked about again.
+    A project can set a visual threshold (`github.visual_threshold`, a percent up to 50, as
+    Chromatic's `diffThreshold` and Percy's sensitivity): a page that differs from the
+    baseline's by less doesn't count as changed for the review, and a push that moves a page by
+    less keeps its acceptance, for what `github.hide` can't name (live: the change's 0.1%
+    differences are `unchanged` under 5%). The percentages shown stay the real ones. GitHub's branch protection can require
     `roll/visual`; with `required` roll's own landing does too (a `visual` blocker in
     `Code::blockers`, from the project's rule, never the change's). A review is someone else's:
     the change's author can't accept it (403 in roll, ignored from GitHub, and an older such
@@ -1030,6 +1035,8 @@ Ranked by what a person notices first. Done so far:
 - a speed budget per project (`github.budget`, the `roll/speed` status);
 - Core Web Vitals per push (LCP and CLS from the screenshot's load, LCP against main's, both in
   the budget);
+- a visual threshold per project (`github.visual_threshold`): a page that moved less isn't
+  reviewed again;
 - screenshot comparisons off the async runtime, and a test for reading a run's pages;
 - the previews waiting for a visual review first in the list, tagged "to review";
 - `roll preview screenshot` (any screenshot or diff to a file);
@@ -1090,26 +1097,32 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A visual threshold per project** (Chromatic's `diffThreshold`, Percy's sensitivity): a page
-   counts as changed only past a share of its pixels (`github.visual_threshold`, default 0), for
-   a page whose clock or rotating banner `hide` can't name.
-2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+1. **Previews kept out of search engines** (Vercel sends `X-Robots-Tag: noindex` on every
+   preview deployment): a public preview, a share link or an earlier push's URL can be found and
+   indexed, and then a search for the product lands on a branch of it. Every response through
+   roll's preview proxy, and roll apps' `pv-` environments, should carry `X-Robots-Tag: noindex`.
+2. **How long the release step took, on production-shaped data** (PlanetScale's deploy requests
+   show what a migration will do before it merges): a migration that takes minutes on a branch of
+   production locks production for as long. Each push's release time on the sheet, the change
+   page and the comment ("its migrations took 2.4 s on a branch of production data"), against
+   the push before.
+3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-5. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+7. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1122,7 +1135,7 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

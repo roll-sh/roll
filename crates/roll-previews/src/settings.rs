@@ -150,6 +150,11 @@ pub struct GithubRule {
     /// commit status fails. 0 is no limit.
     #[serde(default)]
     pub budget: Budget,
+    /// A page counts as changed for the visual review only past this share of its pixels (a
+    /// percent, up to 50; Chromatic's `diffThreshold`, Percy's sensitivity): for what `hide`
+    /// can't name. 0: any change counts.
+    #[serde(default)]
+    pub visual_threshold: f64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -239,7 +244,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default() }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0 }
     }
 }
 
@@ -379,6 +384,9 @@ impl Settings {
         }
         if self.github.hide.len() > MAX_HIDE || !self.github.hide.iter().all(|s| selector_ok(s)) {
             return bad(format!("github.hide: at most {MAX_HIDE} CSS selectors of up to 200 characters (no braces, semicolons or comments)"));
+        }
+        if !(0.0..=50.0).contains(&self.github.visual_threshold) {
+            return bad("github.visual_threshold: a percent from 0 to 50".into());
         }
         let b = &self.github.budget;
         if b.load_ms > 600_000 || b.bytes > 10 << 30 || b.lcp_ms > 600_000 || !(0.0..=100.0).contains(&b.cls) {

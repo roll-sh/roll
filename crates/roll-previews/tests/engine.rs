@@ -241,16 +241,31 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     assert_eq!(e.code.last_report("chg_1").visual_review.map(|v| v.state), Some(VisualState::Accepted), "the change is told at once");
     // A push that changes nothing visible keeps it.
     shoot("cs_1c", 255, 255);
-    assert!(e.engine.store.carry_acceptance(&chg.id).unwrap());
+    assert!(e.engine.store.carry_acceptance(&chg.id, 0.0).unwrap());
     assert_eq!(review().map(|v| v.state), Some(VisualState::Accepted), "pixel-identical to what was accepted");
     // One that changes /pricing only asks about /pricing again; the first page stays accepted.
     shoot("cs_1d", 255, 128);
-    assert!(e.engine.store.carry_acceptance(&chg.id).unwrap());
+    assert!(e.engine.store.carry_acceptance(&chg.id, 0.0).unwrap());
     assert_eq!(review().map(|v| v.state), Some(VisualState::Changed));
     assert_eq!(waiting(), Some(vec!["/pricing".to_string()]));
     // Accept with no page: every page there.
     e.engine.accept_visual(&chg.id, "ada", true, Some("cs_1d"), None).await.unwrap();
     assert_eq!(review().map(|v| v.state), Some(VisualState::Accepted));
+    // Under the project's threshold a page counts as unchanged (a clock `hide` can't name).
+    let mut one_pixel = image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 255, 255, 255]));
+    one_pixel.put_pixel(0, 0, image::Rgba([0, 0, 0, 255]));
+    let mut dot = Vec::new();
+    one_pixel.write_to(&mut std::io::Cursor::new(&mut dot), image::ImageFormat::Png).unwrap();
+    e.engine.store.set_screenshot(&base.id, "cs_main2", &png(255), None, None).unwrap();
+    e.engine.store.set_page_shots(&base.id, "cs_main2", &pricing(255), &["/pricing".into()]).unwrap();
+    e.engine.store.set_screenshot(&chg.id, "cs_1e", &dot, None, None).unwrap();
+    e.engine.store.set_page_shots(&chg.id, "cs_1e", &pricing(255), &["/pricing".into()]).unwrap();
+    e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
+    assert_eq!(review().map(|v| (v.state, v.percent)), Some((VisualState::Changed, 6.25)), "one pixel in 16");
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "github": { "visual_threshold": 10.0 } })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    assert_eq!(review().map(|v| v.state), Some(VisualState::Unchanged));
+    assert!(e.engine.store.settings(&e.project).unwrap().patched(&json!({ "github": { "visual_threshold": 60.0 } })).is_err(), "past 50%");
 }
 
 #[tokio::test]

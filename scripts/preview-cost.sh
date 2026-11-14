@@ -496,6 +496,11 @@ case "$PAGES" in *"wiki:/: 0 error(s), "*"% against main"*) ;; *) echo "the wiki
 api PUT "/v1/previews/projects/$PRJ/settings" '{"visual_review":"required"}' >/dev/null
 REVIEW=$(api GET "/v1/previews/$PV" | jq_ "(d.get('visual_review') or {}).get('state')")
 [ "$REVIEW" = changed ] || { echo "a page that differs from main's should wait for a review: $REVIEW"; exit 1; }
+# Under the project's visual threshold (its pages differ by about 0.1%) nothing waits.
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"visual_threshold":5}}' >/dev/null
+UNDER=$(api GET "/v1/previews/$PV" | jq_ "(d.get('visual_review') or {}).get('state')")
+[ "$UNDER" = unchanged ] || { echo "a change under the visual threshold shouldn't wait for a review: $UNDER"; exit 1; }
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"visual_threshold":0}}' >/dev/null
 # Required: the change can't land in roll meanwhile.
 # (roll code hears of the rule with the preview's next report.)
 for _ in $(seq 1 120); do
@@ -571,6 +576,7 @@ cat <<EOF
 | NoSQL: a mask on app.users_by_email's key, set | $KEY_MASK |
 | What each branch hands the preview's code | $DATA |
 | Core Web Vitals of the first page (the screenshot's load) | $VITALS |
+| Visual review under a 5% visual threshold | $UNDER |
 | Postgres users.email in the branch / in the parent | $PG_MASKED / $PG_PARENT |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |

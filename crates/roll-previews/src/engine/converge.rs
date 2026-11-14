@@ -567,7 +567,8 @@ impl Engine {
                 .unwrap_or(false);
                 if kept && r.change_id.is_some() {
                     self.compare_with_default_branch(r).await;
-                    if self.store.carry_acceptance(&r.id).unwrap_or(false) {
+                    let threshold = self.store.settings(&r.project_id).map_or(0.0, |s| s.github.visual_threshold);
+                    if self.store.carry_acceptance(&r.id, threshold).unwrap_or(false) {
                         let _ = self.store.log(&r.id, "its pages look exactly as when they were accepted: the acceptance carries over");
                     }
                 } else if kept {

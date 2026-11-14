@@ -419,6 +419,11 @@ function Form({
           </div>
         )}
         {s.github.screenshot && (
+          <Field label="Visual threshold (%)" note="A page counts as changed for the visual review only past this share of its pixels (up to 50). 0: any change counts.">
+            <Num value={s.github.visual_threshold ?? 0} step="any" onChange={(v) => set("github", { ...s.github, visual_threshold: Math.min(v, 50) })} />
+          </Field>
+        )}
+        {s.github.screenshot && (
           <Field label="Hidden in screenshots" note="CSS selectors blanked before each screenshot (a clock, an ad), one per line; animations always stop first.">
             <textarea value={hide} onChange={(e) => setHide(e.target.value)} rows={2} placeholder=".clock" className={`${field} w-full py-1.5 font-mono text-[12px]`} spellCheck={false} />
           </Field>
