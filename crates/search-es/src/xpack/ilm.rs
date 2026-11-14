@@ -9,9 +9,12 @@
 //! policies (captured from 9.5.5) are always present, as its index template registries install
 //! them; a stored policy of the same name overrides one.
 //!
-//! **What is emulated:** roll doesn't run the lifecycle steps (rollover, shrink, delete...) in
-//! the background. Managed indices report the state Elasticsearch reports before its first ILM
-//! poll (`new` / `complete` / `complete`), and `move_to_step` records the requested step.
+//! The policies run for real ([`super::ilm_run`]): managed indices move through their phases
+//! in the background, and `_ilm/explain` prints the execution state that keeps
+//! (`phase`/`action`/`step` with their times, the lifecycle date and age, `phase_execution`,
+//! `failed_step`, `step_info`, retry counts). `_ilm/retry` moves a failed index back to its
+//! failed step, `_ilm/move` to any step of its policy, and `_ilm/stop` stops ILM through
+//! `STOPPING` (what runs finishes first) to `STOPPED`.
 
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
@@ -21,8 +24,9 @@ use crate::xpack::{enc, internal, store};
 use std::sync::OnceLock;
 
 pub const POLICIES: &str = "ilm.policy";
-const STATE: &str = "ilm.state";
-const STEPS: &str = "ilm.step";
+/// The operation mode (`mode`).
+pub(crate) const STATE_FAMILY: &str = "ilm.state";
+const STEPS: &str = super::ilm_run::STATE;
 
 const PHASES: [&str; 5] = ["hot", "warm", "cold", "frozen", "delete"];
 
@@ -48,7 +52,7 @@ fn builtin() -> &'static Map {
 }
 
 /// A policy by name: stored, else built in.
-fn policy(st: &crate::meta::ClusterState, name: &str) -> Option<Value> {
+pub(crate) fn policy(st: &crate::meta::ClusterState, name: &str) -> Option<Value> {
     st.metadata.xpack.get(POLICIES, name).cloned().or_else(|| builtin().get(name).cloned())
 }
 
@@ -221,6 +225,7 @@ pub async fn put_lifecycle(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let Some(p) = body.get("policy") else { return Err(EsError::illegal_argument("Required [policy]")) };
     let parsed = parse_policy(ctx, p)?;
     let now = ctx.now_ms;
+    let user = internal::stored_user(crate::xpack::security::principal(ctx));
     ctx.cluster
         .update(move |st| {
             let version = match policy(st, &name) {
@@ -228,7 +233,13 @@ pub async fn put_lifecycle(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 Some(old) => old.get("version").and_then(Value::as_i64).unwrap_or(0) + 1,
                 None => 1,
             };
-            store::put(st, POLICIES, &name, obj! { "version" => version, "modified_date" => now, "policy" => parsed }, now).map(|_| ())
+            let mut rec = obj! { "version" => version, "modified_date" => now, "policy" => parsed };
+            // The policy runs as the user who last put it (Elasticsearch's stored security
+            // headers); a superuser's with the cluster's authority.
+            if let (Some(u), Value::Obj(m)) = (user, &mut rec) {
+                m.insert("_roll".into(), obj! { "user" => u });
+            }
+            store::put(st, POLICIES, &name, rec, now).map(|_| ())
         })
         .await?;
     Reply::acknowledged()
@@ -318,8 +329,13 @@ pub async fn delete_lifecycle(ctx: &Ctx<'_>) -> EsResult<Reply> {
     Reply::acknowledged()
 }
 
-fn mode(st: &crate::meta::ClusterState) -> String {
-    st.metadata.xpack.get(STATE, "mode").and_then(|v| v.get("operation_mode")).and_then(Value::as_str).unwrap_or("RUNNING").to_string()
+/// The ILM operation mode (`RUNNING`, `STOPPING`, `STOPPED`).
+pub(crate) fn mode(st: &crate::meta::ClusterState) -> String {
+    st.metadata.xpack.get(STATE_FAMILY, "mode").and_then(|v| v.get("operation_mode")).and_then(Value::as_str).unwrap_or("RUNNING").to_string()
+}
+
+pub(crate) fn put_mode(st: &mut crate::meta::ClusterState, mode: &str, now: i64) -> EsResult<()> {
+    store::put(st, STATE_FAMILY, "mode", obj! { "operation_mode" => mode }, now).map(|_| ())
 }
 
 pub fn get_status(ctx: &Ctx) -> EsResult<Reply> {
@@ -332,8 +348,14 @@ pub async fn set_mode(ctx: &Ctx<'_>, running: bool) -> EsResult<Reply> {
     let now = ctx.now_ms;
     ctx.cluster
         .update(move |st| {
-            // No step is ever mid-execution, so stopping completes at once.
-            store::put(st, STATE, "mode", obj! { "operation_mode" => if running { "RUNNING" } else { "STOPPED" } }, now).map(|_| ())
+            // `OperationModeUpdateTask`: stopping goes through `STOPPING`; the next ILM run
+            // makes it `STOPPED` once no index is in a step that must finish.
+            let next = match (running, mode(st).as_str()) {
+                (true, _) => "RUNNING",
+                (false, "STOPPED") => return Ok(()),
+                (false, _) => "STOPPING",
+            };
+            put_mode(st, next, now)
         })
         .await?;
     Reply::acknowledged()
@@ -356,48 +378,60 @@ pub async fn explain(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut out = Map::new();
     for n in names {
         let Some(idx) = st.metadata.indices.get(&n) else { continue };
-        let Some(pname) = idx.settings.get("index.lifecycle.name").filter(|p| !p.is_empty()) else {
+        let Some(pname) = super::ilm_run::policy_name(idx) else {
             if !only_managed && !only_errors {
                 out.insert(n.clone(), obj! { "index" => n.clone(), "managed" => false });
             }
             continue;
         };
-        if only_errors {
+        let e = super::ilm_run::exec_of(&st, idx).unwrap_or_default();
+        let rec = policy(&st, pname);
+        // `TransportExplainLifecycleAction`: a missing policy reads as the error step.
+        let step = if rec.is_none() { Some(super::ilm_run::ERROR_STEP.to_string()) } else { e.step.clone() };
+        if only_errors && step.as_deref() != Some(super::ilm_run::ERROR_STEP) {
             continue;
         }
-        let created = idx.settings.get("index.creation_date").and_then(|s| s.parse::<i64>().ok()).unwrap_or(ctx.now_ms);
-        let lifecycle_date = idx.settings.get("index.lifecycle.origination_date").and_then(|s| s.parse::<i64>().ok()).unwrap_or(created);
-        let age = (ctx.now_ms - lifecycle_date).max(0);
-        let step = st.metadata.xpack.get(STEPS, &n).cloned();
-        let (phase, action, stepname, at) = match &step {
-            Some(s) => (
-                s.get("phase").map(Value::to_es_string).unwrap_or_else(|| "new".into()),
-                s.get("action").map(Value::to_es_string).unwrap_or_else(|| "complete".into()),
-                s.get("name").map(Value::to_es_string).unwrap_or_else(|| "complete".into()),
-                s.get("time").and_then(Value::as_i64).unwrap_or(created),
-            ),
-            None => ("new".to_string(), "complete".to_string(), "complete".to_string(), created),
-        };
-        let human = |ms: i64| crate::units::TimeValue::millis(ms).human();
+        let created = idx.creation_date();
+        let human = |ms: i64| crate::units::TimeValue::millis(ms).human_with(2);
         let mut m = Map::new();
         m.insert("index".into(), n.clone().into());
         m.insert("managed".into(), true.into());
         m.insert("policy".into(), pname.into());
         m.insert("index_creation_date_millis".into(), created.into());
         m.insert("time_since_index_creation".into(), human((ctx.now_ms - created).max(0)).into());
-        m.insert("lifecycle_date_millis".into(), lifecycle_date.into());
-        m.insert("age".into(), human(age).into());
-        m.insert("age_in_millis".into(), age.into());
-        m.insert("phase".into(), phase.into());
-        m.insert("phase_time_millis".into(), at.into());
-        m.insert("action".into(), action.into());
-        m.insert("action_time_millis".into(), at.into());
-        m.insert("step".into(), stepname.into());
-        m.insert("step_time_millis".into(), at.into());
-        if let Some(p) = policy(&st, pname) {
-            let modified = p.get("modified_date").and_then(Value::as_i64).unwrap_or(0);
-            m.insert("phase_execution".into(), obj! { "policy" => pname, "version" => p.get("version").cloned().unwrap_or(Value::from(1)), "modified_date_in_millis" => modified });
+        if let Some(date) = super::ilm_run::lifecycle_date(idx, &e) {
+            let age = (ctx.now_ms - date).max(0);
+            m.insert("lifecycle_date_millis".into(), date.into());
+            m.insert("age".into(), human(age).into());
+            m.insert("age_in_millis".into(), age.into());
         }
+        let mut field = |k: &str, v: Option<Value>| {
+            if let Some(v) = v {
+                m.insert(k.into(), v);
+            }
+        };
+        field("phase", e.phase.clone().map(Value::from));
+        field("phase_time_millis", e.phase_time.map(Value::from));
+        field("action", e.action.clone().map(Value::from));
+        field("action_time_millis", e.action_time.map(Value::from));
+        field("step", step.map(Value::from));
+        field("step_time_millis", e.step_time.map(Value::from));
+        field("failed_step", e.failed_step.clone().filter(|f| !f.is_empty()).map(Value::from));
+        field("is_auto_retryable_error", e.auto_retryable.map(Value::from));
+        field("failed_step_retry_count", e.retry_count.map(Value::from));
+        field("step_info", e.step_info.clone());
+        field("previous_step_info", e.previous_step_info.clone());
+        // The phase as cached, with the rollover's default conditions shown.
+        let phase_execution = e.phase_definition.clone().map(|mut p| {
+            if let Some(Value::Obj(def)) = p.as_object_mut().and_then(|m| m.get_mut("phase_definition"))
+                && let Some(Value::Obj(actions)) = def.get_mut("actions")
+                && let Some(r) = actions.get("rollover").cloned()
+            {
+                actions.insert("rollover".into(), Value::Obj(super::ilm_run::conditions_with_defaults(&st, &r)));
+            }
+            p
+        });
+        field("phase_execution", phase_execution);
         m.insert("skip".into(), (idx.settings.get("index.lifecycle.skip") == Some("true")).into());
         out.insert(n, Value::Obj(m));
     }
@@ -425,54 +459,115 @@ pub async fn remove_policy(ctx: &Ctx<'_>) -> EsResult<Reply> {
     Reply::ok(obj! { "has_failures" => false, "failed_indexes" => Value::Arr(vec![]) })
 }
 
+/// Concrete names an `<index>` expression of the retry API names: wildcards expanded, plain
+/// names kept (a missing one fails in the transition, as in Elasticsearch).
+async fn named(ctx: &Ctx<'_>, expr: &str) -> EsResult<Vec<String>> {
+    let mut out = Vec::new();
+    for part in expr.split(',').filter(|p| !p.is_empty()) {
+        if part.contains('*') || part == "_all" {
+            out.extend(resolve(ctx, part).await?);
+        } else {
+            out.push(part.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// `POST <index>/_ilm/retry`: `moveIndexToPreviouslyFailedStep` for each index.
 pub async fn retry(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let expr = ctx.path_param("index").unwrap_or_default().to_string();
-    let names = resolve(ctx, &expr).await?;
-    if let Some(n) = names.first() {
-        return Err(EsError::illegal_argument(format!("cannot retry an action for an index [{n}] that has not encountered an error when running a Lifecycle Policy")));
+    let names = named(ctx, &expr).await?;
+    let require_error = ctx.bool_param("require_error", true)?;
+    if !require_error {
+        // Only reruns an index's current step: the scheduler picks it up.
+        ctx.cluster.jobs.kick(ctx.cluster);
+        return Reply::acknowledged();
     }
+    let now = ctx.now_ms;
+    ctx.cluster
+        .update(move |st| {
+            for n in &names {
+                let Some(idx) = st.metadata.indices.get(n).cloned() else { return Err(EsError::illegal_argument(format!("index [{n}] does not exist"))) };
+                let e = super::ilm_run::exec_of(st, &idx).unwrap_or_default();
+                let not_failed = || EsError::illegal_argument(format!("cannot retry an action for an index [{n}] that has not encountered an error when running a Lifecycle Policy"));
+                let (Some(failed), Some((phase, action, super::ilm_run::ERROR_STEP))) = (e.failed_step.clone().filter(|f| !f.is_empty()), e.key()) else { return Err(not_failed()) };
+                let (phase, action) = (phase.to_string(), action.to_string());
+                let pname = super::ilm_run::policy_name(&idx).unwrap_or_default().to_string();
+                let rec = policy(st, &pname);
+                check_step(n, &pname, rec.as_ref(), &e, &phase, &action, &failed)?;
+                let refresh = rec.as_ref().is_some_and(|r| r.pointer(&["policy", "phases", &phase, "actions", &action]).is_some());
+                let mut next = e.clone();
+                next.move_to(&phase, &action, &failed, rec.as_ref().map(|r| (pname.as_str(), r)), refresh, false, now);
+                next.auto_retryable = e.auto_retryable;
+                next.retry_count = e.retry_count;
+                store::family_mut(st, STEPS).insert(n.clone(), next.to_value());
+            }
+            Ok(())
+        })
+        .await?;
     Reply::acknowledged()
 }
 
+/// `validateTransition`'s step check.
+fn check_step(index: &str, pname: &str, rec: Option<&Value>, e: &super::ilm_run::Exec, phase: &str, action: &str, name: &str) -> EsResult<()> {
+    if super::ilm_run::step_exists(phase, action, name, rec, Some(e)) || (phase == "completed" && action == "completed" && name == "completed") || (action == "complete" && name == "complete" && e.phase.as_deref() == Some(phase)) {
+        return Ok(());
+    }
+    Err(EsError::illegal_argument(format!("step [{{\"phase\":\"{phase}\",\"action\":\"{action}\",\"name\":\"{name}\"}}] for index [{index}] with policy [{pname}] does not exist")))
+}
+
+/// `POST _ilm/move/<index>` (`TransportMoveToStepAction`).
 pub async fn move_to_step(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let index = ctx.path_param("index").unwrap_or_default().to_string();
     let body = ctx.body_map()?.unwrap_or_default();
     let Some(next) = body.get("next_step").cloned() else { return Err(EsError::illegal_argument("Required [next_step]")) };
     let current = body.get("current_step").cloned();
     let st = ctx.state();
-    let Some(idx) = st.metadata.indices.get(&index) else { return Err(EsError::index_not_found(&index)) };
-    let Some(pname) = idx.settings.get("index.lifecycle.name").map(str::to_string) else {
+    let Some(idx) = st.metadata.indices.get(&index).cloned() else { return Err(EsError::illegal_argument(format!("index [{index}] does not exist"))) };
+    let Some(pname) = super::ilm_run::policy_name(&idx).map(str::to_string) else {
         return Err(EsError::illegal_argument(format!("index [{index}] is not associated with an Index Lifecycle Policy")));
     };
-    let phase = next.get("phase").map(Value::to_es_string).unwrap_or_default();
-    let known = policy(&st, &pname).and_then(|p| p.pointer(&["policy", "phases", phase.as_str()]).cloned()).is_some() || phase == "new";
-    if !known {
-        return Err(EsError::illegal_argument(format!("step [{}] for index [{index}] with policy [{pname}] does not exist", next.to_json())));
-    }
-    if let Some(c) = &current {
-        let cur = st.metadata.xpack.get(STEPS, &index).cloned().unwrap_or_else(|| obj! { "phase" => "new", "action" => "complete", "name" => "complete" });
-        let same = ["phase", "action", "name"].iter().all(|k| c.get(k).is_none_or(|v| cur.get(k) == Some(v)));
-        if !same {
-            return Err(EsError::illegal_argument(format!(
-                "index [{index}] is not on current step [{{\"phase\":\"{}\",\"action\":\"{}\",\"name\":\"{}\"}}], currently: [{{\"phase\":\"{}\",\"action\":\"{}\",\"name\":\"{}\"}}]",
-                c.get("phase").map(Value::to_es_string).unwrap_or_default(),
-                c.get("action").map(Value::to_es_string).unwrap_or_default(),
-                c.get("name").map(Value::to_es_string).unwrap_or_default(),
-                cur.get("phase").map(Value::to_es_string).unwrap_or_default(),
-                cur.get("action").map(Value::to_es_string).unwrap_or_default(),
-                cur.get("name").map(Value::to_es_string).unwrap_or_default(),
-            )));
-        }
-    }
     drop(st);
+    let text = |v: &Value, k: &str| v.get(k).filter(|x| !x.is_null()).map(Value::to_es_string);
+    let phase = text(&next, "phase").unwrap_or_default();
+    let (action, name) = (text(&next, "action"), text(&next, "name"));
     let now = ctx.now_ms;
-    let step = obj! {
-        "phase" => phase,
-        "action" => next.get("action").cloned().unwrap_or_else(|| Value::from("complete")),
-        "name" => next.get("name").cloned().unwrap_or_else(|| Value::from("complete")),
-        "time" => now,
-    };
-    ctx.cluster.update(move |st| store::put(st, STEPS, &index, step, now).map(|_| ())).await?;
+    ctx.cluster
+        .update(move |st| {
+            let Some(idx) = st.metadata.indices.get(&index).cloned() else { return Err(EsError::illegal_argument(format!("index [{index}] does not exist"))) };
+            let e = super::ilm_run::exec_of(st, &idx).unwrap_or_default();
+            let rec = policy(st, &pname);
+            // `resolveStepKey`: a phase alone is its first step, a phase and action the
+            // action's first step.
+            let target = match (&action, &name) {
+                (Some(a), Some(n)) => Some((a.clone(), n.clone())),
+                (a, _) => rec.as_ref().and_then(|r| super::ilm_run::first_step_of(&phase, a.as_deref(), r)).map(|(a, s)| (a, s.to_string())),
+            };
+            let Some((action, name)) = target else {
+                return Err(EsError::illegal_argument(format!(
+                    "cannot move index [{index}] with policy [{pname}]: unable to determine concrete step key from target next step key: {{\"phase\":\"{phase}\",\"action\":\"{}\",\"name\":\"{}\"}}",
+                    action.clone().unwrap_or_default(),
+                    name.clone().unwrap_or_default()
+                )));
+            };
+            if let Some(c) = &current {
+                let cur = e.key().map(|(p, a, s)| (p.to_string(), a.to_string(), s.to_string()));
+                let want = (text(c, "phase").unwrap_or_default(), text(c, "action").unwrap_or_default(), text(c, "name").unwrap_or_default());
+                if cur.as_ref() != Some(&want) {
+                    let (p, a, s) = cur.unwrap_or_default();
+                    return Err(EsError::illegal_argument(format!(
+                        "index [{index}] is not on current step [{{\"phase\":\"{}\",\"action\":\"{}\",\"name\":\"{}\"}}], currently: [{{\"phase\":\"{p}\",\"action\":\"{a}\",\"name\":\"{s}\"}}]",
+                        want.0, want.1, want.2
+                    )));
+                }
+            }
+            check_step(&index, &pname, rec.as_ref(), &e, &phase, &action, &name)?;
+            let mut next = super::ilm_run::Exec { uuid: idx.uuid.clone(), ..e };
+            next.move_to(&phase, &action, &name, rec.as_ref().map(|r| (pname.as_str(), r)), true, true, now);
+            store::family_mut(st, STEPS).insert(index.clone(), next.to_value());
+            Ok(())
+        })
+        .await?;
     Reply::acknowledged()
 }
 

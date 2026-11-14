@@ -25,6 +25,7 @@ pub mod fleet;
 pub mod esql;
 pub mod graph;
 pub mod ilm;
+pub mod ilm_run;
 pub mod inference;
 pub mod internal;
 pub mod logstash;

@@ -556,6 +556,7 @@ fn finish_create(
         primary_terms: vec![1; shards],
         system: names::is_system_index(name),
         recovery_source: None,
+        rollover_info: Default::default(),
         dialect: st.dialect,
     };
     st.metadata.indices.insert(name.to_string(), Arc::new(idx));

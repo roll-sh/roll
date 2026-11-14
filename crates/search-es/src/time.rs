@@ -1940,8 +1940,24 @@ fn add_months(t: NaiveDateTime, months: i64) -> NaiveDateTime {
     NaiveDate::from_ymd_opt(y, m, d).map(|nd| NaiveDateTime::new(nd, t.time())).unwrap_or(t)
 }
 
+tokio::task_local! {
+    /// The time [`at`] runs its future at.
+    static CLOCK: i64;
+}
+
+/// The current time (Unix ms): the system clock, or the time [`at`] set.
 pub fn now_millis() -> i64 {
+    if let Ok(t) = CLOCK.try_with(|t| *t) {
+        return t;
+    }
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// Runs `f` with [`now_millis`] (and so every request it makes) reading `now`: a background
+/// run decides and acts at one instant (the lifecycle runners: an index created by a rollover
+/// is dated the run's time), and tests move a run through days without waiting.
+pub async fn at<F: std::future::Future>(now: i64, f: F) -> F::Output {
+    CLOCK.scope(now, f).await
 }
 
 #[cfg(test)]

@@ -406,7 +406,7 @@ fn index_metadata(idx: &IndexMeta, flat: bool) -> Value {
     }
     m.insert("primary_terms".into(), Value::Obj(terms));
     m.insert("in_sync_allocations".into(), Value::Obj(in_sync));
-    m.insert("rollover_info".into(), obj! {});
+    m.insert("rollover_info".into(), idx.rollover_info_value());
     m.insert("mappings_updated_version".into(), Value::from(crate::version::INDEX_VERSION_ID.parse::<i64>().unwrap_or(0)));
     m.insert("system".into(), idx.system.into());
     m.insert("timestamp_range".into(), obj! { "unknown" => true });
