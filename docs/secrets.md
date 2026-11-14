@@ -630,18 +630,22 @@ long-lived public keys on every server. Servers trust one CA key (`TrustedUserCA
   a pair for this session), writes them to a private temporary directory (0700, the key 0600), runs
   `ssh -i … -o CertificateFile=… -o IdentitiesOnly=yes` with the rest of the arguments, deletes both
   when it exits, and exits with ssh's code. A person never handles the key. Hosts the project's
-  SSH CAs sign are trusted by their CA (their `@cert-authority` lines are added before the user's
-  own `known_hosts`), so there's no "trust this host?" on first use.
+  SSH CAs sign are trusted by their CA (their `@cert-authority` lines are added after the user's own
+  `known_hosts`, which keeps any host the user accepts), so there's no "trust this host?" on first
+  use. `--key` and `sign-user` read only a public key line: given a private key's path they read
+  `<path>.pub`, and anything else is refused before it leaves the machine.
 - **A key you already have** (in an agent, on a hardware token): `POST …/ssh-cas/{id}/sign-user
   {public_key, principals, ttl_minutes?}` (`reveal`, as resolving an SSH link is, since a certificate
-  is a login; audited; `roll secrets ssh-cas sign-user NAME ~/.ssh/id_ed25519.pub --principal
+  is a login, and `write`, since otherwise a principal comes only from a link a writer made;
+  audited, and refused if the audit row can't be written; `roll secrets ssh-cas sign-user NAME ~/.ssh/id_ed25519.pub --principal
   deploy`) certifies its public key for logins the CA allows, 60 minutes by default and the CA's
   `max_hours` at most; only the public key comes to roll. `roll ssh --key ~/.ssh/id_ed25519.pub
   --ca ops --principal deploy -- deploy@host` does it per session (the private file next to it,
   or else the agent's matching key). Checked with OpenSSH 10: an RSA key held only in `ssh-agent`
   logged in to a real `sshd` as `deploy` with roll's certificate, and not as `root`.
 - **Host certificates**, as Vault's SSH engine signs host keys: an SSH CA with `host_domains`
-  (`--host-domain svc.internal`; `max_host_days`, 90 by default, 397 at most) signs a server's own
+  (`--host-domain svc.internal`, a domain of the project's own: a top-level or common public
+suffix such as `com`, `co.uk` or `github.io` is refused; `max_host_days`, 90 by default, 397 at most) signs a server's own
   public key for its names. `POST …/ssh-cas/{id}/sign-host {public_key, hosts, days?}` (admin, since
   a host certificate lets a server stand in for those names; audited; `roll secrets ssh-cas
   sign-host NAME /etc/ssh/ssh_host_ed25519_key.pub --host db1.svc.internal`) takes the key line

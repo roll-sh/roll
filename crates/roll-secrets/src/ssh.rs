@@ -258,6 +258,13 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// Public suffixes under which anyone can register a name (the common ones): no CA claims them.
+const PUBLIC_SUFFIXES: &[&str] = &[
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp", "ne.jp", "or.jp", "co.kr", "com.br", "com.cn", "com.mx", "co.in", "co.za", "com.tr",
+    "com.sg", "com.hk", "com.tw", "github.io", "gitlab.io", "pages.dev", "workers.dev", "vercel.app", "netlify.app", "herokuapp.com", "fly.dev", "onrender.com", "web.app",
+    "firebaseapp.com", "azurewebsites.net", "cloudfront.net", "amazonaws.com", "appspot.com", "blogspot.com",
+];
+
 /// Whether a host name is one the CA signs (a domain, a name under it, or `*.` one under it).
 fn host_ok(name: &str, domains: &[String]) -> bool {
     let bare = name.strip_prefix("*.").unwrap_or(name);
@@ -479,6 +486,11 @@ impl Secrets {
         if policy.host_domains.len() > 50 || !policy.host_domains.iter().all(|d| !d.starts_with("*.") && host_ok(d, std::slice::from_ref(d))) {
             return Err(Error::BadRequest("host_domains are DNS domains whose hosts it signs (svc.internal takes db1.svc.internal), 50 at most".into()));
         }
+        // A domain of the project's own, never a top-level or public one: a CA for `com` would
+        // stand in for every .com host to whoever trusts it.
+        if let Some(d) = policy.host_domains.iter().find(|d| !d.contains('.') || PUBLIC_SUFFIXES.contains(&d.as_str())) {
+            return Err(Error::BadRequest(format!("{d} is a top-level or public domain: give a domain of your own (svc.example.com)")));
+        }
         if policy.principals.is_empty() && policy.host_domains.is_empty() {
             return Err(Error::BadRequest("an SSH CA signs for users (principals), hosts (host_domains), or both".into()));
         }
@@ -528,7 +540,10 @@ impl Secrets {
     /// Certify a user's own key for logins the CA allows: `reveal`, as resolving an SSH link is
     /// (a certificate is a login), and audited.
     pub fn sign_user_key(&self, project: &str, id: &str, req: UserKey, caller: &Caller) -> Result<UserCert> {
+        // Reveal (a certificate is a login) and write: without this route, a login for a principal
+        // takes a link, which someone who may write names.
         caller.need(Action::Reveal, &Scope::project(project))?;
+        caller.need(Action::Write, &Scope::project(project))?;
         self.project(project)?;
         let mine: Option<String> = self.db.read(|c| c.query_row("SELECT name FROM ssh_cas WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional())?;
         mine.ok_or_else(|| Error::NotFound(format!("no SSH CA {id}")))?;
@@ -545,7 +560,7 @@ impl Secrets {
         // The key id names who asked, as sshd logs it.
         let key_id: String = format!("roll-secrets:{name}:{}", caller.principal).chars().map(|c| if c.is_ascii_graphic() { c } else { '-' }).take(128).collect();
         let (certificate, serial) = sign_cert(&ca, &Cert { key_type: &key_type, key_fields: &key_fields, host: false, key_id: &key_id, principals: &principals, valid_after: after, valid_before: before }, &serial());
-        self.audit_now(project, caller, "ssh_ca.sign_user", None, None, &[], &format!("{name} signed a {key_type} key for {} (serial {serial}, {minutes} min)", principals.join(", ")));
+        self.audit_or_fail(project, caller, "ssh_ca.sign_user", &format!("{name} signed a {key_type} key for {} (serial {serial}, {minutes} min)", principals.join(", ")))?;
         Ok(UserCert { certificate, serial, principals, valid_before: before as i64 * 1000 })
     }
 
@@ -576,8 +591,14 @@ impl Secrets {
         let (after, before) = (now.saturating_sub(300), now + u64::from(days) * 86_400);
         let key_id = format!("roll-secrets:{name}:{}", hosts[0]);
         let (certificate, serial) = sign_cert(&ca, &Cert { key_type: &key_type, key_fields: &key_fields, host: true, key_id: &key_id, principals: &hosts, valid_after: after, valid_before: before }, &serial());
-        self.audit_now(project, caller, "ssh_ca.sign_host", None, None, &[], &format!("{name} signed a {key_type} host key for {} (serial {serial})", hosts.join(", ")));
+        self.audit_or_fail(project, caller, "ssh_ca.sign_host", &format!("{name} signed a {key_type} host key for {} (serial {serial})", hosts.join(", ")))?;
         Ok(HostCert { certificate, known_hosts: known_hosts(&ca_public, &policy).expect("host domains"), serial, hosts, valid_before: before as i64 * 1000 })
+    }
+
+    /// An audit row that must be written: signing hands out nothing it couldn't record.
+    fn audit_or_fail(&self, project: &str, caller: &Caller, action: &str, summary: &str) -> Result<()> {
+        let now = self.db.now_ms()?;
+        self.db.write(|c| audit::record(c, project, caller, action, None, None, &[], summary, now))
     }
 
     pub(crate) fn ssh_ca_refs(&self, project: &str) -> Result<Vec<(String, String)>> {

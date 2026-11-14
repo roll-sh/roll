@@ -1318,9 +1318,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 let line = if public_key == "-" {
                     let mut t = String::new();
                     std::io::stdin().read_to_string(&mut t).context("reading the host key from stdin")?;
-                    t
+                    public_line(&t, "stdin")?
                 } else {
-                    std::fs::read_to_string(&public_key).with_context(|| format!("reading {public_key}"))?
+                    read_public_key(&public_key)?.0
                 };
                 let list = c.call(Method::GET, &format!("{}/ssh-cas", c.base()), None).await?;
                 let ca = list.as_array().into_iter().flatten().find(|a| a["id"] == id.as_str() || a["name"] == id.as_str()).ok_or_else(|| anyhow::anyhow!("no SSH CA {id}"))?;
@@ -1332,7 +1332,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 eprintln!("sshd: HostCertificate <this file>; clients: {}", s(&v["known_hosts"]));
             }
             SshCasCmd::SignUser { id, public_key, principals, ttl_minutes } => {
-                let line = std::fs::read_to_string(&public_key).with_context(|| format!("reading {public_key}"))?;
+                let line = read_public_key(&public_key)?.0;
                 let ca = ca_named(&c, &id, "ssh-cas").await?;
                 let v = c.call(Method::POST, &format!("{}/ssh-cas/{}/sign-user", c.base(), enc(&ca)), Some(json!({ "public_key": line.trim(), "principals": principals, "ttl_minutes": ttl_minutes }))).await?;
                 if json_out {
@@ -2659,14 +2659,15 @@ pub async fn ssh_command(api: &Api, a: Ssh) -> anyhow::Result<()> {
     let cert_path = dir.path().join("id-cert.pub");
     // The identity ssh uses: the session's own key, or the user's (whose private half roll never reads).
     let id = if let Some(public) = &a.key {
-        let line = std::fs::read_to_string(public).with_context(|| format!("reading {public}"))?;
+        let (line, public) = read_public_key(public)?;
+        let public = public.to_string_lossy().into_owned();
         let ca = ca_named(&c, a.ca.as_deref().unwrap_or_default(), "ssh-cas").await?;
         let v = c.call(Method::POST, &format!("{}/ssh-cas/{}/sign-user", c.base(), enc(&ca)), Some(json!({ "public_key": line.trim(), "principals": a.principals }))).await?;
         std::fs::write(&cert_path, format!("{}\n", s(&v["certificate"]).trim())).context("writing the certificate")?;
         // The private file when it's there; else the public one, which tells ssh to use the
         // agent's key (a hardware token's) that matches it.
-        let private = std::path::PathBuf::from(public.strip_suffix(".pub").unwrap_or(public));
-        if private.exists() && private.as_os_str() != public.as_str() { private } else { std::path::PathBuf::from(public) }
+        let private = std::path::PathBuf::from(public.strip_suffix(".pub").unwrap_or(&public));
+        if private.exists() && private.as_os_str() != public.as_str() { private } else { std::path::PathBuf::from(&public) }
     } else {
         let v = c.call(Method::GET, &format!("{}/values?{}", c.env(&at.env), c.q()), None).await?;
         let get = |k: &str| -> anyhow::Result<String> {
@@ -2694,7 +2695,9 @@ pub async fn ssh_command(api: &Api, a: Ssh) -> anyhow::Result<()> {
     if !trusted.is_empty() {
         let known = dir.path().join("known_hosts");
         std::fs::write(&known, trusted.join("\n") + "\n").context("writing the CA's known_hosts")?;
-        cmd.arg("-o").arg(format!("UserKnownHostsFile={} ~/.ssh/known_hosts", known.display()));
+        // The user's own file first: ssh records a newly accepted host there, not in this one
+        // (which goes); it checks every file listed either way.
+        cmd.arg("-o").arg(format!("UserKnownHostsFile=~/.ssh/known_hosts \"{}\"", known.display()));
     }
     let status = cmd
         .args(&a.args)
@@ -2785,4 +2788,39 @@ async fn ca_named(c: &Client<'_>, id: &str, kind: &str) -> anyhow::Result<String
     let list = c.call(Method::GET, &format!("{}/{kind}", c.base()), None).await?;
     let ca = list.as_array().into_iter().flatten().find(|a| a["id"] == id || a["name"] == id).ok_or_else(|| anyhow::anyhow!("no CA {id}"))?;
     Ok(s(&ca["id"]).to_string())
+}
+
+/// A public key line from `path` (or `<path>.pub` when given a private key's path), and the file
+/// it came from. Anything that isn't one public key line is refused before it can leave the
+/// machine: a private key never goes to roll.
+fn read_public_key(path: &str) -> anyhow::Result<(String, std::path::PathBuf)> {
+    let mut file = std::path::PathBuf::from(path);
+    if !path.ends_with(".pub") {
+        let public = std::path::PathBuf::from(format!("{path}.pub"));
+        if public.exists() {
+            file = public;
+        }
+    }
+    let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+    Ok((public_line(&text, &file.display().to_string())?, file))
+}
+
+fn public_line(text: &str, from: &str) -> anyhow::Result<String> {
+    let line = text.trim();
+    let kind = line.split_whitespace().next().unwrap_or_default();
+    let known = ["ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521"].contains(&kind);
+    if line.contains("PRIVATE KEY") || !known || line.lines().count() != 1 {
+        bail!("{from} isn't a public key line (ssh-ed25519 AAAA…): give the .pub file; a private key never goes to roll");
+    }
+    Ok(line.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_private_key_never_leaves_the_machine() {
+        let private = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n";
+        assert!(super::public_line(private, "id_ed25519").is_err());
+        assert!(super::public_line("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA me@laptop\n", "id_ed25519.pub").is_ok());
+    }
 }

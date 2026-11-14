@@ -1156,6 +1156,9 @@ async fn an_ssh_ca_signs_short_lived_user_certificates_for_its_principals() {
     assert_eq!(api.call(Method::DELETE, &format!("/ssh-cas/{}", ca["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
     // Host certificates: a server's own key signed for names under the CA's host domains, and the
     // known_hosts line that trusts them.
+    for public in ["com", "co.uk"] {
+        assert_eq!(api.call(Method::POST, "/ssh-cas", Some(json!({ "name": "wide", "principals": [], "host_domains": [public] }))).await.0, StatusCode::BAD_REQUEST, "{public}");
+    }
     let hosts = api.ok(Method::POST, "/ssh-cas", Some(json!({ "name": "fleet", "principals": [], "host_domains": ["svc.internal"] }))).await;
     let hosts_pub = hosts["public_key"].as_str().unwrap();
     assert_eq!(hosts["known_hosts"], format!("@cert-authority *.svc.internal,svc.internal {hosts_pub}"));
