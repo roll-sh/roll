@@ -1,5 +1,5 @@
 import { HorizonMark } from "@roll/brand";
-import { ArrowLeft, GitBranch, KeyRound, Moon, RefreshCw, Trash2 } from "lucide-react";
+import { ArrowLeft, FileUp, GitBranch, KeyRound, Moon, RefreshCw, Trash2 } from "lucide-react";
 import { Link } from "@/components/link";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
@@ -20,6 +20,7 @@ import { AppShell } from "../app-shell";
 import { formatTime, fromLocalInput, now, POLL_MS, Segmented, toLocalInput } from "../redis/shared";
 import { ago, btn, Confirm, Connecting, CopyButton, EmptyPanel, ErrorNote, input, Offline, Panel, primary, Stats, useCopy } from "../ui";
 import { AnalyzeTab } from "./analyze";
+import { ImportPanel } from "./import";
 import { InferenceTab } from "./inference";
 import { ApiKeys } from "./api-keys";
 import { SearchConsole } from "./console";
@@ -435,6 +436,7 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
   const [selected, setSelected] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -460,9 +462,14 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
       <Panel
         title="Indices"
         aside={
-          <button onClick={load} disabled={loading} className={btn}>
-            <RefreshCw className={`size-3.5 ${loading ? "animate-spin motion-reduce:animate-none" : ""}`} /> Refresh
-          </button>
+          <span className="flex gap-2">
+            <button onClick={() => setImporting(true)} disabled={importing} className={btn} title="Index a JSON, NDJSON or CSV file">
+              <FileUp className="size-3.5" /> Import
+            </button>
+            <button onClick={load} disabled={loading} className={btn}>
+              <RefreshCw className={`size-3.5 ${loading ? "animate-spin motion-reduce:animate-none" : ""}`} /> Refresh
+            </button>
+          </span>
         }
       >
         {err && <p className="px-5 py-4 text-[13px] text-danger">{err}</p>}
@@ -472,8 +479,11 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
           </p>
         ) : rows && rows.length === 0 ? (
           <p className="px-5 py-6 text-[13px] text-muted">
-            No indices yet. Create one from the Console tab, or index a document with any client: indices are created on
-            the first write.
+            No indices yet.{" "}
+            <button onClick={() => setImporting(true)} className="text-accent hover:underline">
+              Import a file
+            </button>
+            , create one from the Console tab, or index a document with any client: indices are created on the first write.
           </p>
         ) : (
           rows && (
@@ -537,6 +547,17 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
           index to browse its documents, mapping and settings.
         </p>
       </Panel>
+      {importing && (
+        <ImportPanel
+          cluster={cluster}
+          existing={rows?.map((r) => r.index) ?? []}
+          onClose={() => setImporting(false)}
+          onImported={async (index) => {
+            await load();
+            setSelected(index);
+          }}
+        />
+      )}
       {open && (
         <IndexBrowser
           key={open.index}
