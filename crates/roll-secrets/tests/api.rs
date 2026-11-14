@@ -1036,6 +1036,11 @@ async fn a_projects_ca_signs_short_lived_certificates_for_its_names_only() {
     // A name outside its domains is refused; managed certificates live twice their rotation.
     let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/WEB_CERT", Some(json!({ "link": link("certificate", "managed", json!("web.example.com")) }))).await;
     assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("doesn't sign for web.example.com"), "{e}");
+    // A managed certificate rotates before it ends, or isn't taken.
+    for options in [json!({ "names": "web.svc.internal" }), json!({ "names": "web.svc.internal", "rotate_days": 60 })] {
+        let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/WEB_CERT", Some(json!({ "link": { "kind": "pki", "ref": ca["id"], "field": "certificate", "mode": "managed", "options": options } }))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    }
     api.ok(Method::PUT, "/environments/staging/secrets/WEB_CERT", Some(json!({ "link": link("certificate", "managed", json!("web.svc.internal, *.web.svc.internal")) }))).await;
     let stored = api.values("staging", "/").await["values"]["WEB_CERT"].as_str().unwrap().to_string();
     let (_, der) = parse_x509_pem(stored.as_bytes()).unwrap();

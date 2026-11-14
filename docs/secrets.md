@@ -570,10 +570,12 @@ TLS certificates for services (mTLS between them), with no CA to run.
   certificate's names in `options.names` (a list, or comma-separated; the dashboard's Link dialog
   asks): DNS names under the CA's domains, a wildcard one level under one, or IP addresses where
   allowed; anything else is refused, naming the domains. `dynamic` gives each lease its own
-  certificate for the lease's TTL plus five minutes; `managed` stores one and rotates it, valid for
-  twice `rotate_days` (30 by default) so a rotation always comes first; both at most `max_days`
-  (90 by default, 397 at most). Certificates are for servers and clients both (`serverAuth`,
-  `clientAuth`), with a random 128-bit serial.
+  certificate for the lease's TTL plus five minutes; `managed` stores one and rotates it every
+  `rotate_days` (required, and at most half the CA's `max_days`; the Link dialog asks), valid for
+  twice that, so a rotation always comes first. Both are at most `max_days` (90 by default, 397 at
+  most) and never past the CA's own end. A link's names and rotation are checked when it's written.
+  Certificates are for servers and clients both (`serverAuth`, `clientAuth`; the key only signs),
+  with a random 128-bit serial.
 - A certificate can't be taken back: there are no revocation lists, so lifetimes stay short, and a
   lease that ends leaves its certificate valid until it expires. A CA a key links to can't be
   deleted; deleting one leaves what it signed valid until it expires.
