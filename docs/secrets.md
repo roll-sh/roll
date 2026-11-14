@@ -1596,7 +1596,10 @@ together, and the merged tree passes roll-secrets', rolld's auth and the dashboa
 import dialog names Vault trees and AWS (screenshots on #52). `roll secrets kubernetes` and the
 Export menu print ESO's manifests with a fresh token (#55), and a workload identity's login renews
 itself (#56), so a pod running `roll run --watch` needs no stored token, as with Vault's Kubernetes
-auth.
+auth; and identities pin their issuer's keys (#57), so clusters roll can't reach (k3s, kind,
+private EKS) log pods in too (checked on k3s, with #56: a 5-minute login renewed by itself).
+`roll run`'s masking was measured and made 5x faster (#54: 330 MB/s with 300 values and a 3 KB
+key).
 
 An eighth independent review (2026-11-14, of moving in, change policies per folder and the
 seventh review's fixes) found no high-severity issue; it found folder gates a reviewer, a
@@ -1693,8 +1696,8 @@ user's call).
 
 1. **A ninth independent review** of `roll run`'s masking (#54) and the eighth review's fixes
    (running), and its fixes.
-2. **Measure `roll run`'s masking** on a noisy command (a test suite's output, hundreds of values):
-   throughput through the masker against the command alone, and fix what it costs.
+2. **When #56 and #57 meet**: the identities section of this doc keeps both (renewal and pinned
+   keys), and the pod example shows both env and keys.
 3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
 4. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
@@ -1736,6 +1739,8 @@ Open pull requests after this one:
   after its grace; a user with two keys already is refused, never pruned.
 - **#55, pulling into Kubernetes with External Secrets Operator** (after #20): its webhook
   provider (one store for whole environments and single keys) and `values?dynamic=false`.
+- **#57, workload identities pin their issuer's keys** (after #20): `jwks` on an identity, for a
+  cluster's own issuer; `identities add --jwks`, the dashboard's Other OIDC form.
 - **#56, a workload identity's login renews itself** (after #20): long-running `roll run
   --watch` in a pod logs in again before its login ends, reading the rotated token file.
 - **#54, `roll run` masks values in the command's output** (after #20): stdout and stderr that
