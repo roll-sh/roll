@@ -252,39 +252,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    µs/doc on the ECS log), BP only for time-series and log indices, the request path's
    allocations, one allocator policy. Round 6's other tracks (percolator, nested, noaa, pmc, the
    vector tracks) are being rerun.
-2. **Language analysis: the plugins Elastic Cloud and Amazon OpenSearch Service ship** (in
-   progress). Landed: `analysis-phonetic` (every encoder, Commons Codec's algorithms ported:
-   identical codes to Java on 150,000 geonames names), `analysis-stempel` (Polish: Lucene's
-   Egothor stemmer and table, identical on 121,000 words) and `analysis-ukrainian` (the Morfologik
-   dictionary Elasticsearch ships, read in place; identical token streams on 21,000 lines; the three
-   add 7.9 MB to the release binary, nothing to an idle resident set, 4 MiB once all are used), and
-   the CJK plugins `analysis-kuromoji` (Japanese), `analysis-nori` (Korean) and
-   `analysis-smartcn` (Chinese): Lucene's Viterbi search over IPADIC and mecab-ko-dic (search,
-   normal and extended modes, decompounding, user dictionaries, n-best) and smartcn's HMM ported
-   over Lucene's own dictionaries, with every tokenizer, filter, char filter and analyzer of the
-   three plugins; tokens, offsets, positions and explain attributes identical to Elasticsearch's
-   on 604 sentences per language (Tatoeba, with paragraphs past Lucene's 1,024-character buffer)
-   in every mode and option, plus edge cases. The dictionaries (12.8 MB compressed in the binary)
-   are decompressed only when an index first uses them: an idle node's resident set is unchanged,
-   the first use adds 24 MiB (Japanese), 38 MiB (Korean) and 5 MiB (Chinese). In-process
-   throughput against Lucene 10.5.1 on the same lines: Japanese and Korean at parity or ahead
-   (`kuromoji_tokenizer` ~505k tokens/s against ~500k, `nori_tokenizer` ~295k against ~280k),
-   `smartcn_tokenizer` behind (~390k against ~480k). 26 of 26 tests, listed in `_cat/plugins` and
-   `_nodes/plugins`. And `analysis-icu`, 13 of 13: ICU4J 77.1's normalizer, break iterator and
-   Thai, Lao, Khmer, Burmese and CJK dictionary engines ported over ICU's own data (every code
-   point through all six normalization data sets in both modes, 20,000 random strings, 7,525
-   char filter lines with offsets and 4,579 lines of Thai, Lao, Khmer, Burmese, Chinese, Japanese,
-   Korean and emoji text identical to ICU4J and Lucene), `icu_collation` and the
-   `icu_collation_keyword` field on ICU4X's collator (orderings identical to ICU4J in 10
-   configurations over 20,000 words; key bytes differ above primary strength), `icu_transform`
-   from rules, the built-in normalization, case, `Remove` and `Null` IDs, and the
-   `icu_analyzer`; ICU's data (3.4 MB) is read in place: the release binary grows 5.3 MB, an idle
-   `search-dev`'s resident set is unchanged (26 MiB) and using every ICU component adds 2.6 MiB. Left: ICU's data-driven
-   transforms (`Any-Latin`, `Hiragana-Katakana`, `Han-Latin`, `Latin-ASCII`: ICU's
-   transliteration rule data and its rule features beyond plain conversions), custom collation
-   `rules` and `rule_files` for the tokenizer (both need ICU's rule compilers); then smartcn's
-   speed.
-3. **Snapshots on the fleet.** `_snapshot` and snapshot lifecycle management work on a node with
+2. **Snapshots on the fleet.** `_snapshot` and snapshot lifecycle management work on a node with
    `path.repo`, but clusters on roll's fleet get none and there is no object-storage repository
    type, so in production a cluster can't take, schedule or restore a snapshot: the backup and
    migration path Elastic Cloud (automatic snapshots) and Amazon OpenSearch Service offer. Add the
@@ -293,7 +261,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    object storage per cluster, so SLM can snapshot without setup; restore from Elasticsearch's
    repository format where it can be read, so a cluster moves from Elastic Cloud to roll by
    snapshot.
-4. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
+3. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
    Elasticsearch 9.5.5 and OpenSearch 3.9). Roll leads on indexing (4,735 docs/s against 3,585
    and 2,978 at 8 clients), merged `knn` (1.9 ms CPU against 6.1 and 4.9), `rrf` (3.2 against 13.8
    and 8.3), cold start (36 ms to the first `knn` against a ~25-29 s node start) and memory
@@ -308,7 +276,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    halves CPU but drops recall to 0.43), AVX-512 distances for float HNSW indexing (1,250 against
    1,174 µs/doc), searching unmerged segments in parallel (filtered latency 2-3x Elasticsearch's
    there).
-5. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (in progress). Landed: the
+4. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (in progress). Landed: the
    index browser and console on the per-index routes, an API keys panel in Settings, the mapping
    view as a field table, OpenSearch-flavor clusters' own clients and `OPENSEARCH_*` variables,
    and importing a file into an index from the Indices tab (Kibana's "Upload a file"): NDJSON, a
@@ -332,7 +300,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    its `ism_template`). Next: saved console requests. Signed-in users who aren't admins follow
    accounts' phase 2: today every product but code, agents and projects answers them 403
    (docs/accounts.md), search included.
-6. **Compatibility gaps** from the extended suites (5,074 of the 5,541 Elasticsearch passes; a full run on 2026-11-14),
+5. **Compatibility gaps** from the extended suites (5,074 of the 5,541 Elasticsearch passes; a full run on 2026-11-14),
    largest first. Landed: ent-search's last 5 (a `rule` retriever over `rrf`/`linear`, inference
    inside a rule query's organic, workflow-restricted API keys), ES|QL's last 5 (`TOP_SNIPPETS`,
    `CATEGORIZE`, approximation's columns, `LIMIT n BY`, `unsigned_long` past `i64::MAX`),
@@ -346,6 +314,37 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    fields); downsample's last one (allocation filtering). In the opensearch dialect, pick
    `auto_date_histogram`'s rounding from the bounds as OpenSearch's rewrite does where it differs
    from collecting (roll counts with Elasticsearch's choice in both dialects).
+6. **Language analysis: what's left.** Every analysis plugin Elastic Cloud ships runs now (42 of 42
+   tests). Landed: `analysis-phonetic` (every encoder, Commons Codec's algorithms ported: identical
+   codes to Java on 150,000 geonames names), `analysis-stempel` (Polish: Lucene's Egothor stemmer
+   and table, identical on 121,000 words) and `analysis-ukrainian` (the Morfologik dictionary
+   Elasticsearch ships, read in place; identical token streams on 21,000 lines; the three add 7.9 MB
+   to the release binary, nothing to an idle resident set, 4 MiB once all are used), and the CJK
+   plugins `analysis-kuromoji` (Japanese), `analysis-nori` (Korean) and `analysis-smartcn`
+   (Chinese): Lucene's Viterbi search over IPADIC and mecab-ko-dic (search, normal and extended
+   modes, decompounding, user dictionaries, n-best) and smartcn's HMM ported over Lucene's own
+   dictionaries, with every tokenizer, filter, char filter and analyzer of the three plugins;
+   tokens, offsets, positions and explain attributes identical to Elasticsearch's on 604 sentences
+   per language (Tatoeba, with paragraphs past Lucene's 1,024-character buffer) in every mode and
+   option, plus edge cases. The dictionaries (12.8 MB compressed in the binary) are decompressed
+   only when an index first uses them: an idle node's resident set is unchanged, the first use adds
+   24 MiB (Japanese), 38 MiB (Korean) and 5 MiB (Chinese). In-process throughput against Lucene
+   10.5.1 on the same lines: Japanese and Korean at parity or ahead (`kuromoji_tokenizer` ~505k
+   tokens/s against ~500k, `nori_tokenizer` ~295k against ~280k), `smartcn_tokenizer` behind (~390k
+   against ~480k). 26 of 26 tests, listed in `_cat/plugins` and `_nodes/plugins`. And
+   `analysis-icu`, 13 of 13: ICU4J 77.1's normalizer, break iterator and Thai, Lao, Khmer, Burmese
+   and CJK dictionary engines ported over ICU's own data (every code point through all six
+   normalization data sets in both modes, 20,000 random strings, 7,525 char filter lines with
+   offsets and 4,579 lines of Thai, Lao, Khmer, Burmese, Chinese, Japanese, Korean and emoji text
+   identical to ICU4J and Lucene), `icu_collation` and the `icu_collation_keyword` field on ICU4X's
+   collator (orderings identical to ICU4J in 10 configurations over 20,000 words; key bytes differ
+   above primary strength), `icu_transform` from rules, the built-in normalization, case, `Remove`
+   and `Null` IDs, and the `icu_analyzer`; ICU's data (3.4 MB) is read in place: the release binary
+   grows 5.3 MB, an idle `search-dev`'s resident set is unchanged (26 MiB) and using every ICU
+   component adds 2.6 MiB. Left: ICU's data-driven transforms (`Any-Latin`, `Hiragana-Katakana`,
+   `Han-Latin`, `Latin-ASCII`: ICU's transliteration rule data and its rule features beyond plain
+   conversions), custom collation `rules` and `rule_files` for the tokenizer (both need ICU's rule
+   compilers); then smartcn's speed.
 7. **Elasticsearch's lifecycles: what's left.** The data stream lifecycle (rollover, retention,
    failure stores, the error store), ILM and snapshot lifecycle management (scheduled snapshots,
    retention, `.slm-history-7`, ILM's `wait_for_snapshot`) run now (`api/data_stream_lifecycle.rs`,
