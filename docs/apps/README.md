@@ -693,12 +693,14 @@ The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`,
   the node's memory (`Cluster::dispatch`). A node that takes a
   service over starts from the store, and keeps what the previous owner left running of each
   environment's live deployment (its instances' names say their deployment; one that answers is
-  taken as running, `EnvLive::adopt` with `Runtime::address`, the instance numbers after it), so
-  a node's death or a rolld restart costs visitors no cold start (`a_takeover_keeps_the_instances_
-  the_dead_owner_ran`, the nodes on one runtime). Anything else of the service's (older
-  deployments, jobs, one that doesn't answer) is removed. Docker answers `address` (a restart on
-  one host); Fargate doesn't yet for tasks another process started (`found`), so there a takeover
-  still stops them and starts fresh ("Next"). Deploys in flight on a lost
+  taken as running: `EnvLive::adopt` with `Runtime::adopt`, which makes it this process's own,
+  its output followed from then, the instance numbers after it), so a node's death or a rolld
+  restart costs visitors no cold start. Docker checks the container runs and reads its port;
+  Fargate takes a task `list` found from another process (its newest RUNNING one, its private
+  address; any other task of that name stops), so a sleep or a scale-in stops it as any other.
+  Anything else of the service's (older deployments, jobs, one that doesn't answer) is removed
+  (`a_takeover_keeps_the_instances_the_dead_owner_ran`, two nodes on one runtime;
+  `fargate.rs::a_restart_keeps_the_running_task`, on the fake ECS). Deploys in flight on a lost
   node fail and are retried once by the new owner (builds are idempotent: same revision, same
   image tag).
 - Every catalog write that belongs to a service is a `code_sql` write closure; the switch of an
@@ -1534,45 +1536,41 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **Fargate keeps a dead owner's tasks too**: `running` and `address` for the tasks
-   `list` finds from another process (`found`: describe the task, RUNNING, its private address),
-   and `stop`/`suspend` on them, so a fleet takeover adopts instead of a cold start; checked on
-   the first AWS run (the fake covers the rest).
-2. **Crashed workers beyond the target go**: a worker whose backlog target fell while some of its
+1. **Crashed workers beyond the target go**: a worker whose backlog target fell while some of its
    instances were crashed keeps their records forever (an independent review): removed once the
    target is met, their exit kept in the crash list.
-3. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+2. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-4. **Region**: the region shown on the overview and each environment, defaulting to the project's
+3. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-5. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+4. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-6. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+5. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-7. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+6. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-8. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+7. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-9. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-10. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+8. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+9. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-11. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+10. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-12. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+11. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-13. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+12. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-14. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+13. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

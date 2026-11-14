@@ -279,6 +279,40 @@ pub fn for_container(url: &str) -> String {
     out
 }
 
+impl Docker {
+    /// Follow a container's output from `since` until it stops (the logs request ends with it).
+    fn follow_logs(&self, name: &str, since: chrono::DateTime<chrono::Utc>, o: LogSink, e: LogSink) {
+        if let Some(engine) = &self.engine {
+            let (engine, name) = (engine.clone(), name.to_string());
+            tokio::spawn(async move {
+                let since = (since.timestamp(), since.timestamp_subsec_nanos());
+                if let Err(err) = engine.follow(&name, since, o.writer(), e.writer()).await {
+                    tracing::debug!(%name, "following logs: {err:#}");
+                }
+            });
+            return;
+        }
+        let since = since.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        if let Ok(mut child) = Command::new("docker")
+            .args(["logs", "-f", "--since", &since, name])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            let out = child.stdout.take().expect("piped");
+            let err = child.stderr.take().expect("piped");
+            tokio::spawn(async move {
+                let a = tokio::spawn(pump(out, o));
+                let b = tokio::spawn(pump(err, e));
+                let _ = (a.await, b.await);
+                let _ = child.wait().await;
+            });
+        }
+    }
+}
+
 #[async_trait]
 impl Runtime for Docker {
     fn name(&self) -> &'static str {
@@ -452,38 +486,22 @@ impl Runtime for Docker {
             self.known.lock().marks.remove(name);
             engine.start(name).await?;
             let (_, port) = self.id_and_port(name).await?;
-            // Follow its output until it stops (the logs request ends with the container).
-            let (engine, name) = (engine.clone(), name.to_string());
-            tokio::spawn(async move {
-                let since = (now.timestamp(), now.timestamp_subsec_nanos());
-                if let Err(err) = engine.follow(&name, since, o.writer(), e.writer()).await {
-                    tracing::debug!(%name, "following logs: {err:#}");
-                }
-            });
+            self.follow_logs(name, now, o, e);
             return Ok(port.map(|p| SocketAddr::from(([127, 0, 0, 1], p))));
         }
-        let since = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         docker(&["start", name]).await?;
         let (_, port) = self.id_and_port(name).await?;
-        // Follow its output until it stops (`docker logs -f` ends with the container).
-        if let Ok(mut child) = Command::new("docker")
-            .args(["logs", "-f", "--since", &since, name])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-        {
-            let out = child.stdout.take().expect("piped");
-            let err = child.stderr.take().expect("piped");
-            tokio::spawn(async move {
-                let a = tokio::spawn(pump(out, o));
-                let b = tokio::spawn(pump(err, e));
-                let _ = (a.await, b.await);
-                let _ = child.wait().await;
-            });
-        }
+        self.follow_logs(name, now, o, e);
         Ok(port.map(|p| SocketAddr::from(([127, 0, 0, 1], p))))
+    }
+
+    async fn adopt(&self, spec: &InstanceSpec, log: LogSink) -> Option<Option<SocketAddr>> {
+        if !self.running(&spec.name).await {
+            return None;
+        }
+        let (_, port) = self.id_and_port(&spec.name).await.ok()?;
+        self.follow_logs(&spec.name, chrono::Utc::now(), log.stream(Stream::Stdout), log.stream(Stream::Stderr));
+        Some(port.map(|p| SocketAddr::from(([127, 0, 0, 1], p))))
     }
 
     async fn settle(&self, name: &str) {
@@ -599,14 +617,6 @@ impl Runtime for Docker {
         let usec: u64 = stat.lines().find_map(|l| l.strip_prefix("usage_usec ")).and_then(|v| v.trim().parse().ok())?;
         let mem: u64 = tokio::fs::read_to_string(dir.join("memory.current")).await.ok()?.trim().parse().ok()?;
         Some(Usage { cpu_ns: usec * 1000, memory_bytes: mem })
-    }
-
-    async fn address(&self, name: &str) -> Option<SocketAddr> {
-        if !self.running(name).await {
-            return None;
-        }
-        let (_, port) = self.id_and_port(name).await.ok()?;
-        port.map(|p| SocketAddr::from(([127, 0, 0, 1], p)))
     }
 
     async fn list(&self, service: Option<&str>) -> Vec<String> {

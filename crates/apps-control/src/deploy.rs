@@ -1172,7 +1172,9 @@ impl Apps {
             if known.contains(&name) || known.contains(&owner) {
                 continue;
             }
-            if live_prefixes.iter().any(|p| owner.strip_prefix(p.as_str()).is_some_and(|n| n.parse::<u64>().is_ok())) && self.deps.runtime.running(&owner).await {
+            // (Not asked whether it runs: that's the adopt's to find, and a runtime may not know
+            // a task another process started until it looks.)
+            if live_prefixes.iter().any(|p| owner.strip_prefix(p.as_str()).is_some_and(|n| n.parse::<u64>().is_ok())) {
                 continue;
             }
             self.deps.runtime.remove(&name).await;

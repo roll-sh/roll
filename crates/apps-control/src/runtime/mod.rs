@@ -157,10 +157,11 @@ pub trait Runtime: Send + Sync {
     /// Wait for a started instance to exit: its exit code.
     async fn wait(&self, name: &str) -> anyhow::Result<i32>;
     async fn running(&self, name: &str) -> bool;
-    /// Where a running instance answers (what [`Runtime::start`] said), for a node that takes
-    /// the service over and keeps it ([`crate::live::EnvLive::adopt`]). None: not running, or a
-    /// runtime that can't say (the instance is stopped for a fresh one instead).
-    async fn address(&self, _name: &str) -> Option<SocketAddr> {
+    /// Take on `spec.name`, still running from another process (a node that died, rolld before
+    /// a restart), as this process's own, its output followed into `log` from now: where it
+    /// answers (None for a worker). None: not running here, or a runtime that can't (it's
+    /// removed, and a fresh one made). For [`crate::live::EnvLive::adopt`].
+    async fn adopt(&self, _spec: &InstanceSpec, _log: LogSink) -> Option<Option<SocketAddr>> {
         None
     }
     /// How a stopped instance ended, when the runtime can say: its exit code, and whether it

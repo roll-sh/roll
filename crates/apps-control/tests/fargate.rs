@@ -372,7 +372,44 @@ struct World {
     public: axum::Router,
     fake: Fake,
     project: String,
+    cfg: FleetConfig,
+    db: code_sql::Db,
+    ws: Arc<roll_workspace::Workspace>,
     _dir: tempfile::TempDir,
+}
+
+/// roll apps on the fake AWS, as one rolld process.
+async fn apps_on(cfg: &FleetConfig, db: &code_sql::Db, ws: &Arc<roll_workspace::Workspace>, home: &std::path::Path) -> Arc<Apps> {
+    let store = Store::new(db.clone(), Sealer::new("0123456789abcdef0123456789abcdef").unwrap()).unwrap();
+    let cluster = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::solo()), roll_cluster::ClusterConfig::new("n1", "http://127.0.0.1:1", b"0123456789abcdef".to_vec())).unwrap();
+    let mut acfg = AppsConfig::new(home.to_path_buf());
+    acfg.live.worker_grace = Duration::from_millis(20);
+    acfg.live.probe_every = Duration::from_millis(5);
+    acfg.live.drain = Duration::from_millis(50);
+    let deps = Deps {
+        runtime: Fargate::new(cfg.clone()).await.unwrap(),
+        builder: CodeBuild::new(cfg.clone()).await.unwrap(),
+        sources: None,
+        secrets: Arc::new(NoSecrets),
+        resources: Arc::new(NoResources),
+        resolver: Arc::new(StaticDns::default()),
+        tls: Arc::new(apps_control::integrations::NoTls),
+        objects: None,
+        cluster,
+        workspace: Some(ws.clone()),
+    };
+    let apps = Apps::new(acfg, store, deps);
+    apps.start();
+    apps
+}
+
+impl World {
+    /// rolld again, a new process (nothing in memory): the old one's loops stop, its tasks don't.
+    async fn restart(&mut self) {
+        self.apps.shutdown().await;
+        let apps = apps_on(&self.cfg, &self.db, &self.ws, self._dir.path()).await;
+        (self.api, self.public, self.apps) = (apps_control::api::router(apps.clone()), apps_control::public::router(apps.clone()), apps);
+    }
 }
 
 async fn world() -> World {
@@ -408,27 +445,8 @@ async fn world() -> World {
     let ws = Arc::new(roll_workspace::Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
     let project = ws.create("", "acme", "", None).unwrap().id;
     let db = code_sql::Db::open_sqlite(&dir.path().join("apps.db"), code_sql::SqliteOptions { readers: 2, cache_kib: 1024 }).unwrap();
-    let store = Store::new(db, Sealer::new("0123456789abcdef0123456789abcdef").unwrap()).unwrap();
-    let cluster = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::solo()), roll_cluster::ClusterConfig::new("n1", "http://127.0.0.1:1", b"0123456789abcdef".to_vec())).unwrap();
-    let mut acfg = AppsConfig::new(dir.path().to_path_buf());
-    acfg.live.worker_grace = Duration::from_millis(20);
-    acfg.live.probe_every = Duration::from_millis(5);
-    acfg.live.drain = Duration::from_millis(50);
-    let deps = Deps {
-        runtime: Fargate::new(cfg.clone()).await.unwrap(),
-        builder: CodeBuild::new(cfg).await.unwrap(),
-        sources: None,
-        secrets: Arc::new(NoSecrets),
-        resources: Arc::new(NoResources),
-        resolver: Arc::new(StaticDns::default()),
-        tls: Arc::new(apps_control::integrations::NoTls),
-        objects: None,
-        cluster,
-        workspace: Some(ws),
-    };
-    let apps = Apps::new(acfg, store, deps);
-    apps.start();
-    World { api: apps_control::api::router(apps.clone()), public: apps_control::public::router(apps.clone()), apps, fake, project, _dir: dir }
+    let apps = apps_on(&cfg, &db, &ws, dir.path()).await;
+    World { api: apps_control::api::router(apps.clone()), public: apps_control::public::router(apps.clone()), apps, fake, project, cfg, db, ws, _dir: dir }
 }
 
 async fn call(r: &axum::Router, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -669,4 +687,34 @@ async fn a_cron_run_is_a_task_and_reports_its_exit_code() {
     let (lines, _) = w.apps.logs.follow(&format!("env:{id}/production"), 100);
     assert!(lines.iter().any(|l| l.text == "the job ran"), "{lines:?}");
     assert_eq!(w.fake.keys("apps/env/"), Vec::<String>::new());
+}
+
+/// rolld starting again (a new process, or the node that takes a dead one's service over) keeps
+/// the task the last one ran: the next visitor gets the same task, nothing run or stopped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_keeps_the_running_task() {
+    let mut w = world().await;
+    let id = upload_service(&w, "web").await;
+    let d = upload(&w, &id, &[("index.html", "<h1>hi</h1>")]).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
+    let host = env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
+    let visit = |w: &World| {
+        let (public, host) = (w.public.clone(), host.clone());
+        async move {
+            let resp = public.oneshot(Request::builder().uri("/").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
+            (resp.status(), serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+        }
+    };
+    let (st, before) = visit(&w).await;
+    assert_eq!(st, StatusCode::OK, "{before}");
+    let (runs, stops) = (w.fake.calls("RunTask").len(), w.fake.calls("StopTask").len());
+    w.restart().await;
+    let (st, after) = visit(&w).await;
+    assert_eq!(st, StatusCode::OK, "{after}");
+    assert_eq!(after["task"], before["task"], "the same task answers");
+    assert_eq!((w.fake.calls("RunTask").len(), w.fake.calls("StopTask").len()), (runs, stops), "nothing run or stopped");
+    // It's this process's own now: a sleep stops it.
+    w.apps.live(&id, "production").sleep().await;
+    assert_eq!(w.fake.calls("StopTask").len(), stops + 1);
 }

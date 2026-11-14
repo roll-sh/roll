@@ -1285,18 +1285,21 @@ impl EnvLive {
         let mut kept = 0;
         for name in self.runtime.list(Some(&self.service)).await {
             let Some(n) = name.strip_prefix(&prefix).and_then(|n| n.parse::<u64>().ok()) else { continue };
-            if !self.runtime.running(&name).await {
-                continue;
-            }
-            let addr = self.runtime.address(&name).await;
+            let mut spec = tpl.spec.clone();
+            spec.name = name.clone();
+            let addr = self.runtime.adopt(&spec, self.log.instance(&name, &tpl.deployment)).await;
             let up = match (tpl.run.kind, addr) {
-                (RunType::Web, Some(a)) => self.answers(a, None, tpl.run.h2c).await,
-                (RunType::Web, None) => false,
+                (_, None) => false,
+                (RunType::Web, Some(Some(a))) => self.answers(a, None, tpl.run.h2c).await,
+                (RunType::Web, Some(None)) => false,
                 _ => true,
             };
             if !up {
+                // Not one to keep (stopped, or it doesn't answer): it goes, as the rest did.
+                self.runtime.remove(&name).await;
                 continue;
             }
+            let addr = addr.flatten();
             let i = Inst::new(name.clone(), tpl.deployment.clone());
             *i.phase.lock() = Phase::Running(addr);
             *i.started_at.lock() = Some(now_ms());

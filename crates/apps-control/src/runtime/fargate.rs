@@ -641,6 +641,37 @@ impl Runtime for Fargate {
         })
     }
 
+    /// A task `list` found from another process (a node that died): its newest one that's
+    /// RUNNING becomes this instance's, its log followed from now; the rest of its tasks stop.
+    async fn adopt(&self, spec: &InstanceSpec, log: LogSink) -> Option<Option<SocketAddr>> {
+        let arns = self.found.lock().get(&spec.name).cloned()?;
+        let mut keep: Option<(String, Task)> = None;
+        for arn in &arns {
+            if let Ok(Some(t)) = self.describe(arn).await
+                && t.last_status() == Some("RUNNING")
+                && keep.is_none()
+            {
+                keep = Some((arn.clone(), t));
+            }
+        }
+        let (arn, t) = keep?;
+        let addr = match spec.port {
+            Some(_) => Some(SocketAddr::new(private_ip(&t)?, self.cfg.port)),
+            None => None,
+        };
+        let task_def = t.task_definition_arn().unwrap_or_default().to_string();
+        let (drained_tx, drained) = watch::channel(false);
+        self.instances.lock().insert(spec.name.clone(), Instance { spec: spec.clone(), task_def, task: Some(Started { arn: arn.clone(), env_key: None, addr, seen: Some((Instant::now(), true)), drained }) });
+        let rest: Vec<String> = self.found.lock().remove(&spec.name).unwrap_or_default().into_iter().filter(|a| *a != arn).collect();
+        for a in rest {
+            self.stop_task(&a, "roll: not one of this node's instances").await;
+        }
+        if let Some(me) = self.me.upgrade() {
+            tokio::spawn(me.follow(arn, log, drained_tx));
+        }
+        Some(addr)
+    }
+
     async fn running(&self, name: &str) -> bool {
         let Some(s) = self.started(name) else { return false };
         if let Some((at, up)) = s.seen

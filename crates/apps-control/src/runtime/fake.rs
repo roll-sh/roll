@@ -410,10 +410,10 @@ impl Runtime for Fake {
         matches!(self.state(name), Some(FakeState::Running | FakeState::Paused))
     }
 
-    async fn address(&self, name: &str) -> Option<SocketAddr> {
+    async fn adopt(&self, spec: &InstanceSpec, _log: LogSink) -> Option<Option<SocketAddr>> {
         let m = self.instances.lock();
-        let i = m.get(name)?;
-        (i.state == FakeState::Running).then_some(i.addr).flatten()
+        let i = m.get(&spec.name)?;
+        (i.state == FakeState::Running).then_some(i.addr)
     }
 
     async fn exited(&self, name: &str) -> Option<super::Exit> {
