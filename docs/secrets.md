@@ -1586,6 +1586,8 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
+Then change policies per folder (#53), as Infisical's approval policies on secret paths.
+
 A seventh independent review (2026-11-14, of RabbitMQ, the OpenSearch names and the sixth
 review's fixes) found no high-severity issue; it found a RabbitMQ template copied in part (an
 exchange left open), `render --watch` rendering twice, throttled OCSP answers marked cacheable,
@@ -1671,11 +1673,13 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **Change policies per folder**, as Infisical's approval policies on secret paths: a protected
-   folder (`/payments`) inside an unprotected environment, with its own approvals and approvers.
-2. **An eighth independent review** of moving in (#52) and the seventh review's fixes.
-3. **When #50 and #51 meet** (whichever lands second): `open_request_items` keeps both the canvas
-   check before the provider (#51) and check-and-set (#50); a test covering both.
+1. **An eighth independent review** of moving in (#52), change policies per folder (#53) and the
+   seventh review's fixes, and its fixes.
+2. **A screenshot of the folder policy and request gates** for #53, and of moving in for #52's
+   dashboard import dialog (it shows the CLI commands).
+3. **When #50, #51 and #53 meet** (whichever land later): `requests.rs` and `write.rs` keep the
+   canvas check before the provider (#51), check-and-set (#50) and folder gates (#53); a test of
+   the three together.
 4. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
 5. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
@@ -1715,6 +1719,8 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#53, change policies per folder** (after #20): a folder of an unprotected environment takes
+  changes only through approved requests, with its own approvals and approvers.
 - **#52, moving in from Vault trees and AWS Secrets Manager** (after #20): `import --from vault
   --recursive` into folders, `--from aws` through the user's aws CLI.
 - **#51, search links on OpenSearch clusters** (after #20): an internal user (`user`,
