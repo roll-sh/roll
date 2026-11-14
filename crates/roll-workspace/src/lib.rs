@@ -228,10 +228,11 @@ impl Workspace {
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             name_free(c, owner, name, None)?;
-            c.execute(
-                "INSERT INTO projects (id, owner, name, description, icon, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                params![id, owner, name, description, icon, now],
-            )?;
+            // After every project before it, even one made the same millisecond: projects list
+            // in the order they were made.
+            let last: Option<i64> = c.query_row("SELECT MAX(created_at) FROM projects", (), |r| r.get(0))?;
+            let at = last.map_or(now, |l| now.max(l + 1));
+            c.execute("INSERT INTO projects (id, owner, name, description, icon, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![id, owner, name, description, icon, at])?;
             load(c, &id)
         })
     }
