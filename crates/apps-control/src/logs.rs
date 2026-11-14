@@ -137,11 +137,14 @@ pub struct LogHub {
     /// Runtime lines (`env:…` logs) for log drains, as they're written: bounded, so a slow drain
     /// drops lines (counted by the drainer) rather than holding memory or a writer.
     tap: Mutex<Option<Tap>>,
+    /// Whether some drain asks for request (`http:`) and build (`build:`) lines.
+    tap_http: std::sync::atomic::AtomicBool,
+    tap_build: std::sync::atomic::AtomicBool,
 }
 
 impl LogHub {
     pub fn new(objects: Option<Objects>) -> Arc<LogHub> {
-        Arc::new(LogHub { logs: Mutex::new(HashMap::new()), objects, tap: Mutex::new(None) })
+        Arc::new(LogHub { logs: Mutex::new(HashMap::new()), objects, tap: Mutex::new(None), tap_http: Default::default(), tap_build: Default::default() })
     }
 
     /// Every runtime line from now on, `(log key, line)`, at most `capacity` waiting.
@@ -151,13 +154,22 @@ impl LogHub {
         rx
     }
 
+    /// Which sources beyond runtime output some drain asks for (the drainer's, from the store).
+    pub fn set_tapped(&self, http: bool, build: bool) {
+        self.tap_http.store(http, std::sync::atomic::Ordering::Relaxed);
+        self.tap_build.store(build, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn sink(self: &Arc<Self>, key: impl Into<String>, stream: Stream) -> LogSink {
         LogSink { hub: self.clone(), key: Arc::from(key.into()), stream, instance: None, deployment: None, redact: None }
     }
 
     fn push(&self, key: &str, line: LogLine) {
-        // The drains' sources: an environment's output, its requests, its builds.
-        if (key.starts_with("env:") || key.starts_with("http:") || key.starts_with("build:"))
+        // The drains' sources: an environment's output, and its requests and builds while a drain
+        // asks for them (a request a line: nothing on the proxy's path otherwise).
+        use std::sync::atomic::Ordering::Relaxed;
+        let tapped = key.starts_with("env:") || (key.starts_with("http:") && self.tap_http.load(Relaxed)) || (key.starts_with("build:") && self.tap_build.load(Relaxed));
+        if tapped
             && let Some(tap) = self.tap.lock().as_ref()
         {
             let _ = tap.try_send((Arc::from(key), line.clone()));

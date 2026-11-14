@@ -83,7 +83,9 @@ impl Apps {
     /// the defaults (a new one). A service by its name or id, kept by id; only the project's.
     async fn target_fields(self: &Arc<Self>, project: &str, o: &serde_json::Map<String, Value>, current: Option<&NotifyTarget>) -> Result<(Vec<String>, crate::store::TargetFilters)> {
         let events: Vec<String> = match o.get("events") {
-            None | Some(Value::Null) => current.map_or_else(|| DEFAULT_EVENTS.map(String::from).to_vec(), |c| c.events.clone()),
+            // Absent: what it had (an edit) or the defaults (a new one); null: the defaults, as POST's.
+            None => current.map_or_else(|| DEFAULT_EVENTS.map(String::from).to_vec(), |c| c.events.clone()),
+            Some(Value::Null) => DEFAULT_EVENTS.map(String::from).to_vec(),
             Some(Value::Array(a)) => {
                 let e: Vec<String> = a.iter().filter_map(Value::as_str).map(String::from).collect();
                 if e.is_empty() || e.len() != a.len() || e.iter().any(|x| !EVENTS.contains(&x.as_str())) {

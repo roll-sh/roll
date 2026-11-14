@@ -3295,3 +3295,30 @@ async fn an_apps_log_filters_by_the_level_its_lines_say() {
     let (st, v) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs?level=loud"), None).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
 }
+
+/// A paused cron service skips what falls due and doesn't make it up when it's resumed, and
+/// pausing stops a run that's going.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paused_cron_skips_its_runs_and_pausing_stops_one() {
+    let w = world().await;
+    let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "every-minute", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "* * * * *"} }))).await;
+    let cid = cron["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &cid, "production", cron["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
+    let (env, runs) = (format!("/v1/apps/services/{cid}/environments/production"), format!("/v1/apps/services/{cid}/environments/production/runs"));
+    let t = (code_sql::now_ms() / 60_000 + 60) * 60_000 + 30_000;
+    w.apps.cron_pass(t).await;
+    call(&w.api, "PUT", &env, Some(json!({ "paused": true }))).await;
+    for m in 1..=10 {
+        w.apps.cron_pass(t + m * 60_000).await;
+    }
+    assert_eq!(call(&w.api, "GET", &runs, None).await.1, json!([]), "nothing runs while paused");
+    call(&w.api, "PUT", &env, Some(json!({ "paused": false }))).await;
+    w.apps.cron_pass(t + 10 * 60_000 + 1_000).await;
+    w.apps.cron_pass(t + 11 * 60_000).await;
+    let one = get_until(&w.api, &runs, |r| r[0]["status"] == "running").await;
+    assert_eq!(one.as_array().unwrap().len(), 1, "the next one, not the ten it missed: {one}");
+    // Paused with it going: it stops.
+    call(&w.api, "PUT", &env, Some(json!({ "paused": true }))).await;
+    let ended = get_until(&w.api, &runs, |r| r[0]["status"] != "running").await;
+    assert_eq!(ended[0]["status"], "canceled", "{ended}");
+}

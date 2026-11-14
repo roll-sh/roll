@@ -28,7 +28,8 @@ impl Apps {
         for svc in services.into_iter().filter(|s| self.owns(&s.id)) {
             let sid = svc.id.clone();
             let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
-            for env in envs.into_iter().filter(|e| e.redeploy_on_secrets) {
+            // A paused one is passed over, nothing recorded: what changed is acted on once it's resumed.
+            for env in envs.into_iter().filter(|e| e.redeploy_on_secrets && !e.paused) {
                 let Some(active) = env.active.clone() else { continue };
                 let Ok(Some(now)) = self.deps.secrets.digest(&svc.project, &env.name).await else { continue };
                 if env.secrets_seen.as_deref() == Some(now.as_str()) {
@@ -72,7 +73,7 @@ impl Apps {
             }
             let sid = svc.id.clone();
             let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
-            for env in envs.into_iter().filter(|e| e.follow_tag) {
+            for env in envs.into_iter().filter(|e| e.follow_tag && !e.paused) {
                 match self.check_tag(&svc.id, &env.name, image, env.active.as_deref(), env.tag_seen.as_deref()).await {
                     Ok(Some(d)) => started.push(d),
                     Ok(None) => {}

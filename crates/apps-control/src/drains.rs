@@ -47,7 +47,7 @@ impl Apps {
         let secret = format!("whsec_{}", crate::model::random(32));
         let (p, s2) = (project.to_string(), secret.clone());
         let d = self.db(move |s| s.add_drain(&p, &host, &url, &s2, &settings)).await?;
-        self.drains_changed();
+        self.drains_changed(project).await;
         let mut v = serde_json::to_value(&d).expect("JSON");
         v["secret"] = json!(secret);
         Ok(v)
@@ -133,14 +133,18 @@ impl Apps {
         let settings = self.drain_settings(project, &o, Some(&current)).await?;
         let (p, i, headers) = (project.to_string(), id.to_string(), o.contains_key("headers"));
         let d = self.db(move |s| s.update_drain(&p, &i, &settings, headers)).await?;
-        self.drains_changed();
+        self.drains_changed(project).await;
         Ok(d)
     }
 
-    /// A drain made, changed or deleted here takes effect at once on this node (others read
-    /// their drains again within REFRESH).
-    fn drains_changed(&self) {
-        self.drains_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    /// A drain made, changed or deleted here takes effect at once on this node for its project
+    /// (others read their drains again within REFRESH); other projects' lines are untouched.
+    async fn drains_changed(self: &Arc<Self>, project: &str) {
+        self.drains_dirty.lock().insert(project.to_string());
+        // The tap's gate before the answer: a new drain of requests gets the next one.
+        if let Ok((http, build)) = self.db(|s| s.drain_sources_wanted()).await {
+            self.logs.set_tapped(http, build);
+        }
     }
 
     /// `POST …/drains/{did}/test`: one line sent now, as a batch is (signed, with its headers),
@@ -149,7 +153,7 @@ impl Apps {
         let p = project.to_string();
         let d = self.db(move |s| s.drain_secrets(&p)).await?.into_iter().find(|d| d.drain.id == id).ok_or_else(|| Error::NotFound(format!("no log drain {id}")))?;
         let line = json!({ "t": code_sql::now_ms(), "source": "test", "text": "a test line from roll apps" });
-        Ok(match self.post_batch(&d, &[line]).await {
+        Ok(match self.post_batch(&d, &[line], &format!("lgb_{}", crate::model::random(12))).await {
             Ok(code) => json!({ "ok": (200..300).contains(&code), "code": code, "error": Value::Null }),
             Err(e) => json!({ "ok": false, "code": Value::Null, "error": e }),
         })
@@ -158,7 +162,7 @@ impl Apps {
     pub async fn delete_drain(self: &Arc<Self>, project: &str, id: &str) -> Result<()> {
         let (p, i) = (project.to_string(), id.to_string());
         self.db(move |s| s.delete_drain(&p, &i)).await?;
-        self.drains_changed();
+        self.drains_changed(project).await;
         Ok(())
     }
 
@@ -171,7 +175,9 @@ impl Apps {
         // A build's deployment → its service and environment; an environment → a preview's.
         let mut builds: HashMap<String, Option<(String, String)>> = HashMap::new();
         let mut previews: HashMap<(String, String), (Instant, bool)> = HashMap::new();
-        let mut seen_gen = self.drains_gen.load(std::sync::atomic::Ordering::SeqCst);
+        // Request and build lines reach the tap only while some drain asks for them (the proxy's
+        // hot path pays nothing otherwise): read from the drains' sources now and every REFRESH.
+        let mut wanted_at = Instant::now() - REFRESH;
         let mut queues: HashMap<String, Queue> = HashMap::new();
         let mut tick = tokio::time::interval(Duration::from_millis(250));
         loop {
@@ -197,12 +203,21 @@ impl Apps {
                     } else {
                         continue;
                     };
-                    let now_gen = self.drains_gen.load(std::sync::atomic::Ordering::SeqCst);
-                    if now_gen != seen_gen {
-                        drains.clear();
-                        seen_gen = now_gen;
+                    let dirty = std::mem::take(&mut *self.drains_dirty.lock());
+                    if !dirty.is_empty() {
+                        for p in &dirty {
+                            drains.remove(p);
+                        }
+                        wanted_at = Instant::now() - REFRESH;
                     }
                     let fresh = |at: &Instant| at.elapsed() < REFRESH;
+                    // Bounded, as `builds` is: read again rather than kept forever.
+                    if services.len() > 5000 {
+                        services.clear();
+                    }
+                    if previews.len() > 5000 {
+                        previews.clear();
+                    }
                     if !services.get(&service).is_some_and(|(at, _)| fresh(at)) {
                         let sid = service.clone();
                         let found = self.db(move |s| s.service(&sid)).await.ok().map(|s| (s.project, s.name));
@@ -231,7 +246,7 @@ impl Apps {
                     let preview = previews[&k].1;
                     for o in wanted.into_iter().filter(|o| !preview || o.drain.previews) {
                         let d = &o.drain;
-                        let q = queues.entry(d.id.clone()).or_insert_with(Queue::new);
+                        let q = queues.entry(d.id.clone()).or_insert_with(|| Queue::new(&project));
                         if q.lines.is_empty() {
                             q.first = Instant::now();
                         }
@@ -243,6 +258,12 @@ impl Apps {
                     }
                 }
                 _ = tick.tick() => {
+                    if wanted_at.elapsed() >= REFRESH {
+                        wanted_at = Instant::now();
+                        if let Ok((http, build)) = self.db(|s| s.drain_sources_wanted()).await {
+                            self.logs.set_tapped(http, build);
+                        }
+                    }
                     for (_, list) in drains.values() {
                         for o in list {
                             let d = &o.drain;
@@ -270,8 +291,9 @@ impl Apps {
                             q.out = false;
                         }
                     }
-                    // Drains deleted (or of projects no longer seen) stop holding lines.
-                    queues.retain(|id, _| drains.values().any(|(_, l)| l.iter().any(|o| &o.drain.id == id)));
+                    // A deleted drain's queue goes once its project's drains are read again; a project not
+                    // read yet (its drains changed a moment ago) keeps its queues, and its order.
+                    queues.retain(|id, q| !drains.contains_key(&q.project) || drains.values().any(|(_, l)| l.iter().any(|o| &o.drain.id == id)));
                 }
                 _ = self.stop.cancelled() => return,
             }
@@ -281,9 +303,11 @@ impl Apps {
     /// One batch, tried three times (1 s, then 5 s apart), then dropped.
     async fn send_batch(&self, o: &OpenedDrain, batch: &[Value]) {
         let drain = o.drain.id.as_str();
+        // One id for the batch, its retries too: a receiver dedupes by it.
+        let delivery = format!("lgb_{}", crate::model::random(12));
         for (i, wait) in [0u64, 1, 5].into_iter().enumerate() {
             tokio::time::sleep(Duration::from_secs(wait)).await;
-            match self.post_batch(o, batch).await {
+            match self.post_batch(o, batch, &delivery).await {
                 Ok(code) if (200..300).contains(&code) => return,
                 Ok(code) if i == 2 => tracing::warn!(drain, status = code, lines = batch.len(), "apps: a log drain refused a batch; it's dropped"),
                 Err(e) if i == 2 => tracing::warn!(drain, error = %e, lines = batch.len(), "apps: a log drain didn't answer; the batch is dropped"),
@@ -294,7 +318,7 @@ impl Apps {
 
     /// A batch POSTed once, signed as webhooks are and with the drain's own headers: its status,
     /// or why there was none (never the URL).
-    async fn post_batch(&self, o: &OpenedDrain, batch: &[Value]) -> std::result::Result<u16, String> {
+    async fn post_batch(&self, o: &OpenedDrain, batch: &[Value], delivery: &str) -> std::result::Result<u16, String> {
         let mut body = Vec::new();
         for l in batch {
             serde_json::to_writer(&mut body, l).expect("JSON");
@@ -313,7 +337,7 @@ impl Apps {
             .notify_client
             .post(&o.url)
             .header("content-type", "application/x-ndjson")
-            .header("x-roll-delivery", format!("lgb_{}", crate::model::random(12)))
+            .header("x-roll-delivery", delivery)
             .header("x-roll-timestamp", ts)
             .header("x-roll-signature-256", format!("sha256={sig}"));
         for (k, v) in &o.headers {
@@ -328,6 +352,8 @@ impl Apps {
 
 /// One drain's lines waiting for their batch.
 struct Queue {
+    /// Its drain's project.
+    project: String,
     lines: VecDeque<Value>,
     /// When the oldest waiting line came (a batch goes after LINGER even if it's short).
     first: Instant,
@@ -337,7 +363,7 @@ struct Queue {
 }
 
 impl Queue {
-    fn new() -> Queue {
-        Queue { lines: VecDeque::new(), first: Instant::now(), out: false, dropped: 0 }
+    fn new(project: &str) -> Queue {
+        Queue { project: project.to_string(), lines: VecDeque::new(), first: Instant::now(), out: false, dropped: 0 }
     }
 }

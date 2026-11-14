@@ -830,6 +830,29 @@ The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`,
 - **What roll pays for idle**: locally nothing but disk (images, stopped containers). On the
   fleet, the image in ECR ($0.10/GB-month) and the warm window's Fargate seconds.
 
+## Log levels
+
+An app's line says its level the way its logger writes it (Cloud Run's severity, Railway's
+`@level`): a JSON object's `level`, `severity`, `lvl` or `log.level` (a name, or pino's and
+bunyan's numbers), logfmt's `level=`, or an upper-case level word among its first three
+(`2026-11-14 10:00:00 ERROR …`, `[WARN]`; prose that mentions an error isn't one). It's read
+once, as the line is written, and kept with it (`LogLine.level`, absent when it says none), so a
+read costs nothing more; lines written before levels were read have none. `?level=warn` (`roll
+logs --level warn`, the dashboard's level filter) keeps warnings and worse, live and back
+through the stored days, and the dashboard marks warn, error and fatal lines.
+`an_apps_log_filters_by_the_level_its_lines_say`.
+
+## A project's logs together
+
+A project's Logs view (beside Canvas and Previews; Railway's Log Explorer) follows every
+service's runtime log in one environment and merges them by time, each line named by its
+service, with the level and text filters a service's Logs tab has. It reads each service's own
+stream (the same route and permission as that tab, so nothing new can read them) and keeps the
+newest 2,000 lines on screen; reading back through the stored days stays a service's Logs tab's.
+`roll logs --all-services [-p project]` does the same from a terminal: each service's newest
+`--tail` merged by time, or followed together with `-f`, with the filters `roll logs` takes
+(`--level`, `--http`, `--since`, `--grep`). `a_projects_services_logs_read_together`.
+
 ## Request logs
 
 Every request through the proxy is a line in the environment's access log (`http:<service>/<env>`,
@@ -1152,11 +1175,16 @@ Sleep scales a web service to zero, and its next request wakes it; a worker or a
 has no request to wait for, so sleeping isn't stopping (a worker's floor starts it again). A
 paused environment (Render's Suspend, `heroku ps:scale worker=0`; `PUT …/environments/{env}
 {paused}`, `roll apps env --pause` / `--resume`, the service page's Pause and Resume) runs
-nothing until it's resumed: its instances stop and the reaper keeps no floor, a request gets
-roll's 503 "Paused" page and wakes nothing (a private caller neither), deploys, redeploys,
-promotions, rollbacks and jobs are refused (409), a deploy queued before it doesn't build, a push
-to its branch is logged and not deployed, and a cron run that falls due is skipped (not made up
-when it's resumed). It's the spend limit's path for one environment: the flag lives with the
+nothing until it's resumed: its instances stop and the reaper keeps no floor, a job or a cron
+run going is canceled, a request gets roll's 503 "Paused" page and wakes nothing (a private
+caller neither; a static site's files and rewrites and a deployment's own URL neither), and that
+page is metered as a request, not the app's error (no 5xx alert for an environment its owner
+stopped; maintenance's page the same). Deploys, redeploys, promotions, rollbacks and jobs are
+refused (409), a deploy queued before it doesn't build and one building doesn't go live, a push
+to its branch is logged and not deployed (one waiting for its checks too, ended rather than
+deployed late), the tag and secrets watches pass it over (acted on once it's resumed), and a
+cron run that falls due is skipped, its schedule moving on, so resuming doesn't make the missed
+ones up. `a_paused_cron_skips_its_runs_and_pausing_stops_one`. It's the spend limit's path for one environment: the flag lives with the
 environment's live state on its owner, read from the store when that state is loaded, so a
 takeover keeps it paused. `a_paused_worker_stays_stopped_until_its_resumed`.
 
@@ -1268,8 +1296,11 @@ the first `curl` through the proxy (the wake), then in 6 ms.
 
 `roll apps exec [-s service] [-e env] -- <command>` (Railway's `railway run`) runs a command on
 this machine with an environment's variables, read through `…/variables/values` (a reveal, in
-the audit trail). `PORT` and `ROLL_*` are the platform's, so they're left out; a sealed
-variable is never shown again, so it can't be set and is named instead; a value naming a
+the audit trail). `PORT` and `ROLL_*` are the platform's, so they're left out, and so is a name
+that steers this machine's own programs (`PATH`, `LD_PRELOAD`, `DYLD_*`, `BASH_ENV`,
+`NODE_OPTIONS`, `PYTHONPATH` and the like: anyone who may write the environment's variables
+could otherwise run code on the laptop running `exec`); each is named. A sealed variable is never
+shown again, so it can't be set and is named instead; a value naming a
 `*.internal` address is said, as it only resolves inside roll (the proxy above reaches one).
 It exits with the command's exit code.
 
@@ -1408,8 +1439,13 @@ for previews'). Each line says its `source`. A vendor's intake wants its key in 
 (Datadog's `DD-API-KEY`, Better Stack's and Axiom's `Authorization`): a drain's `headers` (at
 most ten, names checked, never `content-type` or roll's own `X-Roll-*`) are sealed, sent with
 every batch and never returned but by name. A drain changes in place (`PATCH`, `roll apps drains
---edit`), keeping its URL and secret; at once on the node that changed it, within 30 s on the
-others. Test (`…/test`, `roll apps drains --test`, the dashboard's Test) sends one line now,
+--edit`), keeping its URL and secret; at once on the node that changed it (only that project's
+drains are read again, every other project's queued lines untouched), within 30 s on the
+others. A batch's `X-Roll-Delivery` is the same on its retries, so a receiver dedupes by it.
+Request and build lines reach the log tap only while some drain asks for them (the proxy's hot
+path pays nothing otherwise), the gate read from the drains' sources at every change and every
+30 s. Listing drains opens nothing; a drain whose sealed settings won't open is skipped, said in
+the node's log, rather than every drain failing. Test (`…/test`, `roll apps drains --test`, the dashboard's Test) sends one line now,
 signed and with its headers, and says how it was answered. `roll apps drains --add URL --source
 runtime,http --only-env production --header 'DD-API-KEY: …'`.
 `a_log_drain_gets_the_runtime_output_signed`.
@@ -1759,47 +1795,46 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (a second product review of the experience, a product review of what one engineer can close here now, bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **Structured logs**: JSON and logfmt lines' level read at the read (no storage change), a
-   `level=` filter and chips, `roll logs --level`.
-2. **A project's logs in one view** (Railway's Log Explorer): every service's stream on the
-   client, and `roll logs --all-services`.
-3. **More builds**: Elixir/Phoenix, Deno and .NET providers, and `NothingDetected` naming what it
+1. **Promote exactly what was reviewed** (roll previews' request): `POST …/promote {from,
+   expect}` answers 409 when `from`'s active deployment isn't `expect`, checked in the step that
+   reads it, so a push deployed between a reviewer's look and the click isn't what goes live.
+2. **More builds**: Elixir/Phoenix, Deno and .NET providers, and `NothingDetected` naming what it
    did find (`mix.exs`, `deno.json`, `*.csproj`).
-4. **A project as roll.toml** (Fly's `fly config save`): `roll apps export` and Project settings'
+3. **A project as roll.toml** (Fly's `fly config save`): `roll apps export` and Project settings'
    Download, parsed back with `parse_project` in its test; variables by name only.
-5. **Cron runs that retry** (Cloud Run Jobs' `--max-retries`).
-6. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+4. **Cron runs that retry** (Cloud Run Jobs' `--max-retries`).
+5. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-7. **Region**: the region shown on the overview and each environment, defaulting to the project's
+6. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-8. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+7. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-9. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+8. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-10. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+9. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-11. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+10. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-12. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-13. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+11. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+12. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-14. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+13. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-15. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+14. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-16. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+15. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-17. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+16. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

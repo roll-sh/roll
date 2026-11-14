@@ -112,7 +112,7 @@ pub struct Logs {
     pub stream: Option<String>,
     /// Only lines whose app says this level or a worse one (`warn`: warnings, errors and fatal),
     /// from JSON's `level`/`severity`, logfmt's `level=` or a leading `ERROR`.
-    #[arg(long, value_parser = ["trace", "debug", "info", "warn", "error", "fatal"], conflicts_with = "http")]
+    #[arg(long, value_parser = ["trace", "debug", "info", "warn", "error", "fatal"], conflicts_with_all = ["http", "build"])]
     pub level: Option<String>,
     /// The requests instead (the proxy's access log): method, path, status, time.
     #[arg(long, conflicts_with = "build")]
@@ -649,8 +649,14 @@ pub enum AppsCmd {
         #[arg(long = "only-service")]
         only_service: Vec<String>,
         /// With `--add` or `--edit`: preview environments' too (left out by default).
-        #[arg(long)]
-        previews: bool,
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+        previews: Option<bool>,
+        /// With `--edit`: every environment's again (its `--only-env` list cleared).
+        #[arg(long, requires = "edit", conflicts_with = "only_env")]
+        every_env: bool,
+        /// With `--edit`: every service's again (its `--only-service` list cleared).
+        #[arg(long, requires = "edit", conflicts_with = "only_service")]
+        every_service: bool,
         /// With `--add` or `--edit`: a header it's sent with, `Name: value` (a vendor's API key;
         /// sealed, never shown again). Repeatable; with `--edit` they replace its headers.
         #[arg(long, value_name = "NAME: VALUE")]
@@ -684,8 +690,14 @@ pub enum AppsCmd {
         #[arg(long = "only-service")]
         only_service: Vec<String>,
         /// With `--add` or `--edit`: preview environments' events too (left out by default).
-        #[arg(long)]
-        previews: bool,
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+        previews: Option<bool>,
+        /// With `--edit`: every environment's again (its `--only-env` list cleared).
+        #[arg(long, requires = "edit", conflicts_with = "only_env")]
+        every_env: bool,
+        /// With `--edit`: every service's again (its `--only-service` list cleared).
+        #[arg(long, requires = "edit", conflicts_with = "only_service")]
+        every_service: bool,
         /// Change a target in place (its events and filters; given ones replace, the rest stay):
         /// its URL and secret stay.
         #[arg(long, value_name = "ID", conflicts_with_all = ["add", "remove"])]
@@ -693,7 +705,7 @@ pub enum AppsCmd {
         #[arg(long)]
         remove: Option<String>,
         /// Send one a test event now (not retried) and print how it answered.
-        #[arg(long, value_name = "ID", conflicts_with_all = ["add", "remove"])]
+        #[arg(long, value_name = "ID", conflicts_with_all = ["add", "remove", "edit"])]
         test: Option<String>,
     },
     /// The project's spend limits this month: show them, or set `--alert` and `--hard` (dollars;
@@ -2145,7 +2157,16 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
         AppsCmd::Use { service: key, project, clear } => {
             let dir = std::env::current_dir()?;
             if clear {
-                let _ = std::fs::remove_file(dir.join(LINK));
+                // The link in effect: this directory's, or the parent's it was found in.
+                match dir.ancestors().find(|d| d.join(LINK).is_file()) {
+                    Some(at) => {
+                        std::fs::remove_file(at.join(LINK))?;
+                        if !json_out {
+                            println!("forgot {}'s link", at.display());
+                        }
+                    }
+                    None => eprintln!("nothing here is linked"),
+                }
                 return Ok(());
             }
             let svc = service(api, &Target { service: key, project, env: "production".into() }).await?;
@@ -2166,13 +2187,29 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let svc = service(api, &target).await?;
             let base = env_path(&svc, &target.env);
             let (values, listed) = (api.get(&format!("{base}/variables/values")).await?, api.get(&format!("{base}/variables")).await?);
+            // Names that steer this machine's own programs (a loader, a shell, a runtime's flags):
+            // an environment's variables are anyone-who-can-write-them's, so they're never set here.
+            let steering = |k: &str| {
+                ["PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV", "IFS", "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND", "NODE_OPTIONS", "NODE_PATH", "PYTHONSTARTUP", "PYTHONPATH", "PYTHONHOME", "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "HOME", "SHELL", "EDITOR"].contains(&k) || k.starts_with("DYLD_")
+            };
+            let mut left_out = Vec::new();
             let vars: Vec<(String, String)> = values
                 .as_object()
                 .into_iter()
                 .flatten()
                 .filter(|(k, _)| k.as_str() != "PORT" && !k.starts_with("ROLL_"))
+                .filter(|(k, _)| {
+                    let keep = !steering(k);
+                    if !keep {
+                        left_out.push(k.to_string());
+                    }
+                    keep
+                })
                 .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
                 .collect();
+            if !left_out.is_empty() {
+                eprintln!("not set here (they'd steer this machine's programs): {}", left_out.join(", "));
+            }
             let sealed: Vec<String> = listed["vars"].as_array().into_iter().flatten().filter(|v| v["sealed"] == true).map(|v| s(&v["name"])).collect();
             if !sealed.is_empty() {
                 eprintln!("not set here (sealed, never shown again): {}", sealed.join(", "));
@@ -2612,8 +2649,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Drains { target, add, source, only_env, only_service, previews, header, edit, test, remove } => {
-            let given = source.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews || !header.is_empty();
+        AppsCmd::Drains { target, add, source, only_env, only_service, previews, every_env, every_service, header, edit, test, remove } => {
+            let given = source.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some() || !header.is_empty();
             if given && add.is_none() && edit.is_none() {
                 bail!("--source, --only-env, --only-service, --previews and --header go with --add or --edit");
             }
@@ -2629,8 +2666,14 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             if !only_service.is_empty() {
                 settings.insert("services".into(), json!(only_service));
             }
-            if previews {
-                settings.insert("previews".into(), json!(true));
+            if let Some(p) = previews {
+                settings.insert("previews".into(), json!(p));
+            }
+            if every_env {
+                settings.insert("environments".into(), json!([]));
+            }
+            if every_service {
+                settings.insert("services".into(), json!([]));
             }
             if !header.is_empty() {
                 let mut h = serde_json::Map::new();
@@ -2684,8 +2727,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::Notifications { target, add, kind, events, only_env, only_service, previews, remove, test, edit } => {
-            if add.is_none() && edit.is_none() && (events.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews) {
+        AppsCmd::Notifications { target, add, kind, events, only_env, only_service, previews, every_env, every_service, remove, test, edit } => {
+            if add.is_none() && edit.is_none() && (events.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some()) {
                 bail!("--events, --only-env, --only-service and --previews go with --add or --edit");
             }
             let svc = service(api, &target).await?;
@@ -2702,8 +2745,14 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 if !only_service.is_empty() {
                     body.insert("services".into(), json!(only_service));
                 }
-                if previews {
-                    body.insert("previews".into(), json!(true));
+                if let Some(p) = previews {
+                    body.insert("previews".into(), json!(p));
+                }
+                if every_env {
+                    body.insert("environments".into(), json!([]));
+                }
+                if every_service {
+                    body.insert("services".into(), json!([]));
                 }
                 if body.is_empty() {
                     bail!("nothing to change: --events, --only-env, --only-service or --previews");
@@ -2715,7 +2764,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 t
             } else if let Some(url) = add {
-                let mut body = json!({ "kind": kind, "url": url, "environments": only_env, "services": only_service, "previews": previews });
+                let mut body = json!({ "kind": kind, "url": url, "environments": only_env, "services": only_service, "previews": previews.unwrap_or(false) });
                 if let Some(e) = events {
                     body["events"] = json!(e);
                 }

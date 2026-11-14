@@ -1048,7 +1048,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/projects/{project}/notifications", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications", "apps", Act::Body(apps_notification_action), one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/notifications/{nid}", "apps", W, one(&["project"], "project")),
-    row("PATCH", "/v1/apps/projects/{project}/notifications/{nid}", "apps", W, one(&["project"], "project")),
+    // An edit can send a webhook more (events, environments, services): reveal, as a drain's edit is.
+    row("PATCH", "/v1/apps/projects/{project}/notifications/{nid}", "apps", REVEAL, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications/{nid}/test", "apps", W, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/notifications/{nid}/deliveries", "apps", R, one(&["project"], "project")),
     // A project's log drains: every service's output POSTed out of roll, signed. Adding one sends

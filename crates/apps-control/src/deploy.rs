@@ -687,6 +687,8 @@ impl Apps {
             RunType::Worker => "rolling out the worker".to_string(),
             RunType::Cron => "the next scheduled run uses this deployment".to_string(),
         });
+        // Paused while it built: nothing of it starts or goes live.
+        anyhow::ensure!(!live.paused(), "the environment was paused while it built: not put live");
         let prepared = match live.prepare(&tpl, None).await {
             Ok(p) => p,
             // What the app said before it failed (a stack trace, a missing variable), in the deploy
@@ -1252,7 +1254,7 @@ impl Apps {
         live_prefixes.extend(pending.iter().filter(|d| self.cancels.lock().contains_key(&d.id)).map(|d| crate::live::instance_prefix(service, &d.environment, &d.id)));
         // A cron run or a job this node started since it took the service (the schedule fires as
         // soon as it owns it) is its own, not a leftover.
-        let own_runs: Vec<String> = self.running_runs.lock().iter().filter(|(_, s)| *s == service).map(|(id, _)| format!("run-{}", id.strip_prefix("run_").unwrap_or(id))).collect();
+        let own_runs: Vec<String> = self.running_runs.lock().iter().filter(|(_, (s, _))| *s == service).map(|(id, _)| format!("run-{}", id.strip_prefix("run_").unwrap_or(id))).collect();
         let own_jobs = self.running_jobs.lock().values().any(|k| k.starts_with(&format!("{service}/")));
         for name in self.deps.runtime.list(Some(service)).await {
             // A known instance's network sandbox (`<instance>-net`) and waker (`-wake`) are its own.
@@ -1333,7 +1335,7 @@ impl Apps {
         // Its jobs and cron runs stop here too (with their variables): the new owner fails what
         // they left running.
         self.cancel_service_jobs(service);
-        let runs: Vec<String> = self.running_runs.lock().iter().filter(|(_, s)| *s == service).map(|(id, _)| id.clone()).collect();
+        let runs: Vec<String> = self.running_runs.lock().iter().filter(|(_, (s, _))| *s == service).map(|(id, _)| id.clone()).collect();
         for id in runs {
             if let Some(t) = self.cancels.lock().get(&id) {
                 t.cancel();
@@ -1732,6 +1734,10 @@ impl Apps {
                     log.line(format!("push {sha} not deployed: its check {which} failed"));
                     true
                 }
+                Ok(_) if self.refuse_paused(&w.service, &w.env).await.is_err() => {
+                    log.line(format!("push {sha} not deployed: its checks passed while the environment is paused"));
+                    true
+                }
                 Ok(_) => {
                     log.line(format!("push {sha}'s checks passed: deploying"));
                     let body = serde_json::json!({ "revision": w.sha, "message": w.message });
@@ -1842,9 +1848,14 @@ impl Apps {
             let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s, svc.run.timezone.as_deref()).ok()) else { continue };
             let sid = svc.id.clone();
             let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
-            // A paused one is skipped, its runs not made up when it's resumed.
-            for e in envs.into_iter().filter(|e| e.active.is_some() && !e.paused) {
+            for e in envs.into_iter().filter(|e| e.active.is_some()) {
                 let key = format!("cron:{}/{}", svc.id, e.name);
+                // Paused: skipped, and its schedule moves on, so resuming doesn't make up the runs.
+                if e.paused {
+                    let (k, v) = (key.clone(), now.to_string());
+                    let _ = self.db(move |s| s.set_state(&k, &v)).await;
+                    continue;
+                }
                 let k = key.clone();
                 let last: i64 = self.db(move |s| s.get_state(&k)).await.ok().flatten().and_then(|v| v.parse().ok()).unwrap_or(now);
                 if last == now {
@@ -1881,7 +1892,7 @@ impl Apps {
         let (sid, e, a, t) = (service.to_string(), env.to_string(), active.clone(), timeout.as_millis() as i64 + 60_000);
         // Known here as running before its row says so: a takeover's cleanup never fails it.
         let rid = crate::model::new_id("run");
-        self.running_runs.lock().insert(rid.clone(), service.to_string());
+        self.running_runs.lock().insert(rid.clone(), (service.to_string(), env.to_string()));
         // Its cancel works from the moment its row says running (a cancel before it starts stops
         // it at once rather than marking a run that then goes ahead).
         let cancel = CancellationToken::new();
