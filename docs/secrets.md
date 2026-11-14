@@ -613,6 +613,39 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
   execs the command. It writes no file, and it fails before running anything if a reference is
   unresolved. Variables already set in the shell keep their value unless `--override` is passed.
 
+### Docker builds and Compose
+
+- **A build that needs a secret** (a private registry's token): BuildKit's secret mount, from
+  `roll run`'s environment. The value is there for that one `RUN` step and in no layer; a build
+  argument (`--build-arg`) would stay in the image's history.
+
+  ```dockerfile
+  # syntax=docker/dockerfile:1
+  RUN --mount=type=secret,id=npm,env=NPM_TOKEN npm ci
+  ```
+
+  ```sh
+  roll run -e production -- docker build --secret id=npm,env=NPM_TOKEN .
+  ```
+
+- **Compose**: list the variables without values and Compose passes `roll run`'s through, so
+  nothing is written to a file:
+
+  ```yaml
+  services:
+    api:
+      environment: [DATABASE_URL, STRIPE_KEY]
+  ```
+
+  ```sh
+  roll run -e development -- docker compose up
+  ```
+
+  `docker compose config` would print them: pass `--no-interpolate` or don't share its output.
+- Checked on 2026-11-14 (Docker 29.9, Compose 5.6): the build step saw the value, `docker history
+  --no-trunc` and the image's `Config.Env` held none of it, a Compose service saw it, and
+  `docker compose config` printed it unless `--no-interpolate`.
+
 ### Runtime resolve for services (roll apps)
 
 roll apps (docs/apps/) deploys a service into an environment and injects that environment's
@@ -1603,6 +1636,7 @@ stacked pull request is mergeable, and #20 is level with `main`.
 Then roll secrets for VS Code (#58): hovers and warnings where code reads a variable, names
 completed, and `.env` values moved into roll as `roll://` references (checked in code-server).
 Then `roll completions` and direnv documented (#59).
+Docker builds (BuildKit secrets) and Compose are documented and checked.
 
 Then (2026-11-14, latest): `roll run` masks values in what the command prints when it isn't a
 terminal (#54), as 1Password's `op run` and GitHub Actions do; pulling into Kubernetes with External
@@ -1712,29 +1746,26 @@ user's call).
 
 1. **A tenth independent review** of ESO (#55), renewing identity logins (#56), pinned issuer keys
    (#57) and the ninth review's fixes, and its fixes.
-2. **Recipes for Docker builds and Compose**, each checked: a build secret through BuildKit
-   (`roll run -- docker build --secret id=npm,env=NPM_TOKEN .`, never a build arg, which stays in
-   the image's history) and a Compose service that passes the environment through.
-3. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
+2. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
    #49 and #54 meet, `watch` keeps both (answered digests, streams and signals).
-4. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
+3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
-5. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
+4. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
    tools are ready), a live check of OpenSearch links (#29 and #51 in one build), and splitting the
    CLI's `secrets.rs` (2,700 lines) by command once the stacked pull requests that touch it have
    landed.
-6. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
+5. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
-7. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
+6. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
    token; the trust policy pins `sub`, as GCP's and Azure's do).
-8. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
+7. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
    notice.
-9. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
+8. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
    installs list Slack user ids and act as the owner's automation; a review must count as the
    person who pressed the button (their permissions, the request's gates), never as the app.
-10. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
+9. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
    project can link their own databases, buckets and streams.
-11. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+10. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
    environment).
 
 Open pull requests after this one:
