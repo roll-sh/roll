@@ -365,7 +365,10 @@ lock") and one made `NOT NULL` ("scans the table under an exclusive lock", where
 VALID` validated first doesn't); on a search branch, an index that goes ("its documents go with
 it") and a field whose type changes ("a mapping can't change in place": a reindex). Added
 columns, fields and indexes aren't risks here: the release ran
-them on production's own rows, and its time is said beside it. The comment lists them unfolded
+them on production's own rows, and its time is said beside it. The risks are read from every
+line, not only the 200 shown (a migration of many removals still names its type changes), at most
+20 with a count of the rest; a view's columns are `view column` lines, never a table's risk, and
+`NOT NULL` is read before a column's default (whose text could say anything). The comment lists them unfolded
 as "Migration risks", each in a code span its names can't close; the sheet and the change page
 show them in red over the lines (the change page with the lines folded).
 
@@ -1010,7 +1013,8 @@ type Settings = {
     keeps every `METHOD /path` it declares (at most 1000, each `METHOD /path` or dropped), with the
     screenshot and with main's at each head; a comparison with main says which operations it
     adds and which it removes (`base_change.api`), a removed one being breaking for whoever calls
-    main's. It's unfolded in the pull request comment ("Its API against `main`: removes `DELETE
+    main's; when main's document was read and the change's wasn't (gone, broken, past 4 MB or 5 s),
+    that's said instead of nothing (`base_change.api_unread`). It's unfolded in the pull request comment ("Its API against `main`: removes `DELETE
     /users/{id}` (breaking for callers of `main`'s); adds `POST /orders`", each in a code span the
     document can't close) and shown on the sheet and the change page (live: the operation the
     change removes and the one it adds).
@@ -1020,7 +1024,8 @@ type Settings = {
     each 2xx response field's type; `$ref`s inside the document followed, fields to a depth of
     4, at most 5000 lines, each line's shape checked by roll), and a parameter or body field that
     becomes required (or a new required one), a type that changes, a request value no longer
-    taken and a response field that goes are named, by operation (`base_change.api_breaking`, at
+    taken and a response field that goes are named, by operation (allowed values sorted and
+    compared only when there are at most 200 of them) (`base_change.api_breaking`, at
     most 30): in the comment's API line, the sheet and the change page (live: a query parameter
     that becomes required). An optional new field, a new response field and fewer response
     values break nobody, so they aren't. GitHub's branch protection can require
@@ -1214,6 +1219,12 @@ Ranked by what a person notices first. Done so far:
 - a look at the sheet from screenshots of a live preview with today's checks (desktop and phone):
   the data branch rows kept their names whole and their notes in word groups;
 - caught mail bounded by bytes (10 MiB a preview) as well as count;
+- a ninth review (of the work since the eighth) and its fixes: migration risks read from every
+  line, not the 200 shown, `NOT NULL` read before a default, view columns apart; each API line
+  bounded in the session so a huge document can't blank the page's report; a change whose API
+  document can't be read said so; allowed values sorted and compared whole; a failed job's output
+  in a fence it can't close; on the stack, Promote only for a trusted change's preview and only
+  for the build the sheet shows;
 - endpoint times against main (`github.endpoints`: the median of 10 GETs on the preview's data,
   a clearly slower one said so in the comment, the sheet and the change page);
 - pages that move by themselves told apart (Argos's and Chromatic's flake detection): each

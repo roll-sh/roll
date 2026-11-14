@@ -160,7 +160,13 @@ const API = OPENAPI && `(async () => {
       if (s.type === "array") return "array<" + typeOf(s.items, depth + 1) + ">";
       return typeof s.type === "string" ? s.type : s.properties ? "object" : "any";
     };
-    const values = (s) => (Array.isArray(deref(s)?.enum) ? deref(s).enum.slice(0, 20).map((v) => JSON.stringify(v)).filter((v) => v.length <= 80 && !/\\s/.test(v)) : []);
+    // Allowed values, sorted, when there are at most 200 (more isn't compared at all: a window of
+    // them would make values fall in and out of it).
+    const values = (s) => {
+      const e = deref(s)?.enum;
+      if (!Array.isArray(e) || e.length > 200) return [];
+      return e.map((v) => JSON.stringify(v)).filter((v) => typeof v === "string" && v.length <= 80).sort();
+    };
     // Each field of a schema, by path (\`a.b\`, \`items[].sku\`), with whether its object requires it.
     const fields = (s, prefix, emit, depth) => {
       s = deref(s);
@@ -178,7 +184,7 @@ const API = OPENAPI && `(async () => {
     const json = (content) => (content && typeof content === "object" ? content["application/json"] || Object.values(content)[0] : null);
     for (const [path, item0] of Object.entries(doc && typeof doc.paths === "object" ? doc.paths : {})) {
       const item = deref(item0);
-      if (!item || !path.startsWith("/") || /\\s/.test(path)) continue;
+      if (!item || !path.startsWith("/") || /\\s/.test(path) || path.length > 200) continue;
       for (const m of ["get", "put", "post", "delete", "patch", "options", "head", "trace"]) {
         const o = deref(item[m]);
         if (!o || out.length >= MAX) continue;
@@ -208,7 +214,9 @@ const API = OPENAPI && `(async () => {
       }
       if (out.length >= MAX) break;
     }
-    return JSON.stringify(out.slice(0, MAX));
+    // Each line bounded as roll reads it (300 characters): one longer is dropped here, so the
+    // report never grows past what roll would keep.
+    return JSON.stringify(out.filter((l) => l.length <= 300).slice(0, MAX));
   } catch {
     return null;
   } finally {

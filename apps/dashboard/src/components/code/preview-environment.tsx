@@ -135,6 +135,7 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
       {env.base_change?.text && <TextAgainst diff={env.base_change.text} branch={env.base_change.branch} />}
       {env.base_change?.api && <TextAgainst diff={env.base_change.api} branch={env.base_change.branch} what="api" />}
       {env.base_change?.api_breaking && <ApiBreaking items={env.base_change.api_breaking} />}
+      {env.base_change?.api_unread && <p className="text-[12px] text-danger">Its OpenAPI document couldn't be read: its API isn't compared with {env.base_change.branch}'s.</p>}
       {env.base_change?.endpoints && <Endpoints items={env.base_change.endpoints} branch={env.base_change.branch} />}
       {env.visual_review && env.visual_review.state !== "unchanged" && <VisualReview previewId={env.id} review={env.visual_review} />}
       {env.release_ms != null && (

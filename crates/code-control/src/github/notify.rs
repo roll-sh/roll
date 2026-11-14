@@ -764,15 +764,19 @@ fn expiry_line(ms: i64) -> Option<String> {
 }
 
 /// The pull request comment for a preview.
+/// A job's output (a failed seed, release or teardown: the change's code's words) as one fence
+/// nothing in it can close: its first 12 lines, 200 characters each, backticks turned into quotes.
+fn output_fence(text: &str) -> String {
+    let lines: Vec<String> = text.lines().take(12).map(|l| l.replace('`', "'").chars().take(200).collect()).collect();
+    format!("```\n{}\n```", lines.join("\n"))
+}
+
 fn preview_comment(c: &Change, teardown: Option<&str>) -> String {
     let marker = format!("<!-- roll-preview:{} -->", c.id);
     let Some(p) = &c.preview else {
         return match teardown {
             // The job's output is the change's code's: one fence nothing in it can close.
-            Some(t) => {
-                let lines: Vec<String> = t.lines().take(12).map(|l| l.replace('`', "'").chars().take(200).collect()).collect();
-                format!("**roll preview**: deleted. Its teardown failed:\n\n```\n{}\n```\n\n{marker}", lines.join("\n"))
-            }
+            Some(t) => format!("**roll preview**: deleted. Its teardown failed:\n\n{}\n\n{marker}", output_fence(t)),
             None => format!("**roll preview**: deleted.\n\n{marker}"),
         };
     };
@@ -810,6 +814,9 @@ fn preview_comment(c: &Change, teardown: Option<&str>) -> String {
             if let Some((b, api)) = e.base_change.as_ref().and_then(|b| Some((b, b.api.as_ref()?))) {
                 out.push_str(&api_line(api, &b.api_breaking, &branch_name(&b.branch)));
             }
+            if let Some(b) = e.base_change.as_ref().filter(|b| b.api_unread) {
+                out.push_str(&format!("**Its API against `{}`:** its OpenAPI document couldn't be read (gone, broken, or too big or slow), so nothing is compared.\n\n", branch_name(&b.branch)));
+            }
             if let Some(lines) = e.schema_changes.as_ref().filter(|l| !l.is_empty()) {
                 out.push_str(&risks_line(&e.schema_risks));
                 out.push_str(&schema_block(lines));
@@ -843,8 +850,7 @@ fn preview_comment(c: &Change, teardown: Option<&str>) -> String {
         }
     }
     if let Some(err) = &p.error {
-        let first: String = err.lines().take(12).collect::<Vec<_>>().join("\n");
-        out.push_str(&format!("\n```\n{first}\n```\n"));
+        out.push_str(&format!("\n{}\n", output_fence(err)));
     }
     out.push_str(&format!("\n{marker}"));
     out
@@ -975,6 +981,7 @@ mod preview_tests {
         let block = schema_block(&["+ column public.users.nick text".into(), "+ table public.x```y".into()]);
         assert!(block.contains("<summary>Schema changes (2)</summary>") && block.contains("+ column public.users.nick text"), "{block}");
         assert_eq!(block.matches("```").count(), 2, "a name can't close the fence: {block}");
+        assert_eq!(output_fence("boom\n```\n![x](https://evil.example/x.png) @ada"), "```\nboom\n'''\n![x](https://evil.example/x.png) @ada\n```", "a job's output can't close its fence");
         let risks = risks_line(&["drops column public.`x`.y: the version running while it deploys may still read it".into()]);
         assert_eq!(risks, "**Migration risks** (1):\n- `drops column public.'x'.y: the version running while it deploys may still read it`\n\n", "a name can't end its code span");
         assert!(expiry_line(1_794_600_000_000).is_some_and(|l| l.contains("goes at 2026-11-13 20:00 UTC")));
@@ -1001,7 +1008,7 @@ mod preview_tests {
         (contrast.impact, contrast.help) = (Some("serious".into()), Some("[click](javascript:x)".into()));
         let ax = crate::model::PreviewPageA11y { issues: vec![contrast], lang: true, title: true, seo: vec![] };
         assert_eq!(a11y_line(&ax), "**Accessibility:** 4 elements failing `color-contrast`, serious (first: `<p>`).\n\n");
-        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None, api: None, api_breaking: Vec::new(), endpoints: Vec::new() };
+        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None, api: None, api_breaking: Vec::new(), api_unread: false, endpoints: Vec::new() };
         assert_eq!(base_line(&b), "Against `mainx`, the page differs by 8.0%, at a phone's width the same.\n\n");
         // Its words against main's: a diff block nothing in the page can close.
         let words = crate::model::PreviewTextDiff { added: vec!["Pay ```now".into()], removed: vec!["Checkout".into()], added_n: 1, removed_n: 1 };
@@ -1064,7 +1071,7 @@ mod preview_tests {
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, over its budget</summary>"));
         // Against main's load where it was compared: only a difference past the noise counts.
         timed.speed_budget = None;
-        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None, api: None, api_breaking: Vec::new(), endpoints: Vec::new() });
+        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None, api: None, api_breaking: Vec::new(), api_unread: false, endpoints: Vec::new() });
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, 300 ms slower than main</summary>"));
         // Core Web Vitals: in the line, against main's paint, and in the budget.
         let ps = timed.page_speed.as_mut().unwrap();

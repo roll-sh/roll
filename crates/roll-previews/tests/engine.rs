@@ -309,6 +309,12 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
     let ep = e.engine.store.preview(&chg.id).unwrap().base_change.unwrap().endpoints;
     assert!(ep.len() == 1 && ep[0].main_ms == Some(40) && ep[0].slower(), "{ep:?}");
+    // Main's API document read and the change's not: said so, nothing compared.
+    e.engine.store.set_page_report(&base.id, None, None, None, None, Some(&["GET /users".to_string()])).unwrap();
+    e.engine.store.set_page_report(&chg.id, None, None, None, None, None).unwrap();
+    e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
+    let b = e.engine.store.preview(&chg.id).unwrap().base_change.unwrap();
+    assert!(b.api_unread && b.api.is_none(), "{b:?}");
 }
 
 #[tokio::test]

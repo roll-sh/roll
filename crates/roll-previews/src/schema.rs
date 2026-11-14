@@ -18,9 +18,13 @@ pub const MAX_LINE: usize = 300;
 /// `+ line` for what only the branch has, `- line` for what only the parent has; removals
 /// first, each sorted, each [`printable`]. Capped at [`MAX_LINES`].
 pub fn diff(parent: &[String], branch: &[String]) -> Vec<String> {
+    cap(diff_all(parent, branch))
+}
+
+/// [`diff`] without the cap: what [`risks`] reads, so nothing past the shown lines is missed.
+pub fn diff_all(parent: &[String], branch: &[String]) -> Vec<String> {
     let (p, b): (BTreeSet<&str>, BTreeSet<&str>) = (parent.iter().map(String::as_str).collect(), branch.iter().map(String::as_str).collect());
-    let out: Vec<String> = p.difference(&b).map(|l| format!("- {}", printable(l))).chain(b.difference(&p).map(|l| format!("+ {}", printable(l)))).collect();
-    cap(out)
+    p.difference(&b).map(|l| format!("- {}", printable(l))).chain(b.difference(&p).map(|l| format!("+ {}", printable(l)))).collect()
 }
 
 /// At most [`MAX_LINES`]: the last one says how many more there were.
@@ -112,7 +116,7 @@ pub fn risks(lines: &[String]) -> Vec<String> {
                 if bt != at_ {
                     out.push(format!("changes {table}.{column}{} from {bt} to {at_}: Postgres may rewrite the table under an exclusive lock", at(s)));
                 }
-                if a.contains(" not null") && !b.contains(" not null") {
+                if not_null(a) && !not_null(b) {
                     out.push(format!("makes {table}.{column}{} NOT NULL: Postgres scans the table under an exclusive lock (a CHECK … NOT VALID, validated first, doesn't)", at(s)));
                 }
             }
@@ -129,7 +133,11 @@ pub fn risks(lines: &[String]) -> Vec<String> {
             out.push(format!("changes search field {field}{} from {b} to {a}: a mapping can't change in place, so the index is rebuilt (a reindex)", at(s)));
         }
     }
-    out.truncate(MAX_RISKS);
+    if out.len() > MAX_RISKS {
+        let more = out.len() - (MAX_RISKS - 1);
+        out.truncate(MAX_RISKS - 1);
+        out.push(format!("… {more} more"));
+    }
     out
 }
 
@@ -176,6 +184,11 @@ fn identifier(s: &str) -> Option<(String, &str)> {
     }
 }
 
+/// Whether a column spec says `not null` (before its default: a default's text could say anything).
+fn not_null(spec: &str) -> bool {
+    spec.split(" default ").next().unwrap_or("").contains(" not null")
+}
+
 /// A column spec's type, without ` not null` and ` default …`.
 fn type_of(spec: &str) -> &str {
     let end = [spec.find(" not null"), spec.find(" default ")].into_iter().flatten().min().unwrap_or(spec.len());
@@ -201,6 +214,9 @@ mod tests {
             l("+ column public.users.handle text"),
             l("+ column public.users.age integer"),
             l("+ index CREATE INDEX users_age ON public.users USING btree (age)"),
+            l("- column public.notes.body text default ' not null'::text"),
+            l("+ column public.notes.body text not null default ' not null'::text"),
+            l("- view column public.v.x integer"),
             l("# search:sc_1"),
             l("- index logs"),
             l("- field products.sku text"),
@@ -212,6 +228,7 @@ mod tests {
             [
                 "drops table public.sessions: production's rows go with it",
                 "drops column public.\"Odd.Name\".\"a b\": the version running while it deploys may still read it",
+                "makes public.notes.body NOT NULL: Postgres scans the table under an exclusive lock (a CHECK … NOT VALID, validated first, doesn't)",
                 "changes public.orders.total from integer to bigint: Postgres may rewrite the table under an exclusive lock",
                 "makes public.users.email NOT NULL: Postgres scans the table under an exclusive lock (a CHECK … NOT VALID, validated first, doesn't)",
                 "drops column public.users.nick: the version running while it deploys may still read it",

@@ -196,7 +196,7 @@ SELECT line FROM (
   SELECT format('%s %I.%I', CASE c.relkind WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'S' THEN 'sequence' WHEN 'f' THEN 'foreign table' ELSE 'table' END, s.nspname, c.relname) AS line
     FROM pg_class c JOIN s ON s.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
   UNION ALL
-  SELECT format('column %I.%I.%I %s%s%s', s.nspname, c.relname, a.attname, format_type(a.atttypid, a.atttypmod),
+  SELECT format('%s %I.%I.%I %s%s%s', CASE WHEN c.relkind IN ('v', 'm') THEN 'view column' ELSE 'column' END, s.nspname, c.relname, a.attname, format_type(a.atttypid, a.atttypmod),
                 CASE WHEN a.attnotnull THEN ' not null' ELSE '' END, coalesce(' default ' || pg_get_expr(d.adbin, d.adrelid), ''))
     FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN s ON s.oid = c.relnamespace
     LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
