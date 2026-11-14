@@ -48,6 +48,8 @@ const RETRY_MS: i64 = 5 * 60_000;
 const PER_PROJECT: i64 = 50;
 /// Pushes one sweep makes (the rest wait for the next one).
 const PER_SWEEP: usize = 20;
+/// How long one sweep spends checking environments' digests before it stops.
+const CHECK_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 /// The longest target, as JSON.
 const TARGET_MAX: usize = 4096;
 /// The longest stored error.
@@ -495,8 +497,11 @@ impl Secrets {
         })?;
         let (mut pushed, mut failed) = (0, 0);
         let mut checked: Vec<String> = vec![];
+        // A digest of a large folder takes a tenth of a second: a sweep checks for so long, and
+        // the next one goes on from the least recently checked (every node sweeps).
+        let started = std::time::Instant::now();
         for r in rows {
-            if pushed + failed >= PER_SWEEP {
+            if pushed + failed >= PER_SWEEP || started.elapsed() >= CHECK_BUDGET {
                 break;
             }
             checked.push(r.info.id.clone());
@@ -555,7 +560,8 @@ impl Secrets {
             match &outcome {
                 Ok(o) if !o.keys.is_empty() || force => audit::record(c, project, &actor, "sync.push", Some(env), Some(path), &o.keys, &o.summary, now)?,
                 Ok(_) => {}
-                Err(e) => audit::record(c, project, &actor, "sync.push", Some(env), Some(path), &[], &clip(format!("{} sync failed: {e}", r.info.kind)), now)?,
+                // Which keys reached the target before it failed isn't known: the row says so.
+                Err(e) => audit::record(c, project, &actor, "sync.push", Some(env), Some(path), &[], &clip(format!("{} sync failed (values may have reached the target in part): {e}", r.info.kind)), now)?,
             }
             Ok::<_, Error>(())
         });
