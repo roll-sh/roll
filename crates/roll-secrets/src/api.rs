@@ -91,6 +91,14 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/aws-users/{{id}}"), axum::routing::delete(delete_aws_user))
         .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
+        .route(&format!("{P}/cas"), get(cas).post(add_ca))
+        .route(&format!("{P}/cas/{{id}}"), axum::routing::delete(delete_ca))
+        .route(&format!("{P}/cas/{{id}}/sign"), post(sign_csr))
+        .route(&format!("{P}/cas/{{id}}/certificates"), get(ca_certificates))
+        .route(&format!("{P}/cas/{{id}}/revoke"), post(revoke_certificate))
+        .route("/v1/secrets/crl/{id}", get(crl))
+        .route("/v1/secrets/ocsp/{id}", post(ocsp_post).layer(axum::extract::DefaultBodyLimit::max(crate::ocsp::REQUEST_MAX)))
+        .route("/v1/secrets/ocsp/{id}/{*request}", get(ocsp_get))
         .route(&format!("{P}/cloud-accounts"), get(cloud_accounts).post(add_cloud_account))
         .route(&format!("{P}/cloud-accounts/{{id}}"), axum::routing::delete(delete_cloud_account))
         .route(&format!("{P}/outside-databases"), get(outside_databases).post(add_outside_database))
@@ -949,6 +957,74 @@ async fn add_outside_database(State(s): S, Who(c): Who, Path(project): Path<Stri
 async fn delete_outside_database(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_outside_database(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn cas(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.cas(&project, &c)).await?))
+}
+
+async fn add_ca(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::pki::NewCa = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_ca(&project, n, &c)).await?))
+}
+
+async fn delete_ca(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_ca(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn sign_csr(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let req: crate::pki::Csr = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.sign_csr(&project, &id, req, &c)).await?))
+}
+
+async fn ca_certificates(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.ca_certificates(&project, &id, &c)).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Revoke {
+    serial: String,
+}
+
+async fn revoke_certificate(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<StatusCode> {
+    let r: Revoke = body(&b)?;
+    blocking(s, move |s| s.revoke_certificate(&project, &id, &r.serial, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// A CA's CRL, without a token: DER (`application/pkix-crl`), or PEM with `?format=pem`.
+async fn crl(State(s): S, Path(id): Path<String>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>) -> crate::Result<Response> {
+    use base64::Engine as _;
+    let der = blocking(s, move |s| s.crl(&id)).await?;
+    let pem = q.get("format").is_some_and(|f| f == "pem");
+    let (kind, body) = if pem {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der.as_slice());
+        let lines: Vec<&str> = b64.as_bytes().chunks(64).map(|c| std::str::from_utf8(c).expect("base64")).collect();
+        ("application/x-pem-file", format!("-----BEGIN X509 CRL-----\n{}\n-----END X509 CRL-----\n", lines.join("\n")).into_bytes())
+    } else {
+        ("application/pkix-crl", der.to_vec())
+    };
+    Ok(([(axum::http::header::CONTENT_TYPE, kind), (axum::http::header::CACHE_CONTROL, "public, max-age=300")], body).into_response())
+}
+
+/// OCSP over POST: the request's DER as the body (`application/ocsp-request`). No token.
+async fn ocsp_post(State(s): S, Path(id): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let (der, _) = blocking(s, move |s| s.ocsp(&id, &b)).await?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/ocsp-response")], der.to_vec()).into_response())
+}
+
+/// OCSP over GET: the request's DER in base64, URL-encoded, as the last path segment (RFC 6960
+/// A.1), so caches and CDNs can keep answers.
+async fn ocsp_get(State(s): S, Path((id, request)): Path<(String, String)>) -> crate::Result<Response> {
+    use base64::Engine as _;
+    // The path segment is percent-decoded already.
+    let der = base64::engine::general_purpose::STANDARD.decode(request.trim()).unwrap_or_default();
+    let (answer, successful) = blocking(s, move |s| s.ocsp(&id, &der)).await?;
+    // Only a signed answer may be kept by a cache: never a tryLater or a malformedRequest.
+    let cache = if successful { "public, max-age=60" } else { "no-store" };
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/ocsp-response"), (axum::http::header::CACHE_CONTROL, cache)], answer.to_vec()).into_response())
 }
 
 async fn list_syncs(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

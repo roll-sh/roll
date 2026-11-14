@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, AwsUser, CloudAccount, NewCloudAccount } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, AwsUser, CloudAccount, NewCloudAccount, SignedCertificate, CaCertificate, Ca } from "@roll/secrets/types";
 import { withSession } from "./code-token";
 import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 
@@ -211,6 +211,15 @@ export function secretsApi(project: string) {
     scanLeaks: (candidates: string[]) => req<{ index: number; key: string; environment: string; path: string }[]>("POST", `${P}/leaks`, { candidates }),
     /** `code`: also the keys no repository on the canvas mentions (a search per key: on request). */
     health: (code = false) => req<Finding[]>("GET", `${P}/health${qs({ code: code ? 1 : undefined })}`),
+    /** The project's certificate authorities (pki links). */
+    cas: () => req<Ca[]>("GET", `${P}/cas`),
+    addCa: (c: { name: string; domains: string[]; allow_ip?: boolean; max_days?: number }) => req<Ca>("POST", `${P}/cas`, c),
+    deleteCa: (id: string) => req<null>("DELETE", `${P}/cas/${enc(id)}`),
+    /** Sign a CSR within the CA's policy: only its key and subjectAltName names are taken. */
+    signCsr: (id: string, csr: string, days?: number) => req<SignedCertificate>("POST", `${P}/cas/${enc(id)}/sign`, { csr, days }),
+    caCertificates: (id: string) => req<CaCertificate[]>("GET", `${P}/cas/${enc(id)}/certificates`),
+    /** On the CA's CRL until it expires. */
+    revokeCertificate: (id: string, serial: string) => req<null>("POST", `${P}/cas/${enc(id)}/revoke`, { serial }),
     /** GCP and Azure accounts: registering one proves its trust names this project and no other. */
     cloudAccounts: () => req<CloudAccount[]>("GET", `${P}/cloud-accounts`),
     addCloudAccount: (a: NewCloudAccount) => req<CloudAccount>("POST", `${P}/cloud-accounts`, a),

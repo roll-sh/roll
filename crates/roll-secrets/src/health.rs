@@ -28,6 +28,10 @@ pub enum Issue {
     Weak,
     /// Its value stops working outside roll within two weeks.
     Expiring,
+    /// A certificate a project CA signed for a CSR ends within two weeks (pki.rs). Links' own
+    /// certificates are replaced by roll; a CSR's is the requester's to renew. `key` is its
+    /// names, `path` the CA's name, `environment` empty.
+    CertificateExpiring,
     /// Unchanged for longer than the environment's `max_age_days`.
     Stale,
     /// Nobody read it in 90 days.
@@ -221,6 +225,18 @@ impl Secrets {
                     }
                 }
             }
+        }
+        // Certificates from CSRs that end within two weeks: nothing renews them but whoever asked.
+        let ending: Vec<(String, String, String, i64)> = self.db.read(|c| {
+            c.query(
+                "SELECT a.name, k.names, k.serial, k.not_after FROM ca_certs k JOIN cas a ON a.id = k.ca_id WHERE k.project_id = ? AND k.source = 'csr' AND k.revoked_at IS NULL AND k.not_after >= ? AND k.not_after < ? ORDER BY k.not_after LIMIT 200",
+                params![project, now, now + EXPIRING_DAYS * 86_400_000],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+        })?;
+        for (ca, names, serial, end) in ending {
+            let names = from_json::<Vec<String>>(&names).join(", ");
+            out.push(Finding { issue: Issue::CertificateExpiring, environment: String::new(), path: ca, key: names, detail: format!("ends {} (serial {serial}): sign a new CSR", chrono_day(end)), owner: None });
         }
         // Who to ask: the required key's owner, its folder's rule first, else the key's anywhere.
         let owners: Vec<crate::required::Required> = self.db.read(|c| crate::required::of(c, project))?.into_iter().filter(|r| r.owner.is_some()).collect();

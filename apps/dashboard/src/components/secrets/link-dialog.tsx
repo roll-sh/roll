@@ -1,4 +1,4 @@
-import { Cloud, Database, KeyRound, Link2, RotateCw, type LucideIcon } from "lucide-react";
+import { Cloud, Database, KeyRound, Link2, RotateCw, ShieldCheck, type LucideIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { SECRET_KEY, type Batch, type Environment, type LinkField, type LinkMode, type LinkTarget, type Op } from "@/lib/secrets-api";
 import type { ResourceKind } from "@/lib/workspace-api";
@@ -14,6 +14,7 @@ const OWN_KINDS: Record<string, { icon: LucideIcon; label: string }> = {
   aws: { icon: Cloud, label: "AWS role" },
   aws_iam_user: { icon: KeyRound, label: "IAM user" },
   outside_database: { icon: Database, label: "Database outside roll" },
+  pki: { icon: ShieldCheck, label: "Certificate authority" },
   gcp: { icon: Cloud, label: "GCP account" },
   azure: { icon: Cloud, label: "Azure account" },
 };
@@ -63,6 +64,8 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const target = targets.data?.find((t) => `${t.kind}:${t.ref}` === at) ?? targets.data?.[0] ?? null;
   const [picks, setPicks] = useState<Record<string, Pick>>({});
   const [ttl, setTtl] = useState("60");
+  const [certNames, setCertNames] = useState("");
+  const [rotateDays, setRotateDays] = useState("30");
   const [busy, setBusy] = useState(false);
 
   const pickOf = (t: LinkTarget, f: LinkField): Pick => picks[`${t.kind}:${t.ref}:${f.field}`] ?? { on: false, key: f.suggest, mode: f.modes[0] };
@@ -80,12 +83,28 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const ttlMinutes = Number(ttl);
   const needsTtl = chosen.some((c) => c.p.mode === "dynamic");
   const ttlOk = !needsTtl || (Number.isInteger(ttlMinutes) && ttlMinutes >= 1 && ttlMinutes <= 7 * 24 * 60);
+  // A certificate names what it's for (the CA's policy decides which names it signs).
+  const needsNames = chosen.some((c) => c.t.kind === "pki");
+  const names = certNames.split(",").map((n) => n.trim()).filter(Boolean);
+  const namesOk = !needsNames || names.length > 0;
+  // A managed certificate rotates on a schedule, before it ends (it lives twice that).
+  const needsRotation = chosen.some((c) => c.t.kind === "pki" && c.p.mode === "managed");
+  const rotate = Number(rotateDays);
+  const rotateOk = !needsRotation || (Number.isInteger(rotate) && rotate >= 1 && rotate <= 198);
 
   const submit = async () => {
     const ops: Op[] = chosen.map((c) => ({
       op: "set",
       key: c.p.key,
-      link: { kind: c.t.kind, ref: c.t.ref, field: c.f.field, mode: c.p.mode, ...(c.p.mode === "dynamic" && { options: { ttl_minutes: ttlMinutes } }) },
+      link: {
+        kind: c.t.kind,
+        ref: c.t.ref,
+        field: c.f.field,
+        mode: c.p.mode,
+        ...((c.p.mode === "dynamic" || c.t.kind === "pki") && {
+          options: { ...(c.p.mode === "dynamic" && { ttl_minutes: ttlMinutes }), ...(c.t.kind === "pki" && { names, ...(c.p.mode === "managed" && { rotate_days: rotate }) }) },
+        }),
+      },
     }));
     const batch: Batch = { path, ops, message: `linked ${ops.map((o) => o.key).join(", ")}` };
     setBusy(true);
@@ -150,6 +169,19 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
       )}
 
       <div className="flex flex-wrap items-center gap-2 border-t border-line pt-3 sm:col-span-2">
+        {needsNames && (
+          <label className="flex items-center gap-1.5 text-[12px] text-muted">
+            Names
+            <input value={certNames} onChange={(e) => setCertNames(e.target.value)} placeholder="api.svc.internal" spellCheck={false} className={`${sized} h-7 w-56 font-mono`} aria-label="Certificate names" />
+          </label>
+        )}
+        {needsRotation && (
+          <label className="flex items-center gap-1.5 text-[12px] text-muted">
+            Rotate every
+            <input value={rotateDays} onChange={(e) => setRotateDays(e.target.value)} inputMode="numeric" className={`${sized} h-7 w-14 font-mono`} aria-label="Rotate every (days)" />
+            days
+          </label>
+        )}
         {needsTtl && (
           <label className="flex items-center gap-1.5 text-[12px] text-muted">
             Lease
@@ -158,13 +190,13 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
           </label>
         )}
         <span className="text-[11.5px] text-danger">
-          {badKey ? `${badKey.p.key || "A key"} isn't a valid key` : dupKey ? `${dupKey.p.key} is picked twice` : !ttlOk ? "A lease is 1 minute to 7 days" : ""}
+          {badKey ? `${badKey.p.key || "A key"} isn't a valid key` : dupKey ? `${dupKey.p.key} is picked twice` : !ttlOk ? "A lease is 1 minute to 7 days" : !namesOk ? "A certificate names what it's for" : !rotateOk ? "Rotate every 1 to 198 days" : ""}
         </span>
         <span className="ml-auto" />
         <button className={ghost} onClick={onClose}>
           Cancel
         </button>
-        <button className={primary} disabled={!chosen.length || !!badKey || !!dupKey || !ttlOk || busy} onClick={submit}>
+        <button className={primary} disabled={!chosen.length || !!badKey || !!dupKey || !ttlOk || !namesOk || !rotateOk || busy} onClick={submit}>
           {busy ? "Linking…" : `Link ${chosen.length || ""}`.trim()}
         </button>
       </div>

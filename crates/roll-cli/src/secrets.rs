@@ -282,6 +282,9 @@ pub enum Secrets {
     Tokens(Tokens),
     /// Where a key is set, in every project you can read (`STRIPE_*` for a prefix). Never values.
     Find { key: String },
+    /// The project's certificate authorities: list, add, print one's certificate, remove.
+    #[command(subcommand)]
+    Cas(CasCmd),
     /// GCP and Azure accounts that trust roll's token for this project: list (with the issuer and
     /// subject to trust), add, remove.
     #[command(subcommand)]
@@ -594,6 +597,45 @@ pub enum CloudsCmd {
         #[arg(long)]
         scope: Option<String>,
     },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum CasCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Make a CA that signs for these domains (and every name under them).
+    Add {
+        name: String,
+        #[arg(long = "domain", required = true)]
+        domains: Vec<String>,
+        /// IP addresses too.
+        #[arg(long)]
+        allow_ip: bool,
+        /// The longest a certificate lives (days, 397 at most; 90 by default).
+        #[arg(long)]
+        max_days: Option<u32>,
+    },
+    /// Print a CA's certificate (PEM), for clients to trust.
+    Cert { id: String },
+    /// Sign a CSR (PEM, from a file or stdin) for names the CA allows; prints the certificate. The
+    /// private key never leaves where the CSR was made.
+    Sign {
+        id: String,
+        #[arg(default_value = "-")]
+        csr: String,
+        #[arg(long, conflicts_with = "ttl_minutes")]
+        days: Option<u32>,
+        #[arg(long)]
+        ttl_minutes: Option<u64>,
+        /// Also print the CA's certificate after it (a chain file).
+        #[arg(long)]
+        chain: bool,
+    },
+    /// The certificates a CA signed that haven't expired.
+    Certs { id: String },
+    /// Revoke a certificate (on the CA's CRL until it expires).
+    Revoke { id: String, serial: String },
     Rm { id: String },
 }
 
@@ -1405,6 +1447,71 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
             }
         }
+        Secrets::Cas(cmd) => match cmd {
+            CasCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/cas", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for a in v.as_array().into_iter().flatten() {
+                    let domains: Vec<&str> = a["domains"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    println!("{}  {:<16} {}{}  up to {} days", s(&a["id"]), s(&a["name"]), domains.join(","), if a["allow_ip"] == true { " +IPs" } else { "" }, a["max_days"]);
+                }
+            }
+            CasCmd::Add { name, domains, allow_ip, max_days } => {
+                let mut body = json!({ "name": name, "domains": domains, "allow_ip": allow_ip });
+                if let Some(d) = max_days {
+                    body["max_days"] = json!(d);
+                }
+                let v = c.call(Method::POST, &format!("{}/cas", c.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Made {} ({}): link TLS_CERT, TLS_KEY and TLS_CA to it with options.names; `roll secrets cas cert {}` prints what clients trust.", s(&v["name"]), s(&v["id"]), s(&v["id"]));
+            }
+            CasCmd::Cert { id } => {
+                let v = c.call(Method::GET, &format!("{}/cas", c.base()), None).await?;
+                let ca = v.as_array().into_iter().flatten().find(|a| a["id"] == id.as_str() || a["name"] == id.as_str()).ok_or_else(|| anyhow::anyhow!("no CA {id}"))?;
+                print!("{}", s(&ca["certificate"]));
+            }
+            CasCmd::Sign { id, csr, days, ttl_minutes, chain } => {
+                let pem = if csr == "-" {
+                    let mut t = String::new();
+                    std::io::stdin().read_to_string(&mut t).context("reading the CSR from stdin")?;
+                    t
+                } else {
+                    std::fs::read_to_string(&csr).with_context(|| format!("reading {csr}"))?
+                };
+                let v = c.call(Method::POST, &format!("{}/cas/{}/sign", c.base(), enc(&ca_id(&c, &id).await?)), Some(json!({ "csr": pem, "days": days, "ttl_minutes": ttl_minutes }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                print!("{}", s(&v["certificate"]));
+                if chain {
+                    print!("{}", s(&v["ca"]));
+                }
+                eprintln!("signed for {} until {} (serial {})", v["names"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", "), day(v["not_after"].as_i64().unwrap_or_default()), s(&v["serial"]));
+            }
+            CasCmd::Certs { id } => {
+                let v = c.call(Method::GET, &format!("{}/cas/{}/certificates", c.base(), enc(&ca_id(&c, &id).await?)), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for x in v.as_array().into_iter().flatten() {
+                    let names: Vec<&str> = x["names"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    let state = x["revoked_at"].as_i64().map_or_else(|| format!("until {}", day(x["not_after"].as_i64().unwrap_or_default())), |t| format!("revoked {}", day(t)));
+                    println!("{}  {:<4} {}  {}", s(&x["serial"]), s(&x["source"]), names.join(","), state);
+                }
+            }
+            CasCmd::Revoke { id, serial } => {
+                c.call(Method::POST, &format!("{}/cas/{}/revoke", c.base(), enc(&ca_id(&c, &id).await?)), Some(json!({ "serial": serial }))).await?;
+                println!("Revoked {serial}: on the CA's CRL until it expires");
+            }
+            CasCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/cas/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
         Secrets::Tokens(t) => match t {
             Tokens::Ls => {
                 let v = c.call(Method::GET, &format!("{}/tokens", c.base()), None).await?;
@@ -2752,4 +2859,11 @@ async fn stop(child: &mut tokio::process::Child) {
         }
     }
     let _ = child.kill().await;
+}
+
+/// A CA's id from its id or its name.
+async fn ca_id(c: &Client<'_>, id: &str) -> anyhow::Result<String> {
+    let list = c.call(Method::GET, &format!("{}/cas", c.base()), None).await?;
+    let ca = list.as_array().into_iter().flatten().find(|a| a["id"] == id || a["name"] == id).ok_or_else(|| anyhow::anyhow!("no CA {id}"))?;
+    Ok(s(&ca["id"]).to_string())
 }

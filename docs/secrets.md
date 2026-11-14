@@ -545,7 +545,9 @@ is one click.
 every standard environment and folder at once, worst first, so none waits on someone opening the
 right folder: `expired`, `missing` (a required key an environment doesn't define, through its
 imports and base), `exposed` (a protected value also in an unprotected environment), `weak`,
-`expiring`, `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
+`expiring`, `certificate_expiring` (a certificate a project CA signed for a CSR that ends
+within two weeks: links' certificates are replaced by roll, a CSR's only by whoever asked; `key` is
+its names, `path` its CA), `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
 and it's older than that). Each `Finding` names the environment, folder and key where it's set,
 with a detail (the other environments, the reason, the date): never a value, and nothing is
 decrypted. Only what the caller may read is listed, and `weak` only where it may reveal.
@@ -852,6 +854,64 @@ cloud trusts roll's token for one project the way it trusts GitHub Actions' toke
   early or extended: a lease that ends leaves it valid until it expires, an hour at most; resolve again for a
   new one. An account a key links to can't be deleted. `roll secrets clouds ls` prints the issuer and
   subject to trust; `roll secrets clouds add-gcp` / `add-azure` register one.
+### Certificates
+A project's own certificate authority, as Vault's PKI engine and Infisical's PKI give: short-lived
+TLS certificates for services (mTLS between them), with no CA to run.
+- `POST …/cas {name, domains, allow_ip?, max_days?}` (admin; `roll secrets cas add NAME --domain
+  svc.internal`, the Integrations tab) makes an ECDSA P-256 key and a self-signed certificate for ten
+  years. The key is sealed with the project's data key, bound to the CA, and never leaves roll; the
+  certificate (`GET …/cas`, `roll secrets cas cert NAME`) is what clients trust. It carries name
+  constraints: only its domains, and IP addresses only where allowed (otherwise excluded), so a
+  client that trusts it trusts nothing else.
+- The link kind `pki` has `certificate`, `private_key` and `ca` (one credential, PEM), with the
+  certificate's names in `options.names` (a list, or comma-separated; the dashboard's Link dialog
+  asks): DNS names under the CA's domains, a wildcard one level under one, or IP addresses where
+  allowed; anything else is refused, naming the domains. `dynamic` gives each lease its own
+  certificate for the lease's TTL plus five minutes; `managed` stores one and rotates it every
+  `rotate_days` (required, and at most half the CA's `max_days`; the Link dialog asks), valid for
+  twice that, so a rotation always comes first. Both are at most `max_days` (90 by default, 397 at
+  most) and never past the CA's own end. A link's names and rotation are checked when it's written.
+  Certificates are for servers and clients both (`serverAuth`, `clientAuth`; the key only signs),
+  with a random 128-bit serial.
+- `POST …/cas/{id}/sign {csr (PEM), days? | ttl_minutes?}` (`write`, audited; `roll secrets cas
+  sign NAME req.csr [--days N] [--chain]`) signs a CSR, for a device or a service mesh that keeps
+  its own private key. The request's signature is checked, then only its public key and its
+  subjectAltName names (DNS names and IP addresses, each within the policy; the subject's CN isn't
+  read) are taken: usages, lifetime (30 days, or the CA's `max_days` if shorter, by default; 5
+  minutes to `max_days`) and everything else are the CA's own, whatever the CSR asks (being a CA
+  itself, signing code). The CSR's key must match its signature (a P-384 key signed with SHA-384,
+  not SHA-256). It answers `{certificate, ca, serial, names, not_after}`. Checked with
+  OpenSSL's CSRs (P-256 and RSA): `openssl verify -x509_strict` passes against the CA.
+- Every certificate a CA signs is listed until it expires (`GET …/cas/{id}/certificates`: serial,
+  names, `csr` or `link`, its end, who asked, when it was revoked; `roll secrets cas certs NAME`).
+  `…/cas/{id}/revoke {serial}` (`write`, audited; `roll secrets cas revoke NAME SERIAL`, the
+  dashboard's Revoke) takes one back, a lost device's, say; roll revokes a lease's certificate
+  when the lease ends and a managed one's when its grace runs out. The CA signs a CRL of the
+  revoked certificates that haven't expired, good for an hour and signed at most once a minute per
+  node (a revocation shows in that node's next one at once, another node's within a minute):
+  `GET /v1/secrets/crl/{id}` (DER, `application/pkix-crl`; `?format=pem`), without a token, as any
+  CRL is fetched. Every certificate names it in its CRL distribution point (rolld's
+  `ROLL_CODE_PUBLIC_URL`). Checked with OpenSSL: `openssl verify -crl_check` refuses a revoked one
+  (`certificate revoked`) and passes the rest. **OCSP** too, beside the
+  CRL (RFC 6960), for clients that ask about one certificate rather than fetch lists:
+  `POST /v1/secrets/ocsp/{id}` (the request's DER as the body) or `GET /v1/secrets/ocsp/{id}/<base64
+  of the request>` (cacheable), without a token. A certificate is `good` while the CA lists it
+  unrevoked, `revoked` with its time once revoked, `unknown` when the CA didn't sign it, it has
+  expired or the request names another issuer; the CA signs each answer itself. The route is
+  public, so its cost is bounded: nonces aren't echoed (RFC 8954 allows it, as large public CAs
+  do), answers are kept a minute per node by the certificates asked about (a revocation drops the
+  CA's), and a CA signs at most 50 fresh answers a second per node (`tryLater` beyond). An answer is
+  good for ten minutes (`nextUpdate`; GET answers `max-age=60`, and `no-store` on anything but a signed answer): how long a revocation can take to
+  reach a client that keeps answers. Every
+  certificate names the responder (Authority Information Access). Checked with `openssl ocsp`:
+  `good` and `revoked`, `Response verify OK`, over POST and over GET. Clients that
+  don't check CRLs or OCSP still trust a revoked
+  certificate until it ends, so lifetimes stay short. A CA a key links to can't be deleted, nor one
+  with a revoked certificate still within its lifetime (its CRL must keep answering; a deleted
+  project's CAs keep serving theirs until then too); deleting one leaves what it signed valid until
+  it expires. One CA keeps at most 10,000 certificates from CSRs valid at once. Serials are
+  random, positive and never start with a zero byte, so the serial a client shows is the one to
+  revoke.
 
 ## Consumption
 
@@ -884,6 +944,8 @@ roll secrets leases  [--renew ID | --revoke ID]
 roll secrets databases ls | add NAME [--role A --role B] [--group G] [--ca FILE] (admin URL on stdin) | rm ID
 roll secrets aws-users ls | add NAME USER --role ROLE | rm ID
 roll secrets clouds  ls | add-gcp NAME --audience A --service-account SA | add-azure NAME --tenant T --client-id C [--scope S] | rm ID
+roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain]
+                     | certs ID | revoke ID SERIAL | rm ID
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -1793,6 +1855,15 @@ isn't in the workspace is 404.
 | `DELETE /cloud-accounts/{id}` | | 204; 409 while a key links to it (`admin`) |
 | `GET /v1/secrets/oidc/.well-known/openid-configuration` | | roll's issuer's discovery document (public) |
 | `GET /v1/secrets/oidc/jwks` | | roll's issuer's public keys (public) |
+| `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
+| `POST /cas` | `{name, domains, allow_ip?, max_days?}` | 201 `Ca` (`admin`) |
+| `DELETE /cas/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `GET /cas/{id}/certificates` | | `CaCertificate[]`: `{serial, names, source, not_after, issued_at, issued_by, revoked_at?}`, what it signed that hasn't expired, newest first (`read`) |
+| `POST /cas/{id}/revoke` | `{serial}` | 204; 404 for a serial it didn't sign or that has expired (`write`, audited) |
+| `GET /v1/secrets/crl/{id}` | | the CA's CRL, DER (`application/pkix-crl`) or `?format=pem`; no token |
+| `POST /v1/secrets/ocsp/{id}` | an OCSP request (DER) | an OCSP response (`application/ocsp-response`); no token |
+| `GET /v1/secrets/ocsp/{id}/{request}` | | the same, the request base64 and URL-encoded (RFC 6960 A.1); no token |
+| `POST /cas/{id}/sign` | `{csr, days?, ttl_minutes?}` | `{certificate, ca, serial, names, not_after}` (`write`, audited); 400 for a name outside the policy or a lifetime past `max_days` |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
 
@@ -1848,7 +1919,7 @@ type Insights = { path: string; max_age_days: number | null; reads_since: number
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */ };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
-type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
+type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };

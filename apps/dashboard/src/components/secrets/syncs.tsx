@@ -3,6 +3,7 @@ import { useState } from "react";
 import { FOLDER_PATH, SECRET_KEY, type NewSync, type Sync, type SyncKind, type SyncPreview } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, label, primary, Section, Teach, useLoad } from "./ui";
+import { Cas } from "./cas";
 import { CloudAccounts } from "./cloud-accounts";
 import { OutsideDatabases } from "./outside-databases";
 import { AwsRoles } from "./aws-roles";
@@ -70,6 +71,7 @@ export function SyncsView() {
       </Section>
       <OutsideDatabases />
       <Rotators />
+      <Cas />
       <CloudAccounts />
       <AwsRoles />
     </div>
