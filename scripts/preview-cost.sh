@@ -297,9 +297,10 @@ NOTES=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?pa
 echo "$NOTES" | grep -q "The heading is cut off" || { echo "the page's notes should list the feedback: $NOTES"; exit 1; }
 # Resolved (what the page's Resolve opens roll to do), it folds away there.
 NOTE_ID=$(echo "$NOTES" | jq_ "d[0]['id']")
+[ "$(api GET "/v1/previews/$PV/notes" | jq_ "[n['id'] for n in d['notes']]")" = "['$NOTE_ID']" ] || { echo "the preview's open notes should list the page's, with its id"; exit 1; }
 [ "$(api POST "/v1/previews/$PV/notes/$NOTE_ID/resolve" '{}' | jq_ "d.get('resolved')")" = "$NOTE_ID" ] || { echo "resolving the page's note should answer with it"; exit 1; }
 RESOLVED=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F" | jq_ "len(d)")
-[ "$RESOLVED" = 0 ] || { echo "a resolved note should fold away on the page: $RESOLVED left"; exit 1; }
+[ "$RESOLVED" = 0 ] && [ "$(api GET "/v1/previews/$PV/notes" | jq_ "len(d['notes'])")" = 0 ] || { echo "a resolved note should fold away on the page and from the open notes: $RESOLVED left"; exit 1; }
 # A share link for someone outside the team: in through its own token (no preview cookie), out
 # once it's revoked.
 SHARE=$(api POST "/v1/previews/$PV/shares" '{"hours":1}')

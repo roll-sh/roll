@@ -9,11 +9,20 @@ impl Engine {
     /// button that lists it: roll previews' own proxy, and roll apps' for its `pv-` environments.
     /// Nothing for a branch's preview (no change to read from) or one that doesn't exist.
     pub async fn notes_of(&self, preview: &str, path: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
+        let mut here: Vec<crate::notes::Note> = self.open_notes(preview).await?.into_iter().filter(|n| n.path == path).collect();
+        let skip = here.len().saturating_sub(50);
+        here.drain(..skip);
+        Ok(here)
+    }
+
+    /// The notes left on a preview's pages that nobody has resolved, every page's (the latest
+    /// 500, oldest first): `GET …/notes`, and the page's button by path.
+    pub async fn open_notes(&self, preview: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
         let Ok(row) = self.store.row(preview) else { return Ok(Vec::new()) };
         let Some(change) = &row.change_id else { return Ok(Vec::new()) };
         let resolved = self.store.resolved_notes(preview)?;
-        let mut here: Vec<crate::notes::Note> = self.source.feedback(change).await?.into_iter().filter(|n| n.path == path && !resolved.contains(&n.id)).collect();
-        let skip = here.len().saturating_sub(50);
+        let mut here: Vec<crate::notes::Note> = self.source.feedback(change).await?.into_iter().filter(|n| !resolved.contains(&n.id)).collect();
+        let skip = here.len().saturating_sub(500);
         here.drain(..skip);
         Ok(here)
     }

@@ -31,6 +31,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/screenshot", get(screenshot))
         .route("/v1/previews/{id}/qr.png", get(qr))
         .route("/v1/previews/{id}/connect", get(connect))
+        .route("/v1/previews/{id}/notes", get(notes))
         .route("/v1/previews/{id}/notes/{note}/resolve", post(resolve_note))
         .route("/v1/previews/{id}/mail", get(mails))
         .route("/v1/previews/{id}/mail/{mail}", get(mail_raw))
@@ -289,6 +290,14 @@ async fn vars(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serde
     })
     .await?;
     Ok(Json(serde_json::json!({ "vars": vars })))
+}
+
+/// The notes left on the preview's pages that nobody has resolved (each with its id, to resolve).
+async fn notes(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serde_json::Value>> {
+    check_id(&id)?;
+    e.store.row(&id)?;
+    let notes = e.open_notes(&id).await.map_err(|err| Error::Internal(format!("{err:#}")))?;
+    Ok(Json(serde_json::json!({ "notes": notes })))
 }
 
 /// Resolve a note left on the preview's page (its review's id): the page stops listing it.

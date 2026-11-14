@@ -786,8 +786,10 @@ async fn a_pages_notes_by_its_environment_name() {
     assert!(e.engine.notes_for("production", "/").await.unwrap().is_empty());
     assert!(e.engine.notes_for("pv-nope", "/").await.unwrap().is_empty());
     // Resolved (from the page's Resolve, in roll), it folds away; only the change's notes resolve.
+    assert_eq!(e.engine.open_notes(&p.id).await.unwrap().iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["rv_Too big", "rv_Typo"], "every page's, with ids");
     e.engine.resolve_note(&p.id, "rv_Too big", "bob").await.unwrap();
     assert!(e.engine.notes_for(&env_name, "/").await.unwrap().is_empty());
+    assert_eq!(e.engine.open_notes(&p.id).await.unwrap().len(), 1);
     assert!(e.engine.resolve_note(&p.id, "rv_someone else's", "bob").await.is_err());
 }
 
