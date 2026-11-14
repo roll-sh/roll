@@ -631,6 +631,37 @@ async fn api_keys() {
     assert_eq!(s, 400);
 }
 
+/// Masking a branch (roll previews: `_update_by_query`, then `only_expunge_deletes` with
+/// `expunge_deletes_allowed: 0`) rewrites the segments it shares with its parent, so the old
+/// values are gone from the branch's term dictionaries (`_terms_enum`, suggesters), while the
+/// parent keeps them.
+#[tokio::test]
+async fn expunging_a_branch_rewrites_the_segments_it_shares() {
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "masked"})).await;
+    let (user, pw) = creds(&c);
+    let (s, _) = e.es(&user, &pw, reqwest::Method::PUT, "/people/_doc/1?refresh=true", Some(json!({"name": "Alice Example"}))).await;
+    assert_eq!(s, 201);
+    let b = e.post("/v1/search/clusters/masked/branches", json!({"name": "masked-b"})).await;
+    let (bu, bp) = creds(&b);
+    let terms = |u: String, p: String| {
+        let e = &e;
+        async move { e.es(&u, &p, reqwest::Method::POST, "/people/_terms_enum", Some(json!({"field": "name.keyword"}))).await.1["terms"].to_string() }
+    };
+    let mask = json!({"query": {"exists": {"field": "name"}}, "script": {"source": "ctx._source.name = '[masked]'"}});
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::POST, "/people/_update_by_query?conflicts=proceed&refresh=true", Some(mask)).await;
+    assert_eq!(s, 200, "{v}");
+    // Masked but not yet rewritten: the shared segment still holds the old term.
+    assert!(terms(bu.clone(), bp.clone()).await.contains("Alice Example"));
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::PUT, "/people/_settings", Some(json!({"index.merge.policy.expunge_deletes_allowed": 0}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::POST, "/people/_forcemerge?only_expunge_deletes=true", None).await;
+    assert_eq!(s, 200, "{v}");
+    let branch = terms(bu, bp).await;
+    assert!(!branch.contains("Alice Example") && branch.contains("[masked]"), "{branch}");
+    assert!(terms(user, pw).await.contains("Alice Example"), "the parent keeps its documents");
+}
+
 #[tokio::test]
 async fn documents_survive_unload_and_branch() {
     let e = env().await;
