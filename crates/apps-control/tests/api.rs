@@ -421,8 +421,11 @@ async fn a_get_to_a_vanished_instance_goes_to_a_fresh_one() {
     let second = body["instance"].as_str().unwrap().to_string();
     assert_ne!(second, first);
     w.fake.crash(&second);
+    let made = w.fake.instances(svc["id"].as_str().unwrap()).len();
     let post = Request::post("/").header("host", h.as_str()).header("content-length", "1").body(Body::from("x")).unwrap();
-    assert_eq!(w.public.clone().oneshot(post).await.unwrap().status(), StatusCode::SERVICE_UNAVAILABLE, "not sent again");
+    let st = w.public.clone().oneshot(post).await.unwrap().status();
+    assert!(matches!(st, StatusCode::SERVICE_UNAVAILABLE | StatusCode::BAD_GATEWAY), "{st}");
+    assert_eq!(w.fake.instances(svc["id"].as_str().unwrap()).len(), made, "not sent again");
 }
 
 /// A newer push stops a push's build that's still running (superseded, its minutes saved); the
@@ -1246,6 +1249,14 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
         let r = site(&path).await.unwrap();
         assert_eq!(r.status(), want, "{path}");
     }
+    // `/api/* service:api/v1/:splat 200`: the project's api service answers on the site's origin.
+    assert_eq!(site("/api/users").await.unwrap().status(), StatusCode::BAD_GATEWAY, "no api service yet");
+    image_service(&w, "api", json!({"port": 80})).await;
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    let r = site("/api/users?page=2").await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["path"], "/v1/users", "{body}");
 
     // A cron service: runs to its exit, recorded.
     let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "nightly", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "0 3 * * *"} }))).await;

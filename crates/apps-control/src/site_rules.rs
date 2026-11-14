@@ -6,7 +6,9 @@
 //!   `:splat` puts it in `to`; a `:name` segment matches one segment and `:name` puts it in `to`.
 //!   301 by default; 301, 302, 303, 307 and 308 redirect (`to` may be another site's URL), 200
 //!   serves `to`'s file instead (a rewrite, only where no file is at the path) and 404 answers
-//!   `to`'s file with a 404. The first rule that matches decides.
+//!   `to`'s file with a 404. The first rule that matches decides. A 200 whose `to` is
+//!   `service:<name>/<path>` sends the request to the project's service of that name in the
+//!   same environment (Netlify's and Vercel's proxy rewrites, only to the project's own).
 //! - `_headers`: a path (the same patterns) on its own line, then indented `Name: value` lines
 //!   for the responses at it. Every matching block adds its headers, in order.
 
@@ -59,6 +61,17 @@ pub enum Outcome {
     Redirect(u16, String),
     /// Serve this path's file instead, with this status (200, or 404).
     Serve(u16, String),
+    /// Send the request to the project's service `service` in this environment, at this path
+    /// (its query kept unless the rule names one).
+    Proxy { service: String, path: String },
+}
+
+/// `service:<name>[/<path>]`: the name, and the path (`/` when none).
+fn service_target(to: &str) -> Option<(&str, &str)> {
+    let rest = to.strip_prefix("service:")?;
+    let (name, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
+    let ok = !name.is_empty() && name.len() <= 32 && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    ok.then_some((name, path))
 }
 
 impl Pattern {
@@ -122,7 +135,8 @@ impl SiteRules {
             };
             // A rewrite or a 404 serves one of the site's own files; a redirect may leave it.
             let external = to.starts_with("https://") || to.starts_with("http://");
-            if !(to.starts_with('/') || external && !matches!(status, 200 | 404)) || to.contains(['\r', '\n']) {
+            let service = service_target(to).is_some() && status == 200;
+            if !(to.starts_with('/') || service || external && !matches!(status, 200 | 404)) || to.contains(['\r', '\n']) {
                 continue;
             }
             if let Some(from) = Pattern::parse(from) {
@@ -182,6 +196,16 @@ impl SiteRules {
             if r.to.starts_with('/') && (to.starts_with("//") || to.starts_with("/\\")) {
                 return None;
             }
+            if let Some((service, path)) = service_target(&to) {
+                let mut path = if path.is_empty() { "/".to_string() } else { path.to_string() };
+                if path.starts_with("//") || path.starts_with("/\\") {
+                    return None;
+                }
+                if let Some(q) = query.filter(|q| !q.is_empty() && !path.contains('?')) {
+                    path = format!("{path}?{q}");
+                }
+                return Some(Outcome::Proxy { service: service.to_string(), path });
+            }
             return Some(match r.status {
                 200 | 404 => Outcome::Serve(r.status, to),
                 s => {
@@ -233,6 +257,11 @@ mod tests {
         assert_eq!(open.redirect("/go/\\evil.com", None, false), Some(Outcome::Redirect(301, "/%5Cevil.com".into())));
         assert_eq!(open.redirect("/u/a?b=1#x", None, false), Some(Outcome::Redirect(302, "/a%3Fb%3D1%23x".into())));
         assert_eq!(open.redirect("/go/a/b", None, false), Some(Outcome::Redirect(301, "/a/b".into())));
+        // To the project's own service, its query kept; never another kind of target or status.
+        let api = SiteRules::parse(Some("/api/* service:api/v1/:splat 200\n/hc service:api 200\n/bad service:API/x 200\n/moved service:api/x 301\n"), None);
+        assert_eq!(api.redirect("/api/users/7", Some("a=1"), false), Some(Outcome::Proxy { service: "api".into(), path: "/v1/users/7?a=1".into() }));
+        assert_eq!(api.redirect("/hc", None, false), Some(Outcome::Proxy { service: "api".into(), path: "/".into() }));
+        assert_eq!((api.redirect("/bad", None, false), api.redirect("/moved", None, false)), (None, None));
     }
 
     #[test]

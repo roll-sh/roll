@@ -210,6 +210,8 @@ pub struct Apps {
     sites: Mutex<HashMap<String, Arc<sites::Site>>>,
     /// Per environment, for the live site's key: its earlier static deployments' site keys.
     earlier_sites: Mutex<HashMap<String, sites::EarlierSites>>,
+    /// `(service, name)` → the id of the service of that name in its project, as of when.
+    service_names: Mutex<HashMap<(String, String), NameLookup>>,
     /// A site being loaded, per key: one load at a time (the rest wait for it).
     site_loads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Environments in a crash loop whose event is written (one per loop).
@@ -268,6 +270,9 @@ fn hex(b: &[u8]) -> String {
 }
 
 /// What makes up an environment's variables, highest precedence last.
+/// A service id looked up by name, as of when (none: no such web service).
+type NameLookup = (std::time::Instant, Option<String>);
+
 /// Another service's values a reference may read, and which of them are sealed.
 type ServiceValues = (HashMap<String, String>, BTreeSet<String>);
 
@@ -309,6 +314,7 @@ impl Apps {
             sites: Mutex::new(HashMap::new()),
             earlier_sites: Mutex::new(HashMap::new()),
             site_loads: Mutex::new(HashMap::new()),
+            service_names: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             ws_shells: Mutex::new(HashMap::new()),
             tunnels: Mutex::new(HashMap::new()),
@@ -1362,6 +1368,33 @@ impl Apps {
 
     /// What reads a job's output or opens a shell needs when the environment has values from
     /// roll secrets (a job may print them, a shell reads them all): roll secrets' own rule for
+    /// The web service named `name` in `service`'s project (a site's `service:` rewrite), looked
+    /// up at most every 30 s (a miss every 2 s).
+    pub(crate) async fn project_service(self: &Arc<Self>, service: &str, name: &str) -> Option<String> {
+        let key = (service.to_string(), name.to_string());
+        // A miss a moment only: a service made just now answers at once.
+        if let Some((at, id)) = self.service_names.lock().get(&key)
+            && at.elapsed() < Duration::from_secs(if id.is_some() { 30 } else { 2 })
+        {
+            return id.clone();
+        }
+        let (sid, n) = key.clone();
+        let id = self
+            .db(move |s| {
+                let svc = s.service(&sid)?;
+                Ok(s.services(Some(&svc.project))?.into_iter().find(|x| x.name == n && x.run.kind == RunType::Web).map(|x| x.id))
+            })
+            .await
+            .ok()
+            .flatten();
+        let mut m = self.service_names.lock();
+        if m.len() > 10_000 {
+            m.clear();
+        }
+        m.insert(key, (std::time::Instant::now(), id.clone()));
+        id
+    }
+
     /// revealing them.
     pub async fn check_secret_reveal(self: &Arc<Self>, service: &str, env: &str, who: integrations::Asker<'_>) -> Result<()> {
         let (svc, row) = self.service_env(service, env).await?;
