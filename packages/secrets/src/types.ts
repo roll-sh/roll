@@ -249,6 +249,11 @@ export type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "exp
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
+/** A GCP service account or an Azure app that trusts roll's token for this project (dynamic `access_token` links). */
+export type CloudAccount =
+  | { id: string; name: string; cloud: "gcp"; audience: string; service_account: string; created_at: number; created_by: string }
+  | { id: string; name: string; cloud: "azure"; tenant: string; client_id: string; scope: string; created_at: number; created_by: string };
+export type NewCloudAccount = { name: string } & ({ cloud: "gcp"; audience: string; service_account: string } | { cloud: "azure"; tenant: string; client_id: string; scope?: string });
 /** A Postgres, MySQL, Redis or MongoDB server outside roll: two login roles that take turns (managed), a group dynamic logins join, or both; the admin URL stays sealed. */
 export type OutsideDatabase = { id: string; name: string; host: string; roles: string[]; group?: string; ca?: string; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };

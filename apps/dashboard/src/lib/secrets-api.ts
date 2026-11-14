@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, AwsUser } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, AwsUser, CloudAccount, NewCloudAccount } from "@roll/secrets/types";
 import { withSession } from "./code-token";
 import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 
@@ -211,6 +211,10 @@ export function secretsApi(project: string) {
     scanLeaks: (candidates: string[]) => req<{ index: number; key: string; environment: string; path: string }[]>("POST", `${P}/leaks`, { candidates }),
     /** `code`: also the keys no repository on the canvas mentions (a search per key: on request). */
     health: (code = false) => req<Finding[]>("GET", `${P}/health${qs({ code: code ? 1 : undefined })}`),
+    /** GCP and Azure accounts: registering one proves its trust names this project and no other. */
+    cloudAccounts: () => req<CloudAccount[]>("GET", `${P}/cloud-accounts`),
+    addCloudAccount: (a: NewCloudAccount) => req<CloudAccount>("POST", `${P}/cloud-accounts`, a),
+    deleteCloudAccount: (id: string) => req<null>("DELETE", `${P}/cloud-accounts/${enc(id)}`),
     /** AWS roles for dynamic credentials: registering one assumes it (its trust policy must pin the ExternalId). */
     awsRoles: () => req<AwsRole[]>("GET", `${P}/aws-roles`),
     addAwsRole: (r: { name: string; role_arn: string }) => req<AwsRole>("POST", `${P}/aws-roles`, r),
@@ -230,6 +234,8 @@ export type SecretsApi = ReturnType<typeof secretsApi>;
 
 export const secretsHealth = () => req<Health>("GET", "/v1/secrets/health");
 export const secretsWhoami = () => req<WhoAmI>("GET", "/v1/secrets/whoami");
+/** roll's OIDC issuer, which a GCP pool or an Azure federated credential trusts (public). */
+export const secretsIssuer = () => req<{ issuer: string; jwks_uri: string }>("GET", "/v1/secrets/oidc/.well-known/openid-configuration");
 /** Every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read. */
 /** Every project's findings the caller may read, projects with none left out. */
 export const allFindings = () => req<ProjectFindings[]>("GET", "/v1/secrets/findings");

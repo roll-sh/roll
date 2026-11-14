@@ -31,6 +31,8 @@ pub mod insights;
 pub mod leaks;
 pub mod links;
 pub mod names;
+pub mod clouds;
+pub mod issuer;
 mod oidc;
 mod read;
 pub mod refs;
@@ -319,6 +321,9 @@ pub struct Options {
     pub trust_forwarded_for: bool,
     /// The dashboard's address (`ROLL_WEB_URL`): a share's link is `<it>/share/<id>#<key>`.
     pub web_url: Option<String>,
+    /// roll's OIDC issuer and the clouds' token endpoints, for dynamic GCP and Azure credentials
+    /// (clouds.rs); `None` without a public URL for the issuer.
+    pub clouds: Option<clouds::Clouds>,
     /// Sets passwords on Postgres servers outside roll (outside.rs); `None`: not on this server.
     pub outside: Option<std::sync::Arc<dyn outside::OutsideDb>>,
 }
@@ -339,6 +344,7 @@ pub struct Secrets {
     open: bool,
     trust_forwarded_for: bool,
     web_url: Option<String>,
+    clouds: Option<clouds::Clouds>,
     outside: Option<Arc<dyn outside::OutsideDb>>,
     /// OIDC issuers' public keys (identities.rs).
     oidc: oidc::Keys,
@@ -407,6 +413,8 @@ impl Secrets {
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
         db.ensure_schema(aws::SCHEMA)?;
+        db.ensure_schema(issuer::SCHEMA)?;
+        db.ensure_schema(clouds::SCHEMA)?;
         db.ensure_schema(iam::SCHEMA)?;
         // Rotators are a link kind of roll secrets' own: they call out through rolld.
         let mut links = opts.links;
@@ -415,6 +423,13 @@ impl Secrets {
             links.register(Arc::new(aws::Provider { db: db.clone(), sts: sts.clone() }));
             links.register(Arc::new(iam::Provider { db: db.clone(), sts: sts.clone() }));
         }
+        if let (Some(c), Ok(keys)) = (&opts.clouds, &opts.keyring) {
+            // The issuer's key exists before anyone asks for its public half.
+            issuer::ensure_key(&db, keys)?;
+            for kind in [clouds::GCP, clouds::AZURE] {
+                links.register(Arc::new(clouds::Provider { kind, db: db.clone(), keys: keys.clone(), clouds: c.clone() }));
+            }
+        }
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
             links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone() }));
         }
@@ -422,7 +437,7 @@ impl Secrets {
         if let (Some(outside), Ok(keys)) = (&opts.outside, &opts.keyring) {
             links.register(Arc::new(outside::Provider { db: db.clone(), keys: keys.clone(), outside: outside.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds })
     }
 
     pub fn links(&self) -> &Links {
@@ -500,7 +515,10 @@ impl Secrets {
                         None => keys.open_dek(p, d).map(|(_, r)| r.is_some()).unwrap_or(true),
                     })
                     .count();
-                if old == 0 { serde_json::json!("all") } else { serde_json::json!(rows.len() - old) }
+                // The issuer's signing key is sealed with the deployment key too: resealed here, and
+                // the previous key isn't "done with" while one still needs it.
+                let issuer_old = if self.clouds.is_some() { issuer::reseal(&self.db, keys)? } else { 0 };
+                if old == 0 && issuer_old == 0 { serde_json::json!("all") } else { serde_json::json!(rows.len() - old) }
             }
             Err(_) => serde_json::Value::Null,
         };
