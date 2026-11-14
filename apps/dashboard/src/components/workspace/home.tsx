@@ -129,7 +129,7 @@ function Stat({ label, value, note }: { label: string; value: string; note: stri
   );
 }
 
-const SERIOUS = new Set(["expired", "missing", "exposed"]);
+const SERIOUS = new Set(["expired", "missing", "exposed", "public"]);
 
 /** Secrets that need fixing now (expired, missing, exposed), in every project: nothing when none. */
 function SecretsToFix() {

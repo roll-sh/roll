@@ -949,6 +949,13 @@ async fn health_lists_every_finding_in_every_environment_worst_first() {
     // Across projects: this one, with its findings.
     let all = api.ok(Method::GET, "/v1/secrets/findings", None).await;
     assert_eq!((all.as_array().map(Vec::len), all[0]["project"].as_str(), all[0]["findings"].as_array().map(Vec::len)), (Some(1), Some(api.project.as_str()), Some(6)));
+    // A server's credential under a name a framework sends to every browser: the write warns and
+    // health flags it; a publishable key under the same prefix is left alone.
+    let w = api.ok(Method::PUT, "/environments/development/secrets/NEXT_PUBLIC_STRIPE_KEY", Some(json!({ "value": "sk_live_51Hx9Q2aBcD7eFgH8iJkLmN" }))).await;
+    assert!(w["warnings"][0].as_str().unwrap().starts_with("NEXT_PUBLIC_STRIPE_KEY: NEXT_PUBLIC_ keys go into the browser bundle (Next.js)"), "{w}");
+    api.set("development", "NEXT_PUBLIC_STRIPE_PUBLISHABLE", "pk_live_51Hx9Q2aBcD7eFgH8iJkLmN").await;
+    let public: Vec<String> = api.ok(Method::GET, "/health", None).await.as_array().unwrap().iter().filter(|f| f["issue"] == "public").map(|f| f["key"].as_str().unwrap().to_string()).collect();
+    assert_eq!(public, ["NEXT_PUBLIC_STRIPE_KEY"]);
 }
 
 #[tokio::test]

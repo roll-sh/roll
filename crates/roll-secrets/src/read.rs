@@ -676,6 +676,12 @@ impl Secrets {
         let mut out = vec![];
         let mut views: HashMap<(String, String), Vec<String>> = HashMap::new();
         for item in items {
+            // A server's credential under a name a framework sends to browsers.
+            if let ItemAction::Set { value, link, .. } = &item.action
+                && let Some(why) = crate::strength::browser_exposure(&item.key, value.as_ref().map(|v| v.expose()), self.secret_field(link.as_ref().and_then(|l| l.as_ref())).as_deref())
+            {
+                out.push(format!("{}: {why}", item.key));
+            }
             let ItemAction::Set { value: Some(v), .. } = &item.action else { continue };
             for r in refs::refs(v.expose()) {
                 let (env, path) = match &r.env {

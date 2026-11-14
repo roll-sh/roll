@@ -195,7 +195,7 @@ pub enum Secrets {
         exec: Option<String>,
     },
     /// Every finding in every environment, worst first: expired, missing, exposed, weak,
-    /// expiring, stale, unread. Fails when there's an expired, missing or exposed one.
+    /// expiring, stale, unread. Fails when there's an expired, missing, exposed or in-the-browser one.
     Health {
         /// Every project you can read, not only this one.
         #[arg(long, conflicts_with = "code")]
@@ -2189,7 +2189,7 @@ async fn doctor(api: &Api, args: &AtArgs) -> anyhow::Result<()> {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter(|f| f["environment"] == at.env.as_str() && ["expired", "missing", "exposed"].contains(&f["issue"].as_str().unwrap_or_default()))
+                    .filter(|f| f["environment"] == at.env.as_str() && ["expired", "missing", "exposed", "public"].contains(&f["issue"].as_str().unwrap_or_default()))
                     .map(|f| format!("{} {} ({})", s(&f["issue"]), s(&f["key"]), s(&f["detail"])))
                     .collect();
                 checks.push(if serious.is_empty() { (true, format!("nothing in {} needs fixing now", at.env)) } else { (false, format!("{} needs fixing: {}", at.env, serious.join("; "))) });
@@ -2230,12 +2230,12 @@ fn report_health(found: &[Value], projects: bool) -> anyhow::Result<()> {
         let project = if projects { format!("{:<16} ", s(&f["project_name"])) } else { String::new() };
         println!("{:<9} {project}{:<14} {:<28} {}{}", s(&f["issue"]).to_uppercase(), s(&f["environment"]), s(&f["key"]), s(&f["detail"]), if f["path"] == "/" { String::new() } else { format!("  ({})", s(&f["path"])) });
     }
-    let serious = found.iter().filter(|f| ["expired", "missing", "exposed"].contains(&f["issue"].as_str().unwrap_or_default())).count();
+    let serious = found.iter().filter(|f| ["expired", "missing", "exposed", "public"].contains(&f["issue"].as_str().unwrap_or_default())).count();
     if found.is_empty() {
         eprintln!("Nothing to fix");
     }
     if serious > 0 {
-        bail!("{serious} to fix now (expired, missing or exposed)");
+        bail!("{serious} to fix now (expired, missing, exposed or in the browser)");
     }
     Ok(())
 }

@@ -381,6 +381,8 @@ impl Secrets {
         db.add_column("versions", "expires_at", "INTEGER")?;
         // Why a credential's value is easy to guess (strength.rs), judged when it was written.
         db.add_column("secrets", "weak", "TEXT")?;
+        // Why a key would put a server's credential in a browser bundle (strength.rs), as weak's.
+        db.add_column("secrets", "public", "TEXT")?;
         // Who supplies a required key (health and the daily notice name them).
         db.add_column("required", "owner", "TEXT")?;
         // A deleted project kept only until what it issued is revoked (forget_project).
