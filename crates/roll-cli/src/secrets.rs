@@ -537,6 +537,16 @@ pub enum SshCasCmd {
     },
     /// Print the known_hosts line that trusts the hosts an SSH CA signs.
     KnownHosts { id: String },
+    /// Certify your own key (its .pub file) for logins; prints the certificate (save it as
+    /// <key>-cert.pub next to the key, and ssh uses it). `roll ssh --key` does this per session.
+    SignUser {
+        id: String,
+        public_key: String,
+        #[arg(long = "principal", required = true)]
+        principals: Vec<String>,
+        #[arg(long)]
+        ttl_minutes: Option<u64>,
+    },
     Rm { id: String },
 }
 
@@ -743,6 +753,16 @@ pub struct Ssh {
     /// The key holding the private key.
     #[arg(long = "identity", default_value = "SSH_KEY")]
     pub identity: String,
+    /// Your own key instead (its .pub file; the private half stays in your agent or on disk):
+    /// an SSH CA certifies it for this session, for --principal.
+    #[arg(long, requires_all = ["ca", "principals"])]
+    pub key: Option<String>,
+    /// With --key: the SSH CA that certifies it.
+    #[arg(long, requires = "key")]
+    pub ca: Option<String>,
+    /// With --key: the logins to certify it for.
+    #[arg(long = "principal", requires = "key")]
+    pub principals: Vec<String>,
     /// ssh's own arguments: the destination, a command, options.
     #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
     pub args: Vec<String>,
@@ -1310,6 +1330,16 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 println!("{}", s(&v["certificate"]));
                 eprintln!("sshd: HostCertificate <this file>; clients: {}", s(&v["known_hosts"]));
+            }
+            SshCasCmd::SignUser { id, public_key, principals, ttl_minutes } => {
+                let line = std::fs::read_to_string(&public_key).with_context(|| format!("reading {public_key}"))?;
+                let ca = ca_named(&c, &id, "ssh-cas").await?;
+                let v = c.call(Method::POST, &format!("{}/ssh-cas/{}/sign-user", c.base(), enc(&ca)), Some(json!({ "public_key": line.trim(), "principals": principals, "ttl_minutes": ttl_minutes }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("{}", s(&v["certificate"]));
+                eprintln!("for {} until {} (serial {})", principals.join(", "), day(v["valid_before"].as_i64().unwrap_or_default()), s(&v["serial"]));
             }
             SshCasCmd::KnownHosts { id } => {
                 let v = c.call(Method::GET, &format!("{}/ssh-cas", c.base()), None).await?;
@@ -2624,23 +2654,35 @@ pub async fn ssh_command(api: &Api, a: Ssh) -> anyhow::Result<()> {
     let at = a.at.resolve();
     let project = project(api, at.project.as_deref()).await?;
     let c = Client { project, api, at: at.clone() };
-    let v = c.call(Method::GET, &format!("{}/values?{}", c.env(&at.env), c.q()), None).await?;
-    let get = |k: &str| -> anyhow::Result<String> {
-        v["values"][k].as_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("{}:{} doesn't set {k}: link it to an SSH CA (roll secrets ssh-cas)", at.env, at.path))
-    };
-    let (cert, key) = (get(&a.cert)?, get(&a.identity)?);
     // The directory is the user's alone (0700) and goes when this returns, key and all.
     let dir = tempfile::Builder::new().prefix("roll-ssh-").tempdir().context("making a private directory for the key")?;
-    let (id, cert_path) = (dir.path().join("id"), dir.path().join("id-cert.pub"));
-    {
+    let cert_path = dir.path().join("id-cert.pub");
+    // The identity ssh uses: the session's own key, or the user's (whose private half roll never reads).
+    let id = if let Some(public) = &a.key {
+        let line = std::fs::read_to_string(public).with_context(|| format!("reading {public}"))?;
+        let ca = ca_named(&c, a.ca.as_deref().unwrap_or_default(), "ssh-cas").await?;
+        let v = c.call(Method::POST, &format!("{}/ssh-cas/{}/sign-user", c.base(), enc(&ca)), Some(json!({ "public_key": line.trim(), "principals": a.principals }))).await?;
+        std::fs::write(&cert_path, format!("{}\n", s(&v["certificate"]).trim())).context("writing the certificate")?;
+        // The private file when it's there; else the public one, which tells ssh to use the
+        // agent's key (a hardware token's) that matches it.
+        let private = std::path::PathBuf::from(public.strip_suffix(".pub").unwrap_or(public));
+        if private.exists() && private.as_os_str() != public.as_str() { private } else { std::path::PathBuf::from(public) }
+    } else {
+        let v = c.call(Method::GET, &format!("{}/values?{}", c.env(&at.env), c.q()), None).await?;
+        let get = |k: &str| -> anyhow::Result<String> {
+            v["values"][k].as_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("{}:{} doesn't set {k}: link it to an SSH CA (roll secrets ssh-cas), or pass --key", at.env, at.path))
+        };
+        let (cert, key) = (get(&a.cert)?, get(&a.identity)?);
+        let id = dir.path().join("id");
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new();
         f.write(true).create_new(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut f, 0o600);
         f.open(&id).and_then(|mut file| file.write_all(key.as_bytes())).context("writing the key")?;
-    }
-    std::fs::write(&cert_path, format!("{}\n", cert.trim())).context("writing the certificate")?;
+        std::fs::write(&cert_path, format!("{}\n", cert.trim())).context("writing the certificate")?;
+        id
+    };
     // Hosts the project's SSH CAs sign are trusted by their CA, not on first use: their
     // @cert-authority lines go first, then the user's own known_hosts.
     let trusted: Vec<String> = match c.call(Method::GET, &format!("{}/ssh-cas", c.base()), None).await {
@@ -2734,6 +2776,13 @@ async fn stop(child: &mut tokio::process::Child) {
 /// A CA's id from its id or its name.
 async fn ca_id(c: &Client<'_>, id: &str) -> anyhow::Result<String> {
     let list = c.call(Method::GET, &format!("{}/cas", c.base()), None).await?;
+    let ca = list.as_array().into_iter().flatten().find(|a| a["id"] == id || a["name"] == id).ok_or_else(|| anyhow::anyhow!("no CA {id}"))?;
+    Ok(s(&ca["id"]).to_string())
+}
+
+/// An SSH CA's or CA's id from its id or its name (`kind`: `ssh-cas` or `cas`).
+async fn ca_named(c: &Client<'_>, id: &str, kind: &str) -> anyhow::Result<String> {
+    let list = c.call(Method::GET, &format!("{}/{kind}", c.base()), None).await?;
     let ca = list.as_array().into_iter().flatten().find(|a| a["id"] == id || a["name"] == id).ok_or_else(|| anyhow::anyhow!("no CA {id}"))?;
     Ok(s(&ca["id"]).to_string())
 }

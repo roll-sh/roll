@@ -89,6 +89,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/ssh-cas"), get(ssh_cas).post(add_ssh_ca))
         .route(&format!("{P}/ssh-cas/{{id}}"), axum::routing::delete(delete_ssh_ca))
         .route(&format!("{P}/ssh-cas/{{id}}/sign-host"), post(sign_host_key))
+        .route(&format!("{P}/ssh-cas/{{id}}/sign-user"), post(sign_user_key))
         .route(&format!("{P}/cas/{{id}}/sign"), post(sign_csr))
         .route(&format!("{P}/cas/{{id}}/certificates"), get(ca_certificates))
         .route(&format!("{P}/cas/{{id}}/revoke"), post(revoke_certificate))
@@ -883,6 +884,11 @@ async fn ssh_cas(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate
 async fn add_ssh_ca(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let n: crate::ssh::NewSshCa = body(&b)?;
     Ok(created(blocking(s, move |s| s.add_ssh_ca(&project, n, &c)).await?))
+}
+
+async fn sign_user_key(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let req: crate::ssh::UserKey = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.sign_user_key(&project, &id, req, &c)).await?))
 }
 
 async fn sign_host_key(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {

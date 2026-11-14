@@ -10,6 +10,9 @@
 //!   makes a new Ed25519 key and a user certificate for it, for the lease's TTL plus five minutes
 //!   and at most the CA's `max_hours` (`dynamic` only: a certificate lives hours, and a managed
 //!   rotation counts in days).
+//! - A key someone already has (in an agent, on a hardware token) gets a user certificate too
+//!   (`…/sign-user`, `reveal`, as resolving a linked one is; audited): only its public key comes
+//!   to roll.
 //! - Host certificates too (`…/sign-host`, admin): a server's own public key (Ed25519, ECDSA or
 //!   RSA) signed for host names under the CA's `host_domains`, so clients trust the CA
 //!   (`@cert-authority` in `known_hosts`) instead of each host on first use. The key never leaves
@@ -273,6 +276,26 @@ pub struct HostKey {
     pub days: Option<u32>,
 }
 
+/// A user's own key to certify: its public key line, the logins, and for how long (60 minutes by
+/// default, the CA's `max_hours` at most).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserKey {
+    pub public_key: String,
+    pub principals: Vec<String>,
+    #[serde(default)]
+    pub ttl_minutes: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserCert {
+    /// `…-cert-v01@openssh.com …`: next to the key as `<key>-cert.pub`, or `ssh -o CertificateFile=`.
+    pub certificate: String,
+    pub serial: String,
+    pub principals: Vec<String>,
+    pub valid_before: i64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct HostCert {
     /// `…-cert-v01@openssh.com …`: the server's `HostCertificate`.
@@ -500,6 +523,30 @@ impl Secrets {
             c.execute("DELETE FROM ssh_cas WHERE id = ?", [id])?;
             audit::record(c, project, caller, "ssh_ca.delete", None, None, &[], &format!("deleted SSH CA {name}"), now)
         })
+    }
+
+    /// Certify a user's own key for logins the CA allows: `reveal`, as resolving an SSH link is
+    /// (a certificate is a login), and audited.
+    pub fn sign_user_key(&self, project: &str, id: &str, req: UserKey, caller: &Caller) -> Result<UserCert> {
+        caller.need(Action::Reveal, &Scope::project(project))?;
+        self.project(project)?;
+        let mine: Option<String> = self.db.read(|c| c.query_row("SELECT name FROM ssh_cas WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional())?;
+        mine.ok_or_else(|| Error::NotFound(format!("no SSH CA {id}")))?;
+        let (name, ca, policy) = Provider { db: self.db.clone(), keys: self.keys()?.clone() }.open(id)?;
+        let principals: Vec<String> = req.principals.iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
+        allowed(&name, &principals, &policy)?;
+        let minutes = req.ttl_minutes.unwrap_or(60);
+        if !(5..=u64::from(policy.max_hours) * 60).contains(&minutes) {
+            return Err(Error::BadRequest(format!("a certificate from {name} lives 5 minutes to {} hours", policy.max_hours)));
+        }
+        let (key_type, key_fields) = parse_public_key(&req.public_key)?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default();
+        let (after, before) = (now.saturating_sub(60), now + minutes * 60);
+        // The key id names who asked, as sshd logs it.
+        let key_id: String = format!("roll-secrets:{name}:{}", caller.principal).chars().map(|c| if c.is_ascii_graphic() { c } else { '-' }).take(128).collect();
+        let (certificate, serial) = sign_cert(&ca, &Cert { key_type: &key_type, key_fields: &key_fields, host: false, key_id: &key_id, principals: &principals, valid_after: after, valid_before: before }, &serial());
+        self.audit_now(project, caller, "ssh_ca.sign_user", None, None, &[], &format!("{name} signed a {key_type} key for {} (serial {serial}, {minutes} min)", principals.join(", ")));
+        Ok(UserCert { certificate, serial, principals, valid_before: before as i64 * 1000 })
     }
 
     /// Sign a server's host key for names under the CA's `host_domains`. Admin: a host

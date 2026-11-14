@@ -1191,6 +1191,17 @@ async fn an_ssh_ca_signs_short_lived_user_certificates_for_its_principals() {
     let fleet_key = base64::engine::general_purpose::STANDARD.decode(hosts_pub.split(' ').nth(1).unwrap()).unwrap();
     assert_eq!(signer, fleet_key);
     ed25519_dalek::VerifyingKey::from_bytes(fleet_key[fleet_key.len() - 32..].try_into().unwrap()).unwrap().verify(&blob[..signed_to], &ed25519_dalek::Signature::from_slice(&sig[sig.len() - 64..]).unwrap()).expect("the CA's signature");
+    // A person's own key (in an agent, on a token): a user certificate for logins the CA allows.
+    let user_at = format!("/ssh-cas/{}/sign-user", ca["id"].as_str().unwrap());
+    assert_eq!(api.call(Method::POST, &user_at, Some(json!({ "public_key": line, "principals": ["root"] }))).await.0, StatusCode::BAD_REQUEST);
+    let mine = api.ok(Method::POST, &user_at, Some(json!({ "public_key": line, "principals": ["deploy"], "ttl_minutes": 30 }))).await;
+    let blob = base64::engine::general_purpose::STANDARD.decode(mine["certificate"].as_str().unwrap().split(' ').nth(1).unwrap()).unwrap();
+    let mut p = 0usize;
+    take(&blob, &mut p);
+    take(&blob, &mut p);
+    assert_eq!(take(&blob, &mut p), server.verifying_key().to_bytes(), "the person's own key");
+    p += 8;
+    assert_eq!(u32::from_be_bytes(blob[p..p + 4].try_into().unwrap()), 1, "a user certificate");
 }
 
 #[tokio::test]

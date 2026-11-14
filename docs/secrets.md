@@ -632,6 +632,14 @@ long-lived public keys on every server. Servers trust one CA key (`TrustedUserCA
   when it exits, and exits with ssh's code. A person never handles the key. Hosts the project's
   SSH CAs sign are trusted by their CA (their `@cert-authority` lines are added before the user's
   own `known_hosts`), so there's no "trust this host?" on first use.
+- **A key you already have** (in an agent, on a hardware token): `POST …/ssh-cas/{id}/sign-user
+  {public_key, principals, ttl_minutes?}` (`reveal`, as resolving an SSH link is, since a certificate
+  is a login; audited; `roll secrets ssh-cas sign-user NAME ~/.ssh/id_ed25519.pub --principal
+  deploy`) certifies its public key for logins the CA allows, 60 minutes by default and the CA's
+  `max_hours` at most; only the public key comes to roll. `roll ssh --key ~/.ssh/id_ed25519.pub
+  --ca ops --principal deploy -- deploy@host` does it per session (the private file next to it,
+  or else the agent's matching key). Checked with OpenSSH 10: an RSA key held only in `ssh-agent`
+  logged in to a real `sshd` as `deploy` with roll's certificate, and not as `root`.
 - **Host certificates**, as Vault's SSH engine signs host keys: an SSH CA with `host_domains`
   (`--host-domain svc.internal`; `max_host_days`, 90 by default, 397 at most) signs a server's own
   public key for its names. `POST …/ssh-cas/{id}/sign-host {public_key, hosts, days?}` (admin, since
@@ -678,7 +686,8 @@ roll secrets leases  [--renew ID | --revoke ID]
 roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain]
                      | certs ID | revoke ID SERIAL | rm ID
 roll secrets ssh-cas ls | add NAME [--principal P…] [--max-hours N] [--host-domain D…] [--max-host-days N] | key ID
-                     | sign-host ID [KEY.pub|-] --host H… [--days N] | known-hosts ID | rm ID
+                     | sign-host ID [KEY.pub|-] --host H… [--days N] | known-hosts ID
+                     | sign-user ID KEY.pub --principal P… [--ttl-minutes N] | rm ID
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 roll ssh [-p project] [-e production] [--cert SSH_CERT] [--identity SSH_KEY] -- <ssh arguments…>
 ```
@@ -1526,6 +1535,7 @@ isn't in the workspace is 404.
 | `GET /ssh-cas` | | `SshCa[]` (`read` on the project; public keys, never private ones) |
 | `POST /ssh-cas` | `{name, principals, max_hours?, host_domains?, max_host_days?}` | 201 `SshCa` (`admin`) |
 | `DELETE /ssh-cas/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `POST /ssh-cas/{id}/sign-user` | `{public_key, principals, ttl_minutes?}` | `{certificate, serial, principals, valid_before}` (`reveal`, audited) |
 | `POST /ssh-cas/{id}/sign-host` | `{public_key, hosts, days?}` | `{certificate, known_hosts, serial, hosts, valid_before}` (`admin`, audited); 400 for a name outside `host_domains` or a weak key |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
