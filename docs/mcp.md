@@ -384,6 +384,8 @@ previews are listed once those products are on.
 | `apps_list_variables` | An environment's variables, values masked. | `GET /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_set_variables` | Set or unset an environment's variables (production is a "deploy" action). | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_metrics` | CPU, memory and requests of an environment. | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
+| `apps_pending` | What the next deploy changes: variables (names), run settings, project secrets. | `GET /v1/apps/services/{service}/environments/{env}/pending` |
+| `apps_deploy_commits` | The commits a deploy brings over the one live before it. | `GET /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/commits` |
 | `apps_rollback` | Roll an environment back to an earlier deploy, with the variables it went live with. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback` |
 | `apps_rollback_previous` | Put back the deploy that was live before this one. | `POST /v1/apps/services/{service}/environments/{env}/rollback` |
 | `apps_logs` | Recent logs of a service's environment, or with `http` its requests (filter by `status`, `min_ms`). | `GET /v1/apps/services/{service}/environments/{env}/logs` |
@@ -438,25 +440,27 @@ start and pre-deploy commands, schedule, kind, port, volume and `run.public`, ar
 a day or less); workload tokens (`Access::mint_workload`: minutes, within an identity's scope, owned
 by its maker, out of the list and caps) for secrets' identity logins; a person's own tokens' news is
 mailed to them (an approval waiting on them, used from a new network, revoked as leaked, about to
-expire; only their own, never a secret); roll code's stream and device-login caps take the client
-the trusted proxy saw (the right-most `X-Forwarded-For` entry that isn't the proxy, over every line,
-only an address), not the left-most a client wrote; apps-next's head passes the per-method check
-with #25; the thirteenth review (X-Forwarded-For only from listed proxies, every line, a bad entry
-stopping the walk, IPv4-mapped addresses matched; nothing listed, the header counts for nothing; MCP
-tool calls carry the gate's address; unconsented client ids good for 90 days and kept ids small
-enough for Postgres); `ROLL_TRUSTED_PROXIES` (X-Forwarded-For only from the edge's addresses, the
-client the right-most entry that isn't one: a direct request can't name its own address for IP
-allowlists or registration's limit); sealed apps variables explained to agents (apps-next #26); the
-prefix check per method (rolld logs each route's methods; 194 `METHOD route` lines reviewed, 7 newly
-found and looked at: a route with its own row for one method can't gain another a prefix decides
-unseen); sensitive secrets explained to agents (`secrets_reveal` and `roll://guide`: a 403 and
-`withheld` are expected; secrets #46); open registration stores nothing (a client's id is the
-client, signed; kept once a person consents, else good for a day), so a flood has nothing to fill;
-the twelfth review's contained findings (CSV cells all quoted with formulas defused after in-cell
-separators too; a completion never waits on or uses an open approval; registration's rate map swept
-once a minute and bounded; the token-page list read from the caller's address and off the async
-threads; stored grants honour the idle policy; client names as consent shows them, no invisible
-characters); a person's own token's page tested to show only their reach (#25);
+expire; only their own, never a secret); `apps_pending` and `apps_deploy_commits` (what the next
+deploy changes, what a deploy brought; apps-next #26), and `debug_failing_service` uses them; `roll
+token tools <id>` (what an agent sees, from the CLI); roll code's stream and device-login caps take
+the client the trusted proxy saw (the right-most `X-Forwarded-For` entry that isn't the proxy, over
+every line, only an address), not the left-most a client wrote; apps-next's head passes the
+per-method check with #25; the thirteenth review (X-Forwarded-For only from listed proxies, every
+line, a bad entry stopping the walk, IPv4-mapped addresses matched; nothing listed, the header
+counts for nothing; MCP tool calls carry the gate's address; unconsented client ids good for 90 days
+and kept ids small enough for Postgres); `ROLL_TRUSTED_PROXIES` (X-Forwarded-For only from the
+edge's addresses, the client the right-most entry that isn't one: a direct request can't name its
+own address for IP allowlists or registration's limit); sealed apps variables explained to agents
+(apps-next #26); the prefix check per method (rolld logs each route's methods; 194 `METHOD route`
+lines reviewed, 7 newly found and looked at: a route with its own row for one method can't gain
+another a prefix decides unseen); sensitive secrets explained to agents (`secrets_reveal` and
+`roll://guide`: a 403 and `withheld` are expected; secrets #46); open registration stores nothing (a
+client's id is the client, signed; kept once a person consents, else good for a day), so a flood has
+nothing to fill; the twelfth review's contained findings (CSV cells all quoted with formulas defused
+after in-cell separators too; a completion never waits on or uses an open approval; registration's
+rate map swept once a minute and bounded; the token-page list read from the caller's address and off
+the async threads; stored grants honour the idle policy; client names as consent shows them, no
+invisible characters); a person's own token's page tested to show only their reach (#25);
 `secrets_list_ssh_cas` (secrets #45); open client registration bounded (20 a minute a network; a
 flood never pushes out a client a person is connecting); `secrets_list_cas` (secrets #44); the
 prefix check skips public routes (no grant classifies what anyone may call);
