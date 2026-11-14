@@ -779,6 +779,12 @@ impl LinkProvider for Search {
         }
         let k = self.0.call(Method::POST, &format!("/v1/search/clusters/{}/keys", enc(r#ref)), Some(body))?;
         let id = text(&k, "/id")?;
+        // A build that says what it made must have made a data key; one that says nothing is
+        // taken as it is (docs/secrets.md, "Links": search).
+        if let Some(access) = k["access"].as_str().filter(|a| *a != "data") {
+            let _ = self.0.delete_gone(&format!("/v1/search/clusters/{}/keys/{}", enc(r#ref), enc(id.expose())));
+            return Err(Error::Link(format!("roll search made an {access} key, not a data one: refused (and deleted)")));
+        }
         Ok(Issued { parts: search_parts(&k)?, handle: json!({ "id": id.expose() }) })
     }
     /// A field the cluster's flavor doesn't issue (an API key from OpenSearch, a user from
