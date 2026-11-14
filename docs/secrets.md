@@ -1976,7 +1976,24 @@ minutes.
     - run: roll run --env production -- ./deploy.sh
   ```
 
-  A login lasts its TTL: enough for a job. A long-running `roll run --watch` uses a token.
+  A login lasts its TTL (5 to 60 minutes). A long-running process (`roll run --watch` in a pod,
+  `render --watch`) logs in again by itself a quarter of the way before its login ends (at least
+  30 s before), reading `ROLL_OIDC_TOKEN_FILE` again, since Kubernetes rotates a projected token's
+  file. That login runs in the background while requests go on with the current token; one that
+  fails or takes over 30 s leaves the current token in use while it lasts (tried again every 15 s;
+  its lifetime is measured on the process's own clock). A token that has ended, or that the server
+  refuses (401), logs in again before the next request: a pod needs no stored secret, as with Vault's Kubernetes auth. The cluster's service
+  account issuer has to be one roll can fetch keys from (EKS's and GKE's are public URLs):
+
+  ```yaml
+  # the pod: a projected token for roll's audience, and the identity to log in as
+  env:
+    - { name: ROLL_API_URL, value: https://roll.example.com }
+    - { name: ROLL_IDENTITY, value: idn_… }
+    - { name: ROLL_OIDC_TOKEN_FILE, value: /var/run/secrets/roll/token }
+  volumeMounts: [{ name: roll-token, mountPath: /var/run/secrets/roll }]
+  # volumes: [{ name: roll-token, projected: { sources: [{ serviceAccountToken: { audience: roll, path: token, expirationSeconds: 3600 } }] } }]
+  ```
 - **A CI job, end to end.** No stored secret: the job logs in with its own OIDC token as an
   identity limited to staging, then checks before it tests. Each step only sees staging, since
   check, scan and health answer what the caller may read:
