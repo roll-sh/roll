@@ -82,6 +82,22 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    const env = secrets.open(await secrets.resolve("production", { consumer: "app:web", sealTo: keys.publicKey }), keys.secretKey);
    const stop = secrets.watch("staging", { onChange: (v) => reconfigure(v.values) });
    ```
+
+   In Go, `sdk/go/secrets` has the same surface, and `FromEnv` logs a workload identity in with
+   its own OIDC token as `roll run` does (`ROLL_IDENTITY`):
+
+   ```go
+   c, err := secrets.FromEnv(ctx)
+   err = c.Watch(ctx, "production", secrets.Watch{OnChange: func(v *secrets.Values) error { return reload(v.Values) }})
+   ```
+
+   In Python, `sdk/python/roll_secrets` (`roll-secrets`, the standard library but for sealed
+   resolves, which need the `seal` extra):
+
+   ```python
+   c = roll_secrets.from_env()
+   c.watch("production", lambda v: reload(v.values))
+   ```
 8. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.

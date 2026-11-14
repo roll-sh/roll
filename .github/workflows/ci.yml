@@ -86,6 +86,31 @@ jobs:
           filter: dashboard...
       - run: pnpm --filter dashboard exec vitest run --shard=${{ matrix.shard }}/3
 
+  # roll secrets' Go and Python clients (sdk/): the same surface as @roll/secrets.
+  sdk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Go
+        working-directory: sdk/go/secrets
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race -count=1 ./...
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python
+        working-directory: sdk/python/roll_secrets
+        run: |
+          pip install -q cryptography
+          PYTHONPATH=src python -m unittest discover -s tests
+
   scripts:
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -107,7 +132,7 @@ jobs:
           fi
 
   ci:
-    needs: [rust, web, dashboard, scripts]
+    needs: [rust, web, dashboard, sdk, scripts]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2
