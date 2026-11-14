@@ -114,6 +114,21 @@ describe("the Previews tab", () => {
     expect(within(list).getAllByText("to review")).toHaveLength(1);
   });
 
+  it("tags a preview whose page added problems against main", async () => {
+    const worse: Preview = {
+      ...preview,
+      id: "pv_worse",
+      title: "New footer",
+      page_links: { checked: 2, broken: [{ path: "/gone", status: 404 }] },
+      base_change: { branch: "main", percent: 0, phone_percent: null, links_added: 1, errors_added: 1 },
+    };
+    api.list.mockResolvedValue([preview, worse]);
+    view();
+    const list = await screen.findByRole("list", { name: "Previews" });
+    expect(await within(list).findByText("2 new problems")).toBeInTheDocument();
+    expect(within(list).getAllByText(/new problems?$/)).toHaveLength(1);
+  });
+
   it("posts a note from the preview page's feedback button on the change, once", async () => {
     const u = userEvent.setup({ delay: null });
     vi.mocked(codeApi.submitReview).mockResolvedValue({} as never);
