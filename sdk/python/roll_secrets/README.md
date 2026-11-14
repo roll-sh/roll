@@ -18,6 +18,9 @@ key = roll_secrets.generate_key()               # sealed to a key only this proc
 v = c.resolve_sealed("production", "app:web", key)
 
 c.watch("production", lambda v: reload(v.values))   # until `stop` (a threading.Event) is set
+
+cards = c.transit("cards")                       # an encryption key that stays in roll
+ct = cards.encrypt(card_number, "order:42")
 ```
 
 Tests: `PYTHONPATH=src python -m unittest discover -s tests` (CI's `sdk` job).

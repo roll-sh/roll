@@ -18,6 +18,10 @@ key, _ := secrets.GenerateKey()
 v, err = c.ResolveSealed(ctx, "production", "", "app:web", key)
 
 // Reload when the environment changes; dynamic credentials' leases are renewed meanwhile.
+// An encryption key (docs/secrets.md, "Encryption keys"): the key stays in roll.
+cards := c.Transit("cards")
+ct, err := cards.Encrypt(ctx, []byte(cardNumber), "order:42")
+
 err = c.Watch(ctx, "production", secrets.Watch{OnChange: func(v *secrets.Values) error {
 	return reload(v.Values)
 }})

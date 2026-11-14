@@ -127,3 +127,35 @@ func TestAWorkloadLogsInReadsSealedValuesAndWatchesForChanges(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 }
+
+// Transit sends bytes as base64 and decrypts back to the same bytes, as @roll/secrets' does.
+func TestTransitSendsBase64AndDecryptsBackToTheSameBytes(t *testing.T) {
+	var sent []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		b["path"] = r.URL.Path
+		sent = append(sent, b)
+		// A server that "encrypts" by echoing: enough to check the encoding both ways.
+		if r.URL.Path == "/v1/secrets/projects/prj_1/transit/cards/encrypt" {
+			_ = json.NewEncoder(w).Encode(map[string]string{"ciphertext": "roll:v1:" + b["plaintext"].(string)})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"plaintext": b["ciphertext"].(string)[len("roll:v1:"):]})
+	}))
+	defer srv.Close()
+	cards := (&Client{API: srv.URL, Token: "rlt_x", Project: "prj_1"}).Transit("cards")
+	ctx := context.Background()
+	ct, err := cards.Encrypt(ctx, []byte("héllo ✓"), "order:42")
+	if err != nil || sent[0]["plaintext"] != "aMOpbGxvIOKckw==" || sent[0]["context"] != "order:42" {
+		t.Fatalf("sent %v (%v)", sent, err)
+	}
+	if got, err := cards.Decrypt(ctx, ct, "order:42"); err != nil || string(got) != "héllo ✓" {
+		t.Fatalf("decrypted %q (%v)", got, err)
+	}
+	raw := []byte{0, 255, 128, 7}
+	ct, _ = cards.Encrypt(ctx, raw, "")
+	if got, _ := cards.Decrypt(ctx, ct, ""); string(got) != string(raw) || sent[2]["context"] != nil {
+		t.Fatalf("bytes: %v, context %v", got, sent[2]["context"])
+	}
+}
