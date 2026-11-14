@@ -1783,29 +1783,35 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
+1. **A landing branch** (`feature/roll-secrets-landing`): every stacked pull request merged on #20
+   in order, conflicts resolved, the whole suite passing, so the stack can land in one step. A
+   rehearsal (2026-11-14) merged each onto the others in order: twelve merge cleanly; twenty
+   conflict with an earlier sibling, nearly all additively (routes in `api.rs`, rows in
+   `catalog.rs`, types in `types.ts`/`secrets-api.ts`, sections of this doc, `rolld/src/secrets.rs`'s
+   providers), and #30 (#20 with roll MCP's #25) touches the most.
+2. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
    #49 and #54 meet, `watch` keeps both (answered digests, streams and signals).
-2. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
+3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
-3. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
+4. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
    tools are ready), a live check of OpenSearch links (#29 and #51 in one build), and splitting the
    CLI's `secrets.rs` (2,700 lines) by command once the stacked pull requests that touch it have
    landed.
-4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
+5. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
-5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
+6. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
    token; the trust policy pins `sub`, as GCP's and Azure's do).
-6. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
+7. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
    notice.
-7. *Waits on #30 meeting #24/#25:* the Access tab shows roll-access tokens waiting for an admin's
+8. *Waits on #30 meeting #24/#25:* the Access tab shows roll-access tokens waiting for an admin's
    approval (`pending`) and rotations that keep the old secret working (`keep_old_for_s`), and
    reach (#61) lists roll-access grants too.
-8. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
+9. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
    installs list Slack user ids and act as the owner's automation; a review must count as the
    person who pressed the button (their permissions, the request's gates), never as the app.
-9. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
+10. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
    project can link their own databases, buckets and streams.
-10. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+11. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
    environment).
 
 Open pull requests after this one:
