@@ -516,6 +516,7 @@ async fn platform_policy_tells_no_role_a_masked_value() {
         cfg.masking = policy(&[
             ("ks", "t", "email", "mask_inner(1, 1)"),
             ("ks", "by_email", "email", "DEFAULT"),
+            ("ks", "v", "emb", "DEFAULT"),
         ]);
         let (db, _store) = open(cfg).await;
         let mut su = login(&db, "cassandra", "cassandra").await;
@@ -555,6 +556,15 @@ async fn platform_policy_tells_no_role_a_masked_value() {
             );
         }
         assert_eq!(rows(&mut su, "SELECT plain FROM ks.t WHERE pk = 1").await, table(&[&["p"]]));
+        // Nor order an ANN search, which ranks rows by the real vectors (ScyllaDB's needs its
+        // Vector Store, which roll doesn't run).
+        if d == Dialect::Cassandra {
+            ok(&mut su, "CREATE TABLE ks.v (pk int PRIMARY KEY, emb vector<float, 2>)").await;
+            ok(&mut su, "CREATE CUSTOM INDEX ON ks.v (emb) USING 'StorageAttachedIndex'").await;
+            ok(&mut su, "INSERT INTO ks.v (pk, emb) VALUES (1, [0.6, 0.8])").await;
+            let q = "SELECT pk FROM ks.v ORDER BY emb ANN OF [0.6, 0.8] LIMIT 1";
+            assert!(err(&mut su, q).await.to_string().contains("masking policy"), "{d}: {q}");
+        }
     }
 }
 

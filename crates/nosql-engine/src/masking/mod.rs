@@ -632,6 +632,20 @@ pub fn check_platform_conditions(
     }
 }
 
+/// The platform policy's rule for vector search: `ORDER BY … ANN OF` on a masked column ranks
+/// rows by the real vectors, so query vectors would recover them; it's refused for every role.
+pub fn check_platform_ann(db: &Database, t: &Table, column: usize) -> Result<()> {
+    let policy = db.masking();
+    let c = &t.columns[column].name;
+    if policy.is_empty() || policy_call(&policy, t, c).is_none() {
+        return Ok(());
+    }
+    Err(Error::unauthorized(format!(
+        "Column {c} of {}.{} is masked by the database's masking policy: it can't order an ANN search",
+        t.keyspace, t.name
+    )))
+}
+
 /// `SelectStatement.authorize`'s check: restricting masked columns needs `UNMASK` or
 /// `SELECT_MASKED` (only while column masks apply).
 pub fn check_restrictions(
