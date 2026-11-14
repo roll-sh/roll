@@ -465,7 +465,7 @@ every deployment is immutable with instant rollback.
   `apps.localhost` on the apps listener (`ROLL_APPS_LISTEN`, `127.0.0.1:7080`), and each service
   can also get a port of its own (`ROLL_APPS_PORTS=58100-58199`) so it opens on a machine without
   wildcard DNS (a Tailscale name).
-- **Notifications** (`…/projects/{project}/notifications`, a service's Settings tab): a project's
+- **Notifications** (`…/projects/{project}/notifications`; Project settings → Services, and a service's Settings → The project): a project's
   failed deploys and crash loops (and, when asked, every new live deployment) go to its targets:
   a webhook (JSON, signed with HMAC-SHA256 over `<timestamp>.<body>`), a Slack incoming webhook
   or a Discord webhook. One node (the singleton `apps:notify`) follows the event log after a
@@ -1689,42 +1689,38 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (a second product review of the experience, a product review of what one engineer can close here now, bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **The project's apps settings on the project**: notifications, log drains and spend limits
-   cover every service but live on each service's Settings (under "The project" in its nav). The
-   project's own settings dialog is every product's, so they need a place there that isn't only
-   roll apps'.
-2. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+1. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-3. **Region**: the region shown on the overview and each environment, defaulting to the project's
+2. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-4. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+3. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-5. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+4. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-6. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+5. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-7. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+6. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-8. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-9. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+7. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+8. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-10. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+9. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-11. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+10. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-12. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+11. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-13. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+12. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

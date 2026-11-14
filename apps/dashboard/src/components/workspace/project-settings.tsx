@@ -3,16 +3,45 @@ import { useState } from "react";
 import { DESCRIPTION_MAX, PROJECT_NAME, type WorkspaceIcon, type WorkspaceProject } from "@/lib/workspace-api";
 import { workspace } from "@/lib/workspace-store";
 import { Dialog } from "../agents/ui/dialog";
+import { ProjectApps } from "../apps/project-apps";
 import { IconEditor } from "./project-icon";
 
 const field = "w-full rounded-lg border border-line-2 bg-canvas px-3 outline-none transition-colors focus:border-accent/60";
 
-/** A project's settings: how it looks, its name and description, and deleting it. */
+/** A project's settings: how it looks, its name and description, and deleting it; with services,
+ *  what roll apps keeps for all of them (notifications, log drains, spending limits). */
 export function ProjectSettings({ project, open, onClose }: { project: WorkspaceProject; open: boolean; onClose: () => void }) {
   const [key, setKey] = useState(0);
+  const [tab, setTab] = useState<"general" | "apps">("general");
+  const apps = project.resources.some((r) => r.kind === "service");
+  const shown = apps ? tab : "general";
   return (
-    <Dialog open={open} onClose={onClose} onExited={() => setKey((k) => k + 1)} title="Project settings" className="w-[min(560px,100%)]">
-      <Form key={key} project={project} onDone={onClose} />
+    <Dialog
+      open={open}
+      onClose={onClose}
+      onExited={() => {
+        setKey((k) => k + 1);
+        setTab("general");
+      }}
+      title="Project settings"
+      className={shown === "apps" ? "w-[min(820px,100%)]" : "w-[min(560px,100%)]"}
+    >
+      {apps && (
+        <div className="-mt-1 mb-4 flex gap-1 border-b border-line pb-2" role="tablist" aria-label="Project settings">
+          {(["general", "apps"] as const).map((t) => (
+            <button
+              key={t}
+              role="tab"
+              aria-selected={shown === t}
+              onClick={() => setTab(t)}
+              className={`h-7 rounded-md px-2.5 text-[12px] transition-colors duration-150 ${shown === t ? "bg-fg/[0.07] text-fg" : "text-muted hover:bg-fg/[0.04] hover:text-fg"}`}
+            >
+              {t === "general" ? "General" : "Services"}
+            </button>
+          ))}
+        </div>
+      )}
+      {shown === "apps" ? <ProjectApps key={key} project={project.id} projectName={project.name} /> : <Form key={key} project={project} onDone={onClose} />}
     </Dialog>
   );
 }
