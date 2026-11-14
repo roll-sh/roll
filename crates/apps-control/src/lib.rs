@@ -820,6 +820,7 @@ impl Apps {
             follow_tag: r.follow_tag,
             feedback: r.feedback,
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
+            pages: r.pages.clone(),
             allow_ips: r.allow_ips.clone(),
             rate_limit: r.rate_limit,
             firewall: r.firewall.clone(),
@@ -835,7 +836,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "feedback", "maintenance", "allow_ips", "rate_limit", "firewall"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -856,6 +857,24 @@ impl Apps {
                 }
             }
             Some(_) => return Err(Error::BadRequest("maintenance is true, {message?} or false".into())),
+        };
+        // Its own pages: each field HTML (at most 64 KiB) or null for roll's; the rest stay.
+        let pages_patch = match o.get("pages") {
+            None => None,
+            Some(Value::Object(p)) => {
+                if let Some(k) = p.keys().find(|k| !matches!(k.as_str(), "error" | "maintenance")) {
+                    return Err(Error::BadRequest(format!("pages.{k} isn't a page (error, maintenance)")));
+                }
+                for (k, v) in p {
+                    match v {
+                        Value::Null => {}
+                        Value::String(h) if !h.trim().is_empty() && h.len() <= crate::model::PAGE_MAX => {}
+                        _ => return Err(Error::BadRequest(format!("pages.{k} is HTML of at most 64 KiB, or null for roll's"))),
+                    }
+                }
+                Some(p.clone())
+            }
+            Some(_) => return Err(Error::BadRequest("pages is {error?, maintenance?}".into())),
         };
         // Who gets in through its public names: networks (`a.b.c.d/n`, a bare address), or
         // null / [] for anyone.
@@ -1016,6 +1035,13 @@ impl Apps {
         if let Some(m) = maintenance {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_maintenance(&sid, &e, m.as_deref())).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if let Some(patch) = pages_patch {
+            let (sid, e) = (service.to_string(), env.to_string());
+            let set: Vec<(String, Option<String>)> = patch.iter().map(|(k, v)| (k.clone(), v.as_str().map(str::to_string))).collect();
+            self.db(move |s| s.patch_pages(&sid, &e, &set)).await?;
             self.live(service, env).forget_gate();
             self.changed(service);
         }
@@ -1821,7 +1847,7 @@ impl Apps {
         let (sid, e) = (live.service.clone(), live.env.clone());
         let row = self.db(move |s| s.environment(&sid, &e)).await?;
         let allow = row.allow_ips.iter().filter_map(|r| r.cidr.parse::<ipnet::IpNet>().ok()).collect();
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall });
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }

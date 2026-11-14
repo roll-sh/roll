@@ -835,6 +835,9 @@ pub struct Environment {
     /// In maintenance (Render's maintenance mode): its public names answer a 503 page with the
     /// message, and nothing wakes. Null: serving.
     pub maintenance: Option<Maintenance>,
+    /// Its own pages for what roll would otherwise answer (Heroku's error and maintenance pages).
+    #[serde(skip_serializing_if = "Pages::is_empty")]
+    pub pages: Pages,
     /// Only these addresses get in through its public names (empty: anyone).
     pub allow_ips: Vec<IpRule>,
     /// Each client's requests a minute through its public names (null: no limit).
@@ -1361,6 +1364,27 @@ pub struct VarView {
     /// Set and run with, never shown again: not by `…/variables/values`, nor its length here.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub sealed: bool,
+}
+
+/// An environment's own HTML for roll's pages (Heroku's `ERROR_PAGE_URL` and
+/// `MAINTENANCE_PAGE_URL`, stored rather than fetched): `error` for the 502, 503 and 504 a
+/// visitor gets while the app can't answer or wake, `maintenance` while it's in maintenance.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Pages {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<String>,
+}
+
+/// The most a page may weigh.
+pub const PAGE_MAX: usize = 64 << 10;
+
+impl Pages {
+    pub fn is_empty(&self) -> bool {
+        self.error.is_none() && self.maintenance.is_none()
+    }
 }
 
 /// What a sealed value shows, whatever it is.

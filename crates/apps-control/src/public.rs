@@ -77,6 +77,7 @@ fn page_retrying(status: StatusCode, title: &str, text: &str, retry: u32) -> Res
          <main>{HORIZON}<h1>{title}</h1><p>{text}</p></main>"
     );
     let mut r = (status, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response();
+    r.extensions_mut().insert(RollPage::Error);
     if status == StatusCode::SERVICE_UNAVAILABLE
         && let Ok(v) = HeaderValue::from_str(&retry.to_string())
     {
@@ -89,7 +90,37 @@ fn page_retrying(status: StatusCode, title: &str, text: &str, retry: u32) -> Res
 /// half minute.
 fn maintenance_page(message: &str) -> Response {
     let text = if message.is_empty() { "This service is down for maintenance. It'll be back soon.".to_string() } else { escape(message) };
-    page_retrying(StatusCode::SERVICE_UNAVAILABLE, "Down for maintenance", &text, 30)
+    let mut r = page_retrying(StatusCode::SERVICE_UNAVAILABLE, "Down for maintenance", &text, 30);
+    r.extensions_mut().insert(RollPage::Maintenance);
+    r
+}
+
+/// Which of roll's pages a response is (never an app's own answer), so an environment's own
+/// page can take its place ([`their_page`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RollPage {
+    Error,
+    Maintenance,
+}
+
+/// One of roll's 5xx pages, as the environment's own HTML when it has one (Heroku's error and
+/// maintenance pages): the same status and `Retry-After`, never cached.
+async fn their_page(apps: &Arc<Apps>, service: &str, env: &str, r: Response) -> Response {
+    let Some(kind) = r.extensions().get::<RollPage>().copied() else { return r };
+    if !r.status().is_server_error() {
+        return r;
+    }
+    let Ok(gate) = apps.gate(&apps.live(service, env)).await else { return r };
+    let html = match kind {
+        RollPage::Error => gate.pages.error.clone(),
+        RollPage::Maintenance => gate.pages.maintenance.clone(),
+    };
+    let Some(html) = html else { return r };
+    let (mut parts, _) = r.into_parts();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    parts.headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Response::from_parts(parts, Body::from(html))
 }
 
 fn escape(s: &str) -> String {
@@ -556,7 +587,12 @@ fn strip_roll_headers(h: &mut axum::http::HeaderMap) {
 
 /// The waking proxy on the owner: an instance (woken if need be), the request forwarded, the
 /// answer metered.
-async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, mut req: Request) -> Response {
+async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, req: Request) -> Response {
+    let r = proxy_inner(apps.clone(), service, env, deployment, req).await;
+    their_page(&apps, service, env, r).await
+}
+
+async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, mut req: Request) -> Response {
     let began = Instant::now();
     // Came in through roll: the private environment's access cookie (checked just below).
     let cookie = format!("roll_access_{env}=");

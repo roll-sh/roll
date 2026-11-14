@@ -269,6 +269,8 @@ export interface EnvironmentPut {
   follow_tag?: boolean;
   /** Maintenance: its public names answer roll's page with the message; false ends it. */
   maintenance?: boolean | { message?: string | null };
+  /** Its own HTML (at most 64 KiB) instead of roll's pages; null goes back to roll's, an absent field stays. */
+  pages?: { error?: string | null; maintenance?: string | null };
   /** Only these networks get in through its public names; null or [] lets anyone in. */
   allow_ips?: (string | IpRule)[] | null;
   /** Each client's requests a minute through its public names, with a burst; null: no limit. */
@@ -342,6 +344,8 @@ export interface Environment extends EnvironmentSummary {
   waiting_for_ci?: string | null;
   /** In maintenance: what visitors read (null: roll's words). Null: serving. */
   maintenance?: { message: string | null } | null;
+  /** Its own pages (Heroku's): `error` for the 502/503/504 while the app can't answer or wake, `maintenance` while in maintenance. Absent: roll's. */
+  pages?: { error?: string; maintenance?: string };
   /** Only these networks get in through its public names (empty: anyone). */
   allow_ips?: IpRule[];
   /** Each client's requests a minute through its public names (null: no limit). */

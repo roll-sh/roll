@@ -557,6 +557,16 @@ pub enum AppsCmd {
         /// No firewall rules.
         #[arg(long)]
         no_firewall: bool,
+        /// Its own page (an HTML file, at most 64 KiB) for the 502, 503 and 504 visitors get
+        /// while the app can't answer or wake (Heroku's error page).
+        #[arg(long, value_name = "HTML_FILE")]
+        error_page: Option<PathBuf>,
+        /// Its own page for while it's in maintenance.
+        #[arg(long, value_name = "HTML_FILE")]
+        maintenance_page: Option<PathBuf>,
+        /// Back to roll's pages.
+        #[arg(long, conflicts_with_all = ["error_page", "maintenance_page"])]
+        roll_pages: bool,
     },
     /// Tear an environment down (asks first; `--yes` doesn't).
     EnvDelete {
@@ -2278,7 +2288,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, private, open, maintenance, serve, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall } => {
+        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, private, open, maintenance, serve, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, error_page, maintenance_page, roll_pages } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -2321,6 +2331,18 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("firewall".into(), Value::Array(firewall.iter().map(|r| firewall_rule(r)).collect::<anyhow::Result<_>>()?));
             } else if no_firewall {
                 body.insert("firewall".into(), Value::Null);
+            }
+            let mut pages = serde_json::Map::new();
+            for (k, f) in [("error", &error_page), ("maintenance", &maintenance_page)] {
+                if let Some(f) = f {
+                    pages.insert(k.into(), json!(std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?));
+                }
+            }
+            if roll_pages {
+                pages.extend([("error".into(), Value::Null), ("maintenance".into(), Value::Null)]);
+            }
+            if !pages.is_empty() {
+                body.insert("pages".into(), Value::Object(pages));
             }
             // A new access token, made here: only its link shows it, once.
             let token = private.then(new_token);

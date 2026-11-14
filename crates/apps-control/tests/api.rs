@@ -2132,9 +2132,32 @@ async fn maintenance_answers_roll_page_and_wakes_nothing() {
     let own = format!("{}--{h}", d["id"].as_str().unwrap().trim_start_matches("dep_"));
     assert_eq!(visit(&w, &own, "/").await.0, StatusCode::OK, "a deployment's own URL answers");
     assert_eq!(call(&w.api, "PUT", &base, Some(json!({"maintenance": {"message": "x".repeat(501)}}))).await.0, StatusCode::BAD_REQUEST);
+    // Its own pages (Heroku's) take the place of roll's, with the same status and Retry-After.
+    let get = |path: &str| {
+        let (public, req) = (w.public.clone(), Request::builder().uri(path).header("host", h.as_str()).body(Body::empty()).unwrap());
+        async move {
+            let r = public.oneshot(req).await.unwrap();
+            let (st, retry) = (r.status(), r.headers().get("retry-after").map(|v| v.to_str().unwrap().to_string()));
+            (st, retry, String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    for bad in [json!({"pages": {"error": "x".repeat(64 * 1024 + 1)}}), json!({"pages": {"other": "<p>x</p>"}}), json!({"pages": {"error": ""}})] {
+        assert_eq!(call(&w.api, "PUT", &base, Some(bad)).await.0, StatusCode::BAD_REQUEST);
+    }
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"pages": {"maintenance": "<h1>ours</h1>", "error": "<h1>oops</h1>"}}))).await;
+    assert_eq!((st, &env["pages"]), (StatusCode::OK, &json!({"maintenance": "<h1>ours</h1>", "error": "<h1>oops</h1>"})), "{env}");
+    assert_eq!(get("/").await, (StatusCode::SERVICE_UNAVAILABLE, Some("30".into()), "<h1>ours</h1>".into()));
     let (_, env) = call(&w.api, "PUT", &base, Some(json!({"maintenance": false}))).await;
     assert_eq!(env["maintenance"], Value::Null);
     assert_eq!(visit(&w, &h, "/").await.0, StatusCode::OK);
+    // roll's 504 for a request past its timeout is their error page; the app's own answers stay.
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"timeout_s": 1}}))).await;
+    let (_, r) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
+    assert_eq!(get("/sleep/1500").await, (StatusCode::GATEWAY_TIMEOUT, None, "<h1>oops</h1>".into()));
+    assert_eq!(get("/").await.0, StatusCode::OK);
+    let (_, env) = call(&w.api, "PUT", &base, Some(json!({"pages": {"error": null, "maintenance": null}}))).await;
+    assert!(env.get("pages").is_none(), "back to roll's: {env}");
 }
 
 /// `run.drain_s`: a request still in flight to the deployment being replaced gets to finish

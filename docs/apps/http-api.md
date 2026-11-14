@@ -275,6 +275,9 @@ type EnvironmentPut = {
    *  answer roll's 503 page (Retry-After 30) with the message, waking nothing; a deployment's own
    *  URL still answers. `false` or null serves again. */
   maintenance?: boolean | { message?: string | null } | null;
+  /** Its own HTML instead of roll's pages, each at most 64 KiB (400 past it or empty); null goes back
+   *  to roll's, a field left out stays. */
+  pages?: { error?: string | null; maintenance?: string | null };
   /** Only these networks get in through its public names (deployment URLs too): at most 100,
    *  each `"a.b.c.d/n"`, an IPv6 `/n`, an address, or `{cidr, description?}`; kept canonical.
    *  Checked first, on the address the fleet vouches for (no address: 403). null or [] lets
@@ -313,6 +316,7 @@ type Environment = EnvironmentSummary & {
   follow_tag: boolean;        // an image service's tag is watched: a new digest behind it deploys
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
   maintenance: { message: string | null } | null; // in maintenance (null message: roll's words); null: serving
+  pages?: { error?: string; maintenance?: string }; // its own pages (absent: roll's): error for the 502/503/504 while it can't answer or wake, maintenance while in maintenance
   allow_ips: { cidr: string; description?: string }[]; // only these networks get in through its public names ([]: anyone)
   tcp: string | null; // a TCP service's address, host:port (null until it has its port)
   rate_limit: { per_minute: number; burst: number | null } | null; // each client's requests a minute (null: no limit)

@@ -333,6 +333,40 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </div>
         )}
 
+        {service.run.type === "web" && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div className="min-w-0 flex-1">
+              <p className="text-[13px] font-medium">Your pages</p>
+              <p className="mt-1 text-[12px] text-muted">Your own HTML instead of roll's, for while the app can't answer or wake, and for maintenance. At most 64 KiB each, served as it is.</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {(["error", "maintenance"] as const).map((k) => (
+                <span key={k} className="inline-flex items-center gap-1">
+                  <label className={`${btn} cursor-pointer`}>
+                    {env.pages?.[k] ? `Replace ${k} page` : `${k === "error" ? "Error" : "Maintenance"} page…`}
+                    <input
+                      type="file"
+                      accept=".html,text/html"
+                      className="sr-only"
+                      disabled={busy}
+                      onChange={async (e) => {
+                        const f = e.target.files?.[0];
+                        e.target.value = "";
+                        if (f) await runner.run(`page:${k}`, async () => appsApi.putEnvironment(service.id, env.name, { pages: { [k]: await f.text() } }));
+                      }}
+                    />
+                  </label>
+                  {env.pages?.[k] && (
+                    <button className="p-1 text-[12px] text-subtle hover:text-fg" disabled={busy} onClick={() => runner.run(`page:${k}`, () => appsApi.putEnvironment(service.id, env.name, { pages: { [k]: null } }))}>
+                      Use roll's
+                    </button>
+                  )}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
         <p className="px-5 pb-2 pt-5 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Scale</p>
 
         {env.scaling && (

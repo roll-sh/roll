@@ -207,6 +207,8 @@ pub struct Gate {
     pub rate: Option<crate::model::RateLimit>,
     /// Its firewall rules, in order.
     pub firewall: Vec<crate::model::FirewallRule>,
+    /// Its own error and maintenance pages.
+    pub pages: crate::model::Pages,
 }
 
 /// Clients a rate limit remembers at most (a full bucket is the same as none, so those go first).
