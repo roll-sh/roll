@@ -215,14 +215,23 @@ async fn keep(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Result<
 
 /// Accept how a change's pages look at its latest screenshot (the `roll/visual` status).
 /// A scoped or OAuth token (an agent's, an app's) isn't a person: it can't accept a required one.
-async fn accept_visual(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<Json<Preview>> {
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct AcceptBody {
+    /// The head whose screenshots were looked at (`visual_review.head`); refused when it isn't
+    /// the latest. Left out: whatever is latest.
+    head: Option<String>,
+}
+
+async fn accept_visual(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Json<Preview>> {
     check_id(&id)?;
+    let seen = if b.is_empty() { AcceptBody::default() } else { body::<AcceptBody>(&b)? }.head;
     let (by, person) = match (who, grant) {
         (Some(axum::Extension(u)), None) => (u.handle, true),
         (_, Some(axum::Extension(g))) => (format!("token:{}", g.name), false),
         (None, None) => ("operator".into(), true),
     };
-    e.accept_visual(&id, &by, person).await.map(Json)
+    e.accept_visual(&id, &by, person, seen.as_deref()).await.map(Json)
 }
 
 #[derive(Deserialize)]

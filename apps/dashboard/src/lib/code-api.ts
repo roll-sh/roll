@@ -362,7 +362,7 @@ export interface PreviewEnvironment {
   /** The project's other pages (`github.pages`): errors while each loaded, change since the push before, against the default branch. */
   pages?: { path: string; errors: number; percent: number | null; base_percent: number | null }[];
   /** The `roll/visual` review (the project's `visual_review`); `required`: it keeps the change from landing too. */
-  visual_review?: { state: "unchanged" | "changed" | "accepted"; branch: string; percent: number; by: string | null; required: boolean };
+  visual_review?: { state: "unchanged" | "changed" | "accepted"; branch: string; percent: number; by: string | null; required: boolean; head?: string };
   /** What a screen reader can't name on that page. */
   page_a11y?: { issues: { kind: "images" | "fields" | "buttons" | "links"; count: number; first: string | null }[]; lang: boolean; title: boolean };
 }

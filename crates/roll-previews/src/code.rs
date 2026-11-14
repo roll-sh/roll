@@ -134,6 +134,7 @@ impl CodeSource {
                     percent: (v.percent * 10.0).round() / 10.0,
                     by: v.by.clone(),
                     required: v.required,
+                    head: Some(v.head.clone()).filter(|h| !h.is_empty()),
                 }),
                 page_a11y: p.page_a11y.as_ref().map(|a| code_control::model::PreviewPageA11y {
                     issues: a.issues.iter().map(|i| code_control::model::PreviewA11yIssue { kind: i.kind.clone(), count: i.count, first: i.first.clone() }).collect(),
@@ -368,10 +369,10 @@ impl PreviewBackend for Backend {
         Ok(self.source.summary(&p, &s))
     }
 
-    async fn accept_visual(&self, change: &code_control::model::Change, by: &str) -> anyhow::Result<()> {
+    async fn accept_visual(&self, change: &code_control::model::Change, by: &str, head: &str) -> anyhow::Result<()> {
         let engine = self.engine.get().and_then(Weak::upgrade).ok_or_else(|| anyhow::anyhow!("previews aren't running"))?;
         let row = engine.store.row_by_change(&change.id)?.ok_or_else(|| anyhow::anyhow!("the change has no preview"))?;
-        engine.accept_visual(&row.id, by, true).await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
+        engine.accept_visual(&row.id, by, true, Some(head)).await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     async fn delete(&self, repo: &RepoRow, change: &code_control::model::Change) -> anyhow::Result<()> {

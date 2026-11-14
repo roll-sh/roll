@@ -218,8 +218,11 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     };
     shoot("cs_1b");
     assert_eq!(review().map(|v| (v.state, v.percent)), Some((VisualState::Changed, 100.0)));
-    assert!(e.engine.accept_visual(&base.id, "ada", true).await.is_err(), "only a change's");
-    let p = e.engine.accept_visual(&chg.id, "ada", true).await.unwrap();
+    assert!(e.engine.accept_visual(&base.id, "ada", true, None).await.is_err(), "only a change's");
+    // What was seen: an older screenshot's head is refused, this one's accepted.
+    let err = e.engine.accept_visual(&chg.id, "ada", true, Some("cs_1a")).await.unwrap_err();
+    assert!(err.to_string().contains("a newer screenshot came in"), "{err}");
+    let p = e.engine.accept_visual(&chg.id, "ada", true, Some("cs_1b")).await.unwrap();
     assert_eq!(p.visual_review.map(|v| (v.state, v.by)), Some((VisualState::Accepted, Some("ada".into()))));
     assert_eq!(e.code.last_report("chg_1").visual_review.map(|v| v.state), Some(VisualState::Accepted), "the change is told at once");
     // A push that changes nothing visible keeps it; the next one that does is reviewed again.

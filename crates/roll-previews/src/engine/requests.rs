@@ -184,7 +184,7 @@ impl Engine {
     /// `by` accepts how the change's pages look at its latest screenshot (`github.visual_review`);
     /// a new head needs its own. The change and its pull request say so at once.
     /// `person`: not a token's; only a person (or the operator) accepts a required one.
-    pub async fn accept_visual(&self, id: &str, by: &str, person: bool) -> Result<Preview> {
+    pub async fn accept_visual(&self, id: &str, by: &str, person: bool, seen: Option<&str>) -> Result<Preview> {
         let r = self.store.row(id)?;
         if r.change_id.is_none() {
             return Err(Error::BadRequest("only a change's preview has a visual review".into()));
@@ -192,7 +192,7 @@ impl Engine {
         if !person && self.store.settings(&r.project_id)?.visual_review == crate::settings::VisualReviewRule::Required {
             return Err(Error::Forbidden("a required visual review is accepted by a person, in roll, not by a token".into()));
         }
-        let head = self.store.accept_visual(id, by)?.ok_or_else(|| Error::Conflict("the preview has no screenshot to accept yet".into()))?;
+        let head = self.store.accept_visual(id, by, seen)?.ok_or_else(|| Error::Conflict("the preview has no screenshot to accept yet".into()))?;
         self.store.log(id, &format!("{by} accepted how its pages look at {}", short(&head)))?;
         self.report(r.clone()).await;
         self.store.view(self.store.row(id)?)

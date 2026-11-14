@@ -1250,18 +1250,23 @@ impl Store {
 
     /// `by` accepted how the preview's pages look at the latest screenshot's head (`None`: no
     /// screenshot to accept).
-    pub fn accept_visual(&self, id: &str, by: &str) -> Result<Option<String>> {
-        let head: Option<String> = self.db.read(|c| c.query_row("SELECT head FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional())?;
-        let Some(head) = head else { return Ok(None) };
+    /// `seen`: the head whose screenshots were looked at; refused (`Conflict`) when a newer one
+    /// came in meanwhile, so nobody accepts pages they didn't see.
+    pub fn accept_visual(&self, id: &str, by: &str, seen: Option<&str>) -> Result<Option<String>> {
         let now = self.now_ms()?;
+        // Read and written in one transaction: a screenshot landing in between can't be accepted.
         self.db.write(|c| {
+            let head: Option<String> = c.query_row("SELECT head FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional()?;
+            let Some(head) = head else { return Ok(None) };
+            if seen.is_some_and(|s| s != head) {
+                return Err(Error::Conflict(format!("a newer screenshot came in (at {}): look at it first", head.chars().take(12).collect::<String>())));
+            }
             c.execute(
                 "INSERT INTO visual_accepts (preview_id, head, by, at) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, by = excluded.by, at = excluded.at",
                 params![id, head, by, now],
             )?;
-            Ok::<_, Error>(())
-        })?;
-        Ok(Some(head))
+            Ok::<_, Error>(Some(head))
+        })
     }
 
     /// After a screenshot: an acceptance of the head just before moves to this one when every page
@@ -1309,7 +1314,7 @@ impl Store {
             Some((_, by, at)) => (Some(by), Some(at)),
             None => (None, None),
         };
-        Ok(Some(crate::VisualReview { state, branch: base.branch.clone(), percent, by, at, required: rule == crate::settings::VisualReviewRule::Required }))
+        Ok(Some(crate::VisualReview { state, branch: base.branch.clone(), percent, by, at, required: rule == crate::settings::VisualReviewRule::Required, head: shot.unwrap_or_default() }))
     }
 
     /// Another page's screenshot (`previous`: the one before it).

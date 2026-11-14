@@ -242,7 +242,7 @@ export function PreviewSheet({
                     <button
                       type="button"
                       disabled={busy !== null || gone}
-                      onClick={() => run("accept", () => previewsApi.acceptVisual(p.id))}
+                      onClick={() => run("accept", () => previewsApi.acceptVisual(p.id, p.visual_review?.head))}
                       className="ml-auto h-6 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
                     >
                       {busy === "accept" ? "Accepting…" : "Accept"}

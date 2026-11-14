@@ -349,6 +349,9 @@ pub struct PreviewVisualReview {
     /// Required to land in roll (`Code::blockers`), not only a status.
     #[serde(default)]
     pub required: bool,
+    /// The head whose screenshots it's about (what an acceptance names).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

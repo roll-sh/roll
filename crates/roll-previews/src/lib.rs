@@ -442,6 +442,8 @@ pub struct VisualReview {
     pub at: Option<i64>,
     /// The project's `visual_review` is `required`: a change waiting for one can't land in roll.
     pub required: bool,
+    /// The head whose screenshots it's about: what an acceptance names (`seen`).
+    pub head: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

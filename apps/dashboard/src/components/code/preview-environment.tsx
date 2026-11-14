@@ -118,7 +118,7 @@ function VisualReview({ previewId, review }: { previewId: string; review: NonNul
           setBusy(true);
           setError(null);
           try {
-            const p = await previewsApi.acceptVisual(previewId);
+            const p = await previewsApi.acceptVisual(previewId, review.head);
             setBy(p.visual_review?.by ?? "you");
           } catch (e) {
             setError(errorText(e));

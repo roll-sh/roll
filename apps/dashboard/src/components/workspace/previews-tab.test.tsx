@@ -104,7 +104,7 @@ describe("the Previews tab", () => {
   });
 
   it("lists the previews waiting for a visual review first, tagged", async () => {
-    const waiting: Preview = { ...preview, id: "pv_review", slug: "pr483-shop", title: "New header", visual_review: { state: "changed", branch: "main", percent: 8, by: null, at: null, required: false } };
+    const waiting: Preview = { ...preview, id: "pv_review", slug: "pr483-shop", title: "New header", visual_review: { state: "changed", branch: "main", percent: 8, by: null, at: null, required: false, head: "cs_1" } };
     api.list.mockResolvedValue([preview, waiting]);
     view();
     const list = await screen.findByRole("list", { name: "Previews" });

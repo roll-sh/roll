@@ -188,9 +188,7 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
         }
         _ => {}
     }
-    let head = c.preview.as_ref().and_then(|p| p.environment.as_ref()).and_then(|e| e.head.clone()).unwrap_or_else(|| c.head.clone());
-    let sha = code.store.resolve(&r.id, &head).ok().flatten().and_then(|cs| code.store.git_of(&r.id, &cs).ok().flatten()).map(|(commit, _)| commit.hex());
-    let Some(sha) = sha else { return Ok(()) };
+    let Some(sha) = preview_sha(code, &r, c) else { return Ok(()) };
     let env = c.preview.as_ref().and_then(|p| p.environment.as_ref());
     let url = c.preview.as_ref().and_then(|p| p.url.clone());
     let log_url = env.and_then(|e| e.dashboard_url.clone());
@@ -442,6 +440,12 @@ fn review_line(v: &crate::model::PreviewVisualReview, dashboard: Option<&str>) -
     }
 }
 
+/// The git commit a change's preview statuses go on: the head its preview runs (else the change's).
+fn preview_sha(code: &Code, r: &RepoRow, c: &Change) -> Option<String> {
+    let head = c.preview.as_ref().and_then(|p| p.environment.as_ref()).and_then(|e| e.head.clone()).unwrap_or_else(|| c.head.clone());
+    code.store.resolve(&r.id, &head).ok().flatten().and_then(|cs| code.store.git_of(&r.id, &cs).ok().flatten()).map(|(commit, _)| commit.hex())
+}
+
 /// Someone clicked `roll/visual`'s Accept on GitHub: accepted for them when they can write to the
 /// repo (the event carries no association: GitHub's permission API) and didn't write the change,
 /// as approvals are; anything else is ignored.
@@ -456,8 +460,15 @@ pub(super) async fn visual_action(code: &Code, hub: &Hub, r: &RepoRow, link: &Li
         tracing::info!(change = %c.id, user = %sender, "a visual review's Accept from someone who can't give it; ignored");
         return Ok(());
     }
+    // Only the check run of the push the review is about: an older one's button would accept
+    // pages its clicker never saw.
+    let review = c.preview.as_ref().and_then(|p| p.environment.as_ref()).and_then(|e| e.visual_review.as_ref());
+    let (Some(head), true) = (review.and_then(|v| v.head.clone()), preview_sha(code, r, &c).as_deref() == Some(e.check_run.head_sha.as_str())) else {
+        tracing::info!(change = %c.id, "a visual review's Accept on an older push's check run; ignored");
+        return Ok(());
+    };
     let Some(backend) = code.previews.read().clone() else { return Ok(()) };
-    backend.accept_visual(&c, &sender).await.map_err(crate::Error::Internal)
+    backend.accept_visual(&c, &sender, &head).await.map_err(crate::Error::Internal)
 }
 
 /// The visual review's check run, and its button.
@@ -790,7 +801,7 @@ mod preview_tests {
         );
         let page = |path: &str, percent, base_percent, errors| crate::model::PreviewPageCheck { path: path.into(), errors, percent, base_percent };
         e.pages = vec![page("/pricing", Some(40.0), Some(2.0), 1), page("/about", Some(0.0), None, 0)];
-        let review = |state: &str, by: Option<&str>| crate::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.04, by: by.map(Into::into), required: false };
+        let review = |state: &str, by: Option<&str>| crate::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.04, by: by.map(Into::into), required: false, head: None };
         assert_eq!(visual_status(&review("changed", None)), ("pending", "Differs from main by 8.0%: accept it in roll".into()));
         assert_eq!(visual_status(&review("accepted", Some("ada"))), ("success", "Accepted by ada: differs from main by 8.0%".into()));
         assert_eq!(visual_status(&review("unchanged", None)).0, "success");

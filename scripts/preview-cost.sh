@@ -445,7 +445,10 @@ REVIEW=$(api GET "/v1/previews/$PV" | jq_ "(d.get('visual_review') or {}).get('s
 # Required: the change can't land in roll meanwhile.
 BLOCKED=$(api GET "/v1/code/changes/$CHG" | jq_ "[b['kind'] for b in d.get('blockers', [])]")
 case "$BLOCKED" in *visual*) ;; *) echo "a required visual review should keep the change from landing: $BLOCKED"; exit 1;; esac
-REVIEW=$(api POST "/v1/previews/$PV/visual/accept" | jq_ "'%s by %s' % (d['visual_review']['state'], d['visual_review']['by'])")
+# Accepting what wasn't seen (an older screenshot's head) is refused; what was, accepted.
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$PV/visual/accept" -H 'content-type: application/json' -d '{"head":"cs_not_this_one"}')" = 409 ] || { echo "accepting an older screenshot should be refused"; exit 1; }
+SEEN=$(api GET "/v1/previews/$PV" | jq_ "d['visual_review']['head']")
+REVIEW=$(api POST "/v1/previews/$PV/visual/accept" "{\"head\":\"$SEEN\"}" | jq_ "'%s by %s' % (d['visual_review']['state'], d['visual_review']['by'])")
 [ "$REVIEW" = "accepted by operator" ] || { echo "accepting should settle the review: $REVIEW"; exit 1; }
 case "$(api GET "/v1/code/changes/$CHG" | jq_ "[b['kind'] for b in d.get('blockers', [])]")" in *visual*) echo "an accepted review shouldn't block landing"; exit 1;; esac
 # Turned off, it goes.
