@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS outside_dbs (
 
 pub(crate) const KIND: &str = "outside_database";
 
-/// A Postgres, MySQL, SQL Server or Redis server outside roll, by the URL's scheme (rolld: TLS to a public address it
+/// A Postgres, MySQL, SQL Server, ClickHouse or Redis server outside roll, by the URL's scheme (rolld: TLS to a public address it
 /// resolved itself). Calls block; errors never carry a password.
 /// `ca` is the server's CA certificates (PEM), trusted as well as the system's.
 pub trait OutsideDb: Send + Sync {
@@ -84,7 +84,7 @@ pub struct OutsideDatabase {
 pub struct NewOutsideDatabase {
     pub name: String,
     /// `postgres://admin:…@host:5432/db`, `mysql://admin:…@host:3306/db`,
-    /// `sqlserver://admin:…@host:1433/db` or `rediss://admin:…@host:6379`: a user that may alter the roles and create logins in the group
+    /// `sqlserver://admin:…@host:1433/db`, `clickhouse://admin:…@host:8443/db` or `rediss://admin:…@host:6379`: a user that may alter the roles and create logins in the group
     /// (Redis: a template user whose rules dynamic logins copy).
     pub url: String,
     /// Two login roles that take turns (managed links), or none.
@@ -389,8 +389,8 @@ impl Secrets {
             return Err(Error::BadRequest("the group role isn't one of the two that take turns".into()));
         }
         let host = authority_host(&n.url)?;
-        if !["postgres://", "postgresql://", "mysql://", "sqlserver://", "redis://", "rediss://"].iter().any(|p| n.url.starts_with(p)) || host.is_empty() || n.url.len() > 2048 {
-            return Err(Error::BadRequest("the URL is postgres://user:password@host:5432/db, mysql://…@host:3306/db, sqlserver://…@host:1433/db or rediss://…@host:6379".into()));
+        if !["postgres://", "postgresql://", "mysql://", "sqlserver://", "clickhouse://", "redis://", "rediss://"].iter().any(|p| n.url.starts_with(p)) || host.is_empty() || n.url.len() > 2048 {
+            return Err(Error::BadRequest("the URL is postgres://user:password@host:5432/db, mysql://…@host:3306/db, sqlserver://…@host:1433/db, clickhouse://…@host:8443/db or rediss://…@host:6379".into()));
         }
         let ca = n.ca.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
         if ca.as_ref().is_some_and(|c| c.len() > 64 * 1024 || !c.contains("-----BEGIN CERTIFICATE-----")) {

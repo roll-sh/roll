@@ -27,7 +27,7 @@ export function OutsideDatabases() {
   const pair = roles.every((r) => ROLE.test(r)) && roles[0] !== roles[1];
   const noPair = roles.every((r) => r === "");
   const groupOk = group === "" ? !noPair : ROLE.test(group) && !roles.includes(group);
-  const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name) && /^(postgres(ql)?|mysql|rediss?|sqlserver):\/\/\S+@\S+/.test(url.trim()) && (pair || noPair) && groupOk;
+  const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name) && /^(postgres(ql)?|mysql|rediss?|sqlserver|clickhouse):\/\/\S+@\S+/.test(url.trim()) && (pair || noPair) && groupOk;
 
   const add = async () => {
     setBusy(true);
@@ -82,7 +82,7 @@ export function OutsideDatabases() {
           </label>
           <label>
             <span className="mb-1 block text-[11px] font-medium text-subtle">Admin URL (kept sealed; a user that may alter these roles)</span>
-            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="postgres://admin:…@db.example.com:5432/app, mysql://…, sqlserver://… or rediss://…" spellCheck={false} autoComplete="off" className={`${field} font-mono text-[12px]`} />
+            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="postgres://admin:…@db.example.com:5432/app, mysql://…, sqlserver://…, clickhouse://… or rediss://…" spellCheck={false} autoComplete="off" className={`${field} font-mono text-[12px]`} />
           </label>
           <div className="sm:col-start-2 flex flex-wrap gap-2">
             {roles.map((r, i) => (
