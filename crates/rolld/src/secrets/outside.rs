@@ -1,11 +1,12 @@
-//! Databases outside roll (roll-secrets' outside.rs), Postgres, MySQL, Redis or MongoDB by the URL's scheme: the
+//! Databases outside roll (roll-secrets' outside.rs), Postgres, MySQL, SQL Server, Redis or MongoDB by the URL's scheme: the
 //! address is the tenant's, so the host is resolved here, private addresses are refused (unless
 //! rolld allows them for local development), and the connection goes to the address that was
 //! checked. TLS is required off private addresses. Postgres gets a new password as a SCRAM
 //! verifier, so neither the wire nor the server's statement log ever sees it (MySQL: mysql.rs;
-//! Redis: redis.rs; MongoDB: mongo.rs).
+//! SQL Server: mssql.rs; Redis: redis.rs; MongoDB: mongo.rs).
 
 mod mongo;
+mod mssql;
 mod mysql;
 mod redis;
 
@@ -36,6 +37,9 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.mongo(url)? {
             return self.mg(u, ca, async move |c| mongo::check(c, &roles, group.as_deref()).await);
         }
+        if let Some(u) = self.mssql(url)? {
+            return self.ms(u, ca, async move |c| mssql::check(c, &roles, group.as_deref()).await);
+        }
         self.run(url, ca, move |c| {
             Box::pin(async move {
                 let rows = c.query("SELECT rolname FROM pg_roles WHERE rolname = ANY($1) AND rolcanlogin", &[&roles]).await.map_err(db_error)?;
@@ -63,6 +67,9 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.mongo(url)? {
             return self.mg(u, ca, async move |c| mongo::set_password(c, role, password).await);
         }
+        if let Some(u) = self.mssql(url)? {
+            return self.ms(u, ca, async move |c| mssql::set_password(c, role, password).await);
+        }
         // Checked by roll-secrets (lowercase letters, digits, _), quoted anyway.
         let sql = format!("ALTER ROLE {} PASSWORD '{}'", ident(role), postgres_protocol::password::scram_sha_256(password.as_bytes()));
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
@@ -78,13 +85,16 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.mongo(url)? {
             return self.mg(u, ca, async move |c| mongo::create_login(c, name, password, group).await);
         }
+        if let Some(u) = self.mssql(url)? {
+            return self.ms(u, ca, async move |c| mssql::create_login(c, name, password, group).await);
+        }
         let sql = format!("CREATE ROLE {} LOGIN PASSWORD '{}' VALID UNTIL '{}' IN ROLE {}", ident(name), postgres_protocol::password::scram_sha_256(password.as_bytes()), stamp(until)?, ident(group));
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
     }
 
     fn extend_login(&self, url: &str, ca: Option<&str>, name: &str, until: i64) -> Result<(), String> {
-        // MySQL, Redis and MongoDB have no expiry for a login: it lasts until roll ends the lease.
-        if self.mysql(url)?.is_some() || self.redis(url)?.is_some() || self.mongo(url)?.is_some() {
+        // MySQL, SQL Server, Redis and MongoDB have no expiry for a login: it lasts until roll ends the lease.
+        if self.mysql(url)?.is_some() || self.mssql(url)?.is_some() || self.redis(url)?.is_some() || self.mongo(url)?.is_some() {
             return Ok(());
         }
         let sql = format!("ALTER ROLE {} VALID UNTIL '{}'", ident(name), stamp(until)?);
@@ -100,6 +110,9 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         }
         if let Some(u) = self.mongo(url)? {
             return self.mg(u, ca, async move |c| mongo::drop_login(c, name).await);
+        }
+        if let Some(u) = self.mssql(url)? {
+            return self.ms(u, ca, async move |c| mssql::drop_login(c, name).await);
         }
         let name = name.to_string();
         self.run(url, ca, move |c| {
@@ -158,6 +171,17 @@ impl Guarded {
         // in, so name one (as roll-edge does).
         let _ = rustls::crypto::ring::default_provider().install_default();
         tokio::runtime::Handle::current().block_on(mysql::run(u, ca.map(str::to_string), self.allow_private, work))
+    }
+
+    /// A `sqlserver://` URL's settings; `None` for the others.
+    fn mssql(&self, url: &str) -> Result<Option<mssql::Url>, String> {
+        if url.starts_with("sqlserver://") { mssql::parse(url).map(Some) } else { Ok(None) }
+    }
+
+    fn ms<T>(&self, u: mssql::Url, ca: Option<&str>, work: impl AsyncFnOnce(&mut mssql::Conn) -> Result<T, String>) -> Result<T, String> {
+        // tiberius builds its TLS config with the process's provider: name one, as for MySQL.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        tokio::runtime::Handle::current().block_on(mssql::run(u, ca.map(str::to_string), self.allow_private, work))
     }
 
     fn run(&self, url: &str, ca: Option<&str>, work: impl FnOnce(tokio_postgres::Client) -> Done + Send + 'static) -> Result<(), String> {
@@ -294,6 +318,10 @@ mod tests {
         assert!(g.mongo("mongodb://a:b@db.example.com:27017/").err().unwrap().contains("tls=true"));
         assert!(g.mongo("mongodb://a:b@db.example.com/?tls=true&tlsInsecure=true").err().unwrap().contains("tlsInsecure"));
         assert!(g.mongo("mongodb+srv://a:b@cluster0.abcde.mongodb.net/?retryWrites=true&w=majority&appName=c").unwrap().is_some());
+        // SQL Server: TLS always (encrypt=false is refused even where private addresses are allowed).
+        assert!(Guarded { allow_private: true }.mssql("sqlserver://a:b@db.example.com/x?encrypt=false").err().unwrap().contains("TLS"));
+        assert!(g.mssql("sqlserver://a:b@db.example.com/x?trustServerCertificate=true").err().unwrap().contains("trustServerCertificate"));
+        assert!(g.mssql("sqlserver://a:b@db.example.com/x?encrypt=true").unwrap().is_some());
         assert!(resolve("127.0.0.1", 5432, false).await.unwrap_err().contains("private"));
         assert!(resolve("10.1.2.3", 5432, false).await.unwrap_err().contains("private"));
     }
