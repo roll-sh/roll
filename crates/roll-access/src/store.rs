@@ -139,8 +139,12 @@ const TOUCH_MS: i64 = 60 * 1000;
 /// Live grants kept at most, and per person.
 pub const MAX_GRANTS: usize = 10_000;
 pub const USER_MAX_GRANTS: usize = 100;
-/// Registered OAuth clients at most (registration is open; RFC 7591).
-pub const MAX_CLIENTS: i64 = 10_000;
+/// A registered client's id prefix: the client itself, signed (`Store::register_client`).
+pub const CLIENT_PREFIX: &str = "rlc_";
+/// How long a registered client's id works before a person consents to it.
+pub const UNCONSENTED_CLIENT_MS: i64 = 24 * 3600 * 1000;
+/// A registered client's name, URI and redirect URIs together, at most (its id carries them).
+pub const MAX_CLIENT_PAYLOAD: usize = 3000;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Grant {
@@ -1339,31 +1343,89 @@ impl Store {
 
     // ── OAuth ──
 
+    /// A registered client (RFC 7591), stored nowhere: its id is the client, signed
+    /// (`rlc_<payload>.<mac>`), so open registration can't fill anything. It's kept (in
+    /// `oauth_clients`) once a person consents to it; until then the id works for a day.
     pub fn register_client(&self, name: &str, uri: Option<&str>, redirect_uris: &[String]) -> Result<Client> {
-        let id = new_id("cli");
+        use base64::Engine;
         let now = code_sql::now_ms();
-        let uris = serde_json::to_string(redirect_uris).unwrap_or_default();
-        self.db.write(|c| {
-            let count: i64 = c.query_row("SELECT COUNT(*) FROM oauth_clients", (), |r| r.get(0))?;
-            if count >= MAX_CLIENTS {
-                // Registration is open: forget the clients that never connected, oldest first, and
-                // only those an hour old (a person may be on the consent screen of a newer one), so
-                // a flood of registrations can't push out a client being connected.
-                let evicted = c.execute(
-                    "DELETE FROM oauth_clients WHERE id IN (SELECT id FROM oauth_clients WHERE last_used_at IS NULL AND created_at < ? AND id NOT IN (SELECT client_id FROM grants WHERE client_id IS NOT NULL) ORDER BY created_at LIMIT 100)",
-                    [now - 3_600_000],
-                )?;
-                if evicted == 0 {
-                    return Err(Error::TooMany("too many clients registered lately: try again in an hour".into()));
-                }
+        let payload = serde_json::to_vec(&serde_json::json!({ "n": name, "u": uri, "r": redirect_uris, "t": now })).map_err(|e| Error::Internal(e.to_string()))?;
+        if payload.len() > MAX_CLIENT_PAYLOAD {
+            return Err(Error::BadRequest(format!("the client's name, URI and redirect URIs are at most {MAX_CLIENT_PAYLOAD} bytes together")));
+        }
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let body = b64.encode(&payload);
+        let id = format!("{CLIENT_PREFIX}{body}.{}", b64.encode(self.client_mac(body.as_bytes())?));
+        Ok(Client { id, name: name.to_string(), uri: uri.map(str::to_string), redirect_uris: redirect_uris.to_vec(), created_at: now, last_used_at: None })
+    }
+
+    /// The MAC of a registered client's payload, under this deployment's client key (made once,
+    /// the same on every node).
+    fn client_mac(&self, body: &[u8]) -> Result<Vec<u8>> {
+        use hmac::Mac;
+        let mut mac = self.client_hmac()?;
+        mac.update(body);
+        Ok(mac.finalize().into_bytes().to_vec())
+    }
+
+    /// Whether `mac` is `body`'s, compared in constant time.
+    fn client_mac_ok(&self, body: &[u8], mac: &[u8]) -> Result<bool> {
+        use hmac::Mac;
+        let mut m = self.client_hmac()?;
+        m.update(body);
+        Ok(m.verify_slice(mac).is_ok())
+    }
+
+    fn client_hmac(&self) -> Result<hmac::Hmac<sha2::Sha256>> {
+        use hmac::Mac;
+        let key = match self.setting("oauth_client_key")?.and_then(|v| v.as_str().map(str::to_string)) {
+            Some(k) => k,
+            None => {
+                let fresh = crate::new_secret("ck_");
+                self.db.write(|c| {
+                    c.execute("INSERT INTO settings (key, value) VALUES ('oauth_client_key', ?) ON CONFLICT (key) DO NOTHING", [serde_json::Value::String(fresh.clone()).to_string()])?;
+                    Ok::<_, Error>(())
+                })?;
+                // Whichever node wrote first: every node signs with the same key.
+                self.setting("oauth_client_key")?.and_then(|v| v.as_str().map(str::to_string)).ok_or_else(|| Error::Internal("no client key".into()))?
             }
-            c.execute("INSERT INTO oauth_clients (id, name, uri, redirect_uris, created_at) VALUES (?, ?, ?, ?, ?)", params![id, name, uri, uris, now])?;
-            Ok::<_, Error>(())
-        })?;
-        self.client(&id)?.ok_or_else(|| Error::Internal("client vanished".into()))
+        };
+        hmac::Hmac::<sha2::Sha256>::new_from_slice(key.as_bytes()).map_err(|e| Error::Internal(e.to_string()))
+    }
+
+    /// A registered client from its signed id, while it may still be consented to (a day).
+    fn signed_client(&self, id: &str) -> Result<Option<Client>> {
+        use base64::Engine;
+        let Some(rest) = id.strip_prefix(CLIENT_PREFIX) else { return Ok(None) };
+        let Some((body, mac)) = rest.split_once('.') else { return Ok(None) };
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let (Ok(mac), Ok(payload)) = (b64.decode(mac), b64.decode(body)) else { return Ok(None) };
+        if !self.client_mac_ok(body.as_bytes(), &mac)? {
+            return Ok(None);
+        }
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&payload) else { return Ok(None) };
+        let t = v["t"].as_i64().unwrap_or(0);
+        if code_sql::now_ms() - t > UNCONSENTED_CLIENT_MS {
+            return Ok(None);
+        }
+        let redirect_uris = v["r"].as_array().map(|a| a.iter().filter_map(|u| u.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        Ok(Some(Client { id: id.to_string(), name: v["n"].as_str().unwrap_or("MCP client").to_string(), uri: v["u"].as_str().map(str::to_string), redirect_uris, created_at: t, last_used_at: None }))
     }
 
     pub fn client(&self, id: &str) -> Result<Option<Client>> {
+        let kept = self.kept_client(id)?;
+        if kept.is_some() {
+            return Ok(kept);
+        }
+        self.signed_client(id)
+    }
+
+    /// The clients kept (consented to at least once), by id.
+    pub fn list_clients(&self) -> Result<Vec<String>> {
+        Ok(self.db.read(|c| c.query("SELECT id FROM oauth_clients ORDER BY id", (), |r| r.get(0)))?)
+    }
+
+    fn kept_client(&self, id: &str) -> Result<Option<Client>> {
         Ok(self.db.read(|c| {
             c.query_row("SELECT id, name, uri, redirect_uris, created_at, last_used_at FROM oauth_clients WHERE id = ?", [id], |r| {
                 Ok(Client {
@@ -1406,6 +1468,7 @@ impl Store {
         let code = new_secret("rlz_");
         let rules = serde_json::to_string(&new.rules).unwrap_or_default();
         let ip = serde_json::to_string(&new.ip_allow).unwrap_or_default();
+        let uris = serde_json::to_string(&client.redirect_uris).unwrap_or_default();
         self.db.write(|c| {
             // The same room a token takes: everyone's, and its person's.
             let count: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE revoked_at IS NULL AND kind <> 'workload'", (), |r| r.get(0))?;
@@ -1418,6 +1481,12 @@ impl Store {
                     return Err(Error::Conflict(format!("a person has at most {USER_MAX_GRANTS} live tokens and connections: revoke some first")));
                 }
             }
+            // A registered client is kept once a person consents to it (its signed id stops
+            // working after a day, but a kept client doesn't).
+            c.execute(
+                "INSERT INTO oauth_clients (id, name, uri, redirect_uris, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+                params![client.id, client.name, client.uri, uris, now],
+            )?;
             // The grant exists from now, unusable (no secret) until the code is exchanged.
             c.execute(
                 "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise) VALUES (?, ?, 'oauth', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
