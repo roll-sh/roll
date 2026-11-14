@@ -310,7 +310,7 @@ the discovery/store plugins.
 <!-- test-search: watcher-security >= 9 -->
 <!-- test-search: wildcard >= 9 -->
 <!-- test-search: platinum >= 1064 -->
-<!-- test-search: inference >= 139 -->
+<!-- test-search: inference >= 161 -->
 <!-- test-search: esql >= 549 -->
 
 `platinum` by directory (roll / Elasticsearch passes): `ml` 349/618, `analytics` 113/114, `spatial`
@@ -920,7 +920,7 @@ same directory on a cluster with the `inference-service-test` plugin's services,
 `search-dev --yaml-test-cluster` provides (`services/test.rs`: `test_service`,
 `text_embedding_test_service`, `test_reranking_service`, `completion_test_service`,
 `streaming_completion_test_service`, reproduced exactly) and real clusters never have; the plugin
-isn't in Elasticsearch's release, so there is no Elasticsearch baseline (roll 117 of 305).
+isn't in Elasticsearch's release, so there is no Elasticsearch baseline (roll 161 of 305).
 Tests: `crates/search-es/tests/inference.rs` runs every service against a mock server.
 
 ### `semantic_text`
