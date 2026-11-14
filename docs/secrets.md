@@ -1593,7 +1593,10 @@ terminal (#54), as 1Password's `op run` and GitHub Actions do; pulling into Kube
 Secrets Operator (#55: its webhook provider, checked against ESO 2.15 on k3s) and
 `values?dynamic=false` for readers that can't renew a lease. #50, #51 and #53 merge cleanly
 together, and the merged tree passes roll-secrets', rolld's auth and the dashboard's tests. #52's
-import dialog names Vault trees and AWS (screenshots on #52).
+import dialog names Vault trees and AWS (screenshots on #52). `roll secrets kubernetes` and the
+Export menu print ESO's manifests with a fresh token (#55), and a workload identity's login renews
+itself (#56), so a pod running `roll run --watch` needs no stored token, as with Vault's Kubernetes
+auth.
 
 An eighth independent review (2026-11-14, of moving in, change policies per folder and the
 seventh review's fixes) found no high-severity issue; it found folder gates a reviewer, a
@@ -1690,9 +1693,8 @@ user's call).
 
 1. **A ninth independent review** of `roll run`'s masking (#54) and the eighth review's fixes
    (running), and its fixes.
-2. **`roll secrets kubernetes`** prints ESO's `SecretStore`, `ExternalSecret` and token `Secret`
-   for an environment (a fresh `--for-env` token, this server's URL, `dynamic=false`), and the
-   dashboard's Export menu offers the same, so nobody writes the webhook template by hand (#55).
+2. **Measure `roll run`'s masking** on a noisy command (a test suite's output, hundreds of values):
+   throughput through the masker against the command alone, and fix what it costs.
 3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
 4. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
@@ -1734,6 +1736,8 @@ Open pull requests after this one:
   after its grace; a user with two keys already is refused, never pruned.
 - **#55, pulling into Kubernetes with External Secrets Operator** (after #20): its webhook
   provider (one store for whole environments and single keys) and `values?dynamic=false`.
+- **#56, a workload identity's login renews itself** (after #20): long-running `roll run
+  --watch` in a pod logs in again before its login ends, reading the rotated token file.
 - **#54, `roll run` masks values in the command's output** (after #20): stdout and stderr that
   aren't a terminal go through roll, which writes `<concealed by roll>` for each value it added
   (as is, by line, JSON- and URL-encoded); `--mask`, `--no-mask`.
