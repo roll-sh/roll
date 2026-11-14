@@ -150,7 +150,8 @@ impl Tool {
         }
         props.insert(
             "approval".into(),
-            json!({ "type": "string", "description": "An approval id (apr_…) from an earlier call that needed the user's approval: waits for it, and runs once it's approved" }),
+            // Every tool takes it: kept short (roll://guide and the server's instructions explain it).
+            json!({ "type": "string", "description": "apr_… from an approval_pending answer: waits, then runs" }),
         );
         let actions = self.find_actions();
         // Read-only changes nothing and makes nothing: a reveal that's a POST (a presigned PUT URL,
@@ -163,7 +164,7 @@ impl Tool {
             "title": self.title,
             "description": self.description,
             "inputSchema": { "type": "object", "properties": props, "required": required, "additionalProperties": false },
-            "annotations": { "title": self.title, "readOnlyHint": read_only, "destructiveHint": destructive, "idempotentHint": idempotent, "openWorldHint": false },
+            "annotations": { "readOnlyHint": read_only, "destructiveHint": destructive, "idempotentHint": idempotent, "openWorldHint": false },
             "_meta": { "roll/product": self.product, "roll/route": format!("{} {}", self.method, self.path), "roll/actions": actions },
         })
     }
