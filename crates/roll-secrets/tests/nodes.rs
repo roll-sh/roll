@@ -12,7 +12,7 @@ fn node(dir: &std::path::Path, ws: Arc<roll_workspace::Workspace>) -> Arc<Secret
 }
 
 fn set(key: &str, value: &str) -> Op {
-    Op::Set { key: key.into(), value: Some(value.into()), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None }
+    Op::Set { key: key.into(), value: Some(value.into()), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None }
 }
 
 #[test]

@@ -78,11 +78,11 @@ export type Secret = {
   weak?: string;
 };
 /** `expires_at`: null clears it; absent keeps it. */
-export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string; expires_at?: number | null };
+export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number };
 /** `path`: another folder for this one operation (default: the batch's). */
 export type Op =
-  | { op: "set"; key: string; value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; path?: string; expires_at?: number | null }
-  | { op: "delete"; key: string; type?: SecretType; path?: string };
+  | { op: "set"; key: string; value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; path?: string; expires_at?: number | null; if_version?: number }
+  | { op: "delete"; key: string; type?: SecretType; path?: string; if_version?: number };
 export type Batch = { path?: string; message?: string; ops: Op[]; if_seq?: number };
 export type ChangeKind = "write" | "rollback" | "promote" | "rotate" | "request" | "rename";
 export type Change = { seq: number; environment: string; path: string; message: string; by: string; at: number; keys: number; kind: ChangeKind };
