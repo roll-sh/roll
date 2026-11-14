@@ -282,6 +282,10 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     let pricing = e.engine.store.page_checks(&chg.id).unwrap().into_iter().find(|p| p.path == "/pricing").unwrap();
     let against = pricing.against.unwrap();
     assert_eq!((pricing.links.map(|l| l.broken.len()), against.links_added, against.text.map(|t| t.added)), (Some(1), Some(1), Some(vec!["/gone".to_string()])));
+    // A list carries it light: the counts a row reads, not each page's checks.
+    let light = e.engine.store.view(e.engine.store.row(&chg.id).unwrap()).unwrap().light();
+    let page = light.pages.iter().find(|p| p.path == "/pricing").unwrap();
+    assert!(page.links.is_none() && page.against.is_none() && page.base_percent.is_some());
 }
 
 #[tokio::test]

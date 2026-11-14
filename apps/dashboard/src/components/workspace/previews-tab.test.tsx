@@ -72,6 +72,8 @@ beforeEach(() => {
   api.vars.mockResolvedValue({ vars: {} });
   api.shares.mockResolvedValue([]);
   api.mail.mockResolvedValue({ mail: [] });
+  // The sheet's full view: the list's item stands in where a test doesn't give one.
+  api.get.mockRejectedValue(new Error("not in this test"));
 });
 
 const view = () =>

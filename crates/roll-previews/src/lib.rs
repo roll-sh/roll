@@ -253,6 +253,27 @@ pub struct Preview {
     pub updated_at: i64,
 }
 
+impl Preview {
+    /// As a list carries it (`GET /v1/previews`): every count a row and its tags read, without
+    /// what only its own view shows (each page's accessibility issues, links and comparison, the
+    /// first page's issues' markup and axe-core's words, the words against main). A project of
+    /// fifty previews with many violations would otherwise send megabytes per list.
+    pub fn light(mut self) -> Preview {
+        for p in &mut self.pages {
+            (p.a11y, p.links, p.against) = (None, None, None);
+        }
+        if let Some(a) = &mut self.page_a11y {
+            for i in &mut a.issues {
+                (i.first, i.help) = (None, None);
+            }
+        }
+        if let Some(b) = &mut self.base_change {
+            b.text = None;
+        }
+        self
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Desired {

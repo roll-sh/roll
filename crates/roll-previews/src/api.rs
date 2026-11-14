@@ -162,7 +162,7 @@ async fn list(AxState(e): S, axum::Extension(visible): axum::Extension<Visible>,
             e.workspace_project(p)?;
         }
         let rows = e.store.rows(q.project.as_deref())?;
-        rows.into_iter().filter(|r| visible.sees(&r.project_id) && state.is_none_or(|s| r.state == s)).map(|r| e.store.view(r)).collect::<crate::Result<Vec<_>>>()
+        rows.into_iter().filter(|r| visible.sees(&r.project_id) && state.is_none_or(|s| r.state == s)).map(|r| e.store.view(r).map(Preview::light)).collect::<crate::Result<Vec<_>>>()
     })
     .await
     .map(Json)

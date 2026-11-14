@@ -53,7 +53,22 @@ export function ProjectPreviews({
   const repos = useMemo(() => project.resources.filter((r) => r.kind === "repo").map((r) => r.ref), [project.resources]);
   const data = useMemo(() => project.resources.filter((r) => r.kind !== "repo"), [project.resources]);
   const names = useMemo(() => resourceNames(project, inventory), [project, inventory]);
-  const opened = list?.find((p) => p.id === openId) ?? null;
+  const listed = list?.find((p) => p.id === openId) ?? null;
+  // The list is light (counts only): the sheet reads the preview's own view, again whenever the
+  // list says it changed, and shows the list's until that's in.
+  const [full, setFull] = useState<Preview | null>(null);
+  useEffect(() => {
+    if (!listed) return setFull(null);
+    let live = true;
+    previewsApi.get(listed.id).then(
+      (p) => live && setFull(p),
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [listed?.id, listed?.updated_at, listed?.screenshot_at, listed?.state]);
+  const opened = listed && full && full.id === listed.id && full.updated_at >= listed.updated_at ? full : listed;
   const act = usePreviewMark(opened ? [opened] : list);
 
   useEffect(() => setOpenId(initial ?? null), [initial]);
@@ -169,7 +184,10 @@ export function ProjectPreviews({
             names={names}
             masked={new Map(Object.entries(settings?.masking ?? {}).map(([k, cols]) => [k, Object.keys(cols).length]))}
             act={act}
-            onChange={put}
+            onChange={(p) => {
+              put(p);
+              setFull(p);
+            }}
             onClose={() => setOpenId(null)}
             feedback={opened.id === initial ? feedback : undefined}
             resolve={opened.id === initial ? resolve : undefined}
