@@ -615,13 +615,16 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
 - What the command prints is masked in logs, as 1Password's `op run` does and GitHub Actions does
   for its own secrets: roll keeps the command as a child, reads the stream, and writes
   `<concealed by roll>` in place of any value it added, so a debug print doesn't put a key in a
-  build log. By default that's stderr when it isn't a terminal (diagnostics, never data), and
-  stdout only in CI (`CI` set) when it's neither a terminal nor a file: a build log. Locally,
-  `roll run -- pg_dump > dump.sql` or `… | jq` gets the command's bytes as they are, and a terminal
-  stays the command's own (prompts, colours). `--mask` masks both streams anywhere; `--no-mask`
-  neither. A value is matched as it is, its JSON and URL encodings, and each line of a multi-line
-  one that has no spaces (a PEM key's lines, not a JSON file's `"type": …` lines); values under 8
-  characters (`true`, a port) aren't masked. Output passes through as it comes, except a tail that
+  build log. By default: in CI (`CI` set) both streams, whatever they are (Jenkins logs to files,
+  Buildkite runs commands in a PTY); elsewhere stderr when it isn't a terminal (diagnostics, never
+  data), and stdout when roll has no controlling terminal (a container, a systemd unit, a pod:
+  its stdout is a log) unless it's a file. In a person's shell, `roll run -- pg_dump > dump.sql` or
+  `… | jq` gets the command's bytes as they are, and a terminal stays the command's own (prompts,
+  colours). `--mask` masks both streams anywhere; `--no-mask` neither. A value is matched as it
+  is, its JSON and URL encodings, each line of a multi-line one that has no spaces (a PEM key's
+  lines, not a JSON file's `"type": …` lines), and, in a JSON value (a cloud key file), the fields
+  named as secrets (`private_key`, `client_secret`, not `token_uri`); values under 8 characters
+  (`true`, a port) aren't masked. Output passes through as it comes, except a tail that
   could start a value, held until more comes or the stream ends (never on a timer: a
   block-buffered program can pause in the middle of a value).
 - Masking is a guard against accidents, not a boundary. The command can print a value some other
@@ -630,7 +633,8 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
 - A masked command runs as roll's child. The exit is the command's: its code, or the same SIGINT,
   SIGTERM or SIGHUP re-raised, so a shell loop stops on Ctrl-C. SIGTERM and SIGHUP (`docker stop`,
   systemd) are passed on, with or without `--watch`, and SIGINT unless roll's terminal sent it to
-  the command too. A process the command leaves in the background gets 1 s of output after the
+  the command too (so a `kill -INT` aimed at roll while it's in the terminal's foreground isn't
+  passed on: send SIGTERM, or signal the command). A process the command leaves in the background gets 1 s of output after the
   command exits (then roll exits and its pipe closes): run daemons with `--no-mask`
   (`roll-cli/src/mask.rs`).
   Measured (release build, 2026-11-14, 400 MB through `cat`): with 300 values of 32 characters
