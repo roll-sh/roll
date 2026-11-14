@@ -243,6 +243,12 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     let (s, list) = d.call(&token, Method::GET, "/v1/projects", None).await;
     assert_eq!((s, ids(&list)), (StatusCode::OK, vec!["pa"]));
     assert_eq!(list[0]["branches"][0]["connection_uri"], "postgres://roll:redacted@db:5432/main");
+    // Reveal on one database, read on all: the list shows only that one's credentials (a list is
+    // judged item by item, not as a whole).
+    let (some, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }, { "product": "postgres", "resources": [{ "id": "pa" }], "actions": { "reveal": "allow" } }]), json!({})).await;
+    let (_, both) = d.call(&some, Method::GET, "/v1/projects", None).await;
+    let uri = |id: &str| both.as_array().unwrap().iter().find(|p| p["id"] == id).unwrap()["branches"][0]["connection_uri"].clone();
+    assert_eq!((uri("pa"), uri("pb")), (json!("postgres://roll:secret@db:5432/main"), json!("postgres://roll:redacted@db:5432/main")), "{both}");
 
     let (s, e) = d.call(&token, Method::DELETE, "/v1/projects/pa", None).await;
     assert_eq!((s, e["code"].as_str(), e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden"), Some("delete")));
