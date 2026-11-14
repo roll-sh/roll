@@ -475,10 +475,10 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Everyday routes with no tool on the core products** (`tool-gaps.py origin/main <product>`):
-   storage, streams, queues, tasks and NoSQL have 2–5× more routes than tools. Add what an agent
-   uses day to day (as postgres' reset and endpoint, redis' restore were); credentials, consoles
-   and a person's calls stay out.
+1. **Context cost with every product on** (222 tools, ~164 KB): measure what each client
+   actually sends a model (Claude Code's tool search, Cursor's cap of 40 tools) and decide
+   whether a default toolset, or a `roll_search_tools` meta-tool like GitHub's dynamic toolsets,
+   serves agents better than the whole list. Measure first; the list itself stays correct.
 2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25), and compare each product's routes with its tools
