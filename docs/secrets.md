@@ -2743,7 +2743,7 @@ user's call).
 12. *The user's call:* land the stack (#62).
 13. *Waits on roll MCP's #25 on `main`:* #64 (#30 onto #62: roll-access's tokens replace `rlst_`,
    re-keyed identities revoke their workload tokens, reach lists roll-access's tokens; every suite
-   passes), then a workload identity a person creates
+   passes; roll MCP's `feature/mcp-on-landing` is #25 with it, its gate passing), then a workload identity a person creates
    asks roll-access's policy (held until an admin approves, `policy_now().needs_approval(&scope,
    false)`, admins told through `Access::tell_admins`), and the Access tab shows tokens waiting
    for approval and rotations that keep the old secret (`keep_old_for_s`).
