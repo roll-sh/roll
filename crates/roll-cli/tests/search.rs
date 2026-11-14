@@ -269,3 +269,20 @@ async fn api_keys() {
     assert_eq!(put("2").await.unwrap().status().as_u16(), 401);
     assert_eq!(e.roll(&["search", "keys", "list", "keyed"]).await.trim(), "no keys");
 }
+
+/// `roll search inference`: the built-in endpoints are listed, a create without a key in the
+/// environment stops before anything is sent (the key never goes on the command line), and an
+/// unknown endpoint is named.
+#[tokio::test]
+async fn inference_endpoints() {
+    let e = env().await;
+    e.roll(&["search", "clusters", "create", "sem"]).await;
+    let out = e.roll(&["search", "inference", "list", "sem"]).await;
+    assert!(out.contains(".elser-2-elasticsearch") && out.contains("built in"), "{out}");
+    let out = e.roll_with(&["search", "inference", "create", "sem", "emb", "--model", "m", "--api-key-env", "ROLL_TEST_NO_SUCH_KEY"], None).await;
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("set ROLL_TEST_NO_SUCH_KEY"), "{out:?}");
+    let out = e.roll_with(&["search", "inference", "delete", "sem", "nope"], None).await;
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nope"), "{out:?}");
+}

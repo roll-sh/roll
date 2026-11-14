@@ -71,10 +71,11 @@ roll search index show app books | mapping … | delete-by-query … | delete ap
 Semantic search (or the dashboard's Inference tab):
 
 ```sh
-roll search request app PUT /_inference/text_embedding/emb '{"service":"openai","service_settings":{"api_key":"<key>","model_id":"text-embedding-3-small"}}'
+OPENAI_API_KEY=… roll search inference create app emb --model text-embedding-3-small   # key from the environment, sealed in the cluster
 roll search request app PUT /articles '{"mappings":{"properties":{"body":{"type":"semantic_text","inference_id":"emb"}}}}'
 roll search request app POST '/articles/_doc?refresh=true' '{"body":"Passwords can be reset from the sign-in page."}'
 roll search request app POST /articles/_search '{"query":{"semantic":{"field":"body","query":"forgot my password"}}}'
+roll search inference list app | test app emb "some text" | delete app emb
 ```
 
 A cluster's name is its identity: the Basic auth user, the host label under `--search-domain`,
