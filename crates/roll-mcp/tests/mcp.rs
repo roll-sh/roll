@@ -147,6 +147,11 @@ async fn tools_follow_the_tokens_rules() {
 
     // Ask: the call comes back pending, and runs once approved when called again with it.
     let asker = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }])).await;
+    // Only a connection a person can be asked about is offered the approval argument (a model
+    // reads every schema): the reader's rules only allow.
+    let schema = |list: &Value, tool: &str| list["tools"].as_array().unwrap().iter().find(|t| t["name"] == tool).map(|t| t["inputSchema"]["properties"].clone()).unwrap();
+    assert!(schema(&d.rpc(&asker, "tools/list", json!({})).await, "postgres_delete_project").get("approval").is_some());
+    assert!(schema(&d.rpc(&reader, "tools/list", json!({})).await, "postgres_query").get("approval").is_none());
     let pending = d.tool(&asker, "postgres_delete_project", json!({ "project": "pa" })).await;
     assert_eq!((pending["isError"].as_bool(), pending["structuredContent"]["status"].as_str()), (Some(false), Some("approval_pending")), "{pending}");
     let id = pending["structuredContent"]["approval"].as_str().unwrap();
