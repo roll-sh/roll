@@ -138,7 +138,8 @@ export function HealthView() {
 
 /** Every managed credential: when it rotates, when it's next due, why its last rotation failed. */
 function Rotations() {
-  const { api } = useSecrets();
+  const { api, standard } = useSecrets();
+  const envName = (slug: string) => standard.find((e) => e.slug === slug)?.name ?? slug;
   const list = useLoad(() => api.rotations(), [api]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -166,7 +167,7 @@ function Rotations() {
           const id = `${r.environment}:${r.path}:${r.keys[0]}`;
           return (
             <div key={`${r.environment}:${r.path}:${r.keys.join(",")}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
-              <span className="rounded border border-line-2 px-1 text-[10.5px] text-subtle">{r.environment}</span>
+              <span className="rounded border border-line-2 px-1 text-[10.5px] text-subtle">{envName(r.environment)}</span>
               <span className="min-w-0 truncate font-mono text-[12px]">{r.keys.join(", ")}</span>
               <span className="text-[11.5px] text-muted">
                 {r.name} · {r.kind}
