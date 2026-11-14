@@ -859,16 +859,10 @@ impl Apps for Runtime {
     }
 
     async fn screenshot(&self, preview: &str, service: &str, opts: &crate::ports::ShotOptions) -> anyhow::Result<Option<crate::ports::Shot>> {
-        use base64::Engine as _;
         if self.iso.name() != "docker" {
             return Ok(None);
         }
         let Some(host) = self.store.services(preview)?.into_iter().find(|s| s.name == service).map(|s| s.host) else { return Ok(None) };
-        // The browser image once, in the background task screenshots run in (a cold pull isn't
-        // bounded by the screenshot's 90 s).
-        if code_preview::docker::docker(&["image", "inspect", "--format", "{{.Id}}", &self.cfg.screenshot_image]).await.is_err() {
-            code_preview::docker::docker(&["pull", "--quiet", &self.cfg.screenshot_image]).await?;
-        }
         let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
         match me.ready(preview, service, self.cfg.wait).await {
             Ok(_) => {}
@@ -878,8 +872,33 @@ impl Apps for Runtime {
         let name = container_name(&host);
         // The port the runtime published (the service's own), not whatever else its image exposes.
         let ports = code_preview::docker::docker(&["inspect", "-f", "{{range $p, $_ := .HostConfig.PortBindings}}{{$p}} {{end}}", &name]).await?;
-        let port = ports.split_whitespace().next().and_then(|p| p.split('/').next()).ok_or_else(|| anyhow::anyhow!("the service publishes no port"))?.to_string();
-        let shot = format!("roll-previews-shot-{host}");
+        let port = ports.split_whitespace().next().and_then(|p| p.split('/').next()).and_then(|p| p.parse::<u16>().ok()).ok_or_else(|| anyhow::anyhow!("the service publishes no port"))?;
+        self.screenshot_in(&name, port, opts).await.map(Some)
+    }
+
+    async fn seed(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {
+        self.seed_job(job).await
+    }
+
+    fn status(&self, preview: &str, service: &str) -> Option<ServiceState> {
+        self.service_status(preview, service)
+    }
+}
+
+impl Runtime {
+    /// A screenshot run in container `name`'s own network (its page at `127.0.0.1:<port>`, so the
+    /// page's code reaches only what the service does): this runtime's containers, and roll
+    /// apps' instances (rolld's `RollApps`, through roll apps' `reachable`). The container must
+    /// be running and kept so for the run.
+    pub async fn screenshot_in(&self, name: &str, port: u16, opts: &crate::ports::ShotOptions) -> anyhow::Result<crate::ports::Shot> {
+        use base64::Engine as _;
+        anyhow::ensure!(self.iso.name() == "docker", "screenshots need Docker");
+        // The browser image once, in the background task screenshots run in (a cold pull isn't
+        // bounded by the screenshot's 90 s).
+        if code_preview::docker::docker(&["image", "inspect", "--format", "{{.Id}}", &self.cfg.screenshot_image]).await.is_err() {
+            code_preview::docker::docker(&["pull", "--quiet", &self.cfg.screenshot_image]).await?;
+        }
+        let shot = format!("roll-previews-shot-{}", name.trim_start_matches("roll-previews-"));
         let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), shot.clone(), "--network".into(), format!("container:{name}")];
         // Cleaned up with the runtime's own containers after a crash.
         args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL)]);
@@ -924,10 +943,10 @@ impl Apps for Runtime {
         let png = b64e.decode(b64.trim()).map_err(|e| anyhow::anyhow!("the screenshot isn't a PNG: {e}"))?;
         anyhow::ensure!(png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX, "the screenshot isn't a PNG of at most {SCREENSHOT_MAX} bytes");
         let phone = b64e.decode(phone.trim()).ok().filter(|p| p.starts_with(b"\x89PNG") && p.len() <= SCREENSHOT_MAX);
-        Ok(Some(crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed), a11y: crate::PageA11y::parse(speed), phone, pages: page_shots(&pages, said, lines) }))
+        Ok(crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed), a11y: crate::PageA11y::parse(speed), phone, pages: page_shots(&pages, said, lines) })
     }
 
-    async fn seed(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {
+    async fn seed_job(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {
         use code_preview::runner::Outcome;
         let docker = self.iso.name() == "docker";
         let env: Vec<(String, String)> = job.env.iter().map(|(k, v)| (k.clone(), reach_local(&self.iso.reach(v), docker))).collect();
@@ -947,7 +966,7 @@ impl Apps for Runtime {
         }
     }
 
-    fn status(&self, preview: &str, service: &str) -> Option<ServiceState> {
+    fn service_status(&self, preview: &str, service: &str) -> Option<ServiceState> {
         let live = self.live.lock().get(&(preview.to_string(), service.to_string())).cloned()?;
         let phase = live.phase.borrow().clone();
         Some(match phase {

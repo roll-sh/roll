@@ -103,7 +103,9 @@ pub fn start(
         workspace.clone(),
         source.clone(),
         branchers,
-        Arc::new(Services { apps: RollApps::new(api.clone()), runtime: runtime.clone() }),
+        // roll apps' instances are screenshotted once roll apps can say where they run
+        // (`Apps::reachable`, roll apps' #26): `reach` is that, wired where rolld has both.
+        Arc::new(Services { apps: RollApps::new(api.clone()), runtime: runtime.clone(), reach: None }),
         Arc::new(Secrets(api.clone())),
         leader,
     );

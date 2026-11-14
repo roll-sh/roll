@@ -327,7 +327,7 @@ impl Engine {
     async fn keep_baseline(&self, project: &roll_workspace::Project, repos: &[String], s: &Settings) -> anyhow::Result<()> {
         let rows: Vec<Row> = self.store.rows(Some(&project.id))?.into_iter().filter(|r| r.desired == Desired::Active).collect();
         // roll apps' services can't be screenshotted yet: a baseline there would cost and never compare.
-        let on_apps = matches!(self.apps.catalog(&project.id).await, Ok(Some(c)) if !c.is_empty());
+        let on_apps = !self.apps.screenshots_apps() && matches!(self.apps.catalog(&project.id).await, Ok(Some(c)) if !c.is_empty());
         let why = if !(s.github.screenshot && s.github.baseline) {
             Some("the project's baseline rule is off")
         } else if on_apps {
