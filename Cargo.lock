@@ -6641,6 +6641,7 @@ dependencies = [
  "aes-gcm",
  "agent-host",
  "agent-proto",
+ "aho-corasick",
  "anyhow",
  "apps-build",
  "aws-sdk-s3",

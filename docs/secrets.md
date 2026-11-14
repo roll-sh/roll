@@ -583,7 +583,7 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
-roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
+roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] [--mask | --no-mask] -- <command…>
 ```
 
 - The project is `-p`/`ROLL_PROJECT` (a name or id), the environment `-e`/`ROLL_ENV`, the path
@@ -612,6 +612,17 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
 - `roll run` fetches the resolved values (`…/values`), adds them to the child's environment and
   execs the command. It writes no file, and it fails before running anything if a reference is
   unresolved. Variables already set in the shell keep their value unless `--override` is passed.
+- What the command prints is masked when it isn't a terminal (a CI log, a file, a pipe), as
+  1Password's `op run` does and GitHub Actions does for its own secrets: roll keeps the command
+  as a child, reads its stdout and stderr, and writes `<concealed by roll>` in place of any value
+  it added, so a debug print doesn't put a key in a build log. A value is matched as it is, each of
+  its lines, and its JSON and URL encodings; values under 8 characters (`true`, a port) aren't
+  masked. Output passes through as it comes, except a tail that could start a value, held until
+  the rest comes or 100 ms pass. A terminal stays the command's own (prompts, colours), unless
+  `--mask` is passed; `--no-mask` turns masking off. Masking is a guard against accidents, not a
+  boundary: the command can always print a value some other way (reversed, split, base64). The
+  exit code is the command's (128 plus the signal that ended it); SIGTERM and SIGHUP are passed
+  on, and SIGINT unless the terminal sent it to the command too (`roll-cli/src/mask.rs`).
 
 ### Runtime resolve for services (roll apps)
 
