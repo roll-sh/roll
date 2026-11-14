@@ -1336,6 +1336,12 @@ sort, BP over text fields only would save about 28% of indexing CPU on logs (ECS
 But a second session's "today" runs gave `match` 1.49 and title 1.98 ms, so that difference is
 within the drift between sessions and is no reason by itself.
 
+Measured and not adopted (2026-11-14): refreshed segments' stored fields at zstd level 1 (merges
+keep level 3 and rewrite them). Stored-field compression at flush is about 11% of indexing CPU on
+the ECS log, but over 6 alternating rounds (1M docs, 8 clients) the median CPU per document was
+55.4 µs against 58.1 (spread ±10% per round) with segments 3-10% larger until merged: not a
+measured win.
+
 Measured and not adopted in round 6: slicing field sorts and queries with score bounds. Their
 serial competitive pruning is so effective that slices only add work: on geonames
 `desc_sort_geonameid` CPU 3.5 → 10.3 ms, `sort_country_code` 5.6 → 12.6 ms, a 1,000-hit
