@@ -2409,35 +2409,20 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
 }
 
 /// `roll run` with masked output: the command as a child (roll can't exec it and still read its
-/// output), exiting with its code. SIGTERM and SIGHUP are passed on; so is SIGINT, unless it came
-/// from the terminal, which sends it to the command as well.
+/// output), exiting as it did. Signals are passed on ([`crate::mask::Signals`]).
 async fn run_masked(r: &Run, env: &[(String, String)], streams: crate::mask::Streams) -> anyhow::Result<()> {
     let mut run = crate::mask::spawn(&r.command, env, streams).with_context(|| format!("running {}", r.command[0]))?;
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{SignalKind, signal};
-        let (mut term, mut hup, mut int) = (signal(SignalKind::terminate())?, signal(SignalKind::hangup())?, signal(SignalKind::interrupt())?);
-        // SAFETY: tcgetpgrp and getpgrp only read.
-        let from_terminal = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) == libc::getpgrp() };
+        let mut signals = crate::mask::Signals::new()?;
         loop {
-            let sig = tokio::select! {
+            tokio::select! {
                 status = run.child.wait() => {
                     let status = status?;
                     run.drain().await;
-                    std::process::exit(crate::mask::code(status));
+                    crate::mask::exit_as(status);
                 }
-                _ = term.recv() => libc::SIGTERM,
-                _ = hup.recv() => libc::SIGHUP,
-                _ = int.recv() => {
-                    if from_terminal {
-                        continue;
-                    }
-                    libc::SIGINT
-                }
-            };
-            if let Some(pid) = run.child.id() {
-                // SAFETY: kill(2) on our own child's pid.
-                unsafe { libc::kill(pid as libc::pid_t, sig) };
+                sig = signals.next() => crate::mask::Signals::pass(&run.child, sig),
             }
         }
     }
@@ -2445,32 +2430,46 @@ async fn run_masked(r: &Run, env: &[(String, String)], streams: crate::mask::Str
     {
         let status = run.child.wait().await?;
         run.drain().await;
-        std::process::exit(crate::mask::code(status));
+        crate::mask::exit_as(status);
     }
 }
 
 /// `roll run --watch`: the command as a child, restarted (SIGTERM, then SIGKILL after 10 s) when
-/// the environment changes. A change that doesn't resolve keeps the running command. Exits with
-/// the command's own code when it exits by itself.
+/// the environment changes. A change that doesn't resolve keeps the running command. Signals are
+/// passed on as `roll run`'s are, and it exits as the command did.
 async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>, mut leases: Vec<String>, streams: crate::mask::Streams) -> anyhow::Result<()> {
     let digest_path = format!("{}/digest?{}", c.env(&at.env), c.q());
     let mut last = c.call(Method::GET, &digest_path, None).await?["digest"].clone();
     let every = std::time::Duration::from_secs(r.interval.max(1));
     // Dynamic credentials outlive their first lease: renewed every 10 minutes while it runs.
     let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
+    #[cfg(unix)]
+    let mut signals = crate::mask::Signals::new()?;
     loop {
         let mut run = crate::mask::spawn(&r.command, &env, streams).with_context(|| format!("running {}", r.command[0]))?;
         loop {
+            #[cfg(unix)]
+            let signal = signals.next();
+            #[cfg(not(unix))]
+            let signal = async {
+                let _ = tokio::signal::ctrl_c().await;
+                0
+            };
             tokio::select! {
                 status = run.child.wait() => {
                     let status = status?;
                     run.drain().await;
-                    std::process::exit(crate::mask::code(status));
+                    crate::mask::exit_as(status);
                 }
-                _ = tokio::signal::ctrl_c() => {
-                    stop(&mut run.child).await;
-                    run.drain().await;
-                    std::process::exit(130);
+                // Passed on: the command's exit ends roll.
+                sig = signal => {
+                    #[cfg(unix)]
+                    crate::mask::Signals::pass(&run.child, sig);
+                    #[cfg(not(unix))]
+                    {
+                        let _ = sig;
+                        stop(&mut run.child).await;
+                    }
                 }
                 _ = renew.tick(), if !leases.is_empty() => {
                     for l in &leases {

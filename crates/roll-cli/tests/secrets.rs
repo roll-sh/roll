@@ -82,9 +82,9 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     // The child sees resolved values; the shell's own variables win unless --override.
     let out = ok(&api, &[("PORT", "6000")], &["run", "-p", "shop", "-e", "production", "--no-mask", "--", "sh", "-c", "echo $DATABASE_URL $PORT"], None).await;
     assert_eq!(out.trim(), "postgres://app:s3cret@db.internal:5432/shop 6000");
-    // Output that isn't a terminal (a CI log) goes through roll, which conceals the values it
-    // added; the command's exit code is still roll's.
-    let logged = roll(&api, &[("PORT", "6000")], &["run", "-p", "shop", "-e", "production", "--", "sh", "-c", "echo $DATABASE_URL $PORT >&2; echo $HOST"], None).await;
+    // In CI, output that isn't a terminal or a file (a build log) goes through roll, which
+    // conceals the values it added; the command's exit code is still roll's.
+    let logged = roll(&api, &[("PORT", "6000"), ("CI", "true")], &["run", "-p", "shop", "-e", "production", "--", "sh", "-c", "echo $DATABASE_URL $PORT >&2; echo $HOST"], None).await;
     assert_eq!((logged.code, logged.stdout.trim(), logged.stderr.trim()), (Some(0), "<concealed by roll>", "<concealed by roll> 6000"));
     let failed = roll(&api, &[], &["run", "-p", "shop", "-e", "production", "--", "sh", "-c", "exit 3"], None).await;
     assert_eq!(failed.code, Some(3));

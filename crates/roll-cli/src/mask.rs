@@ -5,8 +5,7 @@
 //!
 //! Values shorter than [`MIN`] aren't masked (`true`, a port). A value is matched as it is, line by
 //! line, and as JSON and URL encode it. Output passes through as it comes, except for a tail that
-//! could be the start of a value: that's held until more arrives, the stream ends, or [`IDLE`]
-//! passes with nothing new.
+//! could be the start of a value: that's held until more arrives or the stream ends.
 
 use aho_corasick::{AhoCorasick, MatchKind};
 use std::io::IsTerminal;
@@ -19,10 +18,8 @@ use tokio::task::JoinHandle;
 /// The shortest value that's masked.
 pub const MIN: usize = 8;
 pub const CONCEALED: &[u8] = b"<concealed by roll>";
-/// How long a tail that could start a value waits for the rest.
-const IDLE: Duration = Duration::from_millis(100);
-/// After the command exits, how long its output may stay quiet before roll stops reading (a
-/// process it left running in the background can hold the pipe open).
+/// After the command exits, how long roll goes on reading its output (a process it left running
+/// in the background can hold the pipe open).
 const AFTER_EXIT: Duration = Duration::from_secs(1);
 
 /// Replaces values in a stream of bytes, however the stream is split into reads.
@@ -51,8 +48,10 @@ fn patterns<'a>(values: impl IntoIterator<Item = &'a str>) -> Vec<Vec<u8>> {
     };
     for v in values {
         add(v);
+        // A line of a PEM key or a token list, not a line of structure (`"type": "service_account",`
+        // in a JSON key file would be masked wherever it's printed).
         if v.contains('\n') {
-            v.lines().map(str::trim).for_each(&mut add);
+            v.lines().map(str::trim).filter(|l| !l.contains(char::is_whitespace)).for_each(&mut add);
         }
         let json = serde_json::to_string(v).expect("a string");
         add(&json[1..json.len() - 1]);
@@ -79,6 +78,7 @@ impl Masker {
     }
 
     /// Whether a tail is waiting for more.
+    #[cfg(test)]
     pub fn holding(&self) -> bool {
         !self.held.is_empty()
     }
@@ -136,35 +136,26 @@ impl Masker {
     }
 }
 
-/// Copies `from` to `to` through `m` until `from` ends, `to` fails, or the command has exited and
-/// nothing came for [`AFTER_EXIT`].
+/// Copies `from` to `to` through `m` until `from` ends, `to` fails, or [`AFTER_EXIT`] has passed
+/// since the command exited (in all: a process it left behind that keeps writing doesn't hold roll).
+/// A tail that could start a value waits for more output or the end, never for a timer: a program
+/// that block-buffers can pause mid-value, and its first half mustn't go out alone.
 async fn pump(mut from: impl AsyncRead + Unpin, mut to: impl std::io::Write, mut m: Masker, mut exited: watch::Receiver<bool>) {
     let mut buf = vec![0u8; 64 * 1024];
     let mut out = vec![];
-    let mut done = *exited.borrow();
+    let after = || tokio::time::Instant::now() + AFTER_EXIT;
+    let mut deadline = if *exited.borrow() { Some(after()) } else { None };
     loop {
-        let read = if m.holding() {
-            match tokio::time::timeout(IDLE, from.read(&mut buf)).await {
-                Ok(r) => r,
-                Err(_) => {
-                    m.flush(&mut out);
-                    if write(&mut to, &mut out).is_err() {
-                        return;
-                    }
-                    continue;
-                }
-            }
-        } else if done {
-            tokio::time::timeout(AFTER_EXIT, from.read(&mut buf)).await.unwrap_or(Ok(0))
-        } else {
-            tokio::select! {
+        let read = match deadline {
+            Some(d) => tokio::time::timeout_at(d, from.read(&mut buf)).await.unwrap_or(Ok(0)),
+            None => tokio::select! {
                 r = from.read(&mut buf) => r,
                 // A dropped sender counts as an exit too.
                 _ = exited.changed() => {
-                    done = true;
+                    deadline = Some(after());
                     continue;
                 }
-            }
+            },
         };
         // A failed read ends the stream as its end does.
         let n = read.unwrap_or(0);
@@ -202,21 +193,30 @@ pub struct Streams {
 }
 
 impl Streams {
-    /// `--no-mask`: neither. `--mask`: both. Otherwise each stream that isn't a terminal (a log, a
-    /// file, a pipe), so an interactive command keeps its terminal.
+    /// `--no-mask`: neither. `--mask`: both. Otherwise stderr when it isn't a terminal (it's
+    /// diagnostics, never data), and stdout only in CI (`CI` set, as every CI system does) when it's
+    /// neither a terminal nor a file: a build log. Locally `roll run -- pg_dump > dump.sql` or
+    /// `| jq` gets the command's bytes as they are.
     pub fn choose(force: bool, off: bool) -> Streams {
         if off {
             Streams { stdout: false, stderr: false }
         } else if force {
             Streams { stdout: true, stderr: true }
         } else {
-            Streams { stdout: !std::io::stdout().is_terminal(), stderr: !std::io::stderr().is_terminal() }
+            let ci = std::env::var("CI").is_ok_and(|v| !v.is_empty() && v != "false" && v != "0");
+            let stdout = std::io::stdout();
+            Streams { stdout: ci && !stdout.is_terminal() && !regular_file(&stdout), stderr: !std::io::stderr().is_terminal() }
         }
     }
 
     pub fn any(self) -> bool {
         self.stdout || self.stderr
     }
+}
+
+/// Whether `f` is a regular file (output redirected to one is data, not a log).
+fn regular_file(f: &impl std::os::fd::AsFd) -> bool {
+    f.as_fd().try_clone_to_owned().ok().map(std::fs::File::from).and_then(|f| f.metadata().ok()).is_some_and(|m| m.is_file())
 }
 
 /// A command started with `env`, its masked streams copied by tasks of their own.
@@ -257,6 +257,74 @@ impl Running {
             let _ = p.await;
         }
     }
+}
+
+/// The signals roll passes on to its command: SIGTERM and SIGHUP (`docker stop`, systemd, a closed
+/// terminal), and SIGINT unless roll's terminal sent it, since the terminal sends it to the
+/// command too (twice would be "exit immediately" to terraform or npm).
+#[cfg(unix)]
+pub struct Signals {
+    term: tokio::signal::unix::Signal,
+    hup: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl Signals {
+    pub fn new() -> std::io::Result<Signals> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Signals { term: signal(SignalKind::terminate())?, hup: signal(SignalKind::hangup())?, int: signal(SignalKind::interrupt())? })
+    }
+
+    /// The next signal to pass on.
+    pub async fn next(&mut self) -> i32 {
+        loop {
+            tokio::select! {
+                _ = self.term.recv() => return libc::SIGTERM,
+                _ = self.hup.recv() => return libc::SIGHUP,
+                _ = self.int.recv() => {
+                    if !foreground() {
+                        return libc::SIGINT;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Passes `sig` to `child`.
+    pub fn pass(child: &tokio::process::Child, sig: i32) {
+        if let Some(pid) = child.id() {
+            // SAFETY: kill(2) on our own child's pid.
+            unsafe { libc::kill(pid as libc::pid_t, sig) };
+        }
+    }
+}
+
+/// Whether roll is in its controlling terminal's foreground group (then a Ctrl-C reached the
+/// command as well). No controlling terminal: no.
+#[cfg(unix)]
+fn foreground() -> bool {
+    use std::os::fd::AsRawFd;
+    let Ok(tty) = std::fs::File::open("/dev/tty") else { return false };
+    // SAFETY: tcgetpgrp and getpgrp only read; the fd is open for the call.
+    unsafe { libc::tcgetpgrp(tty.as_raw_fd()) == libc::getpgrp() }
+}
+
+/// Exits as the command did: with its code, or by the same SIGINT, SIGTERM or SIGHUP, so a shell
+/// loop around `roll run` stops on Ctrl-C as it would around the command.
+pub fn exit_as(status: std::process::ExitStatus) -> ! {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal().filter(|s| [libc::SIGINT, libc::SIGTERM, libc::SIGHUP].contains(s)) {
+            // SAFETY: back to the default action, then raised on ourselves.
+            unsafe {
+                libc::signal(sig, libc::SIG_DFL);
+                libc::raise(sig);
+            }
+        }
+    }
+    std::process::exit(code(status))
 }
 
 /// The exit code a shell would give: the command's own, or 128 plus the signal that ended it.
@@ -306,6 +374,9 @@ mod tests {
         // Each line of a multi-line value, and its JSON and URL encodings.
         let pem = "-----BEGIN KEY-----\nMIIBVgIBADANBgkqhkiG9w0BAQEFAASCAUAwggE8\n-----END KEY-----";
         assert_eq!(masked(&[pem], "MIIBVgIBADANBgkqhkiG9w0BAQEFAASCAUAwggE8"), "<concealed by roll>");
+        // A line of structure in a multi-line value isn't a value: printed alone, it stays.
+        let key_file = "{\n  \"type\": \"service_account\",\n  \"key\": \"abcdefgh12345678\"\n}";
+        assert_eq!(masked(&[key_file], "  \"type\": \"service_account\",\n"), "  \"type\": \"service_account\",\n");
         assert_eq!(masked(&["p@ss w/rd\"x"], r#"{"pw":"p@ss w/rd\"x"} ?pw=p%40ss%20w%2Frd%22x"#), r#"{"pw":"<concealed by roll>"} ?pw=<concealed by roll>"#);
         assert!(Masker::new(["short", "true"]).is_none());
     }
