@@ -1,7 +1,7 @@
 import { Boxes, Check, Copy, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Smartphone, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Confirm } from "@/components/ui";
-import { a11yWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type PageCheck, type Preview, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
+import { a11yWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, type PreviewFeedback } from "./preview-feedback";
@@ -348,6 +348,7 @@ export function PreviewSheet({
               </p>
             )}
 
+            <Mail id={p.id} />
             <Label>Cost</Label>
             <div className="grid grid-cols-3 gap-2">
               <Stat label="Asleep" value={money(p.cost.sleeping_usd_month)} note="a month" />
@@ -773,6 +774,48 @@ function Screenshot({
       ) : (
         <p className="text-[11.5px] text-muted">No screenshot of {path} yet.</p>
       )}
+    </>
+  );
+}
+
+/** The mail the preview's services sent, caught by roll (never delivered): who it was for and
+ * its subject, each opened as text (never rendered: it's the preview's own content). */
+function Mail({ id }: { id: string }) {
+  const [list, setList] = useState<CaughtMail[] | null>(null);
+  const [open, setOpen] = useState<{ id: string; text: string } | null>(null);
+  useEffect(() => {
+    let live = true;
+    previewsApi.mail(id).then(
+      (r) => live && setList(r.mail),
+      () => live && setList([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, [id]);
+  if (!list?.length) return null;
+  return (
+    <>
+      <Label>Mail caught ({list.length})</Label>
+      <div className="rounded-lg border border-line-2 bg-raised inset-shadow-highlight">
+        {list.map((m) => (
+          <div key={m.id} className="border-t border-line px-2.5 py-1.5 first:border-t-0">
+            <button
+              type="button"
+              onClick={async () => setOpen(open?.id === m.id ? null : { id: m.id, text: await previewsApi.mailText(id, m.id).catch(errorText) })}
+              aria-expanded={open?.id === m.id}
+              className="flex w-full min-w-0 items-center gap-2 text-left text-[11.5px]"
+            >
+              <span className="truncate">{m.subject ?? "(no subject)"}</span>
+              <span className="ml-auto shrink-0 truncate font-mono text-[10.5px] text-subtle">to {m.to.join(", ")}</span>
+            </button>
+            {open?.id === m.id && (
+              <pre className="mt-1 max-h-56 overflow-auto rounded-md border border-line px-2 py-1.5 font-mono text-[10.5px] whitespace-pre-wrap [overflow-wrap:anywhere] text-muted">{open.text}</pre>
+            )}
+          </div>
+        ))}
+      </div>
+      <p className="mt-1 text-[11px] text-subtle">Its services' mail stops here: nobody in its data got it.</p>
     </>
   );
 }

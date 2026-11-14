@@ -370,6 +370,9 @@ function Form({
           <Choice value={s.access} options={["link", "public"]} onChange={(v) => set("access", v)} labels={{ link: "Private link", public: "Anyone with the URL" }} />
         </Field>
         {s.access === "link" && <Bypass projectId={projectId} />}
+        <Field group label="Mail" note="Previews run on copies of production's people. Caught: their services send mail to roll, where it's listed on the preview and goes no further (mail providers' API keys are removed).">
+          <Choice value={s.mail ?? "catch"} options={["catch", "deliver"]} onChange={(v) => set("mail", v)} labels={{ catch: "Caught by roll", deliver: "Delivered" }} />
+        </Field>
       </Section>
 
       <Section title="GitHub pull requests">

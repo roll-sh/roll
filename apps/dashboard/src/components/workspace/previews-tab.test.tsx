@@ -71,6 +71,7 @@ beforeEach(() => {
   api.activity.mockResolvedValue([]);
   api.vars.mockResolvedValue({ vars: {} });
   api.shares.mockResolvedValue([]);
+  api.mail.mockResolvedValue({ mail: [] });
 });
 
 const view = () =>

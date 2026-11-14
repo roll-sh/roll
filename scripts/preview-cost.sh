@@ -54,7 +54,7 @@ export ROLL_HOME=$HOME_DIR ROLL_API=$API ROLL_PROXY=127.0.0.1:${P}432 ROLL_REDIS
   ROLL_KAFKA=127.0.0.1:${P}092 ROLL_S3=127.0.0.1:${P}900 ROLL_STORAGE_API=127.0.0.1:${P}901 \
   ROLL_QUEUES_AMQP=127.0.0.1:${P}672 ROLL_QUEUES_MANAGEMENT=127.0.0.1:${P}673 ROLL_QUEUES_STOMP=127.0.0.1:${P}613 ROLL_QUEUES_WEB_STOMP=127.0.0.1:${P}674 \
   ROLL_QUEUES_MQTT=127.0.0.1:${P}883 ROLL_QUEUES_WEB_MQTT=127.0.0.1:${P}675 ROLL_QUEUES_STREAM=127.0.0.1:${P}552 ROLL_QUEUES_HTTP=127.0.0.1:${P}680 \
-  ROLL_SEARCH_HTTP=127.0.0.1:${P}200 \
+  ROLL_SEARCH_HTTP=127.0.0.1:${P}200 ROLL_PREVIEWS_SMTP=127.0.0.1:${P}525 \
   ROLL_NOSQL_CQL=127.0.0.1:${P}042 ROLL_NOSQL_CQL_SHARD_AWARE=127.0.0.1:${P}043 ROLL_NOSQL_ALTERNATOR=127.0.0.1:${P}000 ROLL_NOSQL_REST=127.0.0.1:${P}100 \
   ROLL_CODE_PREVIEW_DOMAIN=$DOMAIN ROLL_PRODUCTS=${PREVIEW_PRODUCTS:-code,postgres,redis,storage,nosql,queues,streams,tasks,search} RUST_LOG=${RUST_LOG:-info}
 unset ROLL_ADMIN_TOKEN ROLL_CODE_TOKEN
@@ -127,7 +127,7 @@ PRJ=$(api POST /v1/workspace/projects '{"name":"shop"}' | jq_ "d['id']")
 for r in "repo/acme%2Fweb" "repo/acme%2Fwiki" "postgres/$PG" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work" "search/$SEARCH"; do
   api PUT "/v1/workspace/projects/$PRJ/resources/$r" '{"x":0,"y":0}' >/dev/null
 done
-api PUT "/v1/previews/projects/$PRJ/settings" "{\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"},\"search:$SEARCH\":{\"products.name\":\"redact\"}}}" >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" "{\"env\":{\"SENDGRID_API_KEY\":\"SG.from-production\",\"SMTP_HOST\":\"smtp.sendgrid.net\"},\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"},\"search:$SEARCH\":{\"products.name\":\"redact\"}}}" >/dev/null
 # A mask on a key column can't hide it (the engine refuses to read such a table): the settings
 # name it instead of letting a preview's pages fail.
 KEY_MASK=$(curl -s -o /tmp/roll-previews-keymask.json -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' \
@@ -222,6 +222,27 @@ ROBOTS_LOCKED=$(curl -sS -o /dev/null -D - -H "Host: $HOST" "http://$API/" | tr 
 # from before the mask are) and isn't a superuser.
 APP_DB=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
 case "$APP_DB" in postgres://br_*) ;; *) echo "the service's DATABASE_URL should be the branch's own role, not ${APP_DB%%@*}…"; exit 1;; esac
+# Its mail goes to roll's catcher, signed in as the preview, never to the provider production
+# uses: the key is gone, and what it sends is caught and listed (sent here as its service would).
+ENVTXT=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt")
+echo "$ENVTXT" | grep -q '^SENDGRID_API_KEY=' && { echo "a preview's service shouldn't get the mail provider's key"; exit 1; }
+SMTP_USER=$(echo "$ENVTXT" | sed -n 's/^SMTP_USER=//p'); SMTP_PASSWORD=$(echo "$ENVTXT" | sed -n 's/^SMTP_PASSWORD=//p'); SMTP_PORT=$(echo "$ENVTXT" | sed -n 's/^SMTP_PORT=//p')
+[ "$SMTP_USER" = "$PV" ] && [ "$(echo "$ENVTXT" | sed -n 's/^SMTP_HOST=//p')" = host.docker.internal ] || { echo "the service's SMTP should be roll's catcher, as the preview: $SMTP_USER"; exit 1; }
+python3 - "$SMTP_PORT" "$SMTP_USER" "$SMTP_PASSWORD" <<'PY'
+import smtplib, sys
+port, user, password = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+with smtplib.SMTP("127.0.0.1", port, timeout=10) as s:
+    s.login(user, password)
+    s.sendmail("shop@example.com", ["ada@corp.example"], "Subject: Your order\r\n\r\nThanks, Ada.\r\n")
+try:
+    with smtplib.SMTP("127.0.0.1", port, timeout=10) as s:
+        s.login(user, "guess")
+    sys.exit("a wrong password signed in")
+except smtplib.SMTPAuthenticationError:
+    pass
+PY
+MAIL=$(api GET "/v1/previews/$PV/mail" | jq_ "'%s to %s' % (d['mail'][0]['subject'], ','.join(d['mail'][0]['to'])) if d.get('mail') else ''")
+[ "$MAIL" = "Your order to ada@corp.example" ] || { echo "the preview's mail should be caught and listed: $MAIL"; exit 1; }
 # A reviewer's connection from a laptop (`roll preview connect`): the same role, never the parent's.
 CONNECT=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview connect "$PV" --kind postgres | sed -n 's/^DATABASE_URL=//p')
 case "$CONNECT" in postgres://br_*) ;; *) echo "roll preview connect should hand out the branch's own role, not ${CONNECT%%@*}…"; exit 1;; esac
@@ -605,6 +626,7 @@ cat <<EOF
 | X-Robots-Tag on the service's page / on the 401 without the link | $ROBOTS / $ROBOTS_LOCKED |
 | The release's time on the preview's data (at its head) / on the change | $RELEASE / $CHG_RELEASE ms |
 | The preview's link as a QR code (PNG, no-store) | $QR |
+| Mail: the provider's key in the service / sent as the preview, caught | gone / $MAIL |
 | \`roll preview connect --kind postgres\`: the branch's own role | $(role "$CONNECT") |
 | Postgres users.email in the branch / in the parent | $PG_MASKED / $PG_PARENT |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |

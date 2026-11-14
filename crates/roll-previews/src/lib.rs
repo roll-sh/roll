@@ -17,6 +17,7 @@ pub mod cost;
 pub mod engine;
 pub mod glob;
 pub mod ports;
+pub mod mail;
 pub mod mask;
 pub mod notes;
 pub mod runtime;
@@ -593,6 +594,17 @@ pub struct Resource {
     pub bytes: i64,
     /// What of the parent's data the preview's code gets.
     pub data: Data,
+}
+
+/// A message a preview's services sent, caught instead of delivered (`GET …/mail`).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CaughtMail {
+    pub id: String,
+    pub at: i64,
+    pub from: String,
+    pub to: Vec<String>,
+    pub subject: Option<String>,
+    pub size: i64,
 }
 
 /// A data branch's connection, as the preview's services get it (`GET …/connect`).

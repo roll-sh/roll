@@ -720,7 +720,7 @@ fn private_page(through: Option<&str>) -> Response {
 }
 
 /// Equal, in time that doesn't depend on where they differ.
-fn same(a: &str, b: &str) -> bool {
+pub(crate) fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
@@ -729,6 +729,10 @@ fn same(a: &str, b: &str) -> bool {
 fn reach_local(v: &str, docker: bool) -> String {
     if !docker {
         return v.to_string();
+    }
+    // A bare host (`SMTP_HOST=127.0.0.1`).
+    if ["127.0.0.1", "localhost", "0.0.0.0", "[::1]"].contains(&v) {
+        return "host.docker.internal".into();
     }
     let mut out = v.to_string();
     for local in ["127.0.0.1", "localhost", "0.0.0.0", "[::1]"] {
@@ -1266,6 +1270,7 @@ mod tests {
         assert_eq!(reach_local("http://localhost:7070/x", true), "http://host.docker.internal:7070/x");
         assert_eq!(reach_local("127.0.0.1:9092,localhost:9093", true), "host.docker.internal:9092,host.docker.internal:9093");
         assert_eq!(reach_local("db.roll.sh:5432", true), "db.roll.sh:5432");
+        assert_eq!((reach_local("127.0.0.1", true), reach_local("10.0.0.1", true)), ("host.docker.internal".to_string(), "10.0.0.1".to_string()));
         assert_eq!(reach_local("http://127.0.0.1:1", false), "http://127.0.0.1:1");
     }
 }

@@ -151,6 +151,10 @@ struct Args {
     /// roll code previews answer on `<change>.<this domain>` (on the API port).
     #[arg(long, env = "ROLL_CODE_PREVIEW_DOMAIN", default_value = "preview.localhost")]
     code_preview_domain: String,
+    /// roll previews' mail catcher: a preview's services send mail here (`SMTP_*`), never to the
+    /// people in its data. A port that's taken leaves it off, and previews' mail fails.
+    #[arg(long, env = "ROLL_PREVIEWS_SMTP", default_value = "0.0.0.0:2525")]
+    previews_smtp: std::net::SocketAddr,
     /// roll code checks running at once from this node (each in its own container or Fargate
     /// task; `ROLL_CODE_RUNNER`, see `isolation.rs`).
     #[arg(long, env = "ROLL_CODE_RUNNER_CONCURRENCY", default_value_t = 2)]

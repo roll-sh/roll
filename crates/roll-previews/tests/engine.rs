@@ -786,3 +786,35 @@ async fn a_pages_notes_by_its_environment_name() {
     assert!(e.engine.notes_for("production", "/").await.unwrap().is_empty());
     assert!(e.engine.notes_for("pv-nope", "/").await.unwrap().is_empty());
 }
+
+/// A preview's services send mail to roll's catcher, signed in as the preview, never with the
+/// project's own mail settings or a provider's API key (its data is production's people); what
+/// it caught is listed with it. `mail: "deliver"` hands the project's settings through.
+#[tokio::test]
+async fn a_preview_s_mail_is_caught_never_sent() {
+    use roll_previews::mail::Mailbox;
+    use roll_previews::ports::EnvSource;
+    let e = env(json!({ "enabled": true, "env": { "SENDGRID_API_KEY": "SG.real", "SMTP_HOST": "smtp.sendgrid.net" } }));
+    e.code.open(change("chg_m", 7));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_m").unwrap().unwrap();
+    let (_, vars) = e.engine.env(&p.id, "web").await.unwrap();
+    let get = |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    assert_eq!(get("SENDGRID_API_KEY"), None, "no way to send through the provider");
+    assert_ne!(get("SMTP_HOST").as_deref(), Some("smtp.sendgrid.net"));
+    assert_eq!(get("SMTP_USER").as_deref(), Some(p.id.as_str()));
+    let pass = get("SMTP_PASSWORD").unwrap();
+    assert!(e.engine.store.mail_signs_in(&p.id, &pass).unwrap() && !e.engine.store.mail_signs_in(&p.id, "guess").unwrap());
+    // Through the catcher's mailbox: kept with the preview, listed.
+    let mb = roll_previews::mail::Store(e.engine.store.clone());
+    assert_eq!(mb.authorize(&p.id, &pass).await.as_deref(), Some(p.id.as_str()));
+    mb.keep(&p.id, roll_previews::mail::Mail { from: "shop@x".into(), to: vec!["ada@corp.example".into()], raw: b"Subject: Hi\r\n\r\nbody\r\n".to_vec() }).await;
+    let list = e.engine.store.mails(&p.id).unwrap();
+    assert_eq!((list.len(), list[0].subject.as_deref(), list[0].to.clone()), (1, Some("Hi"), vec!["ada@corp.example".to_string()]));
+    assert_eq!(e.engine.store.mail_raw(&p.id, &list[0].id).unwrap().as_deref(), Some(&b"Subject: Hi\r\n\r\nbody\r\n"[..]));
+    // A project that wants real mail says so.
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "mail": "deliver" })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    let (_, vars) = e.engine.env(&p.id, "web").await.unwrap();
+    assert!(vars.iter().any(|(k, v)| k == "SENDGRID_API_KEY" && v == "SG.real"));
+}

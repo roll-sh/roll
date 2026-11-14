@@ -214,6 +214,16 @@ export function a11yWords(a: { issues: A11yIssue[]; lang: boolean; title: boolea
   return words;
 }
 
+/** A message a preview's services sent, caught instead of delivered. */
+export interface CaughtMail {
+  id: string;
+  at: number;
+  from: string;
+  to: string[];
+  subject: string | null;
+  size: number;
+}
+
 /** A page as people read it: the first page at another width (`@768`) is "768 px". */
 export const pageLabel = (path: string) => (/^@\d+$/.test(path) ? `${path.slice(1)} px` : path || "/");
 
@@ -250,6 +260,8 @@ export interface PreviewSettings {
   access: "link" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */
   visual_review?: "off" | "check" | "required";
+  /** `catch` (default): services send mail to roll's catcher, listed on the preview, never delivered; `deliver`: the project's own mail settings. */
+  mail?: "catch" | "deliver";
   /** A feedback button on its pages for people who came in through roll (link access). */
   feedback: boolean;
   /** Variables for a family of branches: a branch glob → `{name: value}`, over `env`. */
@@ -345,6 +357,15 @@ export const previewsApi = {
   unshare: (id: string, share: string) => call<void>("DELETE", `${one(id)}/shares/${encodeURIComponent(share)}`),
   /** Its own variables, over the project's `env`. */
   vars: (id: string) => call<{ vars: Record<string, string> }>("GET", `${one(id)}/env`),
+  /** The mail its services sent, caught instead of delivered (newest first; the last 50). */
+  mail: (id: string) => call<{ mail: CaughtMail[] }>("GET", `${one(id)}/mail`),
+  /** One caught message as it was sent, as text. */
+  mailText: async (id: string, mail: string) => {
+    const res = await fetch(`${ROLL_API}${one(id)}/mail/${encodeURIComponent(mail)}`, { headers: apiHeaders(), cache: "no-store" });
+    onApiStatus(res.status);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
+    return res.text();
+  },
   /** Each data branch's connection, as its services get it (its own credentials, never the parent's). */
   connections: (id: string) => call<{ branches: { kind: PreviewKind; parent: string; vars: Record<string, string> }[] }>("GET", `${one(id)}/connect`),
   /** Set or (`null`) remove some of its own variables; its services redeploy with them. */

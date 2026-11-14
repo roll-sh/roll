@@ -75,6 +75,9 @@ pub struct Config {
     pub interval: Duration,
     /// How often branches' sizes and costs are read again.
     pub usage_every: Duration,
+    /// Where services reach roll's mail catcher (`host:port` as a client on this node writes it;
+    /// containers get it rewritten). `None`: no catcher, and previews' mail fails.
+    pub mail: Option<String>,
 }
 
 impl Default for Config {
@@ -85,6 +88,7 @@ impl Default for Config {
             port: None,
             interval: Duration::from_secs(15),
             usage_every: Duration::from_secs(300),
+            mail: None,
         }
     }
 }

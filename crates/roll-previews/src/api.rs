@@ -31,6 +31,8 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/screenshot", get(screenshot))
         .route("/v1/previews/{id}/qr.png", get(qr))
         .route("/v1/previews/{id}/connect", get(connect))
+        .route("/v1/previews/{id}/mail", get(mails))
+        .route("/v1/previews/{id}/mail/{mail}", get(mail_raw))
         .route("/v1/previews/{id}/screenshot.png", get(screenshot_link))
         .route("/v1/previews/{id}/reset", post(reset))
         // These act on running services, which live on the preview's holder in a cluster.
@@ -286,6 +288,36 @@ async fn vars(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serde
     })
     .await?;
     Ok(Json(serde_json::json!({ "vars": vars })))
+}
+
+/// The mail the preview's services sent, caught (newest first; the last 50).
+async fn mails(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serde_json::Value>> {
+    check_id(&id)?;
+    let mail = blocking(e, move |e| {
+        e.store.row(&id)?;
+        e.store.mails(&id)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({ "mail": mail })))
+}
+
+/// One caught message as it was sent (`message/rfc822`, shown as text, never rendered).
+async fn mail_raw(AxState(e): S, Path((id, mail)): Path<(String, String)>) -> crate::Result<Response> {
+    check_id(&id)?;
+    let raw = blocking(e, move |e| {
+        e.store.row(&id)?;
+        e.store.mail_raw(&id, &mail)?.ok_or_else(|| Error::NotFound("no such mail".into()))
+    })
+    .await?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (axum::http::header::CONTENT_DISPOSITION, "inline"),
+            (axum::http::header::HeaderName::from_static("x-content-type-options"), "nosniff"),
+        ],
+        raw,
+    )
+        .into_response())
 }
 
 /// Each data branch's connection (its own credentials), to query what the preview sees.

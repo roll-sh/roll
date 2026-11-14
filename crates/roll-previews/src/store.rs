@@ -148,6 +148,17 @@ CREATE TABLE IF NOT EXISTS visual_page_accepts (
     at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, path)
 );
+CREATE TABLE IF NOT EXISTS mail (
+    id TEXT PRIMARY KEY,
+    preview_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    sender TEXT NOT NULL,
+    recipients TEXT NOT NULL,
+    subject TEXT,
+    size INTEGER NOT NULL,
+    raw TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS mail_by_preview ON mail (preview_id, at);
 CREATE TABLE IF NOT EXISTS budget_alerts (
     project_id TEXT NOT NULL,
     month INTEGER NOT NULL,
@@ -714,7 +725,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "base_history", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "base_history", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1441,6 +1452,66 @@ impl Store {
     }
 
     /// The key screenshot links are signed with: made once, the same on every node.
+    /// The password of the preview's SMTP sign-in (`SMTP_PASSWORD`, its id the user): a keyed
+    /// hash only roll makes, so nothing needs storing and nobody else's code can send as it.
+    pub fn mail_password(&self, id: &str) -> Result<String> {
+        use hmac::Mac;
+        let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.signing_key()?).map_err(|e| Error::Internal(e.to_string()))?;
+        m.update(b"smtp:");
+        m.update(id.as_bytes());
+        Ok(hex::encode(&m.finalize().into_bytes()[..16]))
+    }
+
+    /// Whether `user`/`password` are a live preview's SMTP sign-in (compared in constant time).
+    pub fn mail_signs_in(&self, user: &str, password: &str) -> Result<bool> {
+        let Ok(r) = self.row(user) else { return Ok(false) };
+        if r.desired == crate::Desired::Deleted {
+            return Ok(false);
+        }
+        Ok(crate::runtime::same(&self.mail_password(&r.id)?, password))
+    }
+
+    /// A caught message, kept with its preview (its last 50).
+    pub fn keep_mail(&self, preview: &str, mail: &crate::mail::Mail) -> Result<()> {
+        use base64::Engine as _;
+        let now = self.now_ms()?;
+        let id = format!("ml_{}", &new_token()[..16]);
+        let to = serde_json::to_string(&mail.to).unwrap_or_else(|_| "[]".into());
+        let raw = base64::engine::general_purpose::STANDARD.encode(&mail.raw);
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO mail (id, preview_id, at, sender, recipients, subject, size, raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, preview, now, mail.from, to, mail.subject(), mail.raw.len() as i64, raw],
+            )?;
+            c.execute(
+                "DELETE FROM mail WHERE preview_id = ? AND id NOT IN (SELECT id FROM mail WHERE preview_id = ? ORDER BY at DESC, id DESC LIMIT 50)",
+                params![preview, preview],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The preview's caught mail, newest first (without the messages).
+    pub fn mails(&self, preview: &str) -> Result<Vec<crate::CaughtMail>> {
+        type Raw = (String, i64, String, String, Option<String>, i64);
+        let rows: Vec<Raw> = self.db.read(|c| {
+            c.query("SELECT id, at, sender, recipients, subject, size FROM mail WHERE preview_id = ? ORDER BY at DESC, id DESC", [preview], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            })
+        })?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, at, from, to, subject, size)| crate::CaughtMail { id, at, from, to: serde_json::from_str(&to).unwrap_or_default(), subject, size })
+            .collect())
+    }
+
+    /// One caught message as it was sent.
+    pub fn mail_raw(&self, preview: &str, id: &str) -> Result<Option<Vec<u8>>> {
+        use base64::Engine as _;
+        let raw: Option<String> = self.db.read(|c| c.query_row("SELECT raw FROM mail WHERE preview_id = ? AND id = ?", [preview, id], |r| r.get(0)).optional())?;
+        Ok(raw.and_then(|r| base64::engine::general_purpose::STANDARD.decode(r).ok()))
+    }
+
     fn signing_key(&self) -> Result<Vec<u8>> {
         if let Some(k) = self.signing.get() {
             return Ok(k.clone());

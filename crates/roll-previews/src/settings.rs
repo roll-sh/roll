@@ -52,6 +52,11 @@ pub struct Settings {
     /// `roll/visual` commit status), pending while its pages differ from the baseline's and
     /// nobody has accepted them at that head; `required` also keeps it from landing in roll.
     pub visual_review: VisualReviewRule,
+    /// `catch` (the default): services send mail to roll's catcher (`SMTP_*` are roll's, mail
+    /// providers' API keys are removed), listed on the preview, never delivered; `deliver`: the
+    /// project's own mail settings reach previews.
+    #[serde(default)]
+    pub mail: MailRule,
     /// A feedback button on the pages of people who came in through roll (link access): it pins a
     /// note to an element and posts it on the change, from roll.
     pub feedback: bool,
@@ -90,6 +95,14 @@ fn seed_timeout() -> u32 {
 
 fn seed_memory() -> u32 {
     1024
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MailRule {
+    #[default]
+    Catch,
+    Deliver,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,6 +250,7 @@ impl Default for Settings {
             github: GithubRule::default(),
             access: Access::Link,
             visual_review: VisualReviewRule::Off,
+            mail: MailRule::Catch,
             feedback: true,
             warm: true,
             seed: None,
