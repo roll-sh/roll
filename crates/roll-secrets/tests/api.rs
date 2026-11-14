@@ -1040,6 +1040,7 @@ async fn an_encryption_key_encrypts_for_apps_and_never_leaves_roll() {
     let check = |input: &[u8], sig: &str| api.ok(Method::POST, "/transit/cards/verify", Some(json!({ "items": [{ "input": b64(input), "signature": sig }] })));
     assert_eq!(check(b"invoice 7", &sig).await["items"][0]["valid"], true);
     assert_eq!(check(b"invoice 8", &sig).await["items"][0]["valid"], false);
+    assert_eq!(check(b"invoice 7", &sig.replace("roll:v2:", "roll:v9:")).await["items"][0]["valid"], false, "an unknown version doesn't verify");
     let public = api.ok(Method::GET, "/transit/cards/public", None).await;
     let raw = base64::engine::general_purpose::STANDARD.decode(public[1]["public_key"].as_str().unwrap()).unwrap();
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&sig["roll:v2:".len()..]).unwrap();

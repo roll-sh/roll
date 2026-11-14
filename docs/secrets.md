@@ -588,8 +588,10 @@ numbers, tokens, notes) in its own database without holding a key.
   every version's public key as raw base64, PEM (SPKI) and a JWK (`kid` `<name>:v<version>`).
   `…/hmac {input}` (`write`) answers `{hmac}`, HMAC-SHA256, stable for one input: a lookup column
   over encrypted fields (a blind index). `…/hmac/verify {input, hmac}` answers `{valid}` and is
-  `write`, not `read`: it answers guesses about the input. All take batches, as encrypt does;
-  retired versions (`min_decrypt_version`) no longer verify.
+  `write`, not `read`: it answers guesses about the input. All take batches, as encrypt does; a
+  signature or HMAC by a retired (`min_decrypt_version`) or unknown version is `valid: false`, a
+  malformed one a 400. Signing is `write` on the project, as encrypting is: a grant can't yet be
+  narrowed to one key, so anyone who may write the project's secrets may sign with its keys.
 - A key can be brought from outside, as Vault's and Infisical's KMS imports: `POST …/transit {name,
   key, vault_version?}` or `…/rotate {key, vault_version?}` (admin; `roll secrets transit import NAME
   [--vault-version N]` with the key on stdin) takes 32 bytes (base64) as the first or newest version.

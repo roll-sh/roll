@@ -215,10 +215,12 @@ impl Opened {
         Ok(format!("roll:v{v}:{}", URL_SAFE_NO_PAD.encode(signer(key)?.sign(input).as_ref())))
     }
 
-    /// Whether `sig` is this key's signature of `input`. A malformed or retired one is an error.
+    /// Whether `sig` is this key's signature of `input`. A malformed one is an error; one by a
+    /// retired or unknown version doesn't verify.
     fn verify(&self, input: &[u8], sig: &str) -> Result<bool> {
         let (v, raw) = parse(sig)?;
-        let public = ring::signature::KeyPair::public_key(&signer(self.version(v)?)?).as_ref().to_vec();
+        let Ok(key) = self.version(v) else { return Ok(false) };
+        let public = ring::signature::KeyPair::public_key(&signer(key)?).as_ref().to_vec();
         Ok(ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public).verify(input, &raw).is_ok())
     }
 
@@ -229,7 +231,8 @@ impl Opened {
 
     fn hmac_verify(&self, input: &[u8], mac: &str) -> Result<bool> {
         let (v, raw) = parse(mac)?;
-        Ok(ring::hmac::verify(&mac_key(self.version(v)?), input, &raw).is_ok())
+        let Ok(key) = self.version(v) else { return Ok(false) };
+        Ok(ring::hmac::verify(&mac_key(key), input, &raw).is_ok())
     }
 }
 
@@ -540,6 +543,9 @@ pub struct ArchivedKey {
     /// (version, Vault version) for versions brought from Vault.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vault: Vec<(u32, u32)>,
+    /// Versions brought from outside (Vault's or not).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imported: Vec<u32>,
 }
 
 impl Secrets {
@@ -548,11 +554,13 @@ impl Secrets {
         let mut out = vec![];
         for name in names {
             let o = self.transit_open(project, &name)?;
-            let at: Vec<i64> = {
+            let stored: Vec<Stored> = {
                 let s: String = self.db.read(|c| c.query_row("SELECT versions FROM transit_keys WHERE id = ?", [&o.id], |r| r.get(0)))?;
-                serde_json::from_str::<Vec<Stored>>(&s).unwrap_or_default().into_iter().map(|s| s.at).collect()
+                serde_json::from_str(&s).unwrap_or_default()
             };
-            out.push(ArchivedKey { name, min_decrypt_version: o.min, versions: o.versions.iter().zip(at).map(|((v, k), at)| (*v, URL_SAFE_NO_PAD.encode(k.as_ref()), at)).collect(), vault: o.vault.iter().map(|(vv, v)| (*v, *vv)).collect() });
+            let imported = stored.iter().filter(|s| s.imported).map(|s| s.v).collect();
+            let at: Vec<i64> = stored.into_iter().map(|s| s.at).collect();
+            out.push(ArchivedKey { name, min_decrypt_version: o.min, versions: o.versions.iter().zip(at).map(|((v, k), at)| (*v, URL_SAFE_NO_PAD.encode(k.as_ref()), at)).collect(), vault: o.vault.iter().map(|(vv, v)| (*v, *vv)).collect(), imported });
         }
         Ok(out)
     }
@@ -568,7 +576,7 @@ impl Secrets {
             for (v, key, at) in &k.versions {
                 let sealed = dek.seal(&version_aad(project, &id, *v), &Value::new(key.clone()));
                 let vault = k.vault.iter().find(|(rv, _)| rv == v).map(|(_, vv)| *vv);
-                stored.push(Stored { v: *v, key: URL_SAFE_NO_PAD.encode(sealed), at: *at, imported: vault.is_some(), vault });
+                stored.push(Stored { v: *v, key: URL_SAFE_NO_PAD.encode(sealed), at: *at, imported: vault.is_some() || k.imported.contains(v), vault });
             }
             if stored.is_empty() {
                 continue;
