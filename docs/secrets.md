@@ -1664,22 +1664,30 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A seventh independent review** of RabbitMQ outside roll and of the OpenSearch link names,
-   with the sixth review's fixes, and its fixes.
-2. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
+1. **A seventh independent review** (running) of RabbitMQ outside roll, the OpenSearch link names
+   and the sixth review's fixes, and its fixes.
+2. **Moving in from Vault and AWS Secrets Manager** (a pull request on #20), as Infisical's and
+   Doppler's importers: `roll secrets import --from vault` walks a KV v2 mount (folders become
+   folders, each secret's fields keys) and `--from aws` reads Secrets Manager by prefix, through
+   the existing audited import route; nothing of theirs is stored, and the source's token stays in
+   the shell.
+3. **Change policies per folder**, as Infisical's approval policies on secret paths: a protected
+   folder (`/payments`) inside an unprotected environment, with its own approvals and approvers.
+4. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
-3. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47), a live check of
-   OpenSearch links (#29 and #51 in one build), and splitting the CLI's `secrets.rs` (2,700 lines)
-   by command once the stacked pull requests that touch it have landed.
-4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
+5. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
+   tools are ready), a live check of OpenSearch links (#29 and #51 in one build), and splitting the
+   CLI's `secrets.rs` (2,700 lines) by command once the stacked pull requests that touch it have
+   landed.
+6. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
-5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
+7. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
    token; the trust policy pins `sub`, as GCP's and Azure's do).
-6. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
+8. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
    notice.
-7. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
+9. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
    project can link their own databases, buckets and streams.
-8. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+10. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
    environment).
 
 Open pull requests after this one:
