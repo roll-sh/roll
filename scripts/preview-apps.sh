@@ -120,6 +120,24 @@ until_vars "'FEATURE_FLAG' in n and 'ROLL_PREVIEW_SET' in n"
 ROLL_API_URL="http://$API" "$CLI" preview env "$PV" --unset FEATURE_FLAG >/dev/null
 until_vars "'FEATURE_FLAG' not in n and 'REDIS_URL' in n"
 UNSET="FEATURE_FLAG set, then unset; REDIS_URL kept"
+
+say "a screenshot of the roll apps service (in its instance's network), and main's baseline on roll apps"
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true}}' >/dev/null
+for _ in $(seq 1 240); do
+  [ "$(api GET "/v1/previews/$PV" | jq_ "d.get('screenshot_at') is not None")" = True ] && break
+  sleep 1
+done
+SHOT=$(curl -sS "http://$API/v1/previews/$PV/screenshot" | python3 -c "import sys; b=sys.stdin.buffer.read(); print(f'{len(b)} bytes, PNG' if b[:4]==b'\x89PNG' else 'not a PNG: ' + b[:200].decode('utf-8','replace'))")
+case "$SHOT" in *PNG) ;; *) echo "the roll apps service should be screenshotted: $SHOT"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1;; esac
+LOAD=$(api GET "/v1/previews/$PV" | jq_ "(d.get('page_speed') or {}).get('now', {}).get('load_ms')")
+BASE=""
+for _ in $(seq 1 600); do
+  BASE=$(api GET "/v1/previews/$PV" | jq_ "('%s%% against %s' % (d['base_change']['percent'], d['base_change']['branch'])) if d.get('base_change') else ''")
+  [ -n "$BASE" ] && break
+  sleep 1
+done
+[ -n "$BASE" ] || { echo "main's baseline on roll apps should be compared with the change"; api GET "/v1/previews?project=$PRJ" | jq_ "[(p['branch'], p['state'], p.get('screenshot_at')) for p in d]"; exit 1; }
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":false}}' >/dev/null
 BRANCH=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='redis'][0]")
 say "land"
 api POST "/v1/code/changes/$CHG/land" '{}' >/dev/null
@@ -129,6 +147,7 @@ cat <<EOF
 | What | Measured |
 | --- | --- |
 | Change opened → preview ready (Redis branched, roll apps environment made, deploy queued) | $((T1 - T0)) ms |
+| The roll apps service's screenshot (its instance's network) / load / against main's baseline on roll apps | $SHOT / $LOAD ms / $BASE |
 | … → its deploy active (a Docker build of the change's commit) | $((T2 - T0)) ms |
 | First request through roll apps (cold) | $((T4 - T3)) ms |
 | Body / the Redis host the service saw / the preview's Redis branch | $BODY / $WHERE / $BRANCH |
