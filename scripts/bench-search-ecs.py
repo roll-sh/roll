@@ -2,7 +2,10 @@
 """A synthetic ECS-style access-log corpus (objects several levels deep, as Beats and Elastic
 Agent send them) and its mapping, for indexing benchmarks.
 
-    scripts/bench-search-ecs.py <docs> <out.json> <mapping.json>
+    scripts/bench-search-ecs.py <docs> <out.json> <mapping.json> [--arrays]
+
+`--arrays` adds an array of 1-3 objects to every document (`related`, as threat-intel
+indicators or order lines are).
 
 then `scripts/bench-search.sh ingest --file <out.json> --body <mapping.json>`.
 """
@@ -11,6 +14,7 @@ import random
 import sys
 
 n, out, mapping = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+arrays = "--arrays" in sys.argv[4:]
 r = random.Random(42)
 paths = ["/", "/api/orders", "/api/users/%d", "/static/app.js", "/login", "/search?q=%d", "/cart"]
 agents = ["Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
@@ -34,6 +38,8 @@ with open(out, "w") as f:
             "event": {"duration": r.randint(100_000, 900_000_000), "dataset": "nginx.access", "outcome": "success" if status < 400 else "failure"},
             "message": "%s %s %d" % (r.choice(["GET", "POST"]), p, status),
         }
+        if arrays:
+            doc["related"] = [{"kind": r.choice(["user", "order", "ip"]), "id": "%x" % r.randint(0, 1 << 40), "score": r.randint(0, 100)} for _ in range(r.randint(1, 3))]
         f.write(json.dumps(doc, separators=(",", ":")) + "\n")
 kw = {"type": "keyword"}
 body = {
@@ -48,6 +54,7 @@ body = {
         "user_agent": {"properties": {"original": {"type": "keyword", "fields": {"text": {"type": "match_only_text"}}}}},
         "event": {"properties": {"duration": {"type": "long"}, "dataset": kw, "outcome": kw}},
         "message": {"type": "match_only_text"},
+        **({"related": {"properties": {"kind": kw, "id": kw, "score": {"type": "long"}}}} if arrays else {}),
     }},
 }
 json.dump(body, open(mapping, "w"))

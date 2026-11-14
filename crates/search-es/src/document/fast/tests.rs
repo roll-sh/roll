@@ -105,16 +105,25 @@ fn http_logs_documents_take_the_fast_path() {
         r#"{"geoip": {"city_name": "x"}}"#,
         r#"{"status": 200, "geoip": {"country_name": "NL", "location": [4.9, 52.37], "city_name": ["a", "b"]}, "size": 1}"#,
         r#"{"geoip": {}}"#,
+        r#"{"geoip": [{"city_name": "x"}, {"country_name": "NL", "city_name": "y"}]}"#,
+        r#"{"geoip": [[{"city_name": "x"}], [], {"city_name": "z"}]}"#,
+        r#"{"geoip": []}"#,
     ] {
         assert!(agree(&idx, &plan, doc), "not taken: {doc}");
     }
+    // Past `index.mapping.array_objects.limit` the general path fails the document.
+    let limited = index(HTTP_LOGS, &[("index.mapping.array_objects.limit", "1")]);
+    let plan1 = FastPlan::new(&limited).expect("plan");
+    assert!(agree(&limited, &plan1, r#"{"geoip": [{"city_name": "x"}]}"#));
+    assert!(plan1.parse(br#"{"geoip": [{"city_name": "x"}, {"city_name": "y"}]}"#).is_none());
     // Malformed addresses stay with the general path (its errors), and so do objects it does
-    // more with: null, arrays of objects, unknown or repeated keys, a value where an object is.
+    // more with: null (also in an array), unknown or repeated keys, a value where an object is.
     for doc in [
         r#"{"clientip": "1.2.3"}"#,
         r#"{"clientip": 1}"#,
         r#"{"geoip": null}"#,
-        r#"{"geoip": [{"city_name": "x"}]}"#,
+        r#"{"geoip": [{"city_name": "x"}, null]}"#,
+        r#"{"geoip": [{"city_name": "x"}, "y"]}"#,
         r#"{"geoip": {"zip": "x"}}"#,
         r#"{"geoip": {"city_name": "x", "city_name": "y"}}"#,
         r#"{"geoip": "x"}"#,
@@ -270,7 +279,7 @@ fn scalar(r: &mut Rng) -> String {
         0 => r.pick(&strings).to_string(),
         1 => r.pick(&nums).to_string(),
         2 => r.pick(&["true", "false", "null"]).to_string(),
-        _ => r.pick(&["[1.5, 2.5]", "[-200, 0]", "[0, 95]", "[1, 2, 3]", "\"1,2\"", "{\"x\": \"a\"}", "[]", "[\"a\", [\"b\"]]", "[1, \"x\"]", "{\"x\": [\"a\", 1]}", "{\"x\": null}", "{}", "{\"x\": \"a\", \"x\": \"b\"}", "{\"p\": {\"y\": 3}, \"z\": 1.25}", "{\"z\": [0.05, -2.25], \"p\": {}}", "{\"p\": {\"y\": 1.5}}"]).to_string(),
+        _ => r.pick(&["[1.5, 2.5]", "[-200, 0]", "[0, 95]", "[1, 2, 3]", "\"1,2\"", "{\"x\": \"a\"}", "[]", "[\"a\", [\"b\"]]", "[1, \"x\"]", "{\"x\": [\"a\", 1]}", "{\"x\": null}", "{}", "{\"x\": \"a\", \"x\": \"b\"}", "{\"p\": {\"y\": 3}, \"z\": 1.25}", "{\"z\": [0.05, -2.25], \"p\": {}}", "{\"p\": {\"y\": 1.5}}", "[{\"x\": \"a\"}, {\"x\": \"b\"}]", "[{\"p\": {\"y\": 2}}, [{\"z\": 0.5}]]", "[{\"x\": \"a\"}, null]"]).to_string(),
     }
 }
 

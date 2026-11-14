@@ -15,7 +15,7 @@
 //!
 //! The fast path decides nothing on its own: it returns `None` (and the caller takes the
 //! general path, which produces every error and every rarer behaviour) for anything outside
-//! what it reproduces exactly — unknown or dotted keys, metadata fields, arrays of objects, `null`,
+//! what it reproduces exactly — unknown or dotted keys, metadata fields, `null`,
 //! strings for numeric fields, out-of-range numbers, out-of-range points, escapes in keys,
 //! comments, duplicate keys, trailing content, invalid UTF-8. Values are converted with the
 //! same functions the general parsers use (number text to `f64`, the field's date formatter).
@@ -104,6 +104,8 @@ pub(crate) struct FastPlan {
     /// The root's scope first.
     scopes: Vec<Scope>,
     pub(crate) source: SourcePlan,
+    /// `index.mapping.array_objects.limit`: past it the general path fails the document.
+    array_objects_limit: usize,
 }
 
 /// An object the general path walks without anything of its own: not nested, a pass-through
@@ -183,7 +185,7 @@ impl FastPlan {
                 }
             }
         };
-        let mut plan = FastPlan { leaves: Vec::new(), scopes: Vec::new(), source };
+        let mut plan = FastPlan { leaves: Vec::new(), scopes: Vec::new(), source, array_objects_limit: ctx.array_objects_limit.max(0) as usize };
         plan.scope(root, "", &ctx, 0);
         if plan.leaves.is_empty() {
             return None;
@@ -227,7 +229,7 @@ impl FastPlan {
         s.i += 1;
         let mut out = ParsedDocument { fields: Vec::with_capacity(self.leaves.len() * 2), ..Default::default() };
         let mut ignored: Vec<Arc<str>> = Vec::new();
-        self.object(&mut s, 0, &mut out, &mut ignored)?;
+        self.object(&mut s, 0, &mut out, &mut ignored, &mut 0)?;
         // Trailing content: only whitespace (the general parser ignores more, but rarely sees it).
         s.ws_end()?;
         if !ignored.is_empty() {
@@ -241,7 +243,7 @@ impl FastPlan {
 
     /// The keys of the object (of `scope`) whose `{` the scanner just passed, through its `}`.
     /// Objects recurse no deeper than the plan's scopes do.
-    fn object(&self, s: &mut Scan<'_>, scope: usize, out: &mut ParsedDocument, ignored: &mut Vec<Arc<str>>) -> Option<()> {
+    fn object(&self, s: &mut Scan<'_>, scope: usize, out: &mut ParsedDocument, ignored: &mut Vec<Arc<str>>, arrays: &mut usize) -> Option<()> {
         let sc = &self.scopes[scope];
         let mut seen = SeenSet::new(sc.by_name.len());
         s.ws()?;
@@ -268,14 +270,18 @@ impl FastPlan {
             s.ws()?;
             match entry {
                 Entry::Leaf(li, _) => self.values(s, &self.leaves[li], out, ignored, 0)?,
-                // Only an object (not `null`, an array of objects or a value) is followed here.
-                Entry::Object(child, _) => {
-                    if s.peek()? != b'{' {
-                        return None;
+                // An object, or an array of them (not `null` or a value).
+                Entry::Object(child, _) => match s.peek()? {
+                    b'{' => {
+                        s.i += 1;
+                        self.object(s, child, out, ignored, arrays)?;
                     }
-                    s.i += 1;
-                    self.object(s, child, out, ignored)?;
-                }
+                    b'[' => {
+                        s.i += 1;
+                        self.object_array(s, child, out, ignored, arrays, 1)?;
+                    }
+                    _ => return None,
+                },
             }
             s.ws()?;
             match s.peek()? {
@@ -284,6 +290,46 @@ impl FastPlan {
                     s.ws()?;
                 }
                 b'}' => {
+                    s.i += 1;
+                    return Some(());
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// The objects of an array (of `scope`) whose `[` the scanner just passed, through its `]`:
+    /// each counts toward `index.mapping.array_objects.limit`, inner arrays flatten, and a
+    /// `null` or a value in it is left to the general path.
+    fn object_array(&self, s: &mut Scan<'_>, scope: usize, out: &mut ParsedDocument, ignored: &mut Vec<Arc<str>>, arrays: &mut usize, depth: usize) -> Option<()> {
+        s.ws()?;
+        if s.peek()? == b']' {
+            s.i += 1;
+            return Some(());
+        }
+        loop {
+            match s.peek()? {
+                b'{' => {
+                    *arrays += 1;
+                    if *arrays > self.array_objects_limit {
+                        return None;
+                    }
+                    s.i += 1;
+                    self.object(s, scope, out, ignored, arrays)?;
+                }
+                b'[' if depth < MAX_ARRAY_DEPTH => {
+                    s.i += 1;
+                    self.object_array(s, scope, out, ignored, arrays, depth + 1)?;
+                }
+                _ => return None,
+            }
+            s.ws()?;
+            match s.peek()? {
+                b',' => {
+                    s.i += 1;
+                    s.ws()?;
+                }
+                b']' => {
                     s.i += 1;
                     return Some(());
                 }
