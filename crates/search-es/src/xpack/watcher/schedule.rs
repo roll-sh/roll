@@ -429,6 +429,11 @@ impl Quartz {
     }
 }
 
+/// Whether a Quartz cron expression parses.
+pub fn valid_cron(expr: &str) -> bool {
+    parse_quartz(expr).is_some()
+}
+
 /// The first time strictly after `after` (Unix ms) a Quartz cron expression fires in `zone`.
 pub fn next_cron(expr: &str, zone: &Zone, after: i64) -> Option<i64> {
     let q = parse_quartz(expr)?;

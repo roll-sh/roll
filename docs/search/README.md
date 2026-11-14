@@ -218,7 +218,7 @@ Measured on the tree merged with `main` (2026-11-12), on ai-server (a shared 18-
 | Elasticsearch 9.5.5 YAML REST suite (`test/free` + clients-tests) | **3,810 of 3,905 pass**, 0 fail, 95 skipped; 0 regressions against the baseline |
 | OpenSearch 3.9.0 YAML REST suite | **1,455 of 1,506 pass**, 0 fail, 51 skipped |
 | OpenSearch SQL plugin's PPL suite | **204 of 204** |
-| extended suites (67 module, plugin and x-pack suites, each on its test cluster's settings) | **5,046 of the 5,541 tests that pass on Elasticsearch** (6,349 in all); 41 suites at 100% (EQL 39 of 39, ent-search 371 of 371, ES\|QL 549 of 549, KQL 34 of 34, `otel-data` 68 of 68, transforms 108 of 108, watcher 89 of 89, `watcher-security` 9 of 9), runtime fields 247 of 248, `logsdb` 225 of 234; round 6 passed 3,463. Largest gaps: x-pack `platinum` (1,064 of 1,412: rollup 52 of 52, security 100 of 101), downsampling (58 of 59) |
+| extended suites (67 module, plugin and x-pack suites, each on its test cluster's settings) | **5,061 of the 5,541 tests that pass on Elasticsearch** (6,349 in all); 44 suites at 100% (EQL 39 of 39, ent-search 371 of 371, ES\|QL 549 of 549, KQL 34 of 34, `otel-data` 68 of 68, SLM 8 of 8, searchable snapshots 13 of 13, transforms 108 of 108, watcher 89 of 89, `watcher-security` 9 of 9), runtime fields 247 of 248, `logsdb` 225 of 234; round 6 passed 3,463. Largest gaps: x-pack `platinum` (1,064 of 1,412: rollup 52 of 52, security 100 of 101), downsampling (58 of 59) |
 | differential suite against Elasticsearch 9.5.5 (seed 1, 60 random workloads) | 2,325 of 2,333 steps equal (99.7%); the 8 others are 2 known differences (soft-delete tombstones in phrase-suggester and term statistics), none new or open; 69 replayed fixtures equal |
 | client matrix (unmodified official clients in Docker) | **11 of 11**: Python, JavaScript, Java, Go, Ruby and PHP clients, the OpenSearch Python and JavaScript clients, django-elasticsearch-dsl, Laravel Scout, and searchkick's own suite (540 runs, 0 failures) |
 | x-pack REST fixtures (`search-es/tests/xpack_fixtures.rs`) | 1,097 of 1,097 steps equal Elasticsearch |
@@ -307,7 +307,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    its `ism_template`). Next: saved console requests. Signed-in users who aren't admins follow
    accounts' phase 2: today every product but code, agents and projects answers them 403
    (docs/accounts.md), search included.
-5. **Compatibility gaps** from the extended suites (5,046 of the 5,541 Elasticsearch passes; a full run on 2026-11-14),
+5. **Compatibility gaps** from the extended suites (5,061 of the 5,541 Elasticsearch passes; a full run on 2026-11-14),
    largest first. Landed: ent-search's last 5 (a `rule` retriever over `rrf`/`linear`, inference
    inside a rule query's organic, workflow-restricted API keys), ES|QL's last 5 (`TOP_SNIPPETS`,
    `CATEGORIZE`, approximation's columns, `LIMIT n BY`, `unsigned_long` past `i64::MAX`),
@@ -322,11 +322,14 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `auto_date_histogram`'s rounding from the bounds as OpenSearch's rewrite does where it differs
    from collecting (roll counts with Elasticsearch's choice in both dialects).
 6. **Elasticsearch's lifecycles: what's left.** The data stream lifecycle (rollover, retention,
-   failure stores, the error store) and ILM run now (`api/data_stream_lifecycle.rs`,
-   `xpack/ilm_run.rs`; compatibility.md, "Known gaps"). They run time-based work at its due time
-   and wake a sleeping cluster only for that. Left: ILM's `shrink` to fewer shards and
-   `downsample` (roll has both APIs; the steps that swap the new index in aren't written),
-   `searchable_snapshot`, `wait_for_snapshot` (needs SLM), and the `ilm-history-*` data stream.
+   failure stores, the error store), ILM and snapshot lifecycle management (scheduled snapshots,
+   retention, `.slm-history-7`, ILM's `wait_for_snapshot`) run now (`api/data_stream_lifecycle.rs`,
+   `xpack/ilm_run.rs`, `xpack/slm.rs`; compatibility.md, "Known gaps"). They run time-based work
+   at its due time and wake a sleeping cluster only for that. Left: ILM's `shrink` to fewer shards
+   and `downsample` (roll has both APIs; the steps that swap the new index in aren't written),
+   `searchable_snapshot`, and the `ilm-history-*` data stream; a `path.repo` (or an object-storage
+   repository type) for clusters on the fleet, which can't register a repository for snapshots
+   or SLM yet.
    The data stream lifecycle's force merges and downsampling rounds aren't run either.
 7. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
    endpoints, creates them (OpenAI or any compatible URL, Cohere, Anthropic; the API key sent

@@ -26,16 +26,16 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
 - Of the 3808 tests that pass on Elasticsearch 9.5.5 (and run here), roll passes **3808** (100%); every x-pack clients test passes.
   <!-- test-search: roll >= 3810 -->
 - Elasticsearch's module, plugin and x-pack YAML suites outside `test/free` (67 suites, 6,349 tests;
-  [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 5,207, **5,046 of
-  the 5,541** that pass on Elasticsearch 9.5.5 (90%), each run like its suite's own test cluster (a
+  [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 5,222, **5,061 of
+  the 5,541** that pass on Elasticsearch 9.5.5 (91%), each run like its suite's own test cluster (a
   full run of every suite at `1dce30b61` plus the dot-prefix warnings, 2026-11-14; `lang-mustache`,
-  `rank-eval`, `ilm` and `eql` rerun since, and the `analysis-phonetic`, `-stempel`, `-ukrainian`,
-  `-kuromoji`, `-nori` and `-smartcn` plugins added). 41 suites pass every test Elasticsearch
-  passes. What's left, largest first: x-pack
+  `rank-eval`, `ilm`, `eql`, `slm`, `searchable-snapshots` and `snapshot-repo-test-kit` rerun since,
+  and the `analysis-phonetic`, `-stempel`, `-ukrainian`, `-kuromoji`, `-nori` and `-smartcn`
+  plugins added). 44 suites pass every test Elasticsearch passes. What's left, largest first: x-pack
   `platinum` (1,065 of 1,412; machine learning is most of it), plugins roll doesn't ship (the
   `analysis-icu` analyzers, `mapper-annotated-text`, `-murmur3`
   and `-size`, `ingest-attachment`, `ingest-otel`, `prometheus`), `apm-data`'s templates and
-  pipelines (1 of 26), cross-cluster replication and snapshot lifecycle management (none),
+  pipelines (1 of 26), cross-cluster replication (none),
   `mapper-unsigned-long` (33 of 34: a `terms` aggregation across `long` and `unsigned_long`
   indices), `logsdb` (225 of 234: `_ignored_source` binary entries, the `@timestamp` doc values
   skipper), runtime fields (247 of 248: highlighting them). In `platinum` besides machine learning:
@@ -257,10 +257,10 @@ the discovery/store plugins.
 | `prometheus` | `x-pack/plugin/prometheus` | security | 6 | 6 | 0 | 0 | 6 |
 | `rank-rrf` | `x-pack/plugin/rank-rrf:linear,rrf` | plain | 136 | 96 | 96 | 96 | 0 |
 | `rank-rrf-license` | `x-pack/plugin/rank-rrf:license` | basic | 3 | 3 | 0 | 0 | 3 |
-| `searchable-snapshots` | `x-pack/plugin/searchable-snapshots/qa/rest` | security | 13 | 13 | 8 | 8 | 5 |
+| `searchable-snapshots` | `x-pack/plugin/searchable-snapshots/qa/rest` | security | 13 | 13 | 13 | 13 | 0 |
 | `search-business-rules` | `x-pack/plugin/search-business-rules` | basic | 16 | 16 | 16 | 16 | 0 |
-| `slm` | `x-pack/plugin/slm` | security | 8 | 8 | 1 | 1 | 7 |
-| `snapshot-repo-test-kit` | `x-pack/plugin/snapshot-repo-test-kit/qa/rest` | basic | 6 | 6 | 3 | 3 | 3 |
+| `slm` | `x-pack/plugin/slm` | security | 8 | 8 | 8 | 8 | 0 |
+| `snapshot-repo-test-kit` | `x-pack/plugin/snapshot-repo-test-kit/qa/rest` | basic | 6 | 6 | 6 | 6 | 0 |
 | `stack` | `x-pack/plugin/stack` | security | 6 | 6 | 6 | 6 | 0 |
 | `transform` | `x-pack/plugin/transform` | security | 109 | 108 | 108 | 108 | 0 |
 | `watcher` | `x-pack/plugin/watcher:mustache,painless,watcher` | plain | 92 | 89 | 89 | 89 | 0 |
@@ -278,7 +278,7 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | **6,349** | **5,541** | **5,207** | **5,046** | **495** |
+| **total** | | | **6,349** | **5,541** | **5,222** | **5,061** | **480** |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
@@ -313,10 +313,10 @@ the discovery/store plugins.
 <!-- test-search: mapper-version >= 6 -->
 <!-- test-search: otel-data >= 68 -->
 <!-- test-search: rank-rrf >= 96 -->
-<!-- test-search: searchable-snapshots >= 8 -->
+<!-- test-search: searchable-snapshots >= 13 -->
 <!-- test-search: search-business-rules >= 16 -->
-<!-- test-search: slm >= 1 -->
-<!-- test-search: snapshot-repo-test-kit >= 3 -->
+<!-- test-search: slm >= 8 -->
+<!-- test-search: snapshot-repo-test-kit >= 6 -->
 <!-- test-search: stack >= 6 -->
 <!-- test-search: transform >= 108 -->
 <!-- test-search: watcher >= 89 -->
@@ -347,7 +347,7 @@ the discovery/store plugins.
 Largest gaps by suite (from the roll reports, `target/search-yaml/extended/roll-<suite>.json`):
 not implemented at all: the plugin analyzers and mappers (`analysis-icu`, `annotated_text`,
 `murmur3`, `_size`),
-CCR, Fleet APIs, SLM, the `normalize_for_stream` processor (`ingest-otel`),
+CCR, Fleet APIs, the `normalize_for_stream` processor (`ingest-otel`),
 `attachment`, reindex management, Prometheus ingest; roll lists no `lang-expression`,
 `transport-netty4` or `user-agent` module in `_nodes`; roll ignores `xpack.license.self_generated.type: basic`
 (its license is always `enterprise`), so `rank-rrf-license`'s licence errors are missing; the
@@ -1307,14 +1307,43 @@ the rest are skipped by the tests' own prerequisites.
   phase, `step_info`, `failed_step`, retry counts; a missing policy reads as `ERROR`). Failed
   steps are retried on each poll; `_ilm/retry`, `_ilm/move` and `_ilm/stop` (`STOPPING`, then
   `STOPPED`) act on that state. A new managed index is initialized in the state change that
-  made it managed. Steps run as the user who last put the policy. Not run: `shrink` to fewer
-  shards, `downsample`, `searchable_snapshot` and `wait_for_snapshot` (no SLM). These end in the
-  `ERROR` step with the reason. ILM history (`ilm-history-*`) isn't written. Elasticsearch polls
+  made it managed. Steps run as the user who last put the policy. `wait_for_snapshot` waits until
+  its snapshot lifecycle policy has taken a snapshot including the index since the action began
+  (a policy it names must exist when the ILM policy is put). Not run: `shrink` to fewer shards,
+  `downsample` and `searchable_snapshot`. These end in the `ERROR` step with the reason. ILM history (`ilm-history-*`) isn't written. Elasticsearch polls
   every `indices.lifecycle.poll_interval` and `data_streams.lifecycle.poll_interval`. roll runs
   time-based work (a phase's `min_age`, a rollover's `max_age`, a retention running out, a time
   series end time) at its due time, and wakes a sleeping cluster for it. It polls at those
   intervals only while a write could meet a size or document condition, or a failure is
   retried, and that poll never wakes a cluster.
+- Snapshot lifecycle management (`xpack/slm.rs`) runs on the same scheduler. A policy takes its
+  snapshot (its `config`, `metadata.policy` added, named from its date-math `name` plus a random
+  suffix) on its Quartz cron schedule in UTC or its interval, as the user who last put it, and
+  records `last_success` or `last_failure` (the error as JSON), the failures since the last
+  success, its counters (`_slm/stats`, `_xpack/usage`) and a `CREATE` item in the hidden
+  `.slm-history-7` data stream (Elasticsearch's template, 90 days of data stream lifecycle
+  retention; `slm.history_index_enabled`). Retention runs on `slm.retention_schedule` and on
+  `_slm/_execute_retention`, with Elasticsearch's eligibility rules (`expire_after`,
+  `min_count`, `max_count`, unsuccessful snapshots first) within `slm.retention_duration`, each
+  deletion counted and recorded as a `DELETE` item. `_slm/stop` stops through `STOPPING` while a
+  snapshot is being taken; runs missed while stopped are skipped, as Elasticsearch reschedules on
+  start. The health report's `slm` indicator reports a stopped SLM and policies that failed
+  `slm.health.failed_snapshot_warn_threshold` times in a row. A policy's next run and the next
+  retention (only while a policy has a retention) are due times that wake a sleeping cluster.
+  Not shown: `in_progress` in `GET _slm/policy` (roll takes the snapshot within the run). On the
+  fleet no cluster has a `path.repo` yet, so no `fs` repository, and so no policy, can be
+  registered there.
+- Searchable snapshots mount through the snapshot restore API; mounted indices keep the
+  repository from being unregistered or moved (409 `repository_conflict_exception`). The
+  statistics list the mounted shards' files by Lucene extension with their sizes but no blob
+  cache traffic (roll reads no blobs through a cache), the shared cache reports its configured
+  size and regions, and a frozen (`shared_cache`) index's files count in `_stats` file sizes
+  only with `include_unloaded_segments`. `_snapshot/<repo>/_verify_integrity` checks every
+  shard each snapshot records still has its durable copy; `_analyze` (the repository test kit)
+  validates and plans as Elasticsearch does, and times out when the repository's
+  `max_snapshot_bytes_per_sec`/`max_restore_bytes_per_sec` couldn't move the data within
+  `timeout`; it doesn't exercise a blob store, since roll keeps snapshot contents in the
+  cluster's own storage.
 - x-pack (`crates/search-es/src/xpack/`): security (native realm, API keys, tokens, role
   mappings, privileges, request authorization), ES|QL, SQL, EQL, enrich, transforms, async
   search, ILM, search applications, query rules, connectors, graph, terms enum, text structure

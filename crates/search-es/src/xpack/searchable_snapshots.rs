@@ -6,10 +6,16 @@
 //! searchable-snapshot allocator and tier preference) and then reads the shard files lazily
 //! from the repository. roll mounts the same way, through the snapshot restore API (so the
 //! index gets exactly a restored index's metadata and errors) plus those settings; the data
-//! comes back however the restore brings it back. What is emulated: roll has no Lucene files
-//! read through a blob cache, so the per-file statistics arrays are empty, the node's shared
-//! cache reports zeros, and a `shared_cache` (frozen tier) mount succeeds like a `full_copy`
-//! one (Elasticsearch fails its shards on a node without a shared cache configured).
+//! comes back however the restore brings it back, and the repository can't be unregistered
+//! while a mounted index reads from it. What is emulated: roll reads no Lucene files through
+//! a blob cache. The per-file statistics list the mounted shards' files by Lucene extension
+//! (the kinds `include_segment_file_sizes` reports, with their counts and sizes), each opened
+//! and closed once by the mount, with no reads, seeks or cache traffic counted; the node's
+//! shared cache reports its configured size and regions
+//! (`xpack.searchable.snapshot.shared_cache.size` and `.region_size`) and no traffic; and a
+//! `shared_cache` (frozen tier) mount succeeds like a `full_copy` one (Elasticsearch fails its
+//! shards on a node without a shared cache configured). A frozen index's segments count in
+//! `_stats` file sizes only with `include_unloaded_segments`, as they aren't loaded there.
 
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
@@ -17,8 +23,9 @@ use crate::obj;
 use crate::rest::{Ctx, Reply};
 use crate::xpack::{enc, internal};
 
-/// The mount body fields (`MountSearchableSnapshotRequest.PARSER`).
-const FIELDS: [&str; 4] = ["index", "renamed_index", "index_settings", "ignore_index_settings"];
+/// The mount body fields (`MountSearchableSnapshotRequest.PARSER`; `ignored_index_settings`
+/// is accepted and ignored, as Elasticsearch does).
+const FIELDS: [&str; 5] = ["index", "renamed_index", "index_settings", "ignore_index_settings", "ignored_index_settings"];
 
 fn none_mounted() -> EsError {
     EsError::new(404, "resource_not_found_exception", "No searchable snapshots indices found")
@@ -135,63 +142,141 @@ fn mounted(ctx: &Ctx) -> EsResult<Vec<(String, std::sync::Arc<crate::meta::Index
     Ok(out)
 }
 
+/// `CacheIndexInputStats` of one file extension: the files the mount opened and closed, with
+/// no traffic (roll reads no blobs through a cache).
+fn file_stats(ext: &str, (total, min, max, n): (u64, u64, u64, u64), human: bool) -> Value {
+    let size = |m: &mut Map, k: &str, v: u64| {
+        if human {
+            m.insert(k.into(), Value::from(crate::units::ByteSize(v as i64).human()));
+        }
+        m.insert(format!("{k}_in_bytes"), Value::from(v as i64));
+    };
+    let mut sz = Map::new();
+    size(&mut sz, "total", total);
+    size(&mut sz, "min", if n == 0 { 0 } else { min });
+    size(&mut sz, "max", max);
+    size(&mut sz, "average", total.checked_div(n).unwrap_or(0));
+    let counter = || obj! { "count" => 0, "sum" => 0, "min" => 0, "max" => 0 };
+    let timed = || {
+        let mut m = obj! { "count" => 0, "sum" => 0, "min" => 0, "max" => 0 };
+        if let Value::Obj(m) = &mut m {
+            if human {
+                m.insert("time".into(), Value::from("0s"));
+            }
+            m.insert("time_in_nanos".into(), Value::from(0));
+        }
+        m
+    };
+    obj! {
+        "file_ext" => ext,
+        "num_files" => n as i64,
+        "open_count" => n as i64,
+        "close_count" => n as i64,
+        "size" => Value::Obj(sz),
+        "contiguous_bytes_read" => counter(),
+        "non_contiguous_bytes_read" => counter(),
+        "cached_bytes_read" => counter(),
+        "index_cache_bytes_read" => counter(),
+        "cached_bytes_written" => timed(),
+        "direct_bytes_read" => timed(),
+        "optimized_bytes_read" => timed(),
+        "forward_seeks" => obj! { "small" => counter(), "large" => counter() },
+        "backward_seeks" => obj! { "small" => counter(), "large" => counter() },
+        "blob_store_bytes_requested" => counter(),
+        "lucene_bytes_read" => counter(),
+        "current_index_cache_fills" => 0,
+    }
+}
+
+fn files_value(files: &crate::api::indices::FileSizes, human: bool) -> Value {
+    Value::Arr(files.by_ext.iter().map(|(ext, &v)| file_stats(ext, v, human)).collect())
+}
+
 pub fn stats(ctx: &Ctx) -> EsResult<Reply> {
     let level = ctx.query("level").unwrap_or("indices");
     if !matches!(level, "cluster" | "indices" | "shards") {
         return Err(EsError::illegal_argument(format!("level parameter must be one of [cluster] or [indices] or [shards] but was [{level}]")));
     }
+    let human = ctx.human;
     let indices = mounted(ctx)?;
     let total: i64 = indices.iter().map(|(_, i)| i.number_of_shards() as i64).sum();
+    let mut all = crate::api::indices::FileSizes::default();
+    let mut per = Map::new();
+    for (name, idx) in &indices {
+        let engine = ctx.cluster.engine.loaded(&idx.uuid);
+        let mut index_files = crate::api::indices::FileSizes::default();
+        let mut shards = Map::new();
+        for s in 0..idx.number_of_shards() {
+            let mut files = crate::api::indices::FileSizes::default();
+            if let Some(e) = &engine {
+                files.add_shard(&e.shard(s).shard);
+            }
+            index_files.merge(&files);
+            shards.insert(
+                s.to_string(),
+                Value::Arr(vec![obj! {
+                    "snapshot_uuid" => idx.settings.get("index.store.snapshot.snapshot_uuid").unwrap_or_default(),
+                    "index_uuid" => idx.settings.get("index.store.snapshot.index_uuid").unwrap_or_default(),
+                    "shard" => obj! {
+                        "id" => format!("[{name}][{s}]"),
+                        "state" => "STARTED",
+                        "primary" => true,
+                        "node" => ctx.cluster.node.id.clone(),
+                    },
+                    "files" => files_value(&files, human),
+                }]),
+            );
+        }
+        all.merge(&index_files);
+        let mut entry = obj! { "total" => files_value(&index_files, human) };
+        if level == "shards"
+            && let Value::Obj(m) = &mut entry
+        {
+            m.insert("shards".into(), Value::Obj(shards));
+        }
+        per.insert(name.clone(), entry);
+    }
     let mut out = obj! {
         "_shards" => obj! { "total" => total, "successful" => total, "failed" => 0 },
-        "total" => Value::Arr(Vec::new()),
+        "total" => files_value(&all, human),
     };
-    if level != "cluster" {
-        let mut per = Map::new();
-        for (name, idx) in &indices {
-            let mut entry = obj! { "total" => Value::Arr(Vec::new()) };
-            if level == "shards"
-                && let Value::Obj(m) = &mut entry
-            {
-                let mut shards = Map::new();
-                for s in 0..idx.number_of_shards() {
-                    shards.insert(
-                        s.to_string(),
-                        Value::Arr(vec![obj! {
-                            "snapshot_uuid" => idx.settings.get("index.store.snapshot.snapshot_uuid").unwrap_or_default(),
-                            "index_uuid" => idx.settings.get("index.store.snapshot.index_uuid").unwrap_or_default(),
-                            "shard" => obj! {
-                                "id" => format!("[{name}][{s}]"),
-                                "state" => "STARTED",
-                                "primary" => true,
-                                "node" => ctx.cluster.node.id.clone(),
-                            },
-                            "files" => Value::Arr(Vec::new()),
-                        }]),
-                    );
-                }
-                m.insert("shards".into(), Value::Obj(shards));
-            }
-            per.insert(name.clone(), entry);
-        }
-        if let Value::Obj(m) = &mut out {
-            m.insert("indices".into(), Value::Obj(per));
-        }
+    if level != "cluster"
+        && let Value::Obj(m) = &mut out
+    {
+        m.insert("indices".into(), Value::Obj(per));
     }
     Reply::ok(out)
 }
 
+/// A node setting in bytes (`ByteSizeValue`), else `default`.
+fn node_bytes(ctx: &Ctx, key: &str, default: i64) -> i64 {
+    ctx.cluster.config.node_setting(key).and_then(|v| crate::units::ByteSize::parse(v, key).ok()).map_or(default, |b| b.bytes())
+}
+
+/// `SharedBlobCacheService.Stats` of the node: its configured size and regions (no shared
+/// cache unless `xpack.searchable.snapshot.shared_cache.size` is set, as on a node without the
+/// frozen role), and no traffic.
 pub fn cache_stats(ctx: &Ctx) -> EsResult<Reply> {
+    let human = ctx.human;
+    let region = node_bytes(ctx, "xpack.searchable.snapshot.shared_cache.region_size", 16 << 20).max(1);
+    let size = node_bytes(ctx, "xpack.searchable.snapshot.shared_cache.size", 0);
+    let mut m = Map::new();
+    let bytes = |m: &mut Map, k: &str, v: i64| {
+        if human {
+            m.insert(k.into(), Value::from(crate::units::ByteSize(v).human()));
+        }
+        m.insert(format!("{k}_in_bytes"), Value::from(v));
+    };
+    m.insert("reads".into(), Value::from(0));
+    bytes(&mut m, "bytes_read", 0);
+    m.insert("writes".into(), Value::from(0));
+    bytes(&mut m, "bytes_written", 0);
+    m.insert("evictions".into(), Value::from(0));
+    m.insert("num_regions".into(), Value::from(size / region));
+    bytes(&mut m, "size", size);
+    bytes(&mut m, "region_size", region);
     let mut nodes = Map::new();
-    nodes.insert(
-        ctx.cluster.node.id.clone(),
-        obj! {
-            "shared_cache" => obj! {
-                "reads" => 0, "bytes_read_in_bytes" => 0, "writes" => 0, "bytes_written_in_bytes" => 0,
-                "evictions" => 0, "num_regions" => 0, "size_in_bytes" => 0, "region_size_in_bytes" => 16_777_216,
-            }
-        },
-    );
+    nodes.insert(ctx.cluster.node.id.clone(), obj! { "shared_cache" => Value::Obj(m) });
     Reply::ok(obj! { "nodes" => Value::Obj(nodes) })
 }
 

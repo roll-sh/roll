@@ -1011,6 +1011,61 @@ async fn a_due_retention_deletion_wakes_its_sleeping_cluster() {
     }
 }
 
+/// A snapshot lifecycle policy's next run wakes its sleeping cluster, which takes the snapshot
+/// on schedule, as Elasticsearch's scheduler does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_due_slm_run_wakes_its_sleeping_cluster() {
+    let repo = std::env::temp_dir().join(format!("roll-search-slm-{}", std::process::id()));
+    let path = repo.to_string_lossy().into_owned();
+    let e = env_with(|c| {
+        c.job_wake_interval = Some(std::time::Duration::from_millis(200));
+        c.node_settings.push(("path.repo".into(), path));
+    })
+    .await;
+    let c = e.post("/v1/search/clusters", json!({"name": "snaps"})).await;
+    let (user, pw) = creds(&c);
+    let calls = [
+        (reqwest::Method::PUT, "/_cluster/settings", json!({"persistent": {"slm.minimum_interval": "0s"}})),
+        (reqwest::Method::PUT, "/_snapshot/repo", json!({"type": "fs", "settings": {"location": "repo"}})),
+        (reqwest::Method::PUT, "/docs/_doc/1?refresh=true", json!({"a": 1})),
+        (reqwest::Method::PUT, "/_slm/policy/p", json!({"schedule": "4s", "name": "<snap-{now/d}>", "repository": "repo"})),
+    ];
+    for (m, uri, body) in calls {
+        let (s, v) = e.es(&user, &pw, m, uri, Some(body)).await;
+        assert!(s < 300, "{uri}: {v}");
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/snaps/unload", Some(json!({}))).await;
+        assert_eq!(s, 200, "{v}");
+        if v["unloaded"] == true || !e.control.node.loaded().iter().any(|n| &**n == "snaps") {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "never unloaded: {v}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let (_, v) = e.call(reqwest::Method::GET, "/v1/search/clusters/snaps", None).await;
+    assert!(v["status"]["state"] == "loaded" || v["status"]["wakes_at"].as_i64().is_some_and(|t| t > 0), "{v}");
+    // No request: the policy's next run loads the cluster, and the snapshot is taken.
+    while !e.control.node.loaded().iter().any(|n| &**n == "snaps") {
+        assert!(tokio::time::Instant::now() < deadline, "the due policy never woke its cluster");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    loop {
+        let (s, v) = e.es(&user, &pw, reqwest::Method::GET, "/_slm/policy/p", None).await;
+        assert_eq!(s, 200, "{v}");
+        if v["p"]["stats"]["snapshots_taken"].as_i64() >= Some(1) {
+            let name = v["p"]["last_success"]["snapshot_name"].as_str().unwrap().to_string();
+            let (s, v) = e.es(&user, &pw, reqwest::Method::GET, &format!("/_snapshot/repo/{name}"), None).await;
+            assert_eq!((s, &v["snapshots"][0]["metadata"]["policy"]), (200, &json!("p")), "{v}");
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the policy never took its snapshot: {v}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
 /// ES|QL and SQL read as their client: an API key limited to one index (what roll secrets hands
 /// out) sees no other index through `FROM`, a wildcard, a lookup join or SQL, and a role's
 /// document query applies to its rows.

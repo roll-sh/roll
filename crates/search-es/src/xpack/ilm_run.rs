@@ -23,8 +23,9 @@
 //! `migrate`'s routing checks, `wait-for-active-shards`, the follower steps of `unfollow` on
 //! an index that isn't a follower); `shrink` completes when the index already has the target
 //! shard count (`branch-check-prerequisites`). Steps roll can't run end in the `ERROR` step
-//! with the reason: `shrink` to fewer shards, `downsample`, `searchable_snapshot` and
-//! `wait_for_snapshot` (roll has no snapshot lifecycle policies).
+//! with the reason: `shrink` to fewer shards, `downsample` and `searchable_snapshot`.
+//! `wait_for_snapshot` waits for its snapshot lifecycle policy ([`super::slm`]) to have taken a
+//! snapshot including the index since the action started (`WaitForSnapshotStep`).
 //!
 //! **When runs happen.** Elasticsearch polls every `indices.lifecycle.poll_interval` (10m).
 //! roll knows when an index's next time-based step is due ([`next_due`]: a phase's `min_age`,
@@ -414,6 +415,14 @@ fn index_due(st: &ClusterState, idx: &IndexMeta, rec: Option<&Value>, now: i64) 
         }
         "check-ts-end-time-passed" => (Some(ts_end(idx).filter(|t| *t > now).unwrap_or(now)), false),
         "check-not-write-index" => (write_index_of(st, idx).is_none().then_some(now), false),
+        // Moves on once the snapshot lifecycle policy has run (its run changes the state, which
+        // wakes the scheduler): never polled, never a reason to wake a cluster.
+        "wait-for-snapshot" => {
+            let p = step_conf(&e).get("policy").map(Value::to_es_string).unwrap_or_default();
+            let since = e.action_time.unwrap_or(0);
+            let waiting = matches!(super::slm::snapshot_since(st, &p, &idx.name, since), super::slm::Since::NotYet);
+            ((!waiting).then_some(now), false)
+        }
         // A step the runner can't move on from (one its cached phase lacks, the terminal
         // `completed` step) never comes due.
         _ if following(&e).is_none() => (None, false),
@@ -702,11 +711,22 @@ async fn execute(env: &Env<'_>, e: &mut Exec) -> Outcome {
         ("freeze", "freeze") => Outcome::Next,
         ("wait_for_snapshot", "wait-for-snapshot") => {
             let p = conf.get("policy").map(Value::to_es_string).unwrap_or_default();
-            fail_with(format!("snapshot lifecycle policy [{p}] cannot be found"))
+            let Some(since) = e.action_time else { return fail_with(format!("no information about ILM action start in index metadata for index '{i}'")) };
+            match super::slm::snapshot_since(&env.cluster.state(), &p, i, since) {
+                super::slm::Since::NoPolicy => fail_with(format!("configured policy '{p}' not found")),
+                super::slm::Since::NotYet => Outcome::Wait(Some(obj! { "message" => format!("waiting for policy '{p}' to be executed since {}", java_date(since)) })),
+                super::slm::Since::Without => fail_with(format!("the last successful snapshot of policy '{p}' does not include index '{i}'")),
+                super::slm::Since::Taken => Outcome::Next,
+            }
         }
         ("delete", "delete") => delete(env).await,
         _ => fail_with(format!("step [{step}] of action [{action}] is not supported by roll search")),
     }
+}
+
+/// `java.util.Date.toString()` in UTC (`EEE MMM dd HH:mm:ss zzz yyyy`).
+fn java_date(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms).map(|d| d.format("%a %b %d %H:%M:%S GMT %Y").to_string()).unwrap_or_default()
 }
 
 /// The rollover conditions with Elasticsearch's defaults (`applyDefaultConditions`): `min_docs:

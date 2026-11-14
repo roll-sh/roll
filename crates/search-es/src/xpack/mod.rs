@@ -36,6 +36,7 @@ pub mod rollup;
 pub mod mvt;
 pub mod searchable_snapshots;
 pub mod security;
+pub mod slm;
 pub mod sql;
 pub mod store;
 pub mod streams;
@@ -71,6 +72,8 @@ pub struct Runtime {
     pub transforms: transform::Runs,
     /// Rollup jobs running a trigger right now.
     pub rollups: rollup::Runs,
+    /// Snapshot lifecycle policies taking a snapshot right now.
+    pub slm_running: std::sync::atomic::AtomicUsize,
 }
 
 /// The `_nodes` header plus the node, as the cache-clearing APIs answer.
@@ -438,6 +441,15 @@ handlers! { ctx;
     IlmRetry => ilm::retry(ctx).await,
     IlmMoveToStep => ilm::move_to_step(ctx).await,
     IlmMigrateToDataTiers => ilm::migrate_to_data_tiers(ctx),
+    SlmPutLifecycle => slm::put_lifecycle(ctx).await,
+    SlmGetLifecycle => slm::get_lifecycle(ctx),
+    SlmDeleteLifecycle => slm::delete_lifecycle(ctx).await,
+    SlmExecuteLifecycle => slm::execute_lifecycle(ctx).await,
+    SlmExecuteRetention => slm::execute_retention(ctx).await,
+    SlmGetStats => slm::get_stats(ctx),
+    SlmGetStatus => slm::get_status(ctx),
+    SlmStart => slm::set_mode(ctx, true).await,
+    SlmStop => slm::set_mode(ctx, false).await,
 
     WatcherPutWatch => watcher::put_watch(ctx).await,
     WatcherGetWatch => watcher::get_watch(ctx),

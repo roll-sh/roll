@@ -263,7 +263,7 @@ fn indicator(ctx: &Ctx, st: &ClusterState, name: &str, verbose: bool, size: usiz
             "Data streams are executing their lifecycles without issues",
             obj! { "stagnating_backing_indices_count" => 0, "total_backing_indices_in_error" => 0 },
         ),
-        "slm" => simple("green", "No Snapshot Lifecycle Management policies configured", obj! { "slm_status" => "RUNNING", "policies" => 0 }),
+        "slm" => crate::xpack::slm::health(st, verbose),
         "shards_availability" => shards_availability(ctx, st, verbose, size),
         // `IlmHealthIndicatorService` (no index counts as stagnating).
         "ilm" => {

@@ -1,9 +1,10 @@
 //! The job scheduler of one cluster: runs what is due in the background — OpenSearch's Index
 //! State Management jobs ([`super::ism_run`]), the triggers of started x-pack transforms
 //! ([`crate::xpack::transform`]), of active watches ([`crate::xpack::watcher`]) and of started
-//! rollup jobs ([`crate::xpack::rollup`]), and Elasticsearch's index lifecycle management
+//! rollup jobs ([`crate::xpack::rollup`]), Elasticsearch's index lifecycle management
 //! ([`crate::xpack::ilm_run`]) and data stream lifecycle
-//! ([`crate::api::data_stream_lifecycle`]).
+//! ([`crate::api::data_stream_lifecycle`]), and snapshot lifecycle policies and their retention
+//! ([`crate::xpack::slm`]).
 //!
 //! One task per cluster, started when the cluster may run background work
 //! ([`Cluster::enable_background_tasks`]) and has a job. It sleeps until the earliest due
@@ -110,6 +111,7 @@ impl Jobs {
                 crate::xpack::transform::run_due(&c, now).await;
                 crate::xpack::watcher::run_due(&c, now).await;
                 crate::xpack::rollup::run_due(&c, now).await;
+                crate::xpack::slm::run_due(&c, now).await;
                 if let Some((_, ilm, dsl)) = loaded_due(&c.state(), &shared) {
                     if ilm.is_some_and(|t| t <= now) {
                         shared.ilm_polled.store(now, Ordering::SeqCst);
@@ -150,6 +152,7 @@ pub fn next_due(st: &crate::meta::ClusterState) -> Option<i64> {
         crate::xpack::transform::next_due(st),
         crate::xpack::watcher::next_due(st),
         crate::xpack::rollup::next_due(st),
+        crate::xpack::slm::next_due(st),
         crate::xpack::ilm_run::next_due(st),
         crate::api::data_stream_lifecycle::next_due(st),
     ]
@@ -171,7 +174,7 @@ fn loaded_due(st: &crate::meta::ClusterState, shared: &Shared) -> Option<(i64, O
     let poll = |polls: bool, last: &std::sync::atomic::AtomicI64, interval: i64| polls.then(|| last.load(Ordering::SeqCst).saturating_add(interval));
     let ilm_due = [ilm::next_due(st), poll(ilm::polls(st), &shared.ilm_polled, ilm::poll_interval(st))].into_iter().flatten().min();
     let dsl_due = [dsl::next_due(st), poll(dsl::polls(st), &shared.dsl_polled, dsl::poll_interval(st))].into_iter().flatten().min();
-    let others = [super::ism_run::next_due(st), crate::xpack::transform::next_due(st), crate::xpack::watcher::next_due(st), crate::xpack::rollup::next_due(st)];
+    let others = [super::ism_run::next_due(st), crate::xpack::transform::next_due(st), crate::xpack::watcher::next_due(st), crate::xpack::rollup::next_due(st), crate::xpack::slm::next_due(st)];
     let due = others.into_iter().chain([ilm_due, dsl_due]).flatten().min()?;
     Some((due, ilm_due, dsl_due))
 }

@@ -98,6 +98,8 @@ pub struct SearchConfig {
     /// Publish Elasticsearch's test cluster features, so the YAML REST suites can run against
     /// clusters made through the API (`search-yaml run --cluster-hook`). Test deployments only.
     pub test_features: bool,
+    /// Node settings every cluster reports (Elasticsearch's `-E`, e.g. `path.repo`).
+    pub node_settings: Vec<(String, String)>,
     /// How often a loaded cluster's figures (docs, stored bytes) are re-read from storage.
     pub stats_interval: Duration,
     /// Memory all loaded clusters may hold together (`None`: no node budget).
@@ -142,6 +144,7 @@ impl SearchConfig {
             job_wake_interval: Some(Duration::from_secs(15)),
             metering_interval: Duration::from_secs(60),
             test_features: false,
+            node_settings: Vec::new(),
             stats_interval: Duration::from_secs(600),
             memory_budget: None,
             catalog: None,
@@ -406,6 +409,7 @@ impl Control {
                 domain: cfg.domain.clone(),
                 idle_unload: Some(cfg.idle_unload),
                 test_features: cfg.test_features,
+                node_settings: cfg.node_settings.clone(),
                 memory_budget: cfg.memory_budget,
                 sealer: cfg.sealer.clone(),
                 ..NodeConfig::default()

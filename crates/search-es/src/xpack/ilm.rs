@@ -326,6 +326,16 @@ pub async fn put_lifecycle(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let user = internal::stored_user(crate::xpack::security::principal(ctx));
     ctx.cluster
         .update(move |st| {
+            // `TransportPutLifecycleAction`: a `wait_for_snapshot` names an existing SLM policy.
+            for (phase, def) in parsed.pointer(&["phases"]).and_then(Value::as_object).into_iter().flatten() {
+                if let Some(slm) = def.pointer(&["actions", "wait_for_snapshot", "policy"]).map(Value::to_es_string)
+                    && st.metadata.xpack.get(super::slm::POLICIES, &slm).is_none()
+                {
+                    return Err(EsError::illegal_argument(format!(
+                        "no such snapshot lifecycle policy [{slm}], the snapshot lifecycle policy referenced by the [wait_for_snapshot] action in the [{phase}] phase must exist before it can be referenced by an ILM policy"
+                    )));
+                }
+            }
             let version = match policy(st, &name) {
                 Some(old) if old.get("policy") == Some(&parsed) => return Ok(()),
                 Some(old) => old.get("version").and_then(Value::as_i64).unwrap_or(0) + 1,
