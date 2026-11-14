@@ -2539,6 +2539,18 @@ fn aws_entries(name: &str, prefix: &str, text: &str) -> Vec<(String, String)> {
 
 /// Every secret of a Vault KV v2 tree under `mount/path`, by the folder it goes to (its path
 /// under `path`; the secret at `path` itself goes to `""`). At most 500 secrets, 8 levels.
+/// Vault answered with this status (matched by the status, never by an error's text).
+#[derive(Debug)]
+struct VaultRefused(reqwest::StatusCode);
+
+impl std::fmt::Display for VaultRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Vault answered {}", self.0)
+    }
+}
+
+impl std::error::Error for VaultRefused {}
+
 async fn vault_tree(source: &str) -> anyhow::Result<Vec<(String, serde_json::Map<String, Value>)>> {
     let (mount, base) = source.split_once('/').map(|(m, p)| (m.to_string(), p.trim_matches('/').to_string())).unwrap_or((source.to_string(), String::new()));
     let addr = std::env::var("VAULT_ADDR").context("set VAULT_ADDR")?;
@@ -2553,7 +2565,9 @@ async fn vault_tree(source: &str) -> anyhow::Result<Vec<(String, serde_json::Map
         if res.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok::<_, anyhow::Error>(None);
         }
-        anyhow::ensure!(res.status().is_success(), "{what}: {} (the token needs read and list on it)", res.status());
+        if !res.status().is_success() {
+            return Err(anyhow::Error::new(VaultRefused(res.status())).context(format!("{what}: {} (the token needs read and list on it)", res.status())));
+        }
         let mut body = Vec::new();
         while let Some(chunk) = res.chunk().await.with_context(|| what.clone())? {
             anyhow::ensure!(body.len() + chunk.len() <= 4 << 20, "{what}: the answer is over 4 MiB");
@@ -2575,7 +2589,7 @@ async fn vault_tree(source: &str) -> anyhow::Result<Vec<(String, serde_json::Map
             let read = fetch(http.get(url("data", &at)).header("x-vault-token", &token), format!("vault {mount}/{at}")).await;
             // The source itself may be only a folder the token can't read as a secret.
             let read = match read {
-                Err(e) if at == base && e.to_string().contains("403") => {
+                Err(e) if at == base && e.downcast_ref::<VaultRefused>().is_some_and(|r| r.0 == reqwest::StatusCode::FORBIDDEN) => {
                     eprintln!("vault {mount}/{at}: not readable as a secret itself, its folders only");
                     None
                 }
