@@ -255,10 +255,12 @@ fn parse_request(r: &Value, templates: &Map, ctx: &Ctx) -> EsResult<RatedRequest
             return Err(request_error(EsError::illegal_argument(msg)));
         }
     }
-    if body.get("explain").and_then(Value::as_bool) == Some(true) {
+    // Booleans as the search source parses them (`"true"` too).
+    let on = |k: &str| matches!(body.get(k), Some(Value::Bool(true))) || matches!(body.get(k), Some(Value::Str(s)) if s == "true");
+    if on("explain") {
         return Err(request_error(EsError::illegal_argument("Query in rated requests should not use explain.")));
     }
-    if body.get("profile").and_then(Value::as_bool) == Some(true) {
+    if on("profile") {
         return Err(request_error(EsError::illegal_argument("Query in rated requests should not use profile.")));
     }
     let summary_fields = match m.get("summary_fields") {

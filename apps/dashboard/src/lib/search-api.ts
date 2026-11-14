@@ -1,12 +1,21 @@
 /**
  * roll search: the control-plane API (`/v1/search/...`, crates/search-control/src/api.rs).
  * Clusters speak the Elasticsearch REST API (or OpenSearch's) on their own port; the dashboard
- * reaches them only through the control plane's request console, so it never holds a password.
+ * reaches them only through the control plane, so it never holds a password: an index's
+ * requests go through its per-index routes (what a user granted only some indices may call),
+ * everything else through the request console.
  */
 
-import { call } from "./roll-api";
+import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
+import { withSession } from "./code-token";
 
 export type Flavor = "elasticsearch" | "opensearch";
+
+/** The prefix of a cluster's environment variables, as its flavor's clients read them
+ * (`ELASTICSEARCH_URL`, `OPENSEARCH_PASSWORD`; roll apps' links name them the same). */
+export function envPrefix(flavor: Flavor) {
+  return flavor === "opensearch" ? "OPENSEARCH" : "ELASTICSEARCH";
+}
 
 export interface SearchDefaults {
   flavor: Flavor;
@@ -53,6 +62,8 @@ export interface SearchStatus {
   in_flight?: number;
   indices?: number;
   cluster_uuid?: string;
+  /** Asleep: when a background job (a watch, a transform, ILM, a rollup) wakes it (unix s). */
+  wakes_at?: number;
 }
 
 export interface SearchSettings {
@@ -140,6 +151,35 @@ export interface SearchUsage {
   };
 }
 
+/** What an API key may do: `data` is an app's role (every index, templates, pipelines and
+ * lifecycle policies, no security); `admin` is everything the cluster's own user may do. */
+export type KeyAccess = "data" | "admin";
+
+/** A new API key (`POST …/keys`), shown once: `api_key` for `Authorization: ApiKey …`, or on an
+ * OpenSearch-flavor cluster an internal user's `username` and `password`. */
+export interface NewSearchKey {
+  id: string;
+  name: string;
+  api_key?: string;
+  username?: string;
+  password?: string;
+  url: string;
+  expires_at?: number;
+}
+
+/** A key as the cluster lists it (`GET /_security/api_key`). */
+export interface SearchKeyInfo {
+  id: string;
+  name: string | null;
+  creation: number;
+  expiration?: number;
+  invalidated: boolean;
+  role_descriptors?: Record<string, unknown>;
+}
+
+/** The role `access: "data"` keys carry (search-control's `link_role`). */
+export const DATA_ROLE = "roll_link";
+
 const cl = (id: string) => `/v1/search/clusters/${encodeURIComponent(id)}`;
 
 export const searchApi = {
@@ -158,6 +198,9 @@ export const searchApi = {
   request: (id: string, method: string, path: string, body?: unknown) =>
     call<ConsoleResponse>("POST", `${cl(id)}/request`, { method, path, body }),
   usage: (id: string, days = 30) => call<SearchUsage>("GET", `${cl(id)}/usage?days=${days}`),
+  createKey: (id: string, name: string, access: KeyAccess, expiresInS?: number) =>
+    call<NewSearchKey>("POST", `${cl(id)}/keys`, { name, access, expires_in_s: expiresInS }),
+  revokeKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/keys/${encodeURIComponent(key)}`),
 };
 
 /** An Elasticsearch error body's reason (`error.reason`, or the first root cause's). */
@@ -178,7 +221,8 @@ export function esReason(body: unknown, status: number): string {
  * A string body is sent byte for byte; anything else is encoded with `JSON.stringify`.
  */
 export async function esRaw<T = unknown>(id: string, method: Method, path: string, body?: unknown): Promise<{ value: T; text: string }> {
-  const r = await searchApi.request(id, method, path, body);
+  const route = perIndexRoute(method, path);
+  const r = route ? await perIndexCall(id, route, body) : await searchApi.request(id, method, path, body);
   let parsed: unknown = null;
   if (r.body) {
     try {
@@ -189,6 +233,54 @@ export async function esRaw<T = unknown>(id: string, method: Method, path: strin
   }
   if (r.status >= 400) throw new Error(esReason(parsed, r.status));
   return { value: parsed as T, text: r.body };
+}
+
+/**
+ * The per-index control-plane route an Elasticsearch request maps onto, or `null` when it has
+ * none (cluster APIs, which take the console). `path` is as the console takes it: an encoded
+ * index first, then the API, then the query string (passed through).
+ */
+export function perIndexRoute(method: string, path: string): { method: string; path: string } | null {
+  const [pathname, query] = path.split("?", 2);
+  const seg = pathname.split("/").filter(Boolean);
+  const index = seg[0];
+  if (!index || index.startsWith("_")) return null;
+  const q = query ? `?${query}` : "";
+  const at = (rest: string, m = method) => ({ method: m, path: `/indices/${index}${rest}${q}` });
+  const [api, id, extra] = [seg[1], seg[2], seg[3]];
+  if (extra !== undefined) return null;
+  if (api === undefined) return ["GET", "PUT", "DELETE"].includes(method) ? at("") : null;
+  if (id !== undefined) return api === "_doc" && ["GET", "PUT", "DELETE"].includes(method) ? at(`/docs/${id}`) : null;
+  switch (api) {
+    case "_doc":
+      return method === "POST" ? at("/docs") : null;
+    case "_mapping":
+      return method === "GET" || method === "PUT" ? at("/mapping") : null;
+    case "_settings":
+      return method === "GET" ? at("/settings") : null;
+    case "_refresh":
+      return method === "POST" ? at("/refresh") : null;
+    case "_analyze":
+      return method === "GET" || method === "POST" ? at("/analyze", "POST") : null;
+    case "_search":
+      return method === "GET" || method === "POST" ? at("/search", "POST") : null;
+    case "_bulk":
+      return method === "POST" ? at("/bulk") : null;
+    case "_delete_by_query":
+      return method === "POST" ? at("/delete_by_query") : null;
+    default:
+      return null;
+  }
+}
+
+/** A per-index route's answer as Elasticsearch gave it: status and exact text. */
+async function perIndexCall(id: string, route: { method: string; path: string }, body?: unknown): Promise<{ status: number; body: string }> {
+  const text = body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body);
+  const ndjson = route.path.includes("/bulk");
+  const headers = { ...(apiHeaders(text) ?? {}), ...(text !== undefined ? { "content-type": ndjson ? "application/x-ndjson" : "application/json" } : {}) };
+  const res = await fetch(`${ROLL_API}/v1/search/clusters/${encodeURIComponent(id)}${route.path}`, withSession({ method: route.method, headers, body: text, cache: "no-store" }));
+  onApiStatus(res.status);
+  return { status: res.status, body: await res.text() };
 }
 
 /** [`esRaw`]'s parsed response. */

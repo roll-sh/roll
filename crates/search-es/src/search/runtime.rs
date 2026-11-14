@@ -1074,7 +1074,8 @@ pub const AGG_MARKER: &str = "__roll_runtime_field";
 /// field's values have), for search-aggs' script values sources.
 pub fn agg_script(f: &RtField, def: &Value) -> Value {
     let value_type = match f.ty {
-        RtType::Keyword | RtType::Ip => "string",
+        RtType::Keyword => "string",
+        RtType::Ip => "ip",
         RtType::Long => "long",
         RtType::Double => "double",
         RtType::Date => "date",

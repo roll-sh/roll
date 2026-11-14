@@ -297,6 +297,41 @@ pub fn action_of(api: &str) -> (Scope, String) {
         | "security.update_api_key"
         | "security.bulk_update_api_keys" => Some((Cluster, "cluster:admin/xpack/security/api_key/manage")),
         "security.grant_api_key" => Some((Cluster, "cluster:admin/xpack/security/api_key/grant")),
+        // OpenSearch's own APIs (the opensearch dialect), by the plugins' action names. The
+        // Security plugin's REST API checks its callers itself.
+        "plugins_security.internalusers"
+        | "plugins_security.roles"
+        | "plugins_security.rolesmapping"
+        | "plugins_security.actiongroups"
+        | "plugins_security.account"
+        | "plugins_security.authinfo"
+        | "plugins_security.health"
+        | "plugins_security.tenants"
+        | "plugins_security.permissionsinfo"
+        | "plugins_security.whoami"
+        | "plugins_security.securityconfig"
+        | "plugins_security.audit"
+        | "plugins_security.ssl"
+        | "plugins_security.cache" => Some((Any, "cluster:admin/opendistro_security/rest")),
+        "create_pit" => Some((Index, "indices:data/read/point_in_time/create")),
+        "delete_pit" | "delete_all_pits" => Some((Index, "indices:data/read/point_in_time/delete")),
+        "get_all_pits" => Some((Index, "indices:data/read/point_in_time/readall")),
+        "ism.put_policy" => Some((Cluster, "cluster:admin/opendistro/ism/policy/write")),
+        "ism.get_policy" => Some((Cluster, "cluster:admin/opendistro/ism/policy/get")),
+        "ism.get_policies" => Some((Cluster, "cluster:admin/opendistro/ism/policy/search")),
+        "ism.delete_policy" => Some((Cluster, "cluster:admin/opendistro/ism/policy/delete")),
+        "ism.add_policy" => Some((Cluster, "cluster:admin/opendistro/ism/managedindex/add")),
+        "ism.remove_policy" => Some((Cluster, "cluster:admin/opendistro/ism/managedindex/remove")),
+        "ism.change_policy" => Some((Cluster, "cluster:admin/opendistro/ism/managedindex/change")),
+        "ism.retry" => Some((Cluster, "cluster:admin/opendistro/ism/managedindex/retry")),
+        "ism.explain" => Some((Cluster, "cluster:admin/opendistro/ism/managedindex/explain")),
+        "search_pipeline.put" => Some((Cluster, "cluster:admin/search/pipeline/put")),
+        "search_pipeline.get" => Some((Cluster, "cluster:admin/search/pipeline/get")),
+        "search_pipeline.delete" => Some((Cluster, "cluster:admin/search/pipeline/delete")),
+        "knn.stats" => Some((Cluster, "cluster:admin/knn_stats_action")),
+        "knn.warmup" => Some((Cluster, "cluster:admin/knn_warmup_action")),
+        "knn.clear_cache" => Some((Cluster, "cluster:admin/knn_clear_cache_action")),
+        "ppl" | "ppl.explain" => Some((Cluster, "cluster:admin/opensearch/ppl")),
         "security.get_token" | "security.invalidate_token" => Some((Cluster, "cluster:admin/xpack/security/token/manage")),
         _ => None,
     };
@@ -378,6 +413,9 @@ pub struct IndexGrant {
     pub field_security: Option<Value>,
     /// The document level security query, when the entry has one.
     pub query: Option<Value>,
+    /// OpenSearch Security's masked fields (`field`, `field::/regex/::replacement`,
+    /// `field::SHA-256`): their values are shown hashed or rewritten.
+    pub masked: Vec<String>,
 }
 
 /// The permissions of one role descriptor.
@@ -425,6 +463,7 @@ impl Permission {
                 allow_restricted: e.get("allow_restricted_indices").and_then(Value::as_bool).unwrap_or(false),
                 field_security: e.get("field_security").filter(|v| !v.is_null()).cloned(),
                 query: e.get("query").filter(|v| !v.is_null()).cloned(),
+                masked: strs(e.get("masked_fields")),
             });
         }
         for e in d.get("applications").and_then(Value::as_array).into_iter().flatten() {
@@ -494,7 +533,7 @@ pub fn index_pattern_matches(pattern: &str, index: &str) -> bool {
 
 /// Restricted indices: the security indices and other internal indices roles must opt into.
 pub fn is_restricted(index: &str) -> bool {
-    index.starts_with(".security") || index.starts_with(".async-search") || index.starts_with(".fleet-") || index.starts_with(".connector-secrets")
+    index.starts_with(".security") || index == super::opensearch::INDEX || index.starts_with(".async-search") || index.starts_with(".fleet-") || index.starts_with(".connector-secrets")
 }
 
 #[cfg(test)]

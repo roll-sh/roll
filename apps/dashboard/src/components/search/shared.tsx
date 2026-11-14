@@ -2,6 +2,7 @@ import { KeyRound } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import {
   BODY_MB_STEPS,
+  envPrefix,
   formatDuration,
   IDLE_OPTIONS,
   IN_FLIGHT_STEPS,
@@ -156,7 +157,8 @@ export function CredentialsOnce({ cluster, onDone, title = "Save the password" }
   const { copied, copy } = useCopy();
   const password = cluster.password ?? "";
   const full = urlWithPassword(cluster.url, cluster.username, password);
-  const env = `ELASTICSEARCH_URL=${cluster.url}\nELASTICSEARCH_USERNAME=${cluster.username}\nELASTICSEARCH_PASSWORD=${password}\n`;
+  const v = envPrefix(cluster.flavor);
+  const env = `${v}_URL=${cluster.url}\n${v}_USERNAME=${cluster.username}\n${v}_PASSWORD=${password}\n`;
   return (
     <Panel
       title={

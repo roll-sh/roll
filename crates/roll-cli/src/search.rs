@@ -26,6 +26,102 @@ pub enum Search {
     /// One document of an index: get, put, add, delete.
     #[command(subcommand, alias = "doc")]
     Docs(Docs),
+    /// API keys: a client's own credential instead of the cluster's password.
+    #[command(subcommand, alias = "key")]
+    Keys(Keys),
+    /// Inference endpoints: the models `semantic_text` fields embed with, rerankers, completions.
+    #[command(subcommand)]
+    Inference(Inference),
+}
+
+#[derive(Subcommand)]
+pub enum Inference {
+    /// The cluster's endpoints (wakes it).
+    #[command(alias = "ls")]
+    List { cluster: String },
+    /// A new endpoint. The provider's API key is read from the environment (`--api-key-env`,
+    /// by default OPENAI_API_KEY, COHERE_API_KEY or ANTHROPIC_API_KEY) or from stdin with
+    /// `--api-key-stdin`, never from the command line; the cluster seals it.
+    Create {
+        cluster: String,
+        id: String,
+        /// openai (or any OpenAI-compatible server with --url), cohere or anthropic.
+        #[arg(long, default_value = "openai")]
+        service: String,
+        /// text_embedding, sparse_embedding, rerank, completion or chat_completion.
+        #[arg(long, default_value = "text_embedding")]
+        task: String,
+        /// The provider's model id, e.g. text-embedding-3-small.
+        #[arg(long)]
+        model: String,
+        /// An OpenAI-compatible endpoint URL (vLLM, Ollama, LiteLLM; public addresses only).
+        #[arg(long)]
+        url: Option<String>,
+        /// Embedding dimensions (openai text_embedding).
+        #[arg(long)]
+        dimensions: Option<u32>,
+        /// Completion length (anthropic requires it).
+        #[arg(long)]
+        max_tokens: Option<u32>,
+        /// The environment variable holding the API key.
+        #[arg(long)]
+        api_key_env: Option<String>,
+        /// Read the API key from stdin instead.
+        #[arg(long, conflicts_with = "api_key_env")]
+        api_key_stdin: bool,
+    },
+    /// Run an endpoint on some text (a rerank endpoint ranks the --doc texts against it).
+    Test {
+        cluster: String,
+        id: String,
+        text: String,
+        /// A document to rank (rerank endpoints); repeat for several.
+        #[arg(long = "doc")]
+        docs: Vec<String>,
+    },
+    /// Delete an endpoint: semantic_text fields using it can't embed new text.
+    #[command(alias = "rm")]
+    Delete { cluster: String, id: String },
+}
+
+/// An endpoint's task type, from `GET _inference/{id}`.
+async fn inference_task(api: &Api, cluster: &Value, id: &str) -> anyhow::Result<String> {
+    let v = es_request(api, cluster, "GET", &format!("/_inference/{}", urlencoding::encode(id)), None).await?;
+    v["endpoints"][0]["task_type"].as_str().map(str::to_string).with_context(|| format!("no inference endpoint {id}"))
+}
+
+/// One REST request through the console route; the parsed body of a 2xx, else its reason.
+async fn es_request(api: &Api, cluster: &Value, method: &str, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
+    let r = api.post(&format!("/v1/search/clusters/{}/request", s(&cluster["id"])), json!({ "method": method, "path": path, "body": body })).await?;
+    let status = r["status"].as_u64().unwrap_or(0);
+    let v: Value = serde_json::from_str(r["body"].as_str().unwrap_or("null")).unwrap_or(Value::Null);
+    if !(200..300).contains(&status) {
+        let reason = v.pointer("/error/reason").and_then(Value::as_str).or(v["error"].as_str()).unwrap_or_default();
+        bail!("HTTP {status}: {reason}");
+    }
+    Ok(v)
+}
+
+#[derive(Subcommand)]
+pub enum Keys {
+    /// The cluster's active keys (wakes it).
+    #[command(alias = "ls")]
+    List { cluster: String },
+    /// A new key, printed once, for `Authorization: ApiKey <key>`.
+    Create {
+        cluster: String,
+        name: String,
+        /// `data`: indices, templates, pipelines and lifecycle policies, no security (users,
+        /// roles, keys); `admin`: everything the cluster's own user may do.
+        #[arg(long, default_value = "data")]
+        access: String,
+        /// Stop working after this long (90s, 15m, 1h, 30d).
+        #[arg(long)]
+        expires_in: Option<String>,
+    },
+    /// Revoke a key: clients using it fail at once.
+    #[command(alias = "rm")]
+    Revoke { cluster: String, id: String },
 }
 
 /// Bodies are JSON (NDJSON for `bulk`), given inline, as `@file`, or `-` for stdin.
@@ -286,6 +382,11 @@ fn refresh(on: bool) -> Vec<(&'static str, String)> {
     if on { vec![("refresh", "wait_for".to_string())] } else { Vec::new() }
 }
 
+/// Unix ms as `YYYY-MM-DD HH:MM` (UTC).
+fn key_time(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms).map_or_else(|| ms.to_string(), |t| t.format("%Y-%m-%d %H:%M").to_string())
+}
+
 async fn find(api: &Api, key: &str) -> anyhow::Result<Value> {
     api.get(&format!("/v1/search/clusters/{}", urlencoding::encode(key))).await.with_context(|| format!("no search cluster {key}"))
 }
@@ -326,6 +427,179 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 Docs::Delete { cluster, index, id, refresh: r } => index_call(api, as_json, Method::DELETE, &cluster, &index, &doc(&id), (refresh(r), None)).await,
             };
         }
+        Search::Inference(cmd) => match cmd {
+            Inference::List { cluster } => {
+                let c = find(api, &cluster).await?;
+                let v = es_request(api, &c, "GET", "/_inference/_all", None).await?;
+                let list = v["endpoints"].as_array().cloned().unwrap_or_default();
+                if !as_json {
+                    for e in &list {
+                        let ss = &e["service_settings"];
+                        let built_in = s(&e["inference_id"]).starts_with('.');
+                        println!(
+                            "{:<36}  {:<17}  {:<13}  {}{}",
+                            s(&e["inference_id"]),
+                            s(&e["task_type"]),
+                            s(&e["service"]),
+                            ss["model_id"].as_str().unwrap_or_default(),
+                            if built_in { "  (built in, needs ML nodes)".to_string() } else { ss["url"].as_str().map(|u| format!("  {u}")).unwrap_or_default() }
+                        );
+                    }
+                    return Ok(());
+                }
+                Value::Array(list)
+            }
+            Inference::Create { cluster, id, service, task, model, url, dimensions, max_tokens, api_key_env, api_key_stdin } => {
+                let key = if api_key_stdin {
+                    let mut k = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut k)?;
+                    k.trim().to_string()
+                } else {
+                    let var = api_key_env.unwrap_or_else(|| format!("{}_API_KEY", service.to_ascii_uppercase()));
+                    std::env::var(&var).with_context(|| format!("set {var} to the provider's API key (or use --api-key-env / --api-key-stdin)"))?
+                };
+                if key.is_empty() {
+                    bail!("the API key is empty");
+                }
+                let c = find(api, &cluster).await?;
+                let mut settings = json!({ "api_key": key, "model_id": model });
+                if let Some(u) = url {
+                    settings["url"] = json!(u);
+                }
+                if let Some(d) = dimensions {
+                    settings["dimensions"] = json!(d);
+                }
+                let mut body = json!({ "service": service, "service_settings": settings });
+                if let Some(m) = max_tokens {
+                    body["task_settings"] = json!({ "max_tokens": m });
+                }
+                let v = es_request(api, &c, "PUT", &format!("/_inference/{}/{}", urlencoding::encode(&task), urlencoding::encode(&id)), Some(body)).await?;
+                if !as_json {
+                    println!("inference endpoint {id} ({task}, {service}) on {}; the key is sealed in the cluster", s(&c["name"]));
+                    return Ok(());
+                }
+                v
+            }
+            Inference::Test { cluster, id, text, docs } => {
+                let c = find(api, &cluster).await?;
+                let task = inference_task(api, &c, &id).await?;
+                let body = if task == "rerank" { json!({ "query": text, "input": docs }) } else { json!({ "input": text }) };
+                let v = es_request(api, &c, "POST", &format!("/_inference/{}/{}", urlencoding::encode(&task), urlencoding::encode(&id)), Some(body)).await?;
+                if !as_json {
+                    match task.as_str() {
+                        "text_embedding" => {
+                            let e = v["text_embedding"][0]["embedding"].as_array().cloned().unwrap_or_default();
+                            println!("{} dimensions", e.len());
+                        }
+                        "completion" => println!("{}", s(&v["completion"][0]["result"])),
+                        _ => println!("{}", serde_json::to_string_pretty(&v)?),
+                    }
+                    return Ok(());
+                }
+                v
+            }
+            Inference::Delete { cluster, id } => {
+                let c = find(api, &cluster).await?;
+                let task = inference_task(api, &c, &id).await?;
+                es_request(api, &c, "DELETE", &format!("/_inference/{}/{}", urlencoding::encode(&task), urlencoding::encode(&id)), None).await?;
+                if !as_json {
+                    println!("deleted {id}");
+                    return Ok(());
+                }
+                json!({ "deleted": id })
+            }
+        },
+        Search::Keys(cmd) => match cmd {
+            Keys::List { cluster } => {
+                let c = find(api, &cluster).await?;
+                if c["flavor"] == "opensearch" {
+                    // The keys route's internal users (`roll-key-*`).
+                    let v = es_request(api, &c, "GET", "/_plugins/_security/api/internalusers", None).await?;
+                    let keys: Vec<Value> = v
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .filter(|(id, _)| id.starts_with("roll-key-"))
+                        .map(|(id, u)| {
+                            let roles: Vec<&str> = u["opendistro_security_roles"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                            let expires = u["attributes"]["roll_expires_at"].as_str().and_then(|v| v.parse::<i64>().ok());
+                            let name = u["description"].as_str().unwrap_or_default().trim_start_matches("roll key: ");
+                            json!({ "id": id, "name": name, "access": if roles.contains(&id.as_str()) { "data" } else { "admin" }, "expires_at": expires.map(|ms| ms / 1000) })
+                        })
+                        .collect();
+                    if !as_json {
+                        if keys.is_empty() {
+                            println!("no keys");
+                        }
+                        for k in &keys {
+                            let expires = k["expires_at"].as_i64().map_or("never expires".to_string(), |s| format!("expires {}", key_time(s * 1000)));
+                            println!("{:<22}  {:<6}  {expires}  {}", s(&k["id"]), s(&k["access"]), s(&k["name"]));
+                        }
+                        return Ok(());
+                    }
+                    println!("{}", serde_json::to_string_pretty(&Value::Array(keys))?);
+                    return Ok(());
+                }
+                let r = api.post(&format!("/v1/search/clusters/{}/request", s(&c["id"])), json!({ "method": "GET", "path": "/_security/api_key" })).await?;
+                let status = r["status"].as_u64().unwrap_or(0);
+                let body: Value = serde_json::from_str(r["body"].as_str().unwrap_or("null")).unwrap_or(Value::Null);
+                if status != 200 {
+                    bail!("listing the keys of {} failed (HTTP {status}): {}", s(&c["name"]), body.pointer("/error/reason").and_then(Value::as_str).unwrap_or_default());
+                }
+                let keys: Vec<Value> = body["api_keys"].as_array().into_iter().flatten().filter(|k| k["invalidated"] != true).cloned().collect();
+                if !as_json {
+                    if keys.is_empty() {
+                        println!("no keys");
+                    }
+                    for k in &keys {
+                        let roles: Vec<&str> = k["role_descriptors"].as_object().map(|m| m.keys().map(String::as_str).collect()).unwrap_or_default();
+                        let access = if roles.contains(&"roll_link") { "data" } else if roles.is_empty() { "admin" } else { "limited" };
+                        let expires = k["expiration"].as_i64().map_or("never expires".to_string(), |ms| format!("expires {}", key_time(ms)));
+                        println!("{:<22}  {:<6}  created {}  {expires}  {}", s(&k["id"]), access, key_time(k["creation"].as_i64().unwrap_or(0)), s(&k["name"]));
+                    }
+                    return Ok(());
+                }
+                Value::Array(keys)
+            }
+            Keys::Create { cluster, name, access, expires_in } => {
+                let c = find(api, &cluster).await?;
+                let expires = expires_in.as_deref().map(crate::storage::duration).transpose()?;
+                let v = api.post(&format!("/v1/search/clusters/{}/keys", s(&c["id"])), json!({ "name": name, "access": access, "expires_in_s": expires })).await?;
+                if !as_json && v.get("api_key").is_none() {
+                    // An OpenSearch-flavor cluster: the key is an internal user.
+                    println!("key {} ({}) of {}, {access} access", s(&v["id"]), s(&v["name"]), s(&c["name"]));
+                    println!("username  {}", s(&v["username"]));
+                    println!("password  {}   (shown once)", s(&v["password"]));
+                    if let Some(at) = v["expires_at"].as_i64() {
+                        println!("expires   {}", key_time(at * 1000));
+                    }
+                    println!();
+                    println!("OPENSEARCH_URL={} OPENSEARCH_USERNAME={} OPENSEARCH_PASSWORD={}", s(&v["url"]), s(&v["username"]), s(&v["password"]));
+                    return Ok(());
+                }
+                if !as_json {
+                    println!("key {} ({}) of {}, {access} access", s(&v["id"]), s(&v["name"]), s(&c["name"]));
+                    println!("api_key   {}   (shown once)", s(&v["api_key"]));
+                    if let Some(at) = v["expires_at"].as_i64() {
+                        println!("expires   {}", key_time(at * 1000));
+                    }
+                    println!();
+                    println!("curl -H 'Authorization: ApiKey {}' {}", s(&v["api_key"]), s(&v["url"]));
+                    println!("ELASTICSEARCH_URL={} ELASTICSEARCH_API_KEY={}", s(&v["url"]), s(&v["api_key"]));
+                    return Ok(());
+                }
+                v
+            }
+            Keys::Revoke { cluster, id } => {
+                let c = find(api, &cluster).await?;
+                api.call(reqwest::Method::DELETE, &format!("/v1/search/clusters/{}/keys/{}", s(&c["id"]), urlencoding::encode(&id)), None).await?;
+                if !as_json {
+                    println!("revoked {id}");
+                    return Ok(());
+                }
+                json!({ "revoked": id })
+            }
+        },
         Search::Request { cluster, method, path, body } => {
             let c = find(api, &cluster).await?;
             // Sent as text, byte for byte (the control plane labels it JSON, or NDJSON for
@@ -550,6 +824,8 @@ mod tests {
         assert!(matches!(t.s, Search::Request { ref method, ref body, .. } if method == "GET" && body.is_none()));
         let t = T::try_parse_from(["t", "request", "app", "POST", "/_bulk", "@bulk.ndjson"]).unwrap();
         assert!(matches!(t.s, Search::Request { body: Some(ref b), .. } if b == "@bulk.ndjson"));
+        let t = T::try_parse_from(["t", "keys", "create", "app", "worker"]).unwrap();
+        assert!(matches!(t.s, Search::Keys(Keys::Create { ref access, .. }) if access == "data"), "keys default to data access");
         for sub in ["create", "list", "show", "delete", "branch", "password", "unload", "url", "indices", "usage"] {
             let e = T::try_parse_from(["t", "clusters", sub, "--help"]).err().unwrap();
             assert_eq!(e.kind(), clap::error::ErrorKind::DisplayHelp, "{sub}");

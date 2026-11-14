@@ -6,14 +6,16 @@
 //! value once more for each multi-field. For a bulk load of documents that only use mapped,
 //! simple fields (most of them: logs, metrics, catalogue data) that is about half of the
 //! preparation cost. [`FastPlan`] is compiled once per index mapping (per bulk request): the
-//! root's leaf fields of the plain types (`text`, `keyword`, the integer types, `double`,
-//! `boolean`, `date`/`date_nanos`, `geo_point` as `[lon, lat]`) with their multi-fields and
-//! the mapping parameters their parsers read. [`FastPlan::parse`] then scans the document
+//! leaf fields of the plain types (`text`, `keyword`, the integer types, `double`, `float`,
+//! `half_float`, `scaled_float`, `boolean`, `date`/`date_nanos`, `ip`, `geo_point` as
+//! `[lon, lat]`) with their multi-fields and the mapping parameters their parsers read, at the
+//! root and in plain objects (not nested, enabled, with sub-objects: what ECS-style logs are
+//! made of). [`FastPlan::parse`] then scans the document
 //! bytes once and emits exactly the fields the general path would emit, in the same order.
 //!
 //! The fast path decides nothing on its own: it returns `None` (and the caller takes the
 //! general path, which produces every error and every rarer behaviour) for anything outside
-//! what it reproduces exactly — unknown or dotted keys, metadata fields, objects, `null`,
+//! what it reproduces exactly — unknown or dotted keys, metadata fields, `null`,
 //! strings for numeric fields, out-of-range numbers, out-of-range points, escapes in keys,
 //! comments, duplicate keys, trailing content, invalid UTF-8. Values are converted with the
 //! same functions the general parsers use (number text to `f64`, the field's date formatter).
@@ -45,6 +47,10 @@ enum Kind {
     Short,
     Byte,
     Double,
+    /// `float`, or `half_float` (rounded to half precision).
+    Float { half: bool },
+    /// A `scaled_float` with its scaling factor.
+    ScaledFloat(f64),
     Boolean,
     Date { fmt: Arc<crate::time::DateFormatter>, nanos: bool },
     GeoPoint,
@@ -59,7 +65,7 @@ struct Target {
     name: Arc<str>,
 }
 
-/// A root-level field of the document.
+/// A field of the document (at the root or in a plain object).
 struct Leaf {
     main: Target,
     /// Multi-fields, in mapping order.
@@ -75,11 +81,55 @@ pub(crate) enum SourcePlan {
     Drop,
 }
 
+/// What a key of an object is in the plan, with its position among the object's keys (for
+/// duplicate detection).
+#[derive(Clone, Copy)]
+enum Entry {
+    Leaf(usize, usize),
+    /// A plain object (see [`plain_object`]): its scope.
+    Object(usize, usize),
+}
+
+/// The root, or a plain object of the mapping: its keys.
+struct Scope {
+    by_name: HashMap<Box<str>, Entry, foldhash::fast::FixedState>,
+}
+
+/// Deepest object nesting the plan follows.
+const MAX_OBJECT_DEPTH: usize = 16;
+
 /// The compiled fast path of one index mapping.
 pub(crate) struct FastPlan {
     leaves: Vec<Leaf>,
-    by_name: HashMap<Box<str>, usize, foldhash::fast::FixedState>,
+    /// The root's scope first.
+    scopes: Vec<Scope>,
     pub(crate) source: SourcePlan,
+    /// `index.mapping.array_objects.limit`: past it the general path fails the document.
+    array_objects_limit: usize,
+}
+
+/// An object the general path walks without anything of its own: not nested, a pass-through
+/// or disabled, with sub-objects, no `source_keep` of its own and no columnar flags.
+fn plain_object(o: &crate::mapping::ObjectMapper) -> bool {
+    matches!(o.kind, crate::mapping::ObjectKind::Object)
+        && o.enabled != Some(false)
+        && o.subobjects != Some(false)
+        && o.source_keep.is_none()
+        && o.disable_objects.is_none()
+}
+
+/// Field `f` at `full` with its multi-fields, when the plan parses all of them.
+fn leaf_of(f: &FieldMapper, full: &str, ctx: &MappingCtx) -> Option<Leaf> {
+    let kind = kind_of(f, ctx)?;
+    let mut subs = Vec::with_capacity(f.fields.len());
+    for (sub_name, sub) in &f.fields {
+        match kind_of(sub, ctx) {
+            // Multi-fields parse the parent's value; a point can't be one.
+            Some(k) if !matches!(k, Kind::GeoPoint) => subs.push(Target { kind: k, name: sub.full_name(&format!("{full}.{sub_name}")) }),
+            _ => return None,
+        }
+    }
+    Some(Leaf { main: Target { kind, name: f.full_name(full) }, subs })
 }
 
 fn kind_of(f: &FieldMapper, ctx: &MappingCtx) -> Option<Kind> {
@@ -96,6 +146,9 @@ fn kind_of(f: &FieldMapper, ctx: &MappingCtx) -> Option<Kind> {
         "short" => Kind::Short,
         "byte" => Kind::Byte,
         "double" => Kind::Double,
+        "float" => Kind::Float { half: false },
+        "half_float" => Kind::Float { half: true },
+        "scaled_float" => Kind::ScaledFloat(super::values::scaling_factor(f, ctx)),
         "boolean" => Kind::Boolean,
         "date" | "date_nanos" => Kind::Date { fmt: f.date_formatter(ctx).ok()?, nanos: f.ty == "date_nanos" },
         // A `position` metric takes one point per document (checked by the general path).
@@ -107,9 +160,6 @@ fn kind_of(f: &FieldMapper, ctx: &MappingCtx) -> Option<Kind> {
 impl FastPlan {
     /// The plan for `idx`, or `None` when its documents always need the general path.
     pub(crate) fn new(idx: &IndexMeta) -> Option<FastPlan> {
-        if crate::opensearch::active() {
-            return None;
-        }
         let ctx = idx.mapping_ctx();
         if ctx.columnar.is_some() || idx.mapping.data_stream_timestamp == Some(true) {
             return None;
@@ -135,43 +185,38 @@ impl FastPlan {
                 }
             }
         };
-        let mut leaves = Vec::new();
-        let mut by_name = HashMap::with_hasher(foldhash::fast::FixedState::default());
-        let mut sub_path = String::new();
-        for (name, m) in &root.children {
-            let Mapper::Field(f) = m else { continue };
-            if name.trim().is_empty() || name.contains('.') || crate::mapping::METADATA_FIELDS.contains(&name.as_str()) {
-                continue;
-            }
-            let Some(kind) = kind_of(f, &ctx) else { continue };
-            let mut subs = Vec::with_capacity(f.fields.len());
-            let mut ok = true;
-            for (sub_name, sub) in &f.fields {
-                match kind_of(sub, &ctx) {
-                    // Multi-fields parse the parent's value; a point can't be one.
-                    Some(k) if !matches!(k, Kind::GeoPoint) => {
-                        sub_path.clear();
-                        sub_path.push_str(name);
-                        sub_path.push('.');
-                        sub_path.push_str(sub_name);
-                        subs.push(Target { kind: k, name: sub.full_name(&sub_path) });
-                    }
-                    _ => {
-                        ok = false;
-                        break;
-                    }
-                }
-            }
-            if !ok {
-                continue;
-            }
-            by_name.insert(name.as_str().into(), leaves.len());
-            leaves.push(Leaf { main: Target { kind, name: f.full_name(name) }, subs });
-        }
-        if leaves.is_empty() {
+        let mut plan = FastPlan { leaves: Vec::new(), scopes: Vec::new(), source, array_objects_limit: ctx.array_objects_limit.max(0) as usize };
+        plan.scope(root, "", &ctx, 0);
+        if plan.leaves.is_empty() {
             return None;
         }
-        Some(FastPlan { leaves, by_name, source })
+        Some(plan)
+    }
+
+    /// Adds the scope of object `o` at `path` (`""`: the root) and returns its index: its leaf
+    /// fields of the plain kinds and its plain objects.
+    fn scope(&mut self, o: &crate::mapping::ObjectMapper, path: &str, ctx: &MappingCtx, depth: usize) -> usize {
+        let at = self.scopes.len();
+        self.scopes.push(Scope { by_name: HashMap::with_hasher(foldhash::fast::FixedState::default()) });
+        let mut keys = 0;
+        for (name, m) in &o.children {
+            if name.trim().is_empty() || name.contains('.') || (path.is_empty() && crate::mapping::METADATA_FIELDS.contains(&name.as_str())) {
+                continue;
+            }
+            let full = if path.is_empty() { name.clone() } else { format!("{path}.{name}") };
+            let entry = match m {
+                Mapper::Field(f) => {
+                    let Some(leaf) = leaf_of(f, &full, ctx) else { continue };
+                    self.leaves.push(leaf);
+                    Entry::Leaf(self.leaves.len() - 1, keys)
+                }
+                Mapper::Object(child) if plain_object(child) && depth < MAX_OBJECT_DEPTH => Entry::Object(self.scope(child, &full, ctx, depth + 1), keys),
+                _ => continue,
+            };
+            keys += 1;
+            self.scopes[at].by_name.insert(name.as_str().into(), entry);
+        }
+        at
     }
 
     /// The parsed document, when the plan reproduces the general path for it exactly.
@@ -184,43 +229,7 @@ impl FastPlan {
         s.i += 1;
         let mut out = ParsedDocument { fields: Vec::with_capacity(self.leaves.len() * 2), ..Default::default() };
         let mut ignored: Vec<Arc<str>> = Vec::new();
-        let mut seen = SeenSet::new(self.leaves.len());
-        s.ws()?;
-        if s.peek()? == b'}' {
-            s.i += 1;
-        } else {
-            loop {
-                if s.peek()? != b'"' {
-                    return None;
-                }
-                let key = s.key()?;
-                let &li = self.by_name.get(key)?;
-                if !seen.insert(li) {
-                    // Duplicate keys fail in the general path's parser.
-                    return None;
-                }
-                s.ws()?;
-                if s.peek()? != b':' {
-                    return None;
-                }
-                s.i += 1;
-                s.ws()?;
-                let leaf = &self.leaves[li];
-                self.values(&mut s, leaf, &mut out, &mut ignored, 0)?;
-                s.ws()?;
-                match s.peek()? {
-                    b',' => {
-                        s.i += 1;
-                        s.ws()?;
-                    }
-                    b'}' => {
-                        s.i += 1;
-                        break;
-                    }
-                    _ => return None,
-                }
-            }
-        }
+        self.object(&mut s, 0, &mut out, &mut ignored, &mut 0)?;
         // Trailing content: only whitespace (the general parser ignores more, but rarely sees it).
         s.ws_end()?;
         if !ignored.is_empty() {
@@ -230,6 +239,103 @@ impl FastPlan {
             out.ignored = names;
         }
         Some(out)
+    }
+
+    /// The keys of the object (of `scope`) whose `{` the scanner just passed, through its `}`.
+    /// Objects recurse no deeper than the plan's scopes do.
+    fn object(&self, s: &mut Scan<'_>, scope: usize, out: &mut ParsedDocument, ignored: &mut Vec<Arc<str>>, arrays: &mut usize) -> Option<()> {
+        let sc = &self.scopes[scope];
+        let mut seen = SeenSet::new(sc.by_name.len());
+        s.ws()?;
+        if s.peek()? == b'}' {
+            s.i += 1;
+            return Some(());
+        }
+        loop {
+            if s.peek()? != b'"' {
+                return None;
+            }
+            let key = s.key()?;
+            let entry = *sc.by_name.get(key)?;
+            let (Entry::Leaf(_, k) | Entry::Object(_, k)) = entry;
+            if !seen.insert(k) {
+                // Duplicate keys fail in the general path's parser.
+                return None;
+            }
+            s.ws()?;
+            if s.peek()? != b':' {
+                return None;
+            }
+            s.i += 1;
+            s.ws()?;
+            match entry {
+                Entry::Leaf(li, _) => self.values(s, &self.leaves[li], out, ignored, 0)?,
+                // An object, or an array of them (not `null` or a value).
+                Entry::Object(child, _) => match s.peek()? {
+                    b'{' => {
+                        s.i += 1;
+                        self.object(s, child, out, ignored, arrays)?;
+                    }
+                    b'[' => {
+                        s.i += 1;
+                        self.object_array(s, child, out, ignored, arrays, 1)?;
+                    }
+                    _ => return None,
+                },
+            }
+            s.ws()?;
+            match s.peek()? {
+                b',' => {
+                    s.i += 1;
+                    s.ws()?;
+                }
+                b'}' => {
+                    s.i += 1;
+                    return Some(());
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// The objects of an array (of `scope`) whose `[` the scanner just passed, through its `]`:
+    /// each counts toward `index.mapping.array_objects.limit`, inner arrays flatten, and a
+    /// `null` or a value in it is left to the general path.
+    fn object_array(&self, s: &mut Scan<'_>, scope: usize, out: &mut ParsedDocument, ignored: &mut Vec<Arc<str>>, arrays: &mut usize, depth: usize) -> Option<()> {
+        s.ws()?;
+        if s.peek()? == b']' {
+            s.i += 1;
+            return Some(());
+        }
+        loop {
+            match s.peek()? {
+                b'{' => {
+                    *arrays += 1;
+                    if *arrays > self.array_objects_limit {
+                        return None;
+                    }
+                    s.i += 1;
+                    self.object(s, scope, out, ignored, arrays)?;
+                }
+                b'[' if depth < MAX_ARRAY_DEPTH => {
+                    s.i += 1;
+                    self.object_array(s, scope, out, ignored, arrays, depth + 1)?;
+                }
+                _ => return None,
+            }
+            s.ws()?;
+            match s.peek()? {
+                b',' => {
+                    s.i += 1;
+                    s.ws()?;
+                }
+                b']' => {
+                    s.i += 1;
+                    return Some(());
+                }
+                _ => return None,
+            }
+        }
     }
 
     /// The value(s) at the scanner: arrays hold several (except a point's `[lon, lat]`).
@@ -295,6 +401,22 @@ fn push(t: &Target, tok: &Tok<'_>, out: &mut ParsedDocument, ignored: &mut Vec<A
         (Kind::Byte, Tok::Int(i, _)) => FieldValue::Long(i8::try_from(*i).ok()? as i64),
         (Kind::Double, Tok::Int(i, _)) => FieldValue::Double(*i as f64),
         (Kind::Double, Tok::Float(d, _)) if d.is_finite() => FieldValue::Double(*d),
+        // `XParser::float_value`: the number as a double, then a float.
+        (Kind::Float { half }, Tok::Int(..) | Tok::Float(..)) => {
+            let v = tok.number()? as f32;
+            let stored = if *half { super::values::half_float(v) } else { v };
+            if !stored.is_finite() {
+                return None;
+            }
+            FieldValue::Float(stored)
+        }
+        (Kind::ScaledFloat(factor), Tok::Int(..) | Tok::Float(..)) => {
+            let d = tok.number()?;
+            if !d.is_finite() {
+                return None;
+            }
+            FieldValue::Long(super::values::scale(d, *factor)?)
+        }
         (Kind::Boolean, Tok::Bool(b)) => FieldValue::Boolean(*b),
         (Kind::Ip, Tok::Str(s)) => FieldValue::Ip(super::values::parse_ip(s)?),
         (Kind::Date { fmt, nanos }, Tok::Str(_) | Tok::Int(..) | Tok::Float(..)) => {
@@ -342,6 +464,15 @@ enum Tok<'a> {
 }
 
 impl Tok<'_> {
+    /// A number token's value as a double (`XParser::double_value`).
+    fn number(&self) -> Option<f64> {
+        match self {
+            Tok::Int(i, _) => Some(*i as f64),
+            Tok::Float(d, _) => Some(*d),
+            _ => None,
+        }
+    }
+
     /// `XParser::text`: strings as they are, numbers and booleans as Jackson renders them.
     /// Jackson's `text()`: numbers as written.
     fn text(&self) -> String {

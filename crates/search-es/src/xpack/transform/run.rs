@@ -93,7 +93,10 @@ pub(super) async fn trigger(cluster: &Cluster, id: &str) {
     if let Ok(t) = get_one(&cluster.state(), id)
         && state_of(&t) == "started"
     {
-        let outcome = checkpoint(cluster, &t).await;
+        // As the user who put or last updated it (Elasticsearch's stored security headers): it
+        // reads and writes only what that user may.
+        let owner = t.pointer(&["_roll", "user"]).and_then(internal::principal_of);
+        let outcome = internal::as_principal(owner, checkpoint(cluster, &t)).await;
         // A store refusing the write (a cluster unloading) leaves the trigger due: the
         // scheduler runs it again.
         let _ = record(cluster, id, outcome).await;
@@ -401,6 +404,47 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+    }
+
+    /// A transform reads and writes as the user who put it, and its preview and delete act as
+    /// their caller: a role's document query limits what reaches the destination and the
+    /// preview, and `delete_dest_index` can't delete an index the caller may not delete.
+    #[tokio::test]
+    async fn transforms_act_as_their_user() {
+        let c = Arc::new(Cluster::open(ClusterConfig::new("c"), Arc::new(MemoryStore::new())).await.unwrap());
+        assert_eq!(call(&c, "PUT", "/src", r#"{"mappings":{"properties":{"a":{"type":"keyword"},"team":{"type":"keyword"}}}}"#).await, 200);
+        for (i, (a, team)) in [("x", "red"), ("y", "blue"), ("x", "red")].iter().enumerate() {
+            assert_eq!(call(&c, "PUT", &format!("/src/_doc/{i}?refresh=true"), &format!(r#"{{"a":"{a}","team":"{team}"}}"#)).await, 201);
+        }
+        assert_eq!(call(&c, "PUT", "/keep", "").await, 200);
+        let role = r#"{"cluster":["manage_transform"],"indices":[{"names":["src"],"privileges":["read","view_index_metadata"],"query":{"term":{"team":"red"}}},{"names":["dst"],"privileges":["all"]},{"names":["keep"],"privileges":["read"]}]}"#;
+        assert_eq!(call(&c, "PUT", "/_security/role/t", role).await, 200);
+        assert_eq!(call(&c, "PUT", "/_security/user/t", r#"{"password":"t-password-1","roles":["t"]}"#).await, 200);
+        let as_t = |method: &str, uri: &str, body: &str| {
+            use base64::Engine;
+            let mut req = if body.is_empty() { EsRequest::new(method, uri) } else { EsRequest::json(method, uri, body.to_string()) };
+            req.headers.push(("Authorization".into(), format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("t:t-password-1"))));
+            crate::rest::handle(&c, req)
+        };
+        let body = |dest: &str| format!(r#"{{"source":{{"index":"src"}},"dest":{{"index":"{dest}"}},"pivot":{{"group_by":{{"a":{{"terms":{{"field":"a"}}}}}},"aggs":{{"n":{{"value_count":{{"field":"a"}}}}}}}}}}"#);
+        let preview = as_t("POST", "/_transform/_preview", &body("dst")).await;
+        let text = String::from_utf8_lossy(&preview.body).into_owned();
+        assert_eq!(preview.status, 200, "{text}");
+        assert!(text.contains("\"x\"") && !text.contains("\"y\""), "the preview read a document the role hides: {text}");
+        assert_eq!(as_t("PUT", "/_transform/tt", &body("dst")).await.status, 200);
+        assert_eq!(as_t("POST", "/_transform/tt/_start", "").await.status, 200);
+        super::trigger(&c, "tt").await;
+        let (_, n) = {
+            let r = crate::rest::handle(&c, EsRequest::new("GET", "/dst/_count?q=a:y")).await;
+            (r.status, crate::json::parse(&r.body).ok().flatten().unwrap_or_default())
+        };
+        assert_eq!(n.get("count").and_then(Value::as_i64), Some(0), "the transform wrote a group the role hides");
+        let r = crate::rest::handle(&c, EsRequest::new("GET", "/dst/_count?q=a:x")).await;
+        assert!(String::from_utf8_lossy(&r.body).contains("\"count\":1"), "{}", String::from_utf8_lossy(&r.body));
+        // An index the caller can only read survives a delete that names it as the destination.
+        assert_eq!(as_t("PUT", "/_transform/k?defer_validation=true", &body("keep")).await.status, 200);
+        as_t("DELETE", "/_transform/k?delete_dest_index=true", "").await;
+        assert_eq!(call(&c, "HEAD", "/keep", "").await, 200, "deleted an index the caller may not delete");
     }
 
     /// Transforms run on the cluster's job scheduler: a batch transform's checkpoint after

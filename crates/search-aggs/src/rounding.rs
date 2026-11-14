@@ -715,6 +715,14 @@ impl ZoneRules {
         ZoneRules { tz, transitions, initial, lo, hi }
     }
 
+    /// Whether two zones have the same offsets at every instant (`ZoneRules.equals`): a link
+    /// (`Canada/Mountain`) and its zone (`America/Edmonton`) do.
+    pub fn same_rules(&self, other: &ZoneRules) -> bool {
+        self.initial == other.initial
+            && self.transitions.len() == other.transitions.len()
+            && self.transitions.iter().zip(&other.transitions).all(|(a, b)| a.at == b.at && a.before == b.before && a.after == b.after)
+    }
+
     /// Offset (seconds) at an instant.
     #[inline]
     pub fn offset_at(&self, utc: i64) -> i32 {

@@ -25,15 +25,21 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
 - Tests run: 3905; passed 3809, failed 1, skipped 95.
 - Of the 3808 tests that pass on Elasticsearch 9.5.5 (and run here), roll passes **3808** (100%); every x-pack clients test passes.
   <!-- test-search: roll >= 3810 -->
-- Elasticsearch's module, plugin and x-pack YAML suites outside `test/free` (66 suites, 6,044
-  tests; [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 3,570,
-  3,531 of the 5,541 that pass on Elasticsearch 9.5.5 run like each suite's own test cluster.
-  Gaps found by the module suites besides those in the table: `geo_bounds` of `geo_point`
-  runtime fields, highlighting runtime fields, the tie order of `ip` runtime field terms, nested runtime field errors as cause chains, the `registered_domain`,
-  `user_agent` and `attachment` processors, ingest node statistics and verbose simulate
-  details; in `platinum`: `geo_shape` runtime fields, `geo_bounds` of shapes crossing the
-  dateline, dateline-crossing `geohex` cells as multipolygons in the `geo_grid` processor,
-  synthetic `_source` order of `counted_keyword` values.
+- Elasticsearch's module, plugin and x-pack YAML suites outside `test/free` (67 suites, 6,349 tests;
+  [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 5,235, **5,074 of
+  the 5,541** that pass on Elasticsearch 9.5.5 (92%), each run like its suite's own test cluster (a
+  full run of every suite at `1dce30b61` plus the dot-prefix warnings, 2026-11-14; `lang-mustache`,
+  `rank-eval`, `ilm`, `eql`, `slm`, `searchable-snapshots` and `snapshot-repo-test-kit` rerun since, and the `analysis-phonetic`, `-stempel`, `-ukrainian`,
+  `-kuromoji`, `-nori`, `-smartcn` and `-icu` plugins added). 45 suites pass every test
+  Elasticsearch passes. What's left, largest first: x-pack
+  `platinum` (1,065 of 1,412; machine learning is most of it), plugins roll doesn't ship
+  (`mapper-annotated-text`, `-murmur3` and `-size`, `ingest-attachment`, `ingest-otel`, `prometheus`), `apm-data`'s templates and
+  pipelines (1 of 26), cross-cluster replication (none),
+  `mapper-unsigned-long` (33 of 34: a `terms` aggregation across `long` and `unsigned_long`
+  indices), `logsdb` (225 of 234: `_ignored_source` binary entries, the `@timestamp` doc values
+  skipper), runtime fields (247 of 248: highlighting them). In `platinum` besides machine learning:
+  `geo_shape` runtime fields, `geo_bounds` of shapes crossing the dateline, dateline-crossing
+  `geohex` cells in the `geo_grid` processor, synthetic `_source` order of `counted_keyword` values.
 - The OpenSearch 3.9.0 suite (opensearch dialect): 1455 of 1506 pass — every test that passes
   on a real single-node OpenSearch 3.9.0 (`crates/search-yaml/baseline/opensearch-3.9.0.txt`,
   re-checked against OpenSearch 3.9.0 in Docker); the other 51 are environment skips
@@ -134,8 +140,7 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   captured from OpenSearch 3.9.0 with job runs forced as the plugin's tests force them
   (`ism_run` steps). Not run: shrink, rollup, transform, search_only, convert_index_to_remote
   and stop_replication (their steps fail with a cause saying so), and notification
-  destinations and channels (roll has no outbound connectivity, as for Watcher webhooks: the
-  step fails with that cause). An unloaded serverless cluster runs its due jobs when it wakes.
+  destinations and channels (roll sends no notifications: the step fails with that cause). An unloaded serverless cluster runs its due jobs when it wakes.
 - OpenSearch search request extras (`os_search_ext.json`, 21 steps): `phase_took`,
   `cancel_after_time_interval`, the bundled plugins' `ext` sections (`rerank`, `ml_inference`,
   `ubi` with its response `query_id`; other names fail as OpenSearch fails them), the `template`
@@ -150,6 +155,36 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   order, missing-index resources, can-match/DFS sort failures and stats shapes;
   `os_search.json` its suggestion order, nested inner hit sources, t-digest 3.3 percentile
   ranks, significant terms background and `_msearch` header rules.
+- The Security plugin (`xpack::security::opensearch`, on roll's one security evaluator):
+  `_plugins/_security/api/internalusers`, `roles`, `rolesmapping`, `actiongroups` and `tenants`
+  (GET, PUT, DELETE, PATCH with JSON patches), `api/account` (GET, and PUT for one's own
+  password), `api/permissionsinfo`, `api/securityconfig` (GET; changes refused, as
+  `allow_securityconfig_modification` is off by default), `api/audit` (GET, PUT, PATCH, with
+  `AuditConfig`'s defaults under a PUT and its validation; stored, roll writes no audit log),
+  `api/ssl/certs` and `api/ssl/*/reloadcerts` (refused: the plugin's super admin only), `whoami`
+  (`No security data`: plain HTTP has no certificate), `api/cache` (DELETE forgets verified
+  passwords), `authinfo` and `health`, also under `_opendistro/_security` (but `whoami`). Answers, validation (keys, types,
+  zxcvbn password strength with the plugin's defaults, Jackson's errors for bad nested
+  entries), static and reserved entries (the distribution's 54 roles and 26 action groups;
+  `admin` is the cluster's owner, `all_access` is mapped to its backend role; the demo users and
+  their published passwords are left out), the REST API's access rule (`all_access`,
+  `security_rest_api_access` or `restapi:admin/*`; roles granting `restapi:` permissions need the
+  plugin's super admin, which roll has none of) are pinned by `os_security_api.json` (87 steps),
+  `os_security_config.json` (52 steps) and `os_security_auth.json` (46 steps). A user's roles are its `opendistro_security_roles` and
+  the mappings naming it or its backend roles (wildcards, `and_backend_roles`); action groups
+  expand to action patterns and `${user.name}`-style variables fill index patterns and DLS. The
+  plugin's authorization: its 403 (`no permissions for [...] and User [...]`), the composite,
+  scroll and reindex actions checked as cluster actions, no narrowing of wildcards to permitted
+  indices, `indices:admin/create` for writes that create an index, bulk items naming both
+  actions, a by-query `refresh=true` refused after its writes, a plain `Unauthorized` 401.
+  Document and field level security and masked fields (BLAKE2b with
+  `plugins.security.compliance.salt`, `::/regex/::replacement` and `::SHA-256`/`::SHA-512`
+  rules; the union over roles) by `os_security_dls.json` (16 steps). Differences: a DLS query
+  filters without adding OpenSearch's +1.0 to scores; masked fields are unmapped for queries
+  and aggregations (OpenSearch aggregates and matches their hashes); mappings by `hosts` never
+  match (roll doesn't see the client's address); `hash`es given by clients are bcrypt (as the
+  plugin's) up to cost 14. Not yet: `nodesdn`, `allowlist`, API tokens and
+  multi-tenancy itself (tenants are stored and listed; no tenant indices).
 
 
 ## Extended suites (modules, plugins, x-pack)
@@ -179,136 +214,162 @@ the discovery/store plugins.
 | `aggregations` | `modules/aggregations` | plain | 640 | 640 | 640 | 640 | 0 |
 | `analysis-common` | `modules/analysis-common` | plain | 164 | 164 | 164 | 164 | 0 |
 | `data-streams` | `modules/data-streams` | security | 170 | 159 | 159 | 159 | 0 |
-| `dot-prefix-validation` | `modules/dot-prefix-validation` | security | 6 | 6 | 2 | 2 | 4 |
+| `dot-prefix-validation` | `modules/dot-prefix-validation` | security | 6 | 6 | 6 | 6 | 0 |
 | `ingest-attachment` | `modules/ingest-attachment` | plain | 10 | 10 | 0 | 0 | 10 |
-| `ingest-common` | `modules/ingest-common` | security | 176 | 175 | 102 | 102 | 73 |
+| `ingest-common` | `modules/ingest-common` | security | 176 | 175 | 175 | 175 | 0 |
 | `ingest-ip-location` | `modules/ingest-ip-location` | plain | 21 | 1 | 0 | 0 | 1 |
 | `ingest-otel` | `modules/ingest-otel` | plain | 13 | 13 | 0 | 0 | 13 |
 | `ip-location` | `modules/ip-location` | plain | 4 | 1 | 0 | 0 | 1 |
-| `lang-expression` | `modules/lang-expression` | plain | 3 | 3 | 2 | 2 | 1 |
-| `lang-mustache` | `modules/lang-mustache` | plain | 21 | 21 | 18 | 18 | 3 |
-| `lang-painless` | `modules/lang-painless` | plain | 345 | 342 | 295 | 295 | 47 |
-| `mapper-extras` | `modules/mapper-extras` | plain | 143 | 143 | 130 | 130 | 13 |
+| `lang-expression` | `modules/lang-expression` | plain | 3 | 3 | 3 | 3 | 0 |
+| `lang-mustache` | `modules/lang-mustache` | plain | 21 | 21 | 20 | 20 | 1 |
+| `lang-painless` | `modules/lang-painless` | plain | 345 | 342 | 337 | 337 | 5 |
+| `mapper-extras` | `modules/mapper-extras` | plain | 143 | 143 | 143 | 143 | 0 |
 | `parent-join` | `modules/parent-join` | plain | 27 | 24 | 24 | 24 | 0 |
 | `percolator` | `modules/percolator` | plain | 6 | 6 | 6 | 6 | 0 |
-| `rank-eval` | `modules/rank-eval` | plain | 8 | 8 | 7 | 7 | 1 |
+| `rank-eval` | `modules/rank-eval` | plain | 8 | 8 | 8 | 8 | 0 |
 | `reindex` | `modules/reindex` | plain | 191 | 184 | 184 | 184 | 0 |
-| `reindex-management` | `modules/reindex-management` | plain | 11 | 11 | 0 | 0 | 11 |
+| `reindex-management` | `modules/reindex-management` | plain | 11 | 11 | 11 | 11 | 0 |
 | `repository-url` | `modules/repository-url` | plain | 9 | 1 | 0 | 0 | 1 |
 | `rest-root` | `modules/rest-root` | plain | 4 | 4 | 4 | 4 | 0 |
-| `runtime-fields-common` | `modules/runtime-fields-common` | plain | 248 | 248 | 243 | 243 | 5 |
+| `runtime-fields-common` | `modules/runtime-fields-common` | plain | 248 | 248 | 247 | 247 | 1 |
 | `streams` | `modules/streams` | plain | 25 | 25 | 25 | 25 | 0 |
-| `transport-netty4` | `modules/transport-netty4` | plain | 1 | 1 | 0 | 0 | 1 |
-| `user-agent` | `modules/user-agent` | plain | 1 | 1 | 0 | 0 | 1 |
+| `transport-netty4` | `modules/transport-netty4` | plain | 1 | 1 | 1 | 1 | 0 |
+| `user-agent` | `modules/user-agent` | plain | 1 | 1 | 1 | 1 | 0 |
 | `apm-data` | `x-pack/plugin/apm-data` | plain | 28 | 26 | 1 | 1 | 25 |
 | `async-search` | `x-pack/plugin/async-search` | plain | 3 | 1 | 1 | 1 | 0 |
-| `autoscaling` | `x-pack/plugin/autoscaling` | security | 19 | 19 | 0 | 0 | 19 |
+| `autoscaling` | `x-pack/plugin/autoscaling` | security | 19 | 19 | 19 | 19 | 0 |
 | `ccr` | `x-pack/plugin/ccr` | security | 10 | 10 | 0 | 0 | 10 |
 | `core` | `x-pack/plugin/core` | security | 1 | 0 | 0 | 0 | 0 |
 | `diskbbq` | `x-pack/plugin/diskbbq` | plain | 8 | 7 | 5 | 5 | 2 |
 | `downsample` | `x-pack/plugin/downsample/qa/rest:downsample` | plain | 68 | 59 | 58 | 58 | 1 |
 | `downsample-with-security` | `x-pack/plugin/downsample/qa/rest:downsample-with-security` | security | 1 | 1 | 1 | 1 | 0 |
-| `ent-search` | `x-pack/plugin/ent-search` | security | 371 | 371 | 6 | 6 | 365 |
-| `eql` | `x-pack/plugin/eql/qa/rest` | basic | 39 | 39 | 27 | 27 | 12 |
-| `fleet` | `x-pack/plugin/fleet` | security-basic | 21 | 21 | 3 | 3 | 18 |
-| `ilm` | `x-pack/plugin/ilm` | plain | 27 | 27 | 16 | 16 | 11 |
-| `kql` | `x-pack/plugin/kql` | plain | 34 | 34 | 0 | 0 | 34 |
+| `ent-search` | `x-pack/plugin/ent-search` | security | 371 | 371 | 371 | 371 | 0 |
+| `eql` | `x-pack/plugin/eql/qa/rest` | basic | 39 | 39 | 39 | 39 | 0 |
+| `fleet` | `x-pack/plugin/fleet` | security-basic | 21 | 21 | 21 | 21 | 0 |
+| `ilm` | `x-pack/plugin/ilm` | plain | 27 | 27 | 27 | 27 | 0 |
+| `kql` | `x-pack/plugin/kql` | plain | 34 | 34 | 34 | 34 | 0 |
 | `logsdb` | `x-pack/plugin/logsdb` | security | 236 | 234 | 225 | 225 | 9 |
 | `mapper-constant-keyword` | `x-pack/plugin/mapper-constant-keyword` | plain | 5 | 5 | 5 | 5 | 0 |
-| `mapper-unsigned-long` | `x-pack/plugin/mapper-unsigned-long` | plain | 34 | 34 | 22 | 22 | 12 |
+| `mapper-unsigned-long` | `x-pack/plugin/mapper-unsigned-long` | plain | 34 | 34 | 33 | 33 | 1 |
 | `mapper-version` | `x-pack/plugin/mapper-version` | plain | 6 | 6 | 6 | 6 | 0 |
 | `otel-data` | `x-pack/plugin/otel-data` | plain | 68 | 68 | 68 | 68 | 0 |
 | `prometheus` | `x-pack/plugin/prometheus` | security | 6 | 6 | 0 | 0 | 6 |
 | `rank-rrf` | `x-pack/plugin/rank-rrf:linear,rrf` | plain | 136 | 96 | 96 | 96 | 0 |
 | `rank-rrf-license` | `x-pack/plugin/rank-rrf:license` | basic | 3 | 3 | 0 | 0 | 3 |
-| `searchable-snapshots` | `x-pack/plugin/searchable-snapshots/qa/rest` | security | 13 | 13 | 6 | 6 | 7 |
+| `searchable-snapshots` | `x-pack/plugin/searchable-snapshots/qa/rest` | security | 13 | 13 | 13 | 13 | 0 |
 | `search-business-rules` | `x-pack/plugin/search-business-rules` | basic | 16 | 16 | 16 | 16 | 0 |
-| `slm` | `x-pack/plugin/slm` | security | 8 | 8 | 1 | 1 | 7 |
-| `snapshot-repo-test-kit` | `x-pack/plugin/snapshot-repo-test-kit/qa/rest` | basic | 6 | 6 | 3 | 3 | 3 |
+| `slm` | `x-pack/plugin/slm` | security | 8 | 8 | 8 | 8 | 0 |
+| `snapshot-repo-test-kit` | `x-pack/plugin/snapshot-repo-test-kit/qa/rest` | basic | 6 | 6 | 6 | 6 | 0 |
 | `stack` | `x-pack/plugin/stack` | security | 6 | 6 | 6 | 6 | 0 |
 | `transform` | `x-pack/plugin/transform` | security | 109 | 108 | 108 | 108 | 0 |
-| `watcher` | `x-pack/plugin/watcher:mustache,painless,watcher` | plain | 92 | 89 | 43 | 43 | 46 |
-| `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 0 | 0 | 9 |
+| `watcher` | `x-pack/plugin/watcher:mustache,painless,watcher` | plain | 92 | 89 | 89 | 89 | 0 |
+| `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 9 | 9 | 0 |
 | `wildcard` | `x-pack/plugin/wildcard` | plain | 9 | 9 | 9 | 9 | 0 |
-| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 954 | 954 | 458 |
-| `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 544 | 544 | 5 |
-| `analysis-icu` | `plugins/analysis-icu` | plugins | 13 | 13 | 0 | 0 | 13 |
-| `analysis-kuromoji` | `plugins/analysis-kuromoji` | plugins | 7 | 7 | 0 | 0 | 7 |
-| `analysis-nori` | `plugins/analysis-nori` | plugins | 6 | 6 | 0 | 0 | 6 |
-| `analysis-phonetic` | `plugins/analysis-phonetic` | plugins | 5 | 5 | 0 | 0 | 5 |
-| `analysis-smartcn` | `plugins/analysis-smartcn` | plugins | 3 | 3 | 0 | 0 | 3 |
-| `analysis-stempel` | `plugins/analysis-stempel` | plugins | 3 | 3 | 0 | 0 | 3 |
-| `analysis-ukrainian` | `plugins/analysis-ukrainian` | plugins | 2 | 2 | 0 | 0 | 2 |
+| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 1065 | 1065 | 347 |
+| `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 549 | 549 | 0 |
+| `analysis-icu` | `plugins/analysis-icu` | plugins | 13 | 13 | 13 | 13 | 0 |
+| `analysis-kuromoji` | `plugins/analysis-kuromoji` | plugins | 7 | 7 | 7 | 7 | 0 |
+| `analysis-nori` | `plugins/analysis-nori` | plugins | 6 | 6 | 6 | 6 | 0 |
+| `analysis-phonetic` | `plugins/analysis-phonetic` | plugins | 5 | 5 | 5 | 5 | 0 |
+| `analysis-smartcn` | `plugins/analysis-smartcn` | plugins | 3 | 3 | 3 | 3 | 0 |
+| `analysis-stempel` | `plugins/analysis-stempel` | plugins | 3 | 3 | 3 | 3 | 0 |
+| `analysis-ukrainian` | `plugins/analysis-ukrainian` | plugins | 2 | 2 | 2 | 2 | 0 |
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | 6044 | 5541 | 4235 | 4235 | 1306 |
+| **total** | | | **6,349** | **5,541** | **5,235** | **5,074** | **467** |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
 <!-- test-search: data-streams >= 159 -->
-<!-- test-search: dot-prefix-validation >= 2 -->
-<!-- test-search: ingest-common >= 172 -->
+<!-- test-search: dot-prefix-validation >= 6 -->
+<!-- test-search: ingest-common >= 175 -->
 <!-- test-search: lang-expression >= 3 -->
-<!-- test-search: lang-mustache >= 18 -->
+<!-- test-search: lang-mustache >= 20 -->
 <!-- test-search: lang-painless >= 337 -->
-<!-- test-search: mapper-extras >= 130 -->
+<!-- test-search: mapper-extras >= 143 -->
 <!-- test-search: parent-join >= 24 -->
 <!-- test-search: percolator >= 6 -->
-<!-- test-search: rank-eval >= 7 -->
+<!-- test-search: rank-eval >= 8 -->
 <!-- test-search: reindex >= 184 -->
+<!-- test-search: reindex-management >= 11 -->
 <!-- test-search: rest-root >= 4 -->
-<!-- test-search: runtime-fields-common >= 243 -->
+<!-- test-search: runtime-fields-common >= 247 -->
 <!-- test-search: streams >= 25 -->
 <!-- test-search: apm-data >= 1 -->
 <!-- test-search: async-search >= 1 -->
 <!-- test-search: diskbbq >= 5 -->
 <!-- test-search: downsample >= 58 -->
 <!-- test-search: downsample-with-security >= 1 -->
-<!-- test-search: ent-search >= 366 -->
-<!-- test-search: eql >= 27 -->
+<!-- test-search: ent-search >= 371 -->
+<!-- test-search: eql >= 39 -->
 <!-- test-search: fleet >= 21 -->
-<!-- test-search: ilm >= 16 -->
+<!-- test-search: ilm >= 27 -->
 <!-- test-search: kql >= 34 -->
 <!-- test-search: logsdb >= 225 -->
 <!-- test-search: mapper-constant-keyword >= 5 -->
-<!-- test-search: mapper-unsigned-long >= 22 -->
+<!-- test-search: mapper-unsigned-long >= 33 -->
 <!-- test-search: mapper-version >= 6 -->
 <!-- test-search: otel-data >= 68 -->
 <!-- test-search: rank-rrf >= 96 -->
-<!-- test-search: searchable-snapshots >= 6 -->
+<!-- test-search: searchable-snapshots >= 13 -->
 <!-- test-search: search-business-rules >= 16 -->
-<!-- test-search: slm >= 1 -->
-<!-- test-search: snapshot-repo-test-kit >= 3 -->
+<!-- test-search: slm >= 8 -->
+<!-- test-search: snapshot-repo-test-kit >= 6 -->
 <!-- test-search: stack >= 6 -->
 <!-- test-search: transform >= 108 -->
-<!-- test-search: watcher >= 43 -->
+<!-- test-search: watcher >= 89 -->
+<!-- test-search: watcher-security >= 9 -->
 <!-- test-search: wildcard >= 9 -->
-<!-- test-search: platinum >= 954 -->
-<!-- test-search: esql >= 544 -->
+<!-- test-search: platinum >= 1065 -->
+<!-- test-search: inference >= 161 -->
+<!-- test-search: esql >= 549 -->
+<!-- test-search: analysis-phonetic >= 5 -->
+<!-- test-search: analysis-stempel >= 3 -->
+<!-- test-search: analysis-ukrainian >= 2 -->
+<!-- test-search: analysis-kuromoji >= 7 -->
+<!-- test-search: analysis-nori >= 6 -->
+<!-- test-search: analysis-smartcn >= 3 -->
+<!-- test-search: analysis-icu >= 13 -->
 
-`platinum` by directory (roll / Elasticsearch passes): `ml` 225/618, `analytics` 111/114,
-`spatial` 92/105, `security` 92/101, `rollup` 0/52, `exponential_histogram` 44/44, `vector-tile`
-34/34, `api_key` 31/32, `aggregate-metrics` 26/28, `inference` 1/23, `search.vectors` 22/23,
-`wildcard` 22/22, `terms_enum` 15/20, `rank_vectors` 0/15, `users` 14/15, `constant_keyword`
-12/13, `counted_keyword` 8/11, `data_streams` 9/11, `migrate` 0/11, `change_password` 6/8,
-`roles` 8/8, `text_structure` 5/8, `enrich` 6/7, `privileges` 7/7, `profiling` 0/7, `token` 4/6,
-`versionfield` 6/6, `async_search` 4/5, `redact` 0/5, `sql` 5/5, `user_profile` 4/5,
-`authenticate` 4/4, `logsdb` 2/4, `role_mapping` 4/4, `search-business-rules` 4/4, `dlm` 0/3,
-`monitoring` 0/3, `searchable_snapshots` 1/3, `snapshot` 1/3, `logging` 0/2, `migration` 2/2,
-`service_accounts` 1/2, `set_security_user` 2/2, `xpack` 0/2, `deprecation` 0/1, `graph` 1/1,
-`health` 0/1, `vectordb_document` 0/1, `voting_only_node` 1/1.
+`platinum` by directory (roll / Elasticsearch passes): `ml` 349/618, `analytics` 113/114, `spatial`
+92/105, `security` 100/101, `rollup` 52/52, `exponential_histogram` 44/44, `vector-tile` 34/34,
+`api_key` 32/32, `aggregate-metrics` 26/28, `inference` 22/23, `search.vectors` 22/23, `wildcard`
+22/22, `terms_enum` 20/20, `rank_vectors` 0/15, `users` 15/15, `constant_keyword` 13/13,
+`counted_keyword` 8/11, `data_streams` 11/11, `migrate` 0/11, `change_password` 8/8, `roles` 8/8,
+`text_structure` 5/8, `enrich` 6/7, `privileges` 7/7, `profiling` 0/7, `token` 6/6, `versionfield`
+6/6, `async_search` 4/5, `redact` 5/5, `sql` 5/5, `user_profile` 5/5, `authenticate` 4/4, `logsdb`
+2/4, `role_mapping` 4/4, `search-business-rules` 4/4, `dlm` 0/3, `monitoring` 0/3,
+`searchable_snapshots` 1/3, `snapshot` 1/3, `logging` 0/2, `migration` 2/2, `service_accounts` 2/2,
+`set_security_user` 2/2, `xpack` 0/2, `deprecation` 0/1, `graph` 1/1, `health` 0/1,
+`vectordb_document` 0/1, `voting_only_node` 1/1.
 
 Largest gaps by suite (from the roll reports, `target/search-yaml/extended/roll-<suite>.json`):
-not implemented at all: the plugin analyzers and mappers (`analysis-icu`, `-kuromoji`, `-nori`,
-`-phonetic`, `-smartcn`, `-stempel`, `-ukrainian`, `annotated_text`, `murmur3`, `_size`),
-CCR, Fleet APIs, SLM, the `normalize_for_stream` processor (`ingest-otel`),
-`attachment`, reindex management, Prometheus ingest, rollups; roll lists no `lang-expression`,
+not implemented at all: the plugin mappers (`annotated_text`,
+`murmur3`, `_size`),
+CCR, Fleet APIs, the `normalize_for_stream` processor (`ingest-otel`),
+`attachment`, reindex management, Prometheus ingest; roll lists no `lang-expression`,
 `transport-netty4` or `user-agent` module in `_nodes`; roll ignores `xpack.license.self_generated.type: basic`
 (its license is always `enterprise`), so `rank-rrf-license`'s licence errors are missing; the
 privileges of `manage_autoscaling`, `manage_search_application`, `watcher_manager` and other
-x-pack cluster privileges don't map to their actions (`autoscaling`, `ent-search`,
-`watcher-security` run as such users).
+x-pack cluster privileges don't map to their actions (`autoscaling`, `ent-search` run as such
+users). `platinum`'s `security` misses one downsampling test (its task fails on roll).
+
+Run-as (`es-security-runas-user`) is checked against the authenticating user's `run_as`
+privilege, then the request is authorized as the run-as user; `_authenticate` shows the
+authenticating realm as `authentication_realm` and the run-as user's as `lookup_realm`. API keys
+and service accounts ignore the header, as in Elasticsearch. Service account tokens come from the
+security index and from `config/service_tokens` (`namespace/service/name:hash` lines, the
+`{PBKDF2_STRETCH}` hashes `elasticsearch-service-tokens` writes; read as the file is now, so
+edits take effect without a restart); `_credentials` lists the file's under
+`nodes_credentials.file_tokens`. An API key whose role descriptors
+carry `restriction.workflows` runs only requests of those workflows (`search_application_query`:
+a search application's `_search`, with the searches it makes), anything else fails with
+`role_restriction_exception` ("access restricted by workflow"), `_authenticate` included. A search with `ignore_unavailable`
+leaves out the explicitly named indices its user may not read (without it they are refused);
+ES|QL and SQL name their indices strictly either way.
+The `watcher` suite's webhooks and `http` inputs call the node itself: its test cluster sets
+`roll.watcher.allow_private_hosts` (a roll-only option in `extended.txt`), which nothing else does.
 
 ## Differential suite
 
@@ -831,6 +892,123 @@ Checked against Elasticsearch 9.5.5 (captures in
   The `request` breaker's messages carry the documentation link too. `fielddata` accounts
   nothing yet.
 
+## Inference (`_inference`)
+
+The inference API of Elasticsearch 9.5.5's inference plugin (`crates/search-es/src/xpack/inference`):
+`PUT/GET/DELETE _inference[/{task_type}]/{id}`, `PUT …/_update`, `POST _inference[/{task_type}]/{id}`
+to run one, `POST …/_stream` (completion and the unified `chat_completion`), `GET _inference/_services[/{task_type}]`,
+the region policy (`_inference/_region_policy`) and the `inference` section of `_xpack/usage`.
+Task types `text_embedding`, `sparse_embedding`, `rerank`, `completion`, `chat_completion`.
+Measured against a private Elasticsearch 9.5.5 calling a mock of the services: the OpenAI flows
+(create with its validation call, get, run, stream, update, delete), 42 error and update cases and
+the region policy CRUD answer the same, and the requests sent upstream are byte for byte
+Elasticsearch's (headers, `encoding_format: base64`, `n: 1`, `stream_options`).
+
+| service | task types | notes |
+|---|---|---|
+| `openai` | `text_embedding`, `completion`, `chat_completion` | `url` points it at any OpenAI-compatible server (vLLM, Ollama, LiteLLM, roll's model gateway). Not supported: OAuth2 client credentials (`client_secret`) and the multimodal `embedding` task type |
+| `cohere` | `text_embedding`, `rerank`, `completion` | the V2 API Elasticsearch uses for new endpoints; `service_settings.url` (Elasticsearch reads it too) or the node's `roll.inference.cohere.url` move the host off `api.cohere.ai` |
+| `anthropic` | `completion`, `chat_completion` | the Messages API; the unified chat stream is translated to and from it. The node's `roll.inference.anthropic.url` moves the host off `api.anthropic.com` |
+| `elasticsearch` | (needs ML nodes) | the three preconfigured endpoints (`.elser-2-elasticsearch`, `.multilingual-e5-small-elasticsearch`, `.rerank-v1-elasticsearch`) are listed, and running them or creating an endpoint of the service answers what a cluster without ML nodes answers (captured: 429, `Could not start deployment because no ML nodes with sufficient capacity were found`; such an endpoint is stored first, as there). roll never makes up their output |
+
+Creating and updating an endpoint calls the service once (`how big`, as Elasticsearch's model
+validators do), which also learns a text embedding model's dimensions and similarity;
+`xpack.inference.skip_validate_and_start` (node setting) skips the call.
+
+Security: API keys are secrets, stored apart from the endpoint (`.secrets-inference`) and sealed
+with the deployment key (`seal.rs`, kind `inference api key`); nothing prints them (`GET` shows the
+service settings without `api_key`, as Elasticsearch does) and they're opened only to send a
+request. Every URL is fetched through `roll_net::PublicOnly` with no redirects and no proxy,
+refusing private IP literals and `localhost`, reading at most 32 MiB
+(`roll.inference.allow_private_hosts` lifts the address rule, for test clusters only). Calls are
+authorized by the one security evaluator (`monitor_inference`, `manage_inference`). Answers are
+parsed as untrusted data: shapes are checked (a rerank index outside the inputs, a missing field
+or a wrong embedding count fail the call).
+
+Differences: streamed answers are read whole before they're sent (the same events, all at the
+end); `rate_limit.requests_per_minute` is enforced per node as Elasticsearch enforces it (a
+one-token bucket per cluster and endpoint, requests waiting their turn, timing out when the wait
+would outlast them; a cluster runs on one node at a time, so it is the cluster's limit), and the
+service's own 429s are retried at most twice; `max_input_tokens` doesn't truncate inputs;
+Cohere's settings are read with roll's settings reader, so a malformed one fails with
+`validation_exception` instead of Cohere's object parser's `x_content_parse_exception`.
+
+YAML: `platinum/inference` 22 of the 23 tests that pass on Elasticsearch (the last needs the
+`random_reranker` retriever). The `inference` extended suite runs the
+same directory on a cluster with the `inference-service-test` plugin's services, which
+`search-dev --yaml-test-cluster` provides (`services/test.rs`: `test_service`,
+`text_embedding_test_service`, `test_reranking_service`, `completion_test_service`,
+`streaming_completion_test_service`, reproduced exactly) and real clusters never have; the plugin
+isn't in Elasticsearch's release, so there is no Elasticsearch baseline (roll 161 of 305).
+Tests: `crates/search-es/tests/inference.rs` runs every service against a mock server.
+
+### `semantic_text`
+
+`semantic_text` fields (`xpack/inference/semantic.rs`, `query.rs`, `chunking.rs`) as Elasticsearch
+9.5.5 has them with `index.mapping.semantic_text.use_legacy_format: false` (its default):
+
+- Mapping: `inference_id` (default `.elser-2-elasticsearch`, which answers as a cluster without
+  ML nodes), `search_inference_id`, `chunking_settings`, `index_options`, `meta`; the first
+  embedded document records `model_settings` (service, task type, dimensions, similarity, element
+  type), and settings that differ later fail the document (`Incompatible model settings`). Field
+  caps report the field as an inference `text` field. `_xpack/usage` counts the fields per
+  endpoint, service and preconfigured model.
+- Indexing: a bulk request embeds the values of all its documents together, one call per endpoint
+  per batch (2,048 inputs for OpenAI, 96 for Cohere, 512 otherwise); single writes, documents an
+  ingest pipeline produced and updates are embedded one by one after their pipeline. An update
+  re-embeds only fields whose text changed. A failed endpoint fails the item with
+  `inference_exception` (`Exception when running inference id [x] on field [f]`, the cause's
+  status). Values are chunked by the field's chunking settings, else the endpoint's: word and
+  sentence chunking follow Elasticsearch's chunkers with Unicode segmentation in place of ICU's
+  break iterators, recursive chunking takes the separators as regular expressions without
+  lookarounds; offsets count UTF-16 units over the values joined by one separator, as there.
+- Storage: the chunks' embeddings are hidden nested documents (`<field>.inference.chunks`, a
+  `sparse_vector` or `dense_vector` shaped by the model settings), and the results are kept in the
+  stored source under `_inference_fields` (Elasticsearch rebuilds that object from the index;
+  roll stores it), left out of `_source` unless the request sets `exclude_vectors: false` or
+  names it in its includes. Branches, snapshots and reindexing carry them: nothing is embedded
+  again unless its text changed.
+- Queries: `semantic`, and `match`, `knn` (a `text_embedding` `query_vector_builder`, or a
+  `query_vector`) and `sparse_vector` (a `query` text) on `semantic_text` fields are embedded on
+  the coordinator, each endpoint and text once, and run as Elasticsearch runs them: `nested`
+  (`score_mode: max`) over the chunks with `sparse_vector` or `knn` (`k` at least 10). Targets that
+  map the field differently each get their clause, limited by `_index`. `sparse_vector` queries
+  with `inference_id` and `query`, and `knn` builders naming an endpoint, work on any field too,
+  also inside `pinned` and `rule` queries. An `inference_id` may name a deployed `text_expansion`
+  trained model instead: roll runs no PyTorch models, so it expands the text into the words of
+  the model's vocabulary the text holds, each weighted 1 (what Elasticsearch's tiny test models
+  do).
+  `sparse_vector` queries themselves are new in roll (linear feature queries boosted by the
+  tokens' weights; query-time token pruning isn't applied).
+- Authority: embedding documents and queries runs with the cluster's authority, as Elasticsearch
+  runs its inference filter and the semantic query's inference under its own origin: a writer
+  needs only its index privileges, a reader its read privileges, and neither gets the inference
+  API (`crates/search-es/tests/inference.rs` runs this as a user with `read` and `write` on one
+  index).
+
+- Highlighting: the `semantic` highlighter, the default for `semantic_text` fields, scores each
+  chunk against the field's query embedding (taken from the rewritten query, no extra call) and
+  returns the best `number_of_fragments` (5) chunks' text, by score with `order: score` and in
+  text order otherwise; without a semantic query on the field, the first chunks.
+- `copy_to` into a `semantic_text` field embeds every source's values, chunks kept per source as
+  Elasticsearch keeps them; multi-fields under `semantic_text` are indexed as usual.
+- Retrievers: `rrf` and `linear` take the simplified `query`/`fields` form, expanded against the
+  targets' mappings as `MultiFieldsInnerRetrieverUtils` expands it (a lexical `multi_match`,
+  `most_fields`, over the text fields; a semantic query per `semantic_text` field, fused with the
+  fields' weights; `index.query.default_field` when no fields are given), with Elasticsearch's
+  validation (rank-rrf's simplified-form tests, run against the test services: 32 of 36). A
+  `text_similarity_reranker` at the top of the request reranks its child's `rank_window_size` hits
+  with a rerank endpoint (each value of `field` an input, a document scoring its best;
+  `min_score`, `allow_rerank_failures`, the endpoint's `top_n` checked), and queries inside
+  compound retrievers are embedded like the top-level query.
+- `exists` on a `semantic_text` field matches documents with chunks.
+
+Not yet: `semantic_text` as a multi-field of a `text` field, validation of `index_options` (kept
+as given), the multimodal `embedding` task type and the new `semantic` field type, the
+`random_reranker` retriever (its scores are seeded by Lucene doc ids, which roll's don't match),
+a `text_similarity_reranker` inside a compound retriever, its `chunk_rescorer`, and the reranker's
+explanation and profile details.
+
 ## Per area
 
 `roll` = baseline tests roll passes, `ES` = tests passing on Elasticsearch 9.5.5. The most
@@ -1079,8 +1257,10 @@ the rest are skipped by the tests' own prerequisites.
 - Segment generations in `_segments` / `_cat/segments` number the current segments.
 - Aggregations and sorting on keyed flattened sub-fields, `_index_mode` aggregations,
   nested sorts inside `top_hits`, and shard-level aggregation failures as partial results.
-- Compound retrievers (`rrf`, `linear`, `pinned`, `rescorer` over them) follow
-  Elasticsearch's rank-docs final phase, explanations and profiles; the `rrf`/`linear`
+- Compound retrievers (`rrf`, `linear`, `pinned`, `rule` and `rescorer` over them) follow
+  Elasticsearch's rank-docs final phase, explanations and profiles (a `rule` retriever over a
+  compound one applies its rules to the child's rank docs: pins on top, exclusions dropped from
+  the hits and the total); the `rrf`/`linear`
   simplified `query`/`fields` form needs inference endpoints for `semantic_text` fields, and
   a `knn` child's explanation reports its search score as the similarity (Elasticsearch
   recomputes it exactly) without its pre-filters.
@@ -1096,10 +1276,80 @@ the rest are skipped by the tests' own prerequisites.
   checkpoint recomputes every bucket up to its bound (Elasticsearch recomputes only the
   buckets whose documents changed); `_start` of a continuous transform answers after its
   first checkpoint (or its `timeout`), a batch transform's at once.
+- Rollup jobs (`_rollup/job`, deprecated in Elasticsearch but working) also run on the job
+  scheduler at their cron times (Quartz syntax, UTC) and keep the next trigger in the stored
+  job, so a sleeping cluster is woken for a started one. Each trigger pages a composite
+  aggregation from the stored position up to the current interval and writes Elasticsearch's
+  rollup documents and ids. The caps APIs and `_rollup_search` read the jobs from the rollup
+  index's `_meta`, as Elasticsearch does. `_rollup_search` merges results in JSON: with more
+  than one job or live indices in one search, a date histogram's empty buckets are those each
+  response filled itself, and a live index's `avg` keeps the rolled average where both have
+  one.
+- The lifecycles run on the job scheduler too (`xpack/ilm_run.rs`,
+  `api/data_stream_lifecycle.rs`). The data stream lifecycle rolls a write index (and a
+  failure store's) over with `cluster.lifecycle.default.rollover` (`max_age=auto` from the
+  effective retention, as `RolloverConfiguration` derives it) and deletes the backing and
+  failure indices whose generation date (`index.lifecycle.origination_date`, else the rollover
+  time, else the creation time) is past the effective retention (`data_retention` within
+  `data_streams.lifecycle.retention.max`/`.default`; failure stores keep 30 days unless
+  configured). It never deletes a write index, and leaves `index.lifecycle.skip`, ILM-preferred,
+  still-writable time series and downsampling indices alone. Failures go to the error store that
+  `_lifecycle/explain` (`error`) and `_lifecycle/stats` print. Its force merges and downsampling
+  rounds aren't run. ILM moves managed indices through hot, warm, cold, frozen and delete as
+  `min_age` passes (from the creation date, the rollover date, or
+  `index.lifecycle.origination_date`), with Elasticsearch's step names and order (`unfollow`
+  and `migrate` injected as it injects them). It runs `rollover` (all conditions, `min_*`
+  included, with the `min_docs: 1` and `max_primary_shard_docs` defaults; aliases and data
+  streams), `set_priority`, `readonly`, `forcemerge` (`index_codec` too), `allocate`,
+  `migrate`, `delete` (a data stream's last index deletes the stream) and `freeze` (a no-op, as
+  in Elasticsearch 8 and later). `shrink` completes when the index is already at its target
+  shard count. `_ilm/explain` prints the execution state (`phase_execution` with the cached
+  phase, `step_info`, `failed_step`, retry counts; a missing policy reads as `ERROR`). Failed
+  steps are retried on each poll; `_ilm/retry`, `_ilm/move` and `_ilm/stop` (`STOPPING`, then
+  `STOPPED`) act on that state. A new managed index is initialized in the state change that
+  made it managed. Steps run as the user who last put the policy. `wait_for_snapshot` waits until
+  its snapshot lifecycle policy has taken a snapshot including the index since the action began
+  (a policy it names must exist when the ILM policy is put). Not run: `shrink` to fewer shards,
+  `downsample` and `searchable_snapshot`. These end in the `ERROR` step with the reason. ILM history (`ilm-history-*`) isn't written. Elasticsearch polls
+  every `indices.lifecycle.poll_interval` and `data_streams.lifecycle.poll_interval`. roll runs
+  time-based work (a phase's `min_age`, a rollover's `max_age`, a retention running out, a time
+  series end time) at its due time, and wakes a sleeping cluster for it. It polls at those
+  intervals only while a write could meet a size or document condition, or a failure is
+  retried, and that poll never wakes a cluster.
+- Snapshot lifecycle management (`xpack/slm.rs`) runs on the same scheduler. A policy takes its
+  snapshot (its `config`, `metadata.policy` added, named from its date-math `name` plus a random
+  suffix) on its Quartz cron schedule in UTC or its interval, as the user who last put it, and
+  records `last_success` or `last_failure` (the error as JSON), the failures since the last
+  success, its counters (`_slm/stats`, `_xpack/usage`) and a `CREATE` item in the hidden
+  `.slm-history-7` data stream (Elasticsearch's template, 90 days of data stream lifecycle
+  retention; `slm.history_index_enabled`). Retention runs on `slm.retention_schedule` and on
+  `_slm/_execute_retention`, with Elasticsearch's eligibility rules (`expire_after`,
+  `min_count`, `max_count`, unsuccessful snapshots first) within `slm.retention_duration`, each
+  deletion counted and recorded as a `DELETE` item. `_slm/stop` stops through `STOPPING` while a
+  snapshot is being taken; runs missed while stopped are skipped, as Elasticsearch reschedules on
+  start. The health report's `slm` indicator reports a stopped SLM and policies that failed
+  `slm.health.failed_snapshot_warn_threshold` times in a row. A policy's next run and the next
+  retention (only while a policy has a retention) are due times that wake a sleeping cluster.
+  Not shown: `in_progress` in `GET _slm/policy` (roll takes the snapshot within the run). On the
+  fleet no cluster has a `path.repo` yet, so no `fs` repository, and so no policy, can be
+  registered there.
+- Searchable snapshots mount through the snapshot restore API; mounted indices keep the
+  repository from being unregistered or moved (409 `repository_conflict_exception`). The
+  statistics list the mounted shards' files by Lucene extension with their sizes but no blob
+  cache traffic (roll reads no blobs through a cache), the shared cache reports its configured
+  size and regions, and a frozen (`shared_cache`) index's files count in `_stats` file sizes
+  only with `include_unloaded_segments`. `_snapshot/<repo>/_verify_integrity` checks every
+  shard each snapshot records still has its durable copy; `_analyze` (the repository test kit)
+  validates and plans as Elasticsearch does, and times out when the repository's
+  `max_snapshot_bytes_per_sec`/`max_restore_bytes_per_sec` couldn't move the data within
+  `timeout`; it doesn't exercise a blob store, since roll keeps snapshot contents in the
+  cluster's own storage.
 - x-pack (`crates/search-es/src/xpack/`): security (native realm, API keys, tokens, role
   mappings, privileges, request authorization), ES|QL, SQL, EQL, enrich, transforms, async
   search, ILM, search applications, query rules, connectors, graph, terms enum, text structure
-  run for real; ML jobs/datafeeds/trained models, watcher, logstash pipelines, searchable
+  and watcher run for real (watches fire on the cluster's job scheduler and wake a sleeping
+  cluster; `http` inputs and webhooks reach public addresses only; email, Slack, PagerDuty and
+  Jira actions are simulated but never sent); ML jobs/datafeeds/trained models, logstash pipelines, searchable
   snapshots, migration, SSL certificates and streams keep their stored objects, validation,
   state transitions and stats shapes as Elasticsearch reports them, without the native
   processes behind them. ES|QL: ~110 scalar functions with Elasticsearch's arity/type errors and
@@ -1134,12 +1384,24 @@ the rest are skipped by the tests' own prerequisites.
   `LOOKUP JOIN ... ON <expression>` keys the lookup rows on the condition's equalities between
   left and lookup fields and checks the rest per row (several matches keep the lookup index's
   order, which Elasticsearch doesn't define).
+  `TOP_SNIPPETS` cuts the text into sentence chunks of `num_words` (default 300) and returns the
+  `num_snippets` (default 5) that score best for the query's words (BM25 over the chunks, words
+  lowercased; Elasticsearch scores with the field's analyzer). `CATEGORIZE` groups messages by
+  their words without digits, printed as Elasticsearch's category regex (`.*?Connected.+?to.*?`);
+  Elasticsearch also merges similar categories (its ML categorizer), roll doesn't.
+  `SET approximation` computes exactly and says so: each approximable aggregate (`COUNT`, `SUM`,
+  `AVG`, `MEDIAN`, `PERCENTILE`) of the last `STATS` gets `_approximation_confidence_interval(x)`
+  (`[x, x]`) and `_approximation_certified(x)` (`true`) with their `_meta`. `LIMIT n BY keys`
+  keeps the first `n` rows of each key. `METRICS_INFO` and `TS_INFO` after `TS` list the
+metric fields the client's field caps show (field level security hides the others): per data
+stream and metric its unit (`meta.unit`), metric and field type and the dimension fields,
+`TS_INFO` once per time series holding it, with its `dimensions` as a JSON object. `unsigned_long` values above `i64::MAX` keep their
+  value (sorting, grouping, output; arithmetic on them answers `null`).
   Not yet: PromQL ranges other than the step, binary operators and unaggregated expressions,
-  `CATEGORIZE`, `TOP_SNIPPETS`, approximation's `_approximation_*` columns, `CHANGE_POINT`,
-  `COMPLETION`/`RERANK`, `unsigned_long` above `i64::MAX`, `EXPLAIN`, other `ST_*` functions
+  `CHANGE_POINT`, `COMPLETION`/`RERANK`, `EXPLAIN`, other `ST_*` functions
   (distance, relations, centroid/extent aggregations). roll claims the ES|QL capabilities whose tests pass; of the 619 tests of the `esql`
   extended suite (run with Elasticsearch's `is_partial` check, `--esql-not-partial`), 549 pass
-  on Elasticsearch 9.5.5 and 544 on roll (544 of Elasticsearch's 549). `_terms_enum` reads
+  on Elasticsearch 9.5.5 and 549 on roll (all of Elasticsearch's). `_terms_enum` reads
   the segments' term dictionaries (keyword, version, flattened subfields; ip from its doc
   values dictionary), so `search_after` reaches any term.
   Differential fixtures against Elasticsearch 9.5.5:

@@ -1,6 +1,10 @@
 //! The job scheduler of one cluster: runs what is due in the background — OpenSearch's Index
-//! State Management jobs ([`super::ism_run`]) and the triggers of started x-pack transforms
-//! ([`crate::xpack::transform`]).
+//! State Management jobs ([`super::ism_run`]), the triggers of started x-pack transforms
+//! ([`crate::xpack::transform`]), of active watches ([`crate::xpack::watcher`]) and of started
+//! rollup jobs ([`crate::xpack::rollup`]), Elasticsearch's index lifecycle management
+//! ([`crate::xpack::ilm_run`]) and data stream lifecycle
+//! ([`crate::api::data_stream_lifecycle`]), and snapshot lifecycle policies and their retention
+//! ([`crate::xpack::slm`]).
 //!
 //! One task per cluster, started when the cluster may run background work
 //! ([`Cluster::enable_background_tasks`]) and has a job. It sleeps until the earliest due
@@ -11,6 +15,12 @@
 //! goes and starts again with the next). The task holds only a weak handle while it waits, so
 //! it never keeps an unloaded cluster alive; dropping the cluster ends it. Jobs keep their
 //! schedule in the cluster state, so what came due while the cluster slept runs when it loads.
+//!
+//! The lifecycles also poll while the cluster is loaded (`indices.lifecycle.poll_interval`,
+//! `data_streams.lifecycle.poll_interval`), but only while a write could change an outcome (a
+//! rollover's size or document-count condition, a retried failure): that poll is never a
+//! reason to wake a sleeping cluster ([`next_due`] leaves it out), since only writes, which
+//! load the cluster, can make such a condition true.
 //!
 //! While jobs run, [`Jobs::busy`] is true: the host must not unload the cluster then (their
 //! steps write through the cluster like requests do).
@@ -27,6 +37,9 @@ struct Shared {
     /// Whether the task is alive (only one per cluster).
     started: AtomicBool,
     running: AtomicUsize,
+    /// When the ILM and data stream lifecycle passes last ran (their polls count from there).
+    ilm_polled: std::sync::atomic::AtomicI64,
+    dsl_polled: std::sync::atomic::AtomicI64,
 }
 
 /// A cluster's job scheduler handle (a field of [`Cluster`]).
@@ -50,7 +63,7 @@ impl Jobs {
             self.shared.wake.notify_one();
             return;
         }
-        if next_due(&cluster.state()).is_none() {
+        if !has_work(&cluster.state()) {
             return;
         }
         let Some(strong) = cluster.handle() else { return };
@@ -61,20 +74,23 @@ impl Jobs {
         let shared = self.shared.clone();
         let weak = Arc::downgrade(&strong);
         drop(strong);
+        let started = crate::time::now_millis();
+        shared.ilm_polled.store(started, Ordering::SeqCst);
+        shared.dsl_polled.store(started, Ordering::SeqCst);
         tokio::spawn(async move {
             loop {
                 if shared.closed.load(Ordering::SeqCst) {
                     break;
                 }
                 let due = match weak.upgrade() {
-                    Some(c) => next_due(&c.state()),
+                    Some(c) => loaded_due(&c.state(), &shared).map(|(t, _, _)| t),
                     None => break,
                 };
                 let Some(due) = due else {
                     // No job left: end; the next managed index starts a new task. Recheck
                     // after clearing the flag, so a job added meanwhile isn't missed.
                     shared.started.store(false, Ordering::SeqCst);
-                    let again = weak.upgrade().is_some_and(|c| next_due(&c.state()).is_some());
+                    let again = weak.upgrade().is_some_and(|c| has_work(&c.state()));
                     if again && !shared.started.swap(true, Ordering::SeqCst) {
                         continue;
                     }
@@ -93,10 +109,23 @@ impl Jobs {
                 let now = crate::time::now_millis();
                 super::ism_run::run_due(&c, now).await;
                 crate::xpack::transform::run_due(&c, now).await;
+                crate::xpack::watcher::run_due(&c, now).await;
+                crate::xpack::rollup::run_due(&c, now).await;
+                crate::xpack::slm::run_due(&c, now).await;
+                if let Some((_, ilm, dsl)) = loaded_due(&c.state(), &shared) {
+                    if ilm.is_some_and(|t| t <= now) {
+                        shared.ilm_polled.store(now, Ordering::SeqCst);
+                        crate::xpack::ilm_run::run(&c, now).await;
+                    }
+                    if dsl.is_some_and(|t| t <= now) {
+                        shared.dsl_polled.store(now, Ordering::SeqCst);
+                        crate::api::data_stream_lifecycle::run(&c, now).await;
+                    }
+                }
                 shared.running.fetch_sub(1, Ordering::SeqCst);
                 // A run whose writes failed (a store refusing) leaves its jobs due: retry them
                 // a little later instead of spinning.
-                let stuck = next_due(&c.state()).is_some_and(|t| t <= now);
+                let stuck = loaded_due(&c.state(), &shared).is_some_and(|(t, _, _)| t <= now);
                 drop(c);
                 if stuck {
                     tokio::select! {
@@ -116,9 +145,38 @@ impl Jobs {
 }
 
 /// The earliest due time of any job (Unix ms): what the host records when the cluster unloads,
-/// to wake it then.
+/// to wake it then. The lifecycles' polls aren't in it (see the module docs).
 pub fn next_due(st: &crate::meta::ClusterState) -> Option<i64> {
-    [super::ism_run::next_due(st), crate::xpack::transform::next_due(st)].into_iter().flatten().min()
+    [
+        super::ism_run::next_due(st),
+        crate::xpack::transform::next_due(st),
+        crate::xpack::watcher::next_due(st),
+        crate::xpack::rollup::next_due(st),
+        crate::xpack::slm::next_due(st),
+        crate::xpack::ilm_run::next_due(st),
+        crate::api::data_stream_lifecycle::next_due(st),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+}
+
+/// Whether the scheduler has anything to run or poll.
+fn has_work(st: &crate::meta::ClusterState) -> bool {
+    next_due(st).is_some() || crate::xpack::ilm_run::polls(st) || crate::api::data_stream_lifecycle::polls(st)
+}
+
+/// When a loaded cluster's scheduler runs next: [`next_due`] or a lifecycle's poll; with when
+/// the ILM and the data stream lifecycle passes are due.
+fn loaded_due(st: &crate::meta::ClusterState, shared: &Shared) -> Option<(i64, Option<i64>, Option<i64>)> {
+    use crate::api::data_stream_lifecycle as dsl;
+    use crate::xpack::ilm_run as ilm;
+    let poll = |polls: bool, last: &std::sync::atomic::AtomicI64, interval: i64| polls.then(|| last.load(Ordering::SeqCst).saturating_add(interval));
+    let ilm_due = [ilm::next_due(st), poll(ilm::polls(st), &shared.ilm_polled, ilm::poll_interval(st))].into_iter().flatten().min();
+    let dsl_due = [dsl::next_due(st), poll(dsl::polls(st), &shared.dsl_polled, dsl::poll_interval(st))].into_iter().flatten().min();
+    let others = [super::ism_run::next_due(st), crate::xpack::transform::next_due(st), crate::xpack::watcher::next_due(st), crate::xpack::rollup::next_due(st), crate::xpack::slm::next_due(st)];
+    let due = others.into_iter().chain([ilm_due, dsl_due]).flatten().min()?;
+    Some((due, ilm_due, dsl_due))
 }
 
 #[cfg(test)]

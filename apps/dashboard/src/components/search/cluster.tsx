@@ -1,5 +1,5 @@
 import { HorizonMark } from "@roll/brand";
-import { ArrowLeft, GitBranch, KeyRound, Moon, RefreshCw, Trash2 } from "lucide-react";
+import { ArrowLeft, FileUp, GitBranch, KeyRound, Moon, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { Link } from "@/components/link";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
@@ -20,11 +20,17 @@ import { AppShell } from "../app-shell";
 import { formatTime, fromLocalInput, now, POLL_MS, Segmented, toLocalInput } from "../redis/shared";
 import { ago, btn, Confirm, Connecting, CopyButton, EmptyPanel, ErrorNote, input, Offline, Panel, primary, Stats, useCopy } from "../ui";
 import { AnalyzeTab } from "./analyze";
+import { DataStreams } from "./data-streams";
+import { ImportPanel } from "./import";
+import { NewIndexPanel } from "./new-index";
+import { Templates } from "./templates";
+import { InferenceTab } from "./inference";
+import { ApiKeys } from "./api-keys";
 import { SearchConsole } from "./console";
 import { IndexBrowser } from "./index-browser";
 import { CredentialsOnce, SearchStateDot, settingsOf, SettingsFields, stateLabel, useAction, useSearchClusters, type Run } from "./shared";
 
-const TABS = ["overview", "indices", "console", "analyze", "branches", "usage", "settings"] as const;
+const TABS = ["overview", "indices", "console", "analyze", "inference", "branches", "usage", "settings"] as const;
 type Tab = (typeof TABS)[number];
 
 /** Placeholder while the route's params resolve. */
@@ -182,6 +188,16 @@ export function SearchClusterPage({ id }: { id: string }) {
         )}
         {tab === "console" && <SearchConsole key={cluster.id} cluster={cluster} prefill={prefill} />}
         {tab === "analyze" && <AnalyzeTab key={cluster.id} cluster={cluster} />}
+        {tab === "inference" && (
+          <InferenceTab
+            key={cluster.id}
+            cluster={cluster}
+            onOpenConsole={(text) => {
+              setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }));
+              setTab("console");
+            }}
+          />
+        )}
         {tab === "branches" && (
           <BranchesTab
             cluster={cluster}
@@ -223,7 +239,9 @@ function OverviewTab({ cluster, info }: { cluster: SearchCluster; info: SearchIn
               ? cluster.idle_timeout_s === 0
                 ? "always loaded"
                 : `sleeps after ${formatDuration(cluster.idle_timeout_s)} without requests`
-              : "wakes on the next request",
+              : st.wakes_at
+                ? `wakes on the next request, or at ${formatTime(st.wakes_at)} for a background job`
+                : "wakes on the next request",
           },
           { label: "Indices", value: formatCount(st.indices ?? cluster.indices), hint: `${formatCount(cluster.docs)} documents` },
           {
@@ -281,6 +299,62 @@ function Connection({ cluster, info }: { cluster: SearchCluster; info: SearchInf
 const CLIENTS = ["curl", "python", "javascript", "go", "ruby"] as const;
 
 function snippet(client: (typeof CLIENTS)[number], c: SearchCluster) {
+  return c.flavor === "opensearch" ? openSearchSnippet(client, c) : elasticSnippet(client, c);
+}
+
+/** Quickstarts with OpenSearch's own clients (Elasticsearch's 8+ clients refuse a server that
+ * isn't Elasticsearch). */
+function openSearchSnippet(client: (typeof CLIENTS)[number], c: SearchCluster) {
+  const url = c.url;
+  const user = c.username;
+  switch (client) {
+    case "curl":
+      return `curl -u ${user}:$OPENSEARCH_PASSWORD ${url}/_cluster/health
+
+curl -u ${user}:$OPENSEARCH_PASSWORD -X PUT ${url}/products/_doc/1 \\
+  -H 'content-type: application/json' -d '{"title": "Trail running shoes"}'
+
+curl -u ${user}:$OPENSEARCH_PASSWORD "${url}/products/_search?q=title:shoes"`;
+    case "python":
+      return `# pip install opensearch-py
+import os
+from opensearchpy import OpenSearch
+
+client = OpenSearch(hosts=["${url}"], http_auth=("${user}", os.environ["OPENSEARCH_PASSWORD"]))
+client.index(index="products", id="1", body={"title": "Trail running shoes"}, refresh=True)
+print(client.search(index="products", body={"query": {"match": {"title": "shoes"}}})["hits"])`;
+    case "javascript":
+      return `// npm i @opensearch-project/opensearch
+import { Client } from "@opensearch-project/opensearch";
+
+const client = new Client({
+  node: "${url}",
+  auth: { username: "${user}", password: process.env.OPENSEARCH_PASSWORD },
+});
+await client.index({ index: "products", id: "1", body: { title: "Trail running shoes" }, refresh: true });
+console.log((await client.search({ index: "products", body: { query: { match: { title: "shoes" } } } })).body.hits);`;
+    case "go":
+      return `// go get github.com/opensearch-project/opensearch-go/v4
+client, _ := opensearchapi.NewClient(opensearchapi.Config{
+  Client: opensearch.Config{
+    Addresses: []string{"${url}"},
+    Username:  "${user}",
+    Password:  os.Getenv("OPENSEARCH_PASSWORD"),
+  },
+})
+info, _ := client.Info(context.Background(), nil)
+fmt.Println(info)`;
+    case "ruby":
+      return `# gem install opensearch-ruby
+require "opensearch"
+
+client = OpenSearch::Client.new(url: "${url}", user: "${user}", password: ENV["OPENSEARCH_PASSWORD"])
+client.index(index: "products", id: 1, body: { title: "Trail running shoes" }, refresh: true)
+puts client.search(index: "products", q: "title:shoes")["hits"]`;
+  }
+}
+
+function elasticSnippet(client: (typeof CLIENTS)[number], c: SearchCluster) {
   const url = c.url;
   const user = c.username;
   switch (client) {
@@ -365,6 +439,8 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
   const [selected, setSelected] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [creating, setCreating] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -390,9 +466,17 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
       <Panel
         title="Indices"
         aside={
-          <button onClick={load} disabled={loading} className={btn}>
-            <RefreshCw className={`size-3.5 ${loading ? "animate-spin motion-reduce:animate-none" : ""}`} /> Refresh
-          </button>
+          <span className="flex gap-2">
+            <button onClick={() => setCreating(true)} disabled={creating} className={btn} title="Create an index with its fields mapped" aria-label="New index">
+              <Plus className="size-3.5" /> <span className="hidden sm:inline">New index</span>
+            </button>
+            <button onClick={() => setImporting(true)} disabled={importing} className={btn} title="Index a JSON, NDJSON or CSV file" aria-label="Import">
+              <FileUp className="size-3.5" /> <span className="hidden sm:inline">Import</span>
+            </button>
+            <button onClick={load} disabled={loading} className={btn}>
+              <RefreshCw className={`size-3.5 ${loading ? "animate-spin motion-reduce:animate-none" : ""}`} /> Refresh
+            </button>
+          </span>
         }
       >
         {err && <p className="px-5 py-4 text-[13px] text-danger">{err}</p>}
@@ -402,8 +486,15 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
           </p>
         ) : rows && rows.length === 0 ? (
           <p className="px-5 py-6 text-[13px] text-muted">
-            No indices yet. Create one from the Console tab, or index a document with any client: indices are created on
-            the first write.
+            No indices yet.{" "}
+            <button onClick={() => setImporting(true)} className="text-accent hover:underline">
+              Import a file
+            </button>
+            ,{" "}
+            <button onClick={() => setCreating(true)} className="text-accent hover:underline">
+              create one with its fields
+            </button>
+            , or index a document with any client: indices are created on the first write.
           </p>
         ) : (
           rows && (
@@ -467,6 +558,32 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
           index to browse its documents, mapping and settings.
         </p>
       </Panel>
+      {rows && <DataStreams cluster={cluster} indices={rows} onSelect={setSelected} />}
+      {rows && <Templates cluster={cluster} onOpenConsole={onOpenConsole} />}
+      {creating && (
+        <NewIndexPanel
+          cluster={cluster}
+          existing={rows?.map((r) => r.index) ?? []}
+          onClose={() => setCreating(false)}
+          onOpenConsole={onOpenConsole}
+          onCreated={async (index) => {
+            setCreating(false);
+            await load();
+            setSelected(index);
+          }}
+        />
+      )}
+      {importing && (
+        <ImportPanel
+          cluster={cluster}
+          existing={rows?.map((r) => r.index) ?? []}
+          onClose={() => setImporting(false)}
+          onImported={async (index) => {
+            await load();
+            setSelected(index);
+          }}
+        />
+      )}
       {open && (
         <IndexBrowser
           key={open.index}
@@ -646,7 +763,10 @@ function UsageTab({ cluster, info }: { cluster: SearchCluster; info: SearchInfo 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-[13px] text-muted">Metered every minute while loaded; storage accrues while asleep too.</p>
+        <p className="text-[13px] text-muted">
+          Metered every minute while loaded, including the time background jobs (watches, transforms, ILM, rollups) keep it
+          awake; storage accrues while asleep too.
+        </p>
         <div className="w-48">
           <Segmented
             value={days}
@@ -817,6 +937,8 @@ function SettingsTab({
           </div>
         </form>
       </Panel>
+
+      <ApiKeys cluster={cluster} />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Panel title="Password">

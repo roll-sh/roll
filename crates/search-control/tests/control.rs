@@ -572,6 +572,10 @@ async fn per_index_routes() {
     assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(2)), "{v}");
     let (_, v) = e.call(reqwest::Method::GET, &format!("{base}/books"), None).await;
     assert_eq!(v["books"]["mappings"]["properties"]["year"]["type"], "integer", "{v}");
+    let (_, v) = e.call(reqwest::Method::GET, &format!("{base}/books/mapping"), None).await;
+    assert_eq!(v["books"]["mappings"]["properties"]["year"]["type"], "integer", "{v}");
+    let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books/analyze"), Some(json!({"field": "title", "text": "Rust Book"}))).await;
+    assert_eq!((s, v["tokens"].as_array().map(Vec::len)), (200, Some(2)), "{v}");
     let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books/delete_by_query?refresh=true"), Some(json!({"query": {"term": {"year": 2018}}}))).await;
     assert_eq!((s, v["deleted"].as_i64()), (200, Some(1)), "{v}");
     let (s, _) = e.call(reqwest::Method::DELETE, &format!("{base}/books/docs/3"), None).await;
@@ -613,6 +617,49 @@ async fn api_keys() {
     assert_eq!(s, 404);
     // The cluster's own password still works.
     assert_eq!(e.es(&user, &pw, reqwest::Method::GET, "/notes/_count", None).await.0, 200);
+    // A data key writes documents but can't make keys or users of its own.
+    let d = e.post("/v1/search/clusters/keys/keys", json!({"name": "app", "access": "data"})).await;
+    let h = format!("ApiKey {}", d["api_key"].as_str().unwrap());
+    let send = |m: reqwest::Method, path: &str, body: Value| {
+        let r = e.http.request(m, format!("{}{path}", e.es)).header("Authorization", h.clone()).json(&body).send();
+        async move { r.await.unwrap().status().as_u16() }
+    };
+    assert_eq!(send(reqwest::Method::PUT, "/notes/_doc/2", json!({"t": "y"})).await, 201);
+    assert_eq!(send(reqwest::Method::POST, "/_security/api_key", json!({"name": "more"})).await, 403);
+    assert_eq!(send(reqwest::Method::PUT, "/_security/user/x", json!({"password": "pw-pw-pw-pw", "roles": ["superuser"]})).await, 403);
+    let (s, _) = e.call(reqwest::Method::POST, "/v1/search/clusters/keys/keys", Some(json!({"name": "x", "access": "root"}))).await;
+    assert_eq!(s, 400);
+}
+
+/// Masking a branch (roll previews: `_update_by_query`, then `only_expunge_deletes` with
+/// `expunge_deletes_allowed: 0`) rewrites the segments it shares with its parent, so the old
+/// values are gone from the branch's term dictionaries (`_terms_enum`, suggesters), while the
+/// parent keeps them.
+#[tokio::test]
+async fn expunging_a_branch_rewrites_the_segments_it_shares() {
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "masked"})).await;
+    let (user, pw) = creds(&c);
+    let (s, _) = e.es(&user, &pw, reqwest::Method::PUT, "/people/_doc/1?refresh=true", Some(json!({"name": "Alice Example"}))).await;
+    assert_eq!(s, 201);
+    let b = e.post("/v1/search/clusters/masked/branches", json!({"name": "masked-b"})).await;
+    let (bu, bp) = creds(&b);
+    let terms = |u: String, p: String| {
+        let e = &e;
+        async move { e.es(&u, &p, reqwest::Method::POST, "/people/_terms_enum", Some(json!({"field": "name.keyword"}))).await.1["terms"].to_string() }
+    };
+    let mask = json!({"query": {"exists": {"field": "name"}}, "script": {"source": "ctx._source.name = '[masked]'"}});
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::POST, "/people/_update_by_query?conflicts=proceed&refresh=true", Some(mask)).await;
+    assert_eq!(s, 200, "{v}");
+    // Masked but not yet rewritten: the shared segment still holds the old term.
+    assert!(terms(bu.clone(), bp.clone()).await.contains("Alice Example"));
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::PUT, "/people/_settings", Some(json!({"index.merge.policy.expunge_deletes_allowed": 0}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::POST, "/people/_forcemerge?only_expunge_deletes=true", None).await;
+    assert_eq!(s, 200, "{v}");
+    let branch = terms(bu, bp).await;
+    assert!(!branch.contains("Alice Example") && branch.contains("[masked]"), "{branch}");
+    assert!(terms(user, pw).await.contains("Alice Example"), "the parent keeps its documents");
 }
 
 #[tokio::test]
@@ -902,6 +949,11 @@ async fn a_due_transform_wakes_its_sleeping_cluster() {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
+    // Asleep, a cluster says when its next job wakes it (unless that already happened).
+    let (_, v) = e.call(reqwest::Method::GET, "/v1/search/clusters/jobs", None).await;
+    assert!(v["status"]["state"] == "loaded" || v["status"]["wakes_at"].as_i64().is_some_and(|t| t > 0), "{v}");
+    let (_, v) = e.call(reqwest::Method::GET, "/v1/search/clusters/idle", None).await;
+    assert_eq!((v["status"]["state"].as_str(), v["status"].get("wakes_at")), (Some("asleep"), None), "{v}");
     // No request: the transform's next trigger loads its cluster again.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
     while !e.control.node.loaded().iter().any(|n| &**n == "jobs") {
@@ -909,6 +961,109 @@ async fn a_due_transform_wakes_its_sleeping_cluster() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert!(!e.control.node.loaded().iter().any(|n| &**n == "idle"), "a cluster without jobs stays asleep");
+}
+
+/// A data stream lifecycle's retention wakes its sleeping cluster when a backing index comes
+/// due for deletion, as Elasticsearch's lifecycle deletes it on its next poll; the write index
+/// stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_due_retention_deletion_wakes_its_sleeping_cluster() {
+    let e = env_with(|c| c.job_wake_interval = Some(std::time::Duration::from_millis(200))).await;
+    let c = e.post("/v1/search/clusters", json!({"name": "logs"})).await;
+    let (user, pw) = creds(&c);
+    let template = json!({"index_patterns": ["logs-app*"], "data_stream": {}, "template": {"lifecycle": {"data_retention": "5s"}}});
+    let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/_index_template/app", Some(template)).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/_data_stream/logs-app", None).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&user, &pw, reqwest::Method::POST, "/logs-app/_rollover", None).await;
+    assert_eq!(s, 200, "{v}");
+    let old = v["old_index"].as_str().unwrap().to_string();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/logs/unload", Some(json!({}))).await;
+        assert_eq!(s, 200, "{v}");
+        if v["unloaded"] == true || !e.control.node.loaded().iter().any(|n| &**n == "logs") {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "never unloaded: {v}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let (_, v) = e.call(reqwest::Method::GET, "/v1/search/clusters/logs", None).await;
+    assert!(v["status"]["state"] == "loaded" || v["status"]["wakes_at"].as_i64().is_some_and(|t| t > 0), "{v}");
+    // No request: the retention's deadline loads the cluster, and the lifecycle deletes the
+    // old backing index.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !e.control.node.loaded().iter().any(|n| &**n == "logs") {
+        assert!(tokio::time::Instant::now() < deadline, "the due deletion never woke its cluster");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    loop {
+        let (s, v) = e.es(&user, &pw, reqwest::Method::GET, "/_data_stream/logs-app", None).await;
+        assert_eq!(s, 200, "{v}");
+        let indices: Vec<String> = v["data_streams"][0]["indices"].as_array().unwrap().iter().map(|i| i["index_name"].as_str().unwrap().to_string()).collect();
+        if !indices.contains(&old) {
+            assert_eq!(indices.len(), 1, "the write index stays: {indices:?}");
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the old backing index was never deleted: {indices:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// A snapshot lifecycle policy's next run wakes its sleeping cluster, which takes the snapshot
+/// on schedule, as Elasticsearch's scheduler does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_due_slm_run_wakes_its_sleeping_cluster() {
+    let repo = std::env::temp_dir().join(format!("roll-search-slm-{}", std::process::id()));
+    let path = repo.to_string_lossy().into_owned();
+    let e = env_with(|c| {
+        c.job_wake_interval = Some(std::time::Duration::from_millis(200));
+        c.node_settings.push(("path.repo".into(), path));
+    })
+    .await;
+    let c = e.post("/v1/search/clusters", json!({"name": "snaps"})).await;
+    let (user, pw) = creds(&c);
+    let calls = [
+        (reqwest::Method::PUT, "/_cluster/settings", json!({"persistent": {"slm.minimum_interval": "0s"}})),
+        (reqwest::Method::PUT, "/_snapshot/repo", json!({"type": "fs", "settings": {"location": "repo"}})),
+        (reqwest::Method::PUT, "/docs/_doc/1?refresh=true", json!({"a": 1})),
+        (reqwest::Method::PUT, "/_slm/policy/p", json!({"schedule": "4s", "name": "<snap-{now/d}>", "repository": "repo"})),
+    ];
+    for (m, uri, body) in calls {
+        let (s, v) = e.es(&user, &pw, m, uri, Some(body)).await;
+        assert!(s < 300, "{uri}: {v}");
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/snaps/unload", Some(json!({}))).await;
+        assert_eq!(s, 200, "{v}");
+        if v["unloaded"] == true || !e.control.node.loaded().iter().any(|n| &**n == "snaps") {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "never unloaded: {v}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let (_, v) = e.call(reqwest::Method::GET, "/v1/search/clusters/snaps", None).await;
+    assert!(v["status"]["state"] == "loaded" || v["status"]["wakes_at"].as_i64().is_some_and(|t| t > 0), "{v}");
+    // No request: the policy's next run loads the cluster, and the snapshot is taken.
+    while !e.control.node.loaded().iter().any(|n| &**n == "snaps") {
+        assert!(tokio::time::Instant::now() < deadline, "the due policy never woke its cluster");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    loop {
+        let (s, v) = e.es(&user, &pw, reqwest::Method::GET, "/_slm/policy/p", None).await;
+        assert_eq!(s, 200, "{v}");
+        if v["p"]["stats"]["snapshots_taken"].as_i64() >= Some(1) {
+            let name = v["p"]["last_success"]["snapshot_name"].as_str().unwrap().to_string();
+            let (s, v) = e.es(&user, &pw, reqwest::Method::GET, &format!("/_snapshot/repo/{name}"), None).await;
+            assert_eq!((s, &v["snapshots"][0]["metadata"]["policy"]), (200, &json!("p")), "{v}");
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the policy never took its snapshot: {v}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let _ = std::fs::remove_dir_all(&repo);
 }
 
 /// ES|QL and SQL read as their client: an API key limited to one index (what roll secrets hands
@@ -1023,4 +1178,74 @@ async fn field_security_hides_a_field_on_every_read_path() {
         assert_eq!(s, 200, "{path}: {v}");
         assert!(text.contains("\"name") && !text.contains("\"secret"), "{path} lists the hidden field: {text}");
     }
+}
+
+/// An app's link to a cluster gets a credential of its own (apps' `Resources::link`): it reads and
+/// writes the data, can't manage the cluster's security, and stops working once revoked: an API
+/// key on an Elasticsearch-flavor cluster, an internal user of OpenSearch Security on an
+/// OpenSearch-flavor one (which has no API keys).
+#[tokio::test]
+async fn a_link_credential_uses_the_data_and_is_revoked() {
+    let e = env().await;
+    for (name, flavor) in [("es-link", "elasticsearch"), ("os-link", "opensearch")] {
+        e.post("/v1/search/clusters", json!({"name": name, "flavor": flavor})).await;
+        let cred = e.control.mint_link(name, "svc_1").await.unwrap();
+        let vars: std::collections::HashMap<_, _> = cred.vars.iter().cloned().collect();
+        let send = |method: reqwest::Method, path: &str, body: Option<Value>| {
+            let mut r = match (vars.get("ELASTICSEARCH_URL"), vars.get("OPENSEARCH_URL")) {
+                (Some(u), _) => e.http.request(method, format!("{}{path}", e.es)).header("Host", host_of(u)).header("Authorization", format!("ApiKey {}", vars["ELASTICSEARCH_API_KEY"])),
+                (_, Some(u)) => {
+                    let parsed = reqwest::Url::parse(u).unwrap();
+                    let user = urlencoding::decode(parsed.username()).unwrap().into_owned();
+                    let pw = urlencoding::decode(parsed.password().unwrap()).unwrap().into_owned();
+                    e.http.request(method, format!("{}{path}", e.es)).basic_auth(user, Some(pw))
+                }
+                _ => panic!("no URL in {vars:?}"),
+            };
+            if let Some(b) = body {
+                r = r.json(&b);
+            }
+            async move { r.send().await.unwrap().status().as_u16() }
+        };
+        assert_eq!(send(reqwest::Method::PUT, "/items/_doc/1?refresh=true", Some(json!({"n": 1}))).await, 201, "{name}");
+        assert_eq!(send(reqwest::Method::GET, "/items/_doc/1", None).await, 200, "{name}");
+        let (path, user) = match flavor {
+            "opensearch" => ("/_plugins/_security/api/internalusers/intruder", json!({"password": "correcthorsebattery", "opendistro_security_roles": ["all_access"]})),
+            _ => ("/_security/user/intruder", json!({"password": "intruder-pass-1", "roles": ["superuser"]})),
+        };
+        assert_eq!(send(reqwest::Method::PUT, path, Some(user)).await, 403, "{name}: no security");
+        e.control.revoke_link(name, &cred.kept).await.unwrap();
+        assert_eq!(send(reqwest::Method::GET, "/items/_doc/1", None).await, 401, "{name}: revoked");
+        e.control.revoke_link(name, &cred.kept).await.unwrap();
+    }
+    // The keys route on an OpenSearch-flavor cluster (roll secrets): an internal user of its own,
+    // the data role, removed on DELETE, and refused once its expiry passes.
+    let as_user = |u: &str, p: &str, method: reqwest::Method, path: &str, body: Option<Value>| {
+        let mut r = e.http.request(method, format!("{}{path}", e.es)).basic_auth(u, Some(p));
+        if let Some(b) = body {
+            r = r.json(&b);
+        }
+        async move { r.send().await.unwrap().status().as_u16() }
+    };
+    let k = e.post("/v1/search/clusters/os-link/keys", json!({"name": "worker", "access": "data"})).await;
+    assert!(k.get("api_key").is_none(), "{k}");
+    let (u, p) = (k["username"].as_str().unwrap().to_string(), k["password"].as_str().unwrap().to_string());
+    assert_eq!(as_user(&u, &p, reqwest::Method::PUT, "/items/_doc/2", Some(json!({"n": 2}))).await, 201);
+    assert_eq!(as_user(&u, &p, reqwest::Method::PUT, "/_plugins/_security/api/internalusers/x", Some(json!({"password": "correcthorsebattery"}))).await, 403);
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("/v1/search/clusters/os-link/keys/{}", k["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, 204);
+    assert_eq!(as_user(&u, &p, reqwest::Method::GET, "/items/_doc/2", None).await, 401, "removed");
+    let (s, _) = e.call(reqwest::Method::DELETE, "/v1/search/clusters/os-link/keys/admin", None).await;
+    assert_eq!(s, 404, "the keys route removes only users it made");
+    let k = e.post("/v1/search/clusters/os-link/keys", json!({"name": "brief", "expires_in_s": 1})).await;
+    assert!(k["expires_at"].as_i64().is_some(), "{k}");
+    let (u, p) = (k["username"].as_str().unwrap().to_string(), k["password"].as_str().unwrap().to_string());
+    assert_eq!(as_user(&u, &p, reqwest::Method::GET, "/items/_doc/2", None).await, 200);
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert_eq!(as_user(&u, &p, reqwest::Method::GET, "/items/_doc/2", None).await, 401, "expired");
+}
+
+/// The host of a URL (its cluster's name on the edge, a node's address otherwise).
+fn host_of(url: &str) -> String {
+    reqwest::Url::parse(url).unwrap().host_str().unwrap_or_default().to_string()
 }

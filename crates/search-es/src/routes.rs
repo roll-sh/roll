@@ -233,9 +233,20 @@ enum Mode {
 
 const MODES: [Mode; 4] = [Mode::ExplicitOnly, Mode::WildcardRoot, Mode::WildcardLeaf, Mode::WildcardAny];
 
-/// Methods Elasticsearch's handlers accept beyond what the REST spec lists
-/// (`RestExecuteEnrichPolicyAction` also routes `POST`).
-const EXTRA_ES_ROUTES: &[(Api, &str, Method)] = &[(Api::EnrichExecutePolicy, "/_enrich/policy/{name}/_execute", Method::Post)];
+/// Methods and paths Elasticsearch's handlers accept beyond what the REST spec lists
+/// (`RestExecuteEnrichPolicyAction` also routes `POST`; `RestStreamInferenceAction` streams any
+/// task type's endpoint.)
+const EXTRA_ES_ROUTES: &[(Api, &str, Method)] = &[
+    (Api::EnrichExecutePolicy, "/_enrich/policy/{name}/_execute", Method::Post),
+    (Api::InferenceStreamCompletion, "/_inference/{task_type}/{inference_id}/_stream", Method::Post),
+];
+
+/// Spec paths Elasticsearch's REST layer doesn't register as written: the typed inference runs
+/// (`POST _inference/text_embedding/{id}`, …) are served by the `_inference/{task_type_or_id}/
+/// {inference_id}` handlers, so an explicit `text_embedding` node would shadow their `PUT`,
+/// `GET` and `DELETE`. Their `POST`s route to `inference.inference`, authorized as the same
+/// action.
+const SHADOWED_ES_APIS: &[Api] = &[Api::InferenceTextEmbedding, Api::InferenceSparseEmbedding, Api::InferenceRerank, Api::InferenceCompletion, Api::InferenceEmbedding];
 
 fn is_wildcard(seg: &str) -> bool {
     seg.len() >= 2 && seg.starts_with('{') && seg.ends_with('}')
@@ -254,6 +265,9 @@ impl Trie {
     fn build(d: Dialect) -> Trie {
         let mut t = Trie { nodes: vec![Node::default()], root_value: None };
         for api in ALL_APIS {
+            if d == Dialect::Elasticsearch && SHADOWED_ES_APIS.contains(&api) {
+                continue;
+            }
             for p in api.spec_in(d).paths {
                 for m in Method::ALL {
                     if p.methods & m.bit() != 0 {

@@ -901,7 +901,7 @@ async fn run_write_counted(
     let mut doc = Value::Obj(d.ordered_source());
     crate::json::write::quote_non_finite(&mut doc);
     let source = Bytes::from(doc.to_json());
-    Ok(Outcome::Index(current, doc, source, Some(Box::new(super::Ingested { args: args_of(&d.meta, args)?, executed }))))
+    Ok(Outcome::Index(current, doc, source, Some(Box::new(super::Ingested { args: args_of(&d.meta, args)?, executed, created }))))
 }
 
 /// The write arguments after a pipeline: its metadata fields replace the request's

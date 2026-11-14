@@ -528,6 +528,22 @@ pub async fn prepare_checked(
     check: Option<MappingCheck<'_>>,
 ) -> EsResult<Prepared> {
     let mut idx = idx;
+    // `semantic_text` values without inference results are embedded first (a bulk request has
+    // done this for its documents in batches already; this covers single writes, documents a
+    // pipeline produced and updates).
+    let embedded;
+    let (source, value) = match value.as_object() {
+        Some(doc) if !crate::xpack::inference::semantic::fields(&idx.mapping).is_empty() => {
+            let entries = crate::xpack::inference::semantic::infer_documents(cluster, &[(&idx.mapping, doc)]).await.pop().unwrap_or_else(|| Ok(Map::new()))?;
+            if entries.is_empty() {
+                (source, value)
+            } else {
+                embedded = crate::xpack::inference::semantic::with_inference(source, doc, &entries);
+                (&embedded.0, &embedded.1)
+            }
+        }
+        _ => (source, value),
+    };
     let given = |m: Option<&Map>| m.filter(|m| !m.is_empty()).map(|m| Arc::new(m.clone()));
     let requested = given(args.and_then(|a| a.dynamic_templates.as_ref()));
     let params = given(args.and_then(|a| a.dynamic_template_params.as_ref()));
@@ -543,6 +559,13 @@ pub async fn prepare_checked(
                 check(&idx)?;
             }
             idx = apply_dynamic_update(cluster, &idx, update).await?;
+            continue;
+        }
+        if !parsed.model_settings.is_empty() {
+            if let Some(check) = check {
+                check(&idx)?;
+            }
+            idx = set_model_settings(cluster, &idx, std::mem::take(&mut parsed.model_settings)).await?;
             continue;
         }
         crate::search::index_time::apply(&cluster.scripts, &st, &idx.mapping, value, &mut parsed)?;
@@ -689,8 +712,9 @@ pub(crate) fn time_series_id(idx: &IndexMeta, parsed: &crate::document::ParsedDo
     Ok((generated, tsid, desc))
 }
 
-/// The `_source` bytes the index keeps: as sent, filtered by the mapping's `_source`
-/// includes/excludes, or nothing when `_source` is disabled.
+/// The `_source` bytes the index keeps: as sent, without the vectors Elasticsearch keeps out
+/// of it, filtered by the mapping's `_source` includes/excludes, or nothing when `_source` is
+/// disabled.
 pub fn stored_source(idx: &IndexMeta, table: &crate::engine::fields::FieldTable, source: &Bytes, value: &Value) -> Option<Bytes> {
     use crate::engine::synthetic;
     let sc = &idx.mapping.source;
@@ -719,6 +743,20 @@ pub fn stored_source(idx: &IndexMeta, table: &crate::engine::fields::FieldTable,
                 (source, value)
             }
         }
+        _ => (source, value),
+    };
+    // Elasticsearch keeps indexed vectors out of the stored source; the readers that need them
+    // patch them back from the vector values (`engine::source_vectors`).
+    let stripped;
+    let (source, value) = match value {
+        Value::Obj(m) if !table.stripped_vectors.is_empty() => match crate::engine::source_vectors::strip(&table.stripped_vectors, m) {
+            Some(m) => {
+                let m = Value::Obj(m);
+                stripped = (Bytes::from(m.to_json()), m);
+                (&stripped.0, &stripped.1)
+            }
+            None => (source, value),
+        },
         _ => (source, value),
     };
     let inc = sc.includes.clone().unwrap_or_default();
@@ -771,6 +809,51 @@ pub async fn apply_dynamic_update(cluster: &Cluster, idx: &IndexMeta, update: cr
 }
 
 /// Sets `dims` of `dense_vector` fields (the first document decides them).
+/// Records `semantic_text` fields' model settings, which their first embedded document reports.
+/// Settings recorded meanwhile by another document must equal these, or the write fails like a
+/// conflicting document does.
+async fn set_model_settings(cluster: &Cluster, idx: &IndexMeta, updates: Vec<(String, Value)>) -> EsResult<Arc<IndexMeta>> {
+    let name = idx.name.clone();
+    cluster
+        .update(move |st| {
+            let Some(cur) = st.metadata.indices.get(&name).cloned() else { return Err(EsError::index_not_found(&name)) };
+            let mut mapping = (*cur.mapping).clone();
+            let mut changed = false;
+            for (path, v) in &updates {
+                if let Some(f) = field_mut(&mut mapping.root, path) {
+                    match f.raw("model_settings").filter(|x| !x.is_null()) {
+                        None => {
+                            f.set("model_settings", v.clone());
+                            changed = true;
+                        }
+                        Some(cur)
+                            if !matches!(
+                                (crate::xpack::inference::semantic::ModelSettings::parse(cur), crate::xpack::inference::semantic::ModelSettings::parse(v)),
+                                (Ok(a), Ok(b)) if a.compatible(&b)
+                            ) =>
+                        {
+                            return Err(EsError::document_parsing(format!(
+                                "Incompatible model settings for field [{path}]. Check that the inference_id is not using different model settings"
+                            )));
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+            if !changed {
+                return Ok(cur);
+            }
+            let mut ni = (*cur).clone();
+            ni.mapping = Arc::new(mapping);
+            ni.mapping_version += 1;
+            ni.version += 1;
+            let ni = Arc::new(ni);
+            st.metadata.indices.insert(name.clone(), ni.clone());
+            Ok(ni)
+        })
+        .await
+}
+
 async fn set_vector_dims(cluster: &Cluster, idx: &IndexMeta, dims: Vec<(String, i64)>) -> EsResult<Arc<IndexMeta>> {
     let name = idx.name.clone();
     cluster
@@ -1024,6 +1107,9 @@ pub fn copy_docs(cluster: &Cluster, searchers: &[search_index::Searcher], dst: &
     let table = de.table();
     let ctx = dst.mapping_ctx();
     let root = search_index::query::nested::root_filter();
+    // The source's stored source may lack its vectors: they come back from its segments (by
+    // path: the copies number their engine fields their own way) before the copy is indexed.
+    let vectors = crate::engine::source_vectors::copied(&table);
     for searcher in searchers {
         let mut docs = Vec::new();
         struct All<'a>(&'a mut Vec<u32>);
@@ -1051,8 +1137,13 @@ pub fn copy_docs(cluster: &Cluster, searchers: &[search_index::Searcher], dst: &
             let stored = searcher.stored(doc).map_err(convert::index_error)?;
             let id = crate::search::hits::stored_id(&stored).unwrap_or_default();
             let routing = crate::fetch::routing(&stored);
-            let source = crate::fetch::source_bytes(&stored).map(Bytes::copy_from_slice).unwrap_or_else(|| Bytes::from_static(b"{}"));
-            let value = crate::fetch::parse_source(&source)?;
+            let mut source = crate::fetch::source_bytes(&stored).map(Bytes::copy_from_slice).unwrap_or_else(|| Bytes::from_static(b"{}"));
+            let mut value = crate::fetch::parse_source(&source)?;
+            if let Value::Obj(m) = &mut value
+                && crate::engine::source_vectors::patch_raw(&vectors, m, &mut crate::engine::source_vectors::InSegmentByName(seg, local))
+            {
+                source = Bytes::from(value.to_json());
+            }
             let mut parsed = crate::document::parse_document(&dst.mapping, &ctx, &value, Some(&source), Some(&id))?;
             crate::search::index_time::apply(&cluster.scripts, &cluster.state(), &dst.mapping, &value, &mut parsed)?;
             // Time series documents keep their `_tsid` and the routing hash their `_id` starts

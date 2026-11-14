@@ -35,8 +35,12 @@ pub struct ReadSecurity(Arc<Inner>);
 
 struct Inner {
     eff: Effective,
+    /// The aliases of each index that has some.
+    aliases: std::collections::HashMap<String, Vec<String>>,
     /// `_user` of templated role queries.
     user: Value,
+    /// The salt of masked fields' hashes (OpenSearch Security).
+    salt: [u8; 16],
 }
 
 impl std::fmt::Debug for ReadSecurity {
@@ -51,6 +55,11 @@ pub struct FieldFilter {
     /// Each set's entries as `(grant, except)` patterns: a field is visible when every set has
     /// an entry granting it.
     sets: Vec<Vec<(Vec<String>, Vec<String>)>>,
+    /// OpenSearch Security's masked fields: the granting entries' rules. A field is masked when
+    /// any entry masks it (the plugin combines the roles' masks), by the first such rule; masked
+    /// values are shown hashed and the field is unmapped for queries and aggregations.
+    masks: Vec<Vec<String>>,
+    salt: [u8; 16],
 }
 
 /// Metadata fields every role sees (`FieldPermissions` adds them to every grant).
@@ -63,6 +72,19 @@ impl FieldFilter {
     /// Whether the field at `path` is visible.
     pub fn allows(&self, path: &str) -> bool {
         METADATA.contains(&path) || self.sets.iter().all(|set| set.iter().any(|(grant, except)| matches(grant, path) && !matches(except, path)))
+    }
+
+    /// Whether queries and aggregations see the field: visible and not masked.
+    pub fn searchable(&self, path: &str) -> bool {
+        self.allows(path) && self.mask_of(path).is_none()
+    }
+
+    /// The masking rule of the field at `path`, when it is masked.
+    fn mask_of<'a>(&'a self, path: &str) -> Option<&'a str> {
+        if self.masks.is_empty() || METADATA.contains(&path) {
+            return None;
+        }
+        self.masks.iter().flatten().find(|r| privileges::glob(super::opensearch::mask_field(r), path)).map(String::as_str)
     }
 
     /// Whether some field under the object at `path` may be visible.
@@ -157,7 +179,11 @@ impl FieldFilter {
                 let kept: Vec<Value> = a.into_iter().filter_map(|x| self.filter_value(x, path)).collect();
                 (!kept.is_empty()).then_some(Value::Arr(kept))
             }
-            leaf => self.allows(path).then_some(leaf),
+            _ if !self.allows(path) => None,
+            leaf => Some(match (self.mask_of(path), leaf) {
+                (Some(rule), Value::Str(s)) => Value::Str(super::opensearch::mask(rule, &self.salt, &s)),
+                (_, leaf) => leaf,
+            }),
         }
     }
 }
@@ -182,26 +208,58 @@ impl ReadSecurity {
     pub fn of(ctx: &Ctx) -> Option<ReadSecurity> {
         let p = ctx.principal.get().filter(|p| !p.is_superuser())?;
         let eff = super::effective(&super::file_roles(ctx.cluster), &ctx.state(), p);
-        let restricts = eff.own.iter().chain(eff.limited_by.iter().flatten()).flat_map(|r| r.indices.iter()).any(|g| g.query.is_some() || g.field_security.is_some());
-        restricts.then(|| ReadSecurity(Arc::new(Inner { eff, user: user_params(p) })))
+        let restricts = eff.own.iter().chain(eff.limited_by.iter().flatten()).flat_map(|r| r.indices.iter()).any(|g| g.query.is_some() || g.field_security.is_some() || !g.masked.is_empty());
+        if !restricts {
+            return None;
+        }
+        let st = ctx.state();
+        let aliases = st.metadata.indices.values().filter(|i| !i.aliases.is_empty()).map(|i| (i.name.clone(), i.aliases.keys().cloned().collect())).collect();
+        Some(ReadSecurity(Arc::new(Inner { eff, aliases, user: user_params(p), salt: super::opensearch::masking_salt(ctx.cluster) })))
     }
 
     fn sets(&self) -> impl Iterator<Item = &Vec<Permission>> {
         std::iter::once(&self.0.eff.own).chain(self.0.eff.limited_by.iter())
     }
 
-    /// A set's entries granting `action` on `index` (or on its data stream).
+    /// A set's entries granting `action` on `index` (or on its data stream); without one, the
+    /// entries granting it on an alias of the index, which the index was read through.
     fn granting<'a>(&self, set: &'a [Permission], action: &str, index: &str) -> Vec<&'a IndexGrant> {
         let parent = self.0.eff.parents.get(index);
         let restricted = privileges::is_restricted(index);
-        set.iter()
-            .flat_map(|r| r.indices.iter())
-            .filter(|g| {
-                (!restricted || g.allow_restricted)
-                    && g.privileges.iter().any(|x| privileges::index_grants(x, action))
-                    && g.names.iter().any(|n| privileges::index_pattern_matches(n, index) || parent.is_some_and(|ds| privileges::index_pattern_matches(n, ds)))
-            })
-            .collect()
+        let entries = |names: &dyn Fn(&str) -> bool| -> Vec<&'a IndexGrant> {
+            set.iter()
+                .flat_map(|r| r.indices.iter())
+                .filter(|g| (!restricted || g.allow_restricted) && g.privileges.iter().any(|x| privileges::index_grants(x, action)) && g.names.iter().any(|n| names(n)))
+                .collect()
+        };
+        let direct = entries(&|n| privileges::index_pattern_matches(n, index) || parent.is_some_and(|ds| privileges::index_pattern_matches(n, ds)));
+        match self.0.aliases.get(index) {
+            Some(aliases) if direct.is_empty() => entries(&|n| aliases.iter().any(|a| privileges::index_pattern_matches(n, a))),
+            _ => direct,
+        }
+    }
+
+    /// Whether `action` reads every document of `idx` (`TransportTermsEnumAction.canAccess`):
+    /// in each set, an entry without a query, or one whose query rewrites to `match_all` on the
+    /// index.
+    pub fn reads_every_document(&self, cluster: &Cluster, action: &str, idx: &crate::meta::IndexMeta) -> EsResult<bool> {
+        for set in self.sets() {
+            let entries = self.granting(set, action, &idx.name);
+            if entries.is_empty() || entries.iter().any(|g| g.query.is_none()) {
+                continue;
+            }
+            let mut any = false;
+            for q in entries.iter().filter_map(|g| g.query.as_ref()) {
+                if rewrites_to_match_all(&self.role_query(cluster, q)?, idx) {
+                    any = true;
+                    break;
+                }
+            }
+            if !any {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// The query a document of `index` must match to be read by `action`, `None` when every
@@ -233,22 +291,26 @@ impl ReadSecurity {
     pub fn restricts(&self, action: &str, index: &str) -> bool {
         self.sets().any(|set| {
             let entries = self.granting(set, action, index);
-            !entries.is_empty() && (entries.iter().all(|g| g.query.is_some()) || entries.iter().all(|g| g.field_security.is_some()))
+            !entries.is_empty() && (entries.iter().all(|g| g.query.is_some()) || entries.iter().all(|g| g.field_security.is_some()) || entries.iter().any(|g| !g.masked.is_empty()))
         })
     }
 
     /// The fields of `index` that `action` may read, `None` when every field.
     pub fn fields(&self, action: &str, index: &str) -> Option<FieldFilter> {
         let mut sets = Vec::new();
+        let mut masks = Vec::new();
         for set in self.sets() {
             let entries = self.granting(set, action, index);
+            if masks.is_empty() {
+                masks = entries.iter().filter(|g| !g.masked.is_empty()).map(|g| g.masked.clone()).collect();
+            }
             if entries.is_empty() || entries.iter().any(|g| g.field_security.is_none()) {
                 continue;
             }
             let strs = |v: Option<&Value>| -> Vec<String> { v.and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default() };
             sets.push(entries.iter().filter_map(|g| g.field_security.as_ref()).map(|fs| (strs(fs.get("grant")), strs(fs.get("except")))).collect());
         }
-        (!sets.is_empty()).then_some(FieldFilter { sets })
+        (!sets.is_empty() || !masks.is_empty()).then_some(FieldFilter { sets, masks, salt: self.0.salt })
     }
 
     /// A role's query as JSON: a template (`{"template": {"source": …}}`) rendered with `_user`.
@@ -272,6 +334,40 @@ impl ReadSecurity {
     }
 }
 
+/// Whether a query rewrites to `match_all` on `idx` (`Rewriteable.rewrite` of its builder):
+/// `match_all`, an empty `bool`, or a `term`, `terms`, `prefix` or `wildcard` query on a constant field (a
+/// `constant_keyword` with a value, `_index`) that its value matches.
+fn rewrites_to_match_all(q: &Value, idx: &crate::meta::IndexMeta) -> bool {
+    let Some((kind, body)) = q.as_object().and_then(|m| m.iter().next()) else { return false };
+    if kind == "match_all" {
+        return true;
+    }
+    let constant = |f: &str| -> Option<String> {
+        if f == "_index" {
+            return Some(idx.name.clone());
+        }
+        match idx.mapping.lookup(f)? {
+            crate::mapping::MapperRef::Field(fm) if fm.ty == "constant_keyword" => fm.raw("value").filter(|v| !v.is_null()).map(Value::to_es_string),
+            _ => None,
+        }
+    };
+    let Some((field, arg)) = body.as_object().and_then(|m| m.iter().find(|(k, _)| !matches!(k.as_str(), "boost" | "_name"))) else {
+        return kind == "bool" && body.as_object().is_some_and(|m| m.keys().all(|k| matches!(k.as_str(), "boost" | "_name")));
+    };
+    let Some(actual) = constant(field) else { return false };
+    let value = |v: &Value| match v {
+        Value::Obj(m) => m.get("value").map(Value::to_es_string),
+        other => Some(other.to_es_string()),
+    };
+    match kind.as_str() {
+        "term" => value(arg).is_some_and(|v| v == actual),
+        "terms" => arg.as_array().is_some_and(|a| a.iter().any(|v| v.to_es_string() == actual)),
+        "prefix" => value(arg).is_some_and(|v| actual.starts_with(&v)),
+        "wildcard" => value(arg).or_else(|| arg.get("wildcard").map(Value::to_es_string)).is_some_and(|v| crate::xcontent::filter::glob_match(&v, &actual)),
+        _ => false,
+    }
+}
+
 /// `_user` of role query templates (`SecurityQueryTemplateEvaluator`).
 fn user_params(p: &Principal) -> Value {
     obj! {
@@ -289,7 +385,7 @@ mod tests {
 
     fn filter(sets: &[&[(&[&str], &[&str])]]) -> FieldFilter {
         let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        FieldFilter { sets: sets.iter().map(|set| set.iter().map(|(g, e)| (s(g), s(e))).collect()).collect() }
+        FieldFilter { sets: sets.iter().map(|set| set.iter().map(|(g, e)| (s(g), s(e))).collect()).collect(), masks: Vec::new(), salt: [0; 16] }
     }
 
     #[test]

@@ -27,6 +27,7 @@ fn index(mapping: &str, settings: &[(&str, &str)]) -> IndexMeta {
         primary_terms: vec![1],
         system: false,
         recovery_source: None,
+        rollover_info: Default::default(),
         dialect: Default::default(),
     }
 }
@@ -100,8 +101,69 @@ fn http_logs_documents_take_the_fast_path() {
     ] {
         assert!(agree(&idx, &plan, doc), "not taken: {doc}");
     }
-    // Malformed addresses and objects stay with the general path (its errors).
-    for doc in [r#"{"clientip": "1.2.3"}"#, r#"{"clientip": 1}"#, r#"{"geoip": {"city_name": "x"}}"#] {
+    // Plain objects are walked too, in document order, with their fields' full names.
+    for doc in [
+        r#"{"geoip": {"city_name": "x"}}"#,
+        r#"{"status": 200, "geoip": {"country_name": "NL", "location": [4.9, 52.37], "city_name": ["a", "b"]}, "size": 1}"#,
+        r#"{"geoip": {}}"#,
+        r#"{"geoip": [{"city_name": "x"}, {"country_name": "NL", "city_name": "y"}]}"#,
+        r#"{"geoip": [[{"city_name": "x"}], [], {"city_name": "z"}]}"#,
+        r#"{"geoip": []}"#,
+    ] {
+        assert!(agree(&idx, &plan, doc), "not taken: {doc}");
+    }
+    // Past `index.mapping.array_objects.limit` the general path fails the document.
+    let limited = index(HTTP_LOGS, &[("index.mapping.array_objects.limit", "1")]);
+    let plan1 = FastPlan::new(&limited).expect("plan");
+    assert!(agree(&limited, &plan1, r#"{"geoip": [{"city_name": "x"}]}"#));
+    assert!(plan1.parse(br#"{"geoip": [{"city_name": "x"}, {"city_name": "y"}]}"#).is_none());
+    // Malformed addresses stay with the general path (its errors), and so do objects it does
+    // more with: null (also in an array), unknown or repeated keys, a value where an object is.
+    for doc in [
+        r#"{"clientip": "1.2.3"}"#,
+        r#"{"clientip": 1}"#,
+        r#"{"geoip": null}"#,
+        r#"{"geoip": [{"city_name": "x"}, null]}"#,
+        r#"{"geoip": [{"city_name": "x"}, "y"]}"#,
+        r#"{"geoip": {"zip": "x"}}"#,
+        r#"{"geoip": {"city_name": "x", "city_name": "y"}}"#,
+        r#"{"geoip": "x"}"#,
+    ] {
+        assert!(plan.parse(doc.as_bytes()).is_none(), "taken: {doc}");
+    }
+}
+
+const NYC_TAXIS: &str = r#"{"dynamic":"strict","properties":{
+    "total_amount":{"type":"scaled_float","scaling_factor":100},
+    "trip_distance":{"type":"scaled_float","scaling_factor":100},
+    "fare_amount":{"type":"double"},
+    "pickup_datetime":{"type":"date","format":"yyyy-MM-dd HH:mm:ss"},
+    "pickup_location":{"type":"geo_point"},
+    "passenger_count":{"type":"integer"},
+    "vendor_id":{"type":"keyword"},
+    "f":{"type":"float"},
+    "h":{"type":"half_float","fields":{"raw":{"type":"keyword"}}},
+    "s":{"type":"scaled_float","scaling_factor":10,"fields":{"f":{"type":"float"}}}
+}}"#;
+
+/// Rally's `nyc_taxis` documents: `scaled_float`, `float` and `half_float` values take the
+/// fast path and come out as the general path's (Java rounding, float narrowing); values the
+/// general path refuses stay with it.
+#[test]
+fn nyc_taxis_documents_take_the_fast_path() {
+    let idx = index(NYC_TAXIS, &[]);
+    let plan = FastPlan::new(&idx).expect("plan");
+    for doc in [
+        r#"{"total_amount": 6.3, "pickup_location": [-73.92259216308594, 40.7545280456543], "pickup_datetime": "2015-01-01 00:34:42", "passenger_count": 1, "fare_amount": 5.0, "trip_distance": 0.88, "vendor_id": "2"}"#,
+        r#"{"total_amount": -22.5, "trip_distance": 0.005, "s": 2.25, "f": 0.1, "h": 0.1}"#,
+        r#"{"total_amount": 1e-300, "s": -0.05, "f": 16777217, "h": 65504, "trip_distance": [1, 2.675, -0.0]}"#,
+        r#"{"f": 3.4028235e38, "h": 1e-8, "s": 9.2e15}"#,
+    ] {
+        assert!(agree(&idx, &plan, doc), "not taken: {doc}");
+    }
+    // Past a long, past a float or a half float, or a string: the general path's errors (or
+    // coercion).
+    for doc in [r#"{"total_amount": 1e300}"#, r#"{"f": 1e39}"#, r#"{"h": 65520}"#, r#"{"total_amount": "6.3"}"#] {
         assert!(plan.parse(doc.as_bytes()).is_none(), "taken: {doc}");
     }
 }
@@ -163,6 +225,7 @@ const TYPES: &str = r#"{"properties":{
     "g":{"type":"geo_point"},
     "f":{"type":"float"},
     "o":{"properties":{"x":{"type":"keyword"}}},
+    "o2":{"properties":{"p":{"properties":{"y":{"type":"long"}}},"z":{"type":"scaled_float","scaling_factor":10}}},
     "c":{"type":"keyword","copy_to":"t"},
     "ip":{"type":"ip"},
     "mot":{"type":"match_only_text","fields":{"raw":{"type":"keyword","ignore_above":4}}}
@@ -217,7 +280,7 @@ fn scalar(r: &mut Rng) -> String {
         0 => r.pick(&strings).to_string(),
         1 => r.pick(&nums).to_string(),
         2 => r.pick(&["true", "false", "null"]).to_string(),
-        _ => r.pick(&["[1.5, 2.5]", "[-200, 0]", "[0, 95]", "[1, 2, 3]", "\"1,2\"", "{\"x\": \"a\"}", "[]", "[\"a\", [\"b\"]]", "[1, \"x\"]"]).to_string(),
+        _ => r.pick(&["[1.5, 2.5]", "[-200, 0]", "[0, 95]", "[1, 2, 3]", "\"1,2\"", "{\"x\": \"a\"}", "[]", "[\"a\", [\"b\"]]", "[1, \"x\"]", "{\"x\": [\"a\", 1]}", "{\"x\": null}", "{}", "{\"x\": \"a\", \"x\": \"b\"}", "{\"p\": {\"y\": 3}, \"z\": 1.25}", "{\"z\": [0.05, -2.25], \"p\": {}}", "{\"p\": {\"y\": 1.5}}", "[{\"x\": \"a\"}, {\"x\": \"b\"}]", "[{\"p\": {\"y\": 2}}, [{\"z\": 0.5}]]", "[{\"x\": \"a\"}, null]"]).to_string(),
     }
 }
 
@@ -225,7 +288,7 @@ fn scalar(r: &mut Rng) -> String {
 fn random_documents_agree() {
     let idx = index(TYPES, &[]);
     let plan = FastPlan::new(&idx).unwrap();
-    let keys = ["t", "k", "kn", "l", "i", "s", "b", "d", "bo", "dt", "de", "dn", "dk", "g", "f", "o", "c", "zz", "ip", "mot"];
+    let keys = ["t", "k", "kn", "l", "i", "s", "b", "d", "bo", "dt", "de", "dn", "dk", "g", "f", "o", "o2", "c", "zz", "ip", "mot"];
     let mut r = Rng(0x9E37_79B9_7F4A_7C15);
     let seeds: u64 = std::env::var("FAST_DOCS").ok().and_then(|s| s.parse().ok()).unwrap_or(20_000);
     let (mut fast, mut total) = (0, 0);
@@ -306,4 +369,20 @@ fn numbers_index_as_written_like_elasticsearch() {
     assert_eq!(keywords(&fast, "d.k"), ["12345678.9", "1E5"]);
     assert_eq!(keywords(&fast, "ia"), ["abcde", "😀😀"]);
     assert_eq!(fast.ignored, vec!["ia".to_string()]);
+}
+
+/// Every check above holds in the opensearch dialect too (its general path is the reference
+/// there: field names, points and dates parse by its rules).
+#[test]
+fn the_opensearch_dialect_agrees() {
+    crate::opensearch::with(true, || {
+        geonames_documents_take_the_fast_path();
+        http_logs_documents_take_the_fast_path();
+        nyc_taxis_documents_take_the_fast_path();
+        everything_else_takes_the_general_path();
+        ignore_above_records_ignored_fields();
+        random_documents_agree();
+        plans_refuse_what_they_cannot_reproduce();
+        numbers_index_as_written_like_elasticsearch();
+    });
 }

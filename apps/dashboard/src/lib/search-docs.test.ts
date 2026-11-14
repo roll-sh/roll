@@ -1,7 +1,7 @@
 // Tests of the index browser's document helpers (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { cellText, columnsOf, deleteRequest, flatten, formatJson, hitSources, jsonSpans, parseDocument, sourceCells, tableColumns, writeRequest } from "./search-docs";
+import { cellText, columnsOf, deleteRequest, flatten, formatJson, hitSources, jsonSpans, mappingNotes, mappingRows, newIndexBody, newIndexProblem, timeBuckets, timeFieldOf, timeFilter, parseDocument, sourceCells, tableColumns, writeRequest } from "./search-docs";
 
 test("flatten", () => {
   assert.deepEqual([...flatten({ a: 1, u: { name: "x", geo: { lat: 1 } }, tags: ["a", "b"], e: {}, n: null })], [
@@ -157,4 +157,76 @@ test("column picker", async () => {
   assert.deepEqual(visibleColumns(["d", "x"], avail), ["d", "x"]);
   assert.deepEqual(toggleColumn(["a", "b"], "b"), ["a"]);
   assert.deepEqual(toggleColumn(["a"], "c"), ["a", "c"]);
+});
+
+test("mapping rows", () => {
+  const resp = {
+    a: {
+      mappings: {
+        dynamic: "strict",
+        properties: {
+          body: { type: "semantic_text", inference_id: "my-e5" },
+          title: { type: "text", analyzer: "english", fields: { keyword: { type: "keyword", ignore_above: 256 } } },
+          user: { properties: { name: { type: "keyword", doc_values: false } } },
+          vec: { type: "dense_vector", dims: 384, similarity: "cosine", index_options: { type: "bbq_hnsw" } },
+        },
+        runtime: { day: { type: "keyword", script: { source: "emit('x')" } } },
+      },
+    },
+    b: { mappings: { properties: { extra: { type: "long" }, title: { type: "text" } } } },
+  };
+  assert.deepEqual(
+    mappingRows(resp).map((r) => [r.name, r.type, r.depth, r.notes.join(" · "), !!r.multi, !!r.runtime]),
+    [
+      ["body", "semantic_text", 0, "inference my-e5", false, false],
+      ["title", "text", 0, "analyzer english", false, false],
+      ["title.keyword", "keyword", 1, "ignore above 256", true, false],
+      ["user", "object", 0, "", false, false],
+      ["user.name", "keyword", 1, "no doc values", false, false],
+      ["vec", "dense_vector", 0, "384 dims · cosine · bbq_hnsw", false, false],
+      ["extra", "long", 0, "", false, false],
+      ["day", "keyword", 0, "script", false, true],
+    ],
+  );
+  assert.deepEqual(mappingNotes(resp), ["dynamic: strict"]);
+  assert.deepEqual(mappingRows({ a: { mappings: {} } }), []);
+});
+
+test("a new index's request from the field editor", () => {
+  const fields = [
+    { name: "title", type: "text" as const, analyzer: "english", keyword: true },
+    { name: "seller.name", type: "keyword" as const },
+    { name: "body", type: "semantic_text" as const, inferenceId: "my-e5" },
+    { name: "vec", type: "dense_vector" as const, dims: 384, similarity: "dot_product" as const },
+    { name: "", type: "long" as const },
+  ];
+  assert.deepEqual(newIndexBody(fields, "strict", false), {
+    mappings: {
+      dynamic: "strict",
+      properties: {
+        title: { type: "text", analyzer: "english", fields: { keyword: { type: "keyword", ignore_above: 256 } } },
+        seller: { properties: { name: { type: "keyword" } } },
+        body: { type: "semantic_text", inference_id: "my-e5" },
+        vec: { type: "dense_vector", dims: 384, similarity: "dot_product" },
+      },
+    },
+  });
+  assert.equal(newIndexProblem(fields, false), null);
+  const os = newIndexBody([fields[3]], "true", true);
+  assert.deepEqual(os, { mappings: { properties: { vec: { type: "knn_vector", dimension: 384, space_type: "innerproduct" } } }, settings: { "index.knn": true } });
+  assert.match(newIndexProblem(fields, true) ?? "", /semantic_text/);
+  assert.match(newIndexProblem([{ name: "user", type: "keyword" }, { name: "user.name", type: "keyword" }], false) ?? "", /also holds/);
+  assert.match(newIndexProblem([{ name: "v", type: "dense_vector", dims: 5000 }], false) ?? "", /1 to 4096/);
+  assert.match(newIndexProblem([{ name: "body", type: "semantic_text" }], false) ?? "", /pick an embeddings endpoint/);
+});
+
+test("time-based indices are browsed by their time field", () => {
+  const f = (name: string, type = "date") => ({ name, type });
+  assert.equal(timeFieldOf([f("created"), f("@timestamp"), f("title", "text")]), "@timestamp");
+  assert.equal(timeFieldOf([f("created"), f("event.ingested")]), "created");
+  assert.equal(timeFieldOf([f("created"), f("updated")]), null);
+  assert.deepEqual(timeFilter("@timestamp", { last: "15m" }), { range: { "@timestamp": { gte: "now-15m" } } });
+  assert.equal(timeFilter("@timestamp", { last: null }), null);
+  assert.deepEqual(timeFilter("t", { gte: 1, lt: 2 }), { range: { t: { gte: 1, lt: 2, format: "epoch_millis" } } });
+  assert.deepEqual(timeBuckets({ aggregations: { over_time: { buckets: [{ key: 10, doc_count: 3 }] } } }), [{ key: 10, count: 3 }]);
 });

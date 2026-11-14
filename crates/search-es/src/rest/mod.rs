@@ -165,6 +165,18 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// An Elasticsearch deprecation warning that requests from Elastic products get too.
+    pub fn warn_even_for_products(&self, msg: impl Into<String>) {
+        if self.cluster.dialect == Dialect::OpenSearch {
+            return;
+        }
+        let msg = msg.into();
+        let mut w = self.warnings.lock();
+        if !w.contains(&msg) {
+            w.push(msg);
+        }
+    }
+
     /// A warning in the cluster's dialect (`None` skips it for that dialect).
     pub fn warn_dialect(&self, elasticsearch: Option<String>, opensearch: Option<String>) {
         let msg = match self.cluster.dialect {
@@ -571,7 +583,16 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admit
     // Authentication comes first (Elasticsearch's security REST filter), authorization after
     // the request was parsed (its transport action).
     let charged = in_flight.as_ref().map(|_| ()).map_err(Clone::clone);
-    let result = match charged.and_then(|_| crate::xpack::security::authenticate(&ctx)).and_then(|_| params::check_params(&ctx)) {
+    let authenticated = charged.and_then(|_| crate::xpack::security::authenticate(&ctx)).map(|()| {
+        // An internal call without credentials inside `internal::as_principal` (a watch running
+        // as its owner) is that principal's.
+        if ctx.principal.get().is_none()
+            && let Some(p) = crate::xpack::internal::acting_principal(req)
+        {
+            let _ = ctx.principal.set(p);
+        }
+    });
+    let result = match authenticated.and_then(|_| params::check_params(&ctx)) {
         Err(e) => Err(e),
         Ok(()) => {
             // OpenSearch (forked before Elasticsearch added this check) ignores a body an API
@@ -595,7 +616,8 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admit
                 };
                 match admission {
                     Ok(admission) => {
-                        let r = dispatch_off_reactor(&ctx).await;
+                        // Boxed: the dispatch future is large, and internal calls nest it.
+                        let r = crate::xpack::security::in_workflow(&ctx, Box::pin(dispatch_off_reactor(&ctx))).await;
                         drop(admission);
                         r
                     }
@@ -790,6 +812,12 @@ fn compat_of(neg: Option<&Negotiated>) -> Option<u8> {
 }
 
 fn render_error(e: &EsError, neg: Option<&Negotiated>, pretty: bool, trace: bool, warnings: Vec<(String, String)>, head: bool, dialect: Dialect) -> EsResponse {
+    // An error whose answer is plain text (OpenSearch Security's `Unauthorized`).
+    if let Some(Value::Str(text)) = e.hidden("plain_body") {
+        let mut headers = vec![("content-type".to_string(), "text/plain; charset=UTF-8".to_string())];
+        headers.extend(e.headers().iter().flat_map(|(k, vs)| vs.iter().map(move |v| (k.clone(), v.clone()))));
+        return EsResponse { status: e.status, headers, body: Bytes::from(text.clone()), head };
+    }
     let ty = response_type(None, neg);
     let ty = if ty == XContentType::Smile { XContentType::Json } else { ty };
     let mut v = e.to_body_with(trace, dialect == Dialect::OpenSearch);

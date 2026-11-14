@@ -86,6 +86,10 @@ struct ShardScan {
     idx: Arc<IndexMeta>,
     searcher: search_index::Searcher,
     docs: Vec<u32>,
+    /// An index whose `_source` hides vectors (`index.mapping.exclude_source_vectors`): each
+    /// source gets the vectors it keeps out back, as Elasticsearch shows them (reindex writes
+    /// them to the destination, update by query's scripts see them).
+    vectors: Option<Arc<crate::engine::fields::FieldTable>>,
 }
 
 impl Scanner {
@@ -104,7 +108,15 @@ impl Scanner {
             seg.ensure_stored().map_err(crate::engine::convert::index_error)?;
             let stored = sh.searcher.stored(doc).map_err(crate::engine::convert::index_error)?;
             let id = crate::search::hits::stored_id(&stored).unwrap_or_default();
-            let source = crate::fetch::source_bytes(&stored).map(Bytes::copy_from_slice);
+            let mut source = crate::fetch::source_bytes(&stored).map(Bytes::copy_from_slice);
+            if self.need_source
+                && let (Some(table), Some(b)) = (&sh.vectors, &source)
+                && let Value::Obj(mut m) = crate::fetch::parse_source(b)?
+            {
+                crate::engine::synthetic::vectors(table, "", &mut m, false);
+                crate::engine::source_vectors::patch(&table.stripped_vectors, &mut m, &mut crate::engine::source_vectors::InSegment(seg, local));
+                source = Some(Bytes::from(Value::Obj(m).to_json()));
+            }
             if self.need_source && source.is_none() {
                 return Err(EsError::illegal_argument(format!("[{}][{id}] didn't store _source", sh.idx.name)));
             }
@@ -232,7 +244,7 @@ fn scan_shard(
     {
         match crate::search::id_slice_query(&qctx, sid, max)? {
             Some(f) => b = b.add(Occur::Filter, f),
-            None => return Ok(ShardScan { idx: t.idx.clone(), searcher, docs: Vec::new() }),
+            None => return Ok(ShardScan { idx: t.idx.clone(), searcher, docs: Vec::new(), vectors: None }),
         }
     }
     q = arc(b);
@@ -243,7 +255,8 @@ fn scan_shard(
     if let Some(l) = limit {
         docs.truncate(l.min(usize::MAX as u64) as usize);
     }
-    Ok(ShardScan { idx: t.idx.clone(), searcher, docs })
+    let vectors = (table.has_vectors && t.idx.settings.get("index.mapping.exclude_source_vectors") != Some("false")).then_some(table);
+    Ok(ShardScan { idx: t.idx.clone(), searcher, docs, vectors })
 }
 
 /// What a by-query run counted (`BulkByScrollTask.Status`).
@@ -836,6 +849,8 @@ fn run_doc_script(ctx: &Ctx, bound: &crate::scripting::Bound, kind: CtxKind, d: 
 /// `refresh`: the written indices, by uuid.
 fn refresh_touched(ctx: &Ctx<'_>, refresh: bool, touched: &[String]) -> EsResult<()> {
     if refresh {
+        // OpenSearch runs the refresh as the user, once the documents are written.
+        crate::xpack::security::check_refresh(ctx)?;
         for u in touched {
             if let Some(e) = ctx.cluster.engine.loaded(u) {
                 e.refresh_all()?;
@@ -927,6 +942,8 @@ pub async fn delete_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
                     }
                     if !throttle.before_batch(batch.len()).await {
                         s.canceled = Some("by user request".into());
+                        // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
+                        publish(&live, &s, &throttle);
                         break;
                     }
                     s.batches += 1;
@@ -1003,6 +1020,8 @@ pub async fn update_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
                     }
                     if !throttle.before_batch(batch.len()).await {
                         s.canceled = Some("by user request".into());
+                        // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
+                        publish(&live, &s, &throttle);
                         break;
                     }
                     s.batches += 1;
@@ -1312,6 +1331,8 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 for chunk in docs.chunks(batch.max(1) as usize) {
                     if !throttle.before_batch(chunk.len()).await {
                         s.canceled = Some("by user request".into());
+                        // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
+                        publish(&live, &s, &throttle);
                         break;
                     }
                     let sds: Vec<SourceDoc> = chunk.iter().map(|d| SourceDoc { index: d.index.clone(), id: d.id.clone(), routing: d.routing.clone(), version: d.version, source: d.source.clone() }).collect();
@@ -1346,6 +1367,8 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
                             }
                             if !throttle.before_batch(docs.len()).await {
                                 s.canceled = Some("by user request".into());
+                                // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
+                                publish(&live, &s, &throttle);
                                 break;
                             }
                             s.batches += 1;

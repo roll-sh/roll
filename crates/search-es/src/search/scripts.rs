@@ -58,6 +58,9 @@ pub struct DocHost {
     /// The vector field [`Host::with_vector`] reads, resolved once, and a buffer for vectors
     /// whose bytes are not aligned as floats.
     vector: Option<(Box<str>, VectorSlot)>,
+    /// `params._source` holds the vectors the stored source leaves out (the fetch phase's
+    /// script fields; other scripts read the stored source, without them, as Elasticsearch's do).
+    pub source_vectors: bool,
     vector_buf: Vec<f32>,
 }
 
@@ -105,7 +108,7 @@ impl DocHost {
     pub fn new(table: Arc<FieldTable>, seg: SegmentContext, shard: i32, index: String) -> DocHost {
         let ctl = search_index::search::ambient_control();
         let runtime = super::runtime::RuntimeScope::of_control(ctl.as_ref());
-        DocHost { table, seg, doc: 0, score: 0.0, shard, index, id_fielddata: crate::opensearch::active(), buf: Vec::new(), resolved: Vec::new(), slots: Vec::new(), cols: Vec::new(), block_start: 0, cancellable: search_scripts_poll(), ctl, term_stats: None, runtime, chain: Vec::new(), rt_leaves: Vec::new(), vector: None, vector_buf: Vec::new() }
+        DocHost { table, seg, doc: 0, score: 0.0, shard, index, id_fielddata: crate::opensearch::active(), buf: Vec::new(), resolved: Vec::new(), slots: Vec::new(), cols: Vec::new(), block_start: 0, cancellable: search_scripts_poll(), ctl, term_stats: None, runtime, chain: Vec::new(), rt_leaves: Vec::new(), vector: None, vector_buf: Vec::new(), source_vectors: false }
     }
 
     /// `doc[field]` of a runtime field (`None`: `field` is no runtime field of the search on
@@ -368,7 +371,12 @@ impl DocHost {
                 _ => {}
             }
         }
-        out.longs.sort_unstable();
+        // Doc values order: an `unsigned_long`'s raw bits sort as the unsigned values.
+        if f.kind == Kind::UnsignedLong {
+            out.longs.sort_unstable_by_key(|v| *v as u64);
+        } else {
+            out.longs.sort_unstable();
+        }
         out.doubles.sort_unstable_by(f64::total_cmp);
         out.geo.sort_unstable_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
         strs.sort_unstable();
@@ -855,6 +863,14 @@ impl Host for DocHost {
         self.seg.ensure_stored().ok()?;
         let stored = self.seg.reader.stored().document(self.doc).ok()?;
         let b = crate::fetch::source_bytes(&stored)?;
+        // Script fields see the vectors kept out of the stored source (Elasticsearch's fetch
+        // phase patches them back).
+        let patched = if self.source_vectors {
+            crate::engine::source_vectors::patched_source(&self.table, b, &mut crate::engine::source_vectors::InSegment(&self.seg, self.doc)).ok()?
+        } else {
+            None
+        };
+        let b = patched.as_deref().unwrap_or(b);
         let s = std::str::from_utf8(b).ok()?;
         // Under field level security the script sees the fields its reader may (as its
         // `doc[...]` does).
@@ -1098,6 +1114,12 @@ impl Painless {
         Leaf::from_bound(&self.bound, self.host(seg))
             .ok_or_else(|| search_index::Error::illegal("not a painless script"))
     }
+
+    fn field_leaf(&self, seg: &SegmentContext) -> search_index::Result<Leaf> {
+        let mut host = self.host(seg);
+        host.source_vectors = true;
+        Leaf::from_bound(&self.bound, host).ok_or_else(|| search_index::Error::illegal("not a painless script"))
+    }
 }
 
 /// A filter script on one segment. Deleted documents never match and never run the script:
@@ -1164,7 +1186,7 @@ pub fn to_value(v: &search_painless::Value) -> crate::json::Value {
 
 /// `script_fields` of one hit.
 pub fn script_field(p: &Painless, seg: &SegmentContext, local: u32, score: f32) -> EsResult<Vec<crate::json::Value>> {
-    let mut leaf = p.leaf_of(seg).map_err(crate::engine::convert::index_error)?;
+    let mut leaf = p.field_leaf(seg).map_err(crate::engine::convert::index_error)?;
     let v = leaf.run(local, score as f64).map_err(crate::scripting::script_error)?;
     let j = to_value(&v);
     Ok(match j {

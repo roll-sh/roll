@@ -77,6 +77,7 @@ fn principal_from_user(u: &Value) -> Principal {
         metadata: u.get("metadata").cloned().unwrap_or_else(Value::object),
         realm_name,
         realm_type,
+        authenticating: None,
         kind: AuthKind::Realm,
     }
 }
@@ -199,6 +200,16 @@ pub async fn invalidate_token(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if token.is_none() && refresh.is_none() && username.is_none() && realm.is_none() {
         return Err(EsError::action_request_validation(&["one of [token, refresh_token, realm_name, username] must be specified".into()]));
     }
+    // A token given by value is looked up in the tokens index: a missing index fails the
+    // request, unless the value isn't even a token (`TokenService.invalidateAccessToken`,
+    // `invalidateRefreshToken`).
+    let by_value = token.as_ref().or(refresh.as_ref()).cloned();
+    if let Some(v) = &by_value
+        && !store::home_index(TOKENS).is_some_and(|i| ctx.state().metadata.indices.contains_key(i))
+        && super::b64_decode(v).is_ok()
+    {
+        return Err(EsError::security(400, "failed to invalidate token"));
+    }
     let now = ctx.now_ms;
     let (invalidated, previously) = ctx
         .cluster
@@ -241,7 +252,9 @@ pub async fn invalidate_token(ctx: &Ctx<'_>) -> EsResult<Reply> {
             Ok((inv, prev))
         })
         .await?;
-    Reply::ok(obj! { "invalidated_tokens" => invalidated, "previously_invalidated_tokens" => previously, "error_count" => 0 })
+    // No token of that value: 404, with the counts.
+    let status = if by_value.is_some() && invalidated + previously == 0 { 404 } else { 200 };
+    Ok(Reply::Body(status, obj! { "invalidated_tokens" => invalidated, "previously_invalidated_tokens" => previously, "error_count" => 0 }))
 }
 
 // --- service accounts ------------------------------------------------------------------------
@@ -280,10 +293,23 @@ fn authenticate_service_token(cluster: &Cluster, value: &str) -> EsResult<Princi
     let text = String::from_utf8_lossy(&bytes[4..]).into_owned();
     let Some((qualified, secret)) = text.split_once(':') else { return Err(invalid()) };
     let st = cluster.state();
-    let Some(t) = st.metadata.xpack.get(SERVICE_TOKENS, qualified) else { return Err(invalid()) };
-    if !super::verify_secret(secret, t.get("hash").and_then(Value::as_str).unwrap_or_default()) {
-        return Err(invalid());
-    }
+    // The security index's tokens, then `config/service_tokens`'s (`CompositeServiceAccountTokenStore`).
+    let file = match st.metadata.xpack.get(SERVICE_TOKENS, qualified) {
+        Some(t) => {
+            if !super::verify_secret(secret, t.get("hash").and_then(Value::as_str).unwrap_or_default()) {
+                return Err(invalid());
+            }
+            false
+        }
+        None => {
+            let tokens = file_tokens(cluster);
+            let Some((_, hash)) = tokens.iter().find(|(q, _)| q == qualified) else { return Err(invalid()) };
+            if !super::verify_password(secret, hash) {
+                return Err(invalid());
+            }
+            true
+        }
+    };
     let (account, name) = qualified.rsplit_once('/').unwrap_or((qualified, ""));
     Ok(Principal {
         username: account.to_string(),
@@ -293,8 +319,31 @@ fn authenticate_service_token(cluster: &Cluster, value: &str) -> EsResult<Princi
         metadata: obj! { "_elastic_service_account" => true },
         realm_name: "_service_account",
         realm_type: "_service_account",
-        kind: AuthKind::ServiceAccount { token: name.to_string() },
+        authenticating: None,
+        kind: AuthKind::ServiceAccount { token: name.to_string(), file },
     })
+}
+
+/// The largest `config/service_tokens` read.
+const MAX_TOKENS_FILE: u64 = 1 << 20;
+
+/// `config/service_tokens` (`FileServiceAccountTokenStore`, read as it is now, as Elasticsearch
+/// reloads it on change): `namespace/service/name:hash` lines, as (qualified name, hash).
+fn file_tokens(cluster: &Cluster) -> Vec<(String, String)> {
+    use std::io::Read;
+    let Some(dir) = cluster.config.node_setting("path.conf") else { return Vec::new() };
+    let Ok(f) = std::fs::File::open(std::path::Path::new(dir).join("service_tokens")) else { return Vec::new() };
+    let mut text = String::new();
+    if f.take(MAX_TOKENS_FILE).read_to_string(&mut text).is_err() {
+        return Vec::new();
+    }
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| l.split_once(':'))
+        .filter(|(q, _)| q.split('/').count() == 3)
+        .map(|(q, h)| (q.to_string(), h.to_string()))
+        .collect()
 }
 
 pub fn get_service_accounts(ctx: &Ctx) -> EsResult<Reply> {
@@ -362,20 +411,37 @@ pub fn get_service_credentials(ctx: &Ctx) -> EsResult<Reply> {
     let st = ctx.state();
     let prefix = format!("{account}/");
     let tokens: Map = st.metadata.xpack.iter(SERVICE_TOKENS).filter_map(|(k, _)| k.strip_prefix(&prefix).map(|n| (n.to_string(), obj! {}))).collect();
+    // The file tokens, by the nodes that have them (one: this node).
+    let node = ctx.cluster.config.node_name.clone();
+    let files: Map = file_tokens(ctx.cluster).into_iter().filter_map(|(q, _)| q.strip_prefix(&prefix).map(|n| (n.to_string(), obj! { "nodes" => crate::arr![node.clone()] }))).collect();
     Reply::ok(obj! {
         "service_account" => account,
-        "count" => tokens.len(),
+        "count" => tokens.len() + files.len(),
         "tokens" => Value::Obj(tokens),
-        "nodes_credentials" => obj! { "_nodes" => obj! { "total" => 1, "successful" => 1, "failed" => 0 }, "file_tokens" => obj! {} },
+        "nodes_credentials" => obj! { "_nodes" => obj! { "total" => 1, "successful" => 1, "failed" => 0 }, "file_tokens" => Value::Obj(files) },
     })
 }
 
 // --- user profiles ---------------------------------------------------------------------------
 
-fn profile_uid(username: &str, realm: &str) -> String {
+/// A user's profile uid (`ProfileService`): `u_`, the base64url SHA-256 of the username, and
+/// the first differentiator (`_0`…`_9`) that is free or already the user's of that realm.
+fn profile_uid(st: &crate::meta::ClusterState, username: &str, realm: &str) -> EsResult<String> {
     use base64::Engine;
-    let d = super::digest(&[username.as_bytes(), realm.as_bytes()]);
-    format!("u_{}_0", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(d))
+    use sha2::Digest;
+    let d = sha2::Sha256::digest(username.as_bytes());
+    let base = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(d);
+    for n in 0..10 {
+        let uid = format!("u_{base}_{n}");
+        match st.metadata.xpack.get(PROFILES, &uid) {
+            None => return Ok(uid),
+            Some(p) if p.pointer(&["user", "username"]).and_then(Value::as_str) == Some(username) && p.pointer(&["user", "realm_name"]).and_then(Value::as_str) == Some(realm) => {
+                return Ok(uid);
+            }
+            Some(_) => {}
+        }
+    }
+    Err(EsError::illegal_state(format!("failed to activate profile for user [{username}]: too many profiles with the same username")))
 }
 
 /// The profile uid of a user, if it activated one.
@@ -409,7 +475,6 @@ fn profile_view(p: &Value, data_keys: Option<&[String]>) -> Value {
 pub async fn activate_profile(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body()?.unwrap_or_else(Value::object);
     let p = grant_principal(ctx.cluster, &body, "cluster:admin/xpack/security/profile/activate")?;
-    let uid = profile_uid(&p.username, p.realm_name);
     let now = ctx.now_ms;
     let mut user = Map::new();
     user.insert("username".into(), p.username.clone().into());
@@ -421,10 +486,10 @@ pub async fn activate_profile(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if !p.email.is_null() {
         user.insert("email".into(), p.email.clone());
     }
-    let u = uid.clone();
     let doc = ctx
         .cluster
         .update(move |st| {
+            let u = profile_uid(st, &p.username, p.realm_name)?;
             let existing = st.metadata.xpack.get(PROFILES, &u).cloned();
             let seq = existing.as_ref().and_then(|e| e.get("seq_no")).and_then(Value::as_i64).map_or(0, |s| s + 1);
             let doc = obj! {
@@ -587,6 +652,7 @@ pub fn has_privileges_profile(ctx: &Ctx) -> EsResult<Reply> {
             metadata: Value::object(),
             realm_name: "default_native",
             realm_type: "native",
+            authenticating: None,
             kind: AuthKind::Realm,
         };
         let (all, ..) = super::users::check_privileges(&file, &st, &principal, &privs)?;
@@ -627,7 +693,8 @@ pub fn get_settings(ctx: &Ctx) -> EsResult<Reply> {
     let mut out = Map::new();
     for (key, index) in [("security", ".security-7"), ("security-tokens", ".security-tokens-7"), ("security-profile", ".security-profile-8")] {
         let mut settings = Map::new();
-        if index == ".security-7" {
+        // An index's settings once it exists (the main index is listed always).
+        if index == ".security-7" || st.metadata.indices.contains_key(index) {
             settings.insert("auto_expand_replicas".into(), "0-1".into());
             settings.insert("number_of_replicas".into(), "0".into());
             settings.insert("routing".into(), obj! { "allocation" => obj! { "include" => obj! { "_tier_preference" => "data_hot,data_content" } } });
@@ -690,10 +757,4 @@ mod tests {
         assert!(check_account("elastic", "nope").is_err());
     }
 
-    #[test]
-    fn profile_uids_are_stable() {
-        let a = profile_uid("juan", "default_native");
-        assert_eq!(a, profile_uid("juan", "default_native"));
-        assert!(a.starts_with("u_") && a.ends_with("_0"));
-    }
 }

@@ -451,7 +451,7 @@ The contract between the stack, the image and rolld. Each setting is a flag with
 | `ROLL_STREAM_ACK_LINGER_MS` | `50` | how long a stream's owner gathers appends before writing its write-ahead log object: `acks=all` latency against S3 PUTs (at most one per busy stream per round) |
 | `ROLL_PRODUCTS` | `redis,streams,tasks,storage,nosql,queues,code,search` | the products the node runs (see "Products"); Postgres is off until its engine runs in process |
 | `ROLL_S3_BUCKET`, `AWS_REGION` | `roll-cloud-data-<account>`, `us-east-1` | all product data, under per-product prefixes |
-| `ROLL_SECRET_KEY` | from Secrets Manager | seals owners' keys, the stored certificates and accounts' TOTP seeds |
+| `ROLL_SECRET_KEY` | from Secrets Manager | seals owners' keys, the stored certificates, accounts' TOTP seeds and search clusters' stored secrets (watch passwords, connector and Fleet secrets) |
 | `ROLL_ADMIN_TOKEN` | from Secrets Manager | the operator token every control-plane API accepts |
 | `ROLL_ACCOUNTS_MAIL_FROM` | the stack's `MailFrom` (unset: no mail) | sign-in codes and invites through SES v2 from this address (docs/accounts.md) |
 | `ROLL_ACCOUNTS_OUTBOX` | never set | writes mail to a directory instead: local development and tests only |

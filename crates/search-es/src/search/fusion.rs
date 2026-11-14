@@ -10,7 +10,7 @@
 //! document (Elasticsearch's `RankDoc` order).
 
 use super::query::QueryCtx;
-use super::rank_docs::{RankDoc, RankDocsQuery, RankKind, SimilarityQuery, TopQuery};
+use super::rank_docs::{RankDoc, RankDocsQuery, RankKind, SimilarityQuery, SumOf, TopQuery};
 use super::retriever::{Fusion, FusionKind};
 use super::{SearchOutcome, SearchRequest, Target};
 use crate::cluster::Cluster;
@@ -32,8 +32,11 @@ pub enum Child {
     /// A nested compound retriever.
     Compound(Node),
     /// A `pinned` retriever's child: its ranked documents (from the `pinned` query), its own
-    /// query (explained) and the `pinned` query (what it matches).
-    Wrapped { ranked: Vec<(usize, u32, f32)>, organic: Value, pinned: Value },
+    /// query (explained) and the `pinned` query (what it matches). Under a `rule` retriever
+    /// (`rule`), the `rule` query is what explains.
+    Wrapped { ranked: Vec<(usize, u32, f32)>, organic: Value, pinned: Value, rule: bool },
+    /// A child less the documents a `rule` retriever's rules exclude (a query matching them).
+    Excluding { inner: Box<Child>, excluded: Value },
 }
 
 /// A compound retriever's fused ranking.
@@ -99,11 +102,26 @@ impl Child {
                 Arc::new(TopQuery::new(docs, RankKind::Plain, sources, vec![None]))
             }
             Child::Compound(node) if explain => Arc::new(node.top(qctx, ti, true)?),
-            // `PinnedRetrieverBuilderWrapper.explainQuery`: the child's rank docs over its query.
-            Child::Wrapped { ranked, organic, .. } if explain => {
+            // `PinnedRetrieverBuilderWrapper.explainQuery`: the child's rank docs over its query;
+            // under a `rule` retriever, over the `rule` query (`QueryRuleRetrieverBuilder`).
+            Child::Wrapped { ranked, organic, pinned, rule } if explain => {
                 let docs = ranked.iter().enumerate().filter(|(_, r)| r.0 == ti).map(|(i, r)| RankDoc { doc: r.1, score: r.2, rank: i as u32 + 1, per_child: Vec::new() }).collect();
-                let (q, _) = crate::query::parse_query(organic, None, &[])?;
-                Arc::new(TopQuery::new(docs, RankKind::Plain, vec![qctx.to_query(&q)?], vec![None]))
+                let source = if *rule {
+                    let (q, _) = crate::query::parse_query(pinned, None, &[])?;
+                    Arc::new(SumOf(qctx.to_query(&q)?)) as QueryRef
+                } else {
+                    let (q, _) = crate::query::parse_query(organic, None, &[])?;
+                    qctx.to_query(&q)?
+                };
+                Arc::new(TopQuery::new(docs, RankKind::Plain, vec![source], vec![None]))
+            }
+            Child::Excluding { inner, .. } if explain => inner.source(qctx, ti, true)?,
+            Child::Excluding { inner, excluded } => {
+                let (q, _) = crate::query::parse_query(excluded, None, &[])?;
+                let b = search_index::query::BooleanQuery::new()
+                    .add(search_index::query::Occur::Must, inner.source(qctx, ti, false)?)
+                    .add(search_index::query::Occur::MustNot, qctx.to_query(&q)?);
+                Arc::new(b)
             }
             Child::Wrapped { pinned, .. } => {
                 let (q, _) = crate::query::parse_query(pinned, None, &[])?;
@@ -159,8 +177,8 @@ pub fn rank(cluster: &Cluster, req: &SearchRequest, targets: &[Target], f: &Fusi
         ranked.push(out.ranked.iter().take(window).map(|(t, d, s)| ((*t, *d), *s)).collect());
         children.push(match tail {
             Some(v) if matches!(f.kind, FusionKind::Pinned { organic: Some(_), .. }) => {
-                let FusionKind::Pinned { organic: Some(o), .. } = &f.kind else { unreachable!() };
-                Child::Wrapped { ranked: out.ranked, organic: o.clone(), pinned: v }
+                let FusionKind::Pinned { organic: Some(o), rule, .. } = &f.kind else { unreachable!() };
+                Child::Wrapped { ranked: out.ranked, organic: o.clone(), pinned: v, rule: rule.is_some() }
             }
             Some(v) => Child::Query(v),
             None => {
@@ -169,14 +187,35 @@ pub fn rank(cluster: &Cluster, req: &SearchRequest, targets: &[Target], f: &Fusi
             }
         });
     }
-    if let FusionKind::Pinned { pins, organic: None } = &f.kind {
-        // The pinned documents rank ahead of the child's (`PinnedQueryBuilder`); they also
-        // match, child or not.
-        ranked.push(pinned_docs(targets, pins)?);
-        let ids: Vec<Value> = pins.iter().map(|(_, id)| Value::Str(id.clone())).collect();
-        children.push(Child::Query(crate::obj! { "ids" => crate::obj! { "values" => Value::Arr(ids) } }));
+    if let FusionKind::Pinned { pins, organic: None, rule } = &f.kind {
+        let mut pins = pins.clone();
+        if let Some(rule) = rule {
+            // `rule` over a compound retriever: its rules run on the child's rank docs.
+            let actions = crate::xpack::entsearch::query_rules::actions(&cluster.state(), &rule.ruleset_ids, &rule.match_criteria)?;
+            pins = actions.pins();
+            let excluded = actions.excluded();
+            if !excluded.is_empty() {
+                let gone: std::collections::HashSet<(usize, u32)> = find_docs(targets, &excluded)?.into_iter().map(|(d, _)| d).collect();
+                if let Some(first) = ranked.first_mut() {
+                    first.retain(|(d, _)| !gone.contains(d));
+                }
+                if let Some(Child::Compound(node)) = children.first_mut() {
+                    node.fused.retain(|d| !gone.contains(&d.key));
+                }
+                let inner = children.remove(0);
+                children.insert(0, Child::Excluding { inner: Box::new(inner), excluded: docs_query(&excluded) });
+            }
+        }
+        if !pins.is_empty() {
+            // The pinned documents rank ahead of the child's (`PinnedQueryBuilder`); they also
+            // match, child or not.
+            ranked.push(pinned_docs(targets, &pins)?);
+            let ids: Vec<Value> = pins.iter().map(|(_, id)| Value::Str(id.clone())).collect();
+            children.push(Child::Query(crate::obj! { "ids" => crate::obj! { "values" => Value::Arr(ids) } }));
+        }
     }
     let kind = match &f.kind {
+        FusionKind::Pinned { rule: Some(rule), .. } => RankKind::Rule(rule.description()),
         FusionKind::Pinned { .. } => RankKind::Pinned,
         FusionKind::Rrf { rank_constant, .. } => RankKind::Rrf { rank_constant: *rank_constant },
         FusionKind::Linear { weights, normalizers } => RankKind::Linear { weights: weights.clone(), normalizers: normalizers.iter().map(|n| n.name()).collect() },
@@ -189,12 +228,31 @@ pub fn rank(cluster: &Cluster, req: &SearchRequest, targets: &[Target], f: &Fusi
 /// The pinned documents with their pin scores (the floats right above the organic cap,
 /// highest first): `(target, doc)`, score.
 fn pinned_docs(targets: &[Target], pins: &[(Option<String>, String)]) -> EsResult<Vec<((usize, u32), f32)>> {
+    let top = super::extra::MAX_ORGANIC_SCORE.to_bits() + 1 + pins.len() as u32;
+    Ok(find_docs(targets, pins)?.into_iter().map(|(d, i)| (d, f32::from_bits(top - i as u32))).collect())
+}
+
+/// A query matching the documents `docs` names (`(index, id)`).
+fn docs_query(docs: &[(Option<String>, String)]) -> Value {
+    let should: Vec<Value> = docs
+        .iter()
+        .map(|(index, id)| {
+            let mut filter = vec![crate::obj! { "ids" => crate::obj! { "values" => crate::arr![id.clone()] } }];
+            if let Some(i) = index {
+                filter.push(crate::obj! { "term" => crate::obj! { "_index" => i.clone() } });
+            }
+            crate::obj! { "bool" => crate::obj! { "filter" => Value::Arr(filter) } }
+        })
+        .collect();
+    crate::obj! { "bool" => crate::obj! { "should" => Value::Arr(should) } }
+}
+
+/// The live documents `docs` names (`(index, id)`), in that order: `(target, doc)` and the
+/// position in `docs`.
+fn find_docs(targets: &[Target], docs: &[(Option<String>, String)]) -> EsResult<Vec<((usize, u32), usize)>> {
     let ie = crate::engine::convert::index_error;
     let mut out = Vec::new();
-    let mut boost_num = super::extra::MAX_ORGANIC_SCORE.to_bits() + 1 + pins.len() as u32;
-    for (index, id) in pins {
-        let score = f32::from_bits(boost_num);
-        boost_num -= 1;
+    for (pos, (index, id)) in docs.iter().enumerate() {
         let q: QueryRef = Arc::new(search_index::query::TermQuery::new(search_index::schema::ID_FIELD, id.as_bytes().to_vec()));
         for (ti, t) in targets.iter().enumerate() {
             if index.as_deref().is_some_and(|i| i != t.idx.name) {
@@ -207,7 +265,7 @@ fn pinned_docs(targets: &[Target], pins: &[(Option<String>, String)]) -> EsResul
                 let mut d = sc.next();
                 while d != search_codec::NO_MORE_DOCS {
                     if seg.is_live(d) {
-                        out.push(((ti, seg.base + d), score));
+                        out.push(((ti, seg.base + d), pos));
                         break;
                     }
                     d = sc.next();

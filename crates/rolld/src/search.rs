@@ -130,6 +130,9 @@ impl Search {
         cfg.history_retention = Duration::from_secs(args.search_history_s);
         cfg.test_features = args.search_test_features;
         cfg.gc_interval = (args.search_gc_interval_s > 0).then(|| Duration::from_secs(args.search_gc_interval_s));
+        // Watch passwords, connector and Fleet secrets are sealed in cluster state under the
+        // deployment's key; without one they're stored as given (as on Elasticsearch).
+        cfg.sealer = std::env::var("ROLL_SECRET_KEY").ok().and_then(|k| search_control::Sealer::from_secret(&k));
         // Behind the edge, cluster URLs name `<cluster>.search.<region>.<domain>` over HTTPS.
         if let Some(p) = public {
             p.search(&mut cfg);

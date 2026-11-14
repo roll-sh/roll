@@ -43,6 +43,7 @@ const HOMES: &[Home] = &[
     Home { prefix: "security.token", index: ".security-tokens-7", alias: Some(".security-tokens") },
     Home { prefix: "security.profile", index: ".security-profile-8", alias: Some(".security-profile") },
     Home { prefix: "security.", index: ".security-7", alias: Some(".security") },
+    Home { prefix: "opendistro_security.", index: ".opendistro_security", alias: None },
     Home { prefix: "ml.job", index: ".ml-config", alias: None },
     Home { prefix: "ml.datafeed", index: ".ml-config", alias: None },
     Home { prefix: "ml.dfa", index: ".ml-config", alias: None },
@@ -57,10 +58,17 @@ const HOMES: &[Home] = &[
     Home { prefix: "transform", index: ".transform-internal-007", alias: Some(".transform-internal-007-alias") },
     Home { prefix: "watcher.watch", index: ".watches", alias: None },
     Home { prefix: "logstash.", index: ".logstash", alias: None },
+    Home { prefix: "inference_secret", index: ".secrets-inference", alias: None },
+    Home { prefix: "inference", index: ".inference", alias: Some(".inference-alias") },
 ];
 
 fn home(family: &str) -> Option<&'static Home> {
     HOMES.iter().find(|h| family.starts_with(h.prefix))
+}
+
+/// The system index a family's objects live in (`None`: the cluster state).
+pub fn home_index(family: &str) -> Option<&'static str> {
+    home(family).map(|h| h.index)
 }
 
 impl XpackState {

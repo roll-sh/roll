@@ -48,10 +48,16 @@ pub struct Stats {
     pub original_types: Vec<(String, Vec<String>)>,
     /// Column `_meta` (`SET column_metadata=true`), by column name.
     pub col_meta: Vec<(String, Value)>,
+    /// The aggregates of the last `STATS` that query approximation reports on (output names).
+    pub approx: Vec<String>,
     /// Columns of conflicting types from a union source (a subquery or view) that nothing read
     /// yet: the error each is if a command above reads it.
     pub conflicts: Vec<(String, EsError)>,
 }
+
+/// Aggregates query approximation estimates (`SET approximation`), which get its confidence
+/// interval and certified columns.
+const APPROXIMABLE: &[&str] = &["count", "sum", "avg", "median", "percentile"];
 
 /// The default and maximum number of rows a query returns.
 pub const DEFAULT_LIMIT: usize = 1000;
@@ -74,6 +80,15 @@ pub struct Src<'a> {
 /// A union type: each mapping type of a field and the indices that map it.
 type UnionTypes = Vec<(String, Vec<String>)>;
 
+/// A time series source's metrics as the client's field caps show them: (name, metric type,
+/// field type, unit), sorted by name, and the data streams of its indices (`None`: an index
+/// outside one).
+#[derive(Clone, Debug, Default)]
+pub struct TsMeta {
+    metrics: Vec<(String, String, String, Option<String>)>,
+    data_streams: Vec<Option<String>>,
+}
+
 /// What `ENRICH` and `LOOKUP JOIN` read, loaded (asynchronously) before the pipeline is built.
 #[derive(Default)]
 pub struct Resources {
@@ -89,6 +104,8 @@ pub struct Resources {
     enrich_ranges: HashMap<String, String>,
     /// The source's time series dimensions (`TS` groups by them per series).
     dimensions: std::sync::OnceLock<std::collections::HashSet<String>>,
+    /// The source's metric fields and data streams (`METRICS_INFO`, `TS_INFO`).
+    ts_meta: std::sync::OnceLock<TsMeta>,
     /// By index: its columns and every row.
     lookup: HashMap<String, Table>,
     /// The source fields Elasticsearch would resolve (`needed_columns`) and every source field:
@@ -97,6 +114,8 @@ pub struct Resources {
     suggest: std::sync::OnceLock<(Option<std::collections::HashSet<String>>, std::collections::HashSet<String>)>,
     /// `SET column_metadata=true`: the `_meta` of `BUCKET` groups, by output name.
     col_meta: parking_lot::Mutex<Vec<(String, Value)>>,
+    /// The last `STATS`'s approximable aggregates ([`Stats::approx`]).
+    approx: parking_lot::Mutex<Vec<String>>,
 }
 
 /// The `_meta.bucket` Elasticsearch reports for a `BUCKET` group: the numeric interval, or
@@ -947,6 +966,22 @@ impl Compiler<'_> {
                 let mut cs = Vec::new();
                 let mut ts = Vec::new();
                 for a in args {
+                    // A function's options map: its literal entries, as JSON.
+                    if let ExprKind::Call(n, pairs) = &a.kind
+                        && n == "$map"
+                    {
+                        let mut m = crate::json::Map::new();
+                        for kv in pairs.chunks(2) {
+                            if let [k, v] = kv
+                                && let (ExprKind::Lit(V::Str(key)), Some(val)) = (&k.kind, fold(self.src, v))
+                            {
+                                m.insert(key.clone(), val.to_json(val.type_of()));
+                            }
+                        }
+                        cs.push(CE::Lit(V::Str(crate::json::Value::Obj(m).to_json())));
+                        ts.push(DataType::Keyword);
+                        continue;
+                    }
                     let (c, t) = self.compile(a)?;
                     cs.push(c);
                     ts.push(t);
@@ -1307,6 +1342,8 @@ pub enum GroupKey {
     Null,
     Bool(bool),
     Int(i64),
+    /// An `unsigned_long` above `i64::MAX`.
+    UInt(u64),
     /// Doubles by their bits, as Elasticsearch's double `BlockHash` keys them
     /// (`doubleToLongBits`): `-0.0` and `0.0` are two groups.
     Double(u64),
@@ -1322,6 +1359,7 @@ impl GroupKey {
             V::Bool(b) => GroupKey::Bool(*b),
             V::Int(i) => GroupKey::Int(*i as i64),
             V::Long(l) => GroupKey::Int(*l),
+            V::ULong(u) => GroupKey::UInt(*u),
             V::Double(d) => GroupKey::Double(double_key(*d)),
             V::Str(s) | V::Ip(s) => GroupKey::Str(s.clone()),
             V::Date(d) => GroupKey::Date(*d),
@@ -1918,6 +1956,7 @@ fn hash_key(v: &V, h: &mut impl std::hash::Hasher) {
         V::Bool(b) => (1u8, *b).hash(h),
         V::Int(i) => (2u8, *i as i64).hash(h),
         V::Long(l) => (2u8, *l).hash(h),
+        V::ULong(u) => (7u8, *u).hash(h),
         V::Double(d) => (3u8, double_key(*d)).hash(h),
         V::Str(s) | V::Ip(s) => (4u8, s.as_str()).hash(h),
         V::Date(d) => (5u8, *d).hash(h),
@@ -1934,6 +1973,7 @@ fn same_key(a: &V, b: &V) -> bool {
         (V::Null, V::Null) => true,
         (V::Bool(x), V::Bool(y)) => x == y,
         (V::Int(_) | V::Long(_), V::Int(_) | V::Long(_)) => a.as_i64() == b.as_i64(),
+        (V::ULong(x), V::ULong(y)) => x == y,
         (V::Double(x), V::Double(y)) => double_key(*x) == double_key(*y),
         (V::Str(x) | V::Ip(x), V::Str(y) | V::Ip(y)) => x == y,
         (V::Date(x), V::Date(y)) => x == y,
@@ -1958,6 +1998,17 @@ impl Grouper {
         for n in by {
             let (c, t) = match &n.expr.kind {
                 ExprKind::Call(f, args) if f == "bucket" || f == "bin" => compile_bucket(src, cols, &n.expr, args)?,
+                // `CATEGORIZE(text)`: groups by each value's category ([`functions::categorize`]).
+                ExprKind::Call(f, args) if f == "categorize" => {
+                    let Some(a) = args.first() else {
+                        return Err(verification(src, n.expr.start, "error building [categorize]: expects one or two arguments"));
+                    };
+                    let (c, t) = Compiler { src, cols, aggs: None }.compile(a)?;
+                    if !t.is_string() && t != DataType::Null {
+                        return Err(verification(src, a.start, &format!("first argument of [{}] must be [string], found value [{}] type [{}]", &src[n.expr.start..n.expr.end], &src[a.start..a.end], functions::type_name_static(t))));
+                    }
+                    (CE::Fn(F::Categorize, vec![c], vec![t], at_of(src.text, &n.expr)), DataType::Keyword)
+                }
                 // `TBUCKET(span)`: `BUCKET(@timestamp, span)`.
                 ExprKind::Call(f, args) if f == "tbucket" => {
                     let mut full = vec![Expr { kind: ExprKind::Col("@timestamp".into()), start: n.expr.start, end: n.expr.start }];
@@ -1998,6 +2049,7 @@ impl Grouper {
             }
             outputs.push((c, t, n.name.clone()));
         }
+        *src.res.approx.lock() = aggs.iter().filter(|n| matches!(&n.expr.kind, ExprKind::Call(f, _) if APPROXIMABLE.contains(&f.as_str()))).map(|n| n.name.clone()).collect();
         Ok(Grouper { keys, outputs, specs, index: HashMap::default(), groups: Vec::new() })
     }
 
@@ -2588,6 +2640,7 @@ struct Source {
     flattened: Vec<String>,
     /// Time series dimensions (in some target index).
     dimensions: std::collections::HashSet<String>,
+    ts_meta: TsMeta,
     /// The same, with the indices mapping each as `flattened` (`None`: every index). Below such
     /// a field, in those indices, there is no column: its keys read as null.
     flattened_in: Vec<(String, Option<Vec<String>>)>,
@@ -2620,7 +2673,7 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
     if caps.get("indices").and_then(Value::as_array).is_none_or(|a| a.is_empty()) {
         // Patterns that match nothing are an empty result with no columns.
         if sources.iter().all(|s| s.contains('*')) {
-            return Ok(Source { index, cols: vec![Col { name: "<no-fields>".into(), ty: DataType::Null }], fields: Vec::new(), metadata: Vec::new(), needed: None, ft: Vec::new(), load: Vec::new(), source_order: Default::default(), floats: Default::default(), constants: Default::default(), indices: Vec::new(), original_types: Vec::new(), unions: HashMap::new(), unsupported: HashMap::new(), flattened: Vec::new(), flattened_in: Vec::new(), dimensions: Default::default() });
+            return Ok(Source { index, cols: vec![Col { name: "<no-fields>".into(), ty: DataType::Null }], fields: Vec::new(), metadata: Vec::new(), needed: None, ft: Vec::new(), load: Vec::new(), source_order: Default::default(), floats: Default::default(), constants: Default::default(), indices: Vec::new(), original_types: Vec::new(), unions: HashMap::new(), unsupported: HashMap::new(), flattened: Vec::new(), flattened_in: Vec::new(), dimensions: Default::default(), ts_meta: TsMeta::default() });
         }
         return Err(verification_plain(&format!("Unknown index [{index}]")));
     }
@@ -2764,10 +2817,27 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
         Some(Value::Obj(f)) => f.iter().filter(|(_, c)| c.as_object().is_some_and(|m| m.values().any(|t| t.get("time_series_dimension").and_then(Value::as_bool) == Some(true)))).map(|(k, _)| k.clone()).collect(),
         _ => Default::default(),
     };
+    let mut metrics: Vec<(String, String, String, Option<String>)> = match caps.get("fields") {
+        Some(Value::Obj(f)) => f
+            .iter()
+            .filter_map(|(name, c)| {
+                let (ty, cap) = c.as_object()?.iter().find(|(_, t)| t.get("time_series_metric").is_some())?;
+                let unit = cap.pointer(&["meta", "unit"]).and_then(|u| u.as_array().and_then(|a| a.first()).or(Some(u))).map(Value::to_es_string);
+                Some((name.clone(), cap.get("time_series_metric").map(Value::to_es_string).unwrap_or_default(), ty.clone(), unit))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    metrics.sort();
+    let st = cluster.state();
+    let mut data_streams: Vec<Option<String>> = indices.iter().map(|i| st.metadata.data_streams.values().find(|d| d.indices.contains(i)).map(|d| d.name.clone())).collect();
+    data_streams.sort();
+    data_streams.dedup();
+    let ts_meta = TsMeta { metrics, data_streams };
     // A client that may read only some indices reads the ones its field caps resolved to (its
     // wildcards expanded to authorized indices only), never the expression again.
     let index = if internal::caller().is_some() { indices.join(",") } else { index };
-    Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported, flattened, flattened_in, dimensions })
+    Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported, flattened, flattened_in, dimensions, ts_meta })
 }
 
 /// Whether `s` may be read straight from the shards ([`super::columnar`]): not when the client
@@ -3548,6 +3618,9 @@ fn merge_stats(into: &mut Stats, from: Stats) {
         }
     }
     into.col_meta.extend(from.col_meta);
+    if !from.approx.is_empty() {
+        into.approx = from.approx;
+    }
     into.conflicts.extend(from.conflicts);
     for (n, t) in from.original_types {
         if !into.original_types.iter().any(|(x, _)| *x == n) {
@@ -3907,6 +3980,7 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
         let t = run_rest(&src, t, &rest, w)?;
         stats.rows_emitted = t.rows.len() as i64;
         stats.col_meta.extend(std::mem::take(&mut *src.res.col_meta.lock()));
+        stats.approx = std::mem::take(&mut *src.res.approx.lock());
         Ok((t, stats))
     })
 }
@@ -4049,6 +4123,7 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
             let _ = src.res.unions.set(source.unions.clone());
             let _ = src.res.unsupported.set(source.unsupported.clone());
             let _ = src.res.dimensions.set(source.dimensions.clone());
+            let _ = src.res.ts_meta.set(source.ts_meta.clone());
             stats.fields = source.fields.iter().filter(|f| source.needed.as_ref().is_none_or(|n| n.contains(*f))).cloned().collect();
             let _ = src.res.suggest.set((source.needed.clone(), source.cols.iter().map(|c| c.name.clone()).collect()));
             let (pipe, out_cols) = build_pipeline(&src, prefix, source.cols.clone())?;
@@ -4128,6 +4203,7 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
     table = run_rest(&src, table, rest, w)?;
     stats.rows_emitted = table.rows.len() as i64;
     stats.col_meta.extend(std::mem::take(&mut *src.res.col_meta.lock()));
+    stats.approx = std::mem::take(&mut *src.res.approx.lock());
     Ok((table, stats))
 }
 
@@ -4225,10 +4301,63 @@ async fn finish(_cluster: &Cluster, src: &Src<'_>, t: Table, rest: &[Cmd], w: &m
     let t = run_rest(src, t, rest, w)?;
     stats.rows_emitted = t.rows.len() as i64;
     stats.col_meta.extend(std::mem::take(&mut *src.res.col_meta.lock()));
+    stats.approx = std::mem::take(&mut *src.res.approx.lock());
     Ok((t, stats))
 }
 
 /// The commands after the first blocking one, over a materialized table.
+/// `METRICS_INFO` (`ts`: `TS_INFO`) over the rows of a `TS` source: per data stream and metric
+/// the client can read, its unit, metric and field type, and the dimension fields; `TS_INFO`
+/// per time series holding the metric too, its `dimensions` as a JSON object.
+fn ts_info(src: &Src<'_>, t: &Table, ts: bool) -> Table {
+    let meta = src.res.ts_meta.get().cloned().unwrap_or_default();
+    let mut dims: Vec<String> = src.res.dimensions.get().map(|d| d.iter().cloned().collect()).unwrap_or_default();
+    dims.sort();
+    let col = |n: &str| t.cols.iter().position(|c| c.name == n);
+    let dim_cols: Vec<(String, usize)> = dims.iter().filter_map(|d| col(d).map(|i| (d.clone(), i))).collect();
+    let dim_fields = match dims.len() {
+        0 => V::Null,
+        1 => V::Str(dims[0].clone()),
+        _ => V::Multi(dims.iter().cloned().map(V::Str).collect()),
+    };
+    let streams = if meta.data_streams.is_empty() { vec![None] } else { meta.data_streams.clone() };
+    let mut cols: Vec<Col> = ["metric_name", "data_stream", "unit", "metric_type", "field_type", "dimension_fields"].iter().map(|n| Col { name: n.to_string(), ty: DataType::Keyword }).collect();
+    if ts {
+        cols.push(Col { name: "dimensions".into(), ty: DataType::Keyword });
+    }
+    let mut rows = Vec::new();
+    for (name, metric, ty, unit) in meta.metrics.iter() {
+        let Some(mi) = col(name) else { continue };
+        let base = |ds: &Option<String>| vec![V::Str(name.clone()), ds.clone().map_or(V::Null, V::Str), unit.clone().map_or(V::Null, V::Str), V::Str(metric.clone()), V::Str(ty.clone()), dim_fields.clone()];
+        if !ts {
+            rows.extend(streams.iter().map(base));
+            continue;
+        }
+        let mut series: Vec<String> = t
+            .rows
+            .iter()
+            .filter(|r| r.get(mi).is_some_and(|v| !v.is_null()))
+            .map(|r| {
+                let mut m = crate::json::Map::new();
+                for (d, i) in &dim_cols {
+                    if let Some(v) = r.get(*i).filter(|v| !v.is_null()) {
+                        m.insert(d.clone(), v.to_json(v.type_of()));
+                    }
+                }
+                Value::Obj(m).to_json()
+            })
+            .collect();
+        series.sort();
+        series.dedup();
+        for s in series {
+            let mut r = base(streams.first().unwrap_or(&None));
+            r.push(V::Str(s));
+            rows.push(r);
+        }
+    }
+    Table { cols, rows }
+}
+
 fn run_rest(src: &Src<'_>, mut t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsResult<Table> {
     for cmd in cmds {
         match cmd {
@@ -4290,6 +4419,21 @@ fn run_rest(src: &Src<'_>, mut t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsRe
             }
             Cmd::Sort(keys) => sort_rows(src, keys, &mut t, w)?,
             Cmd::Limit(n) => t.rows.truncate((*n).min(MAX_LIMIT)),
+            Cmd::MetricsInfo | Cmd::TsInfo => t = ts_info(src, &t, matches!(cmd, Cmd::TsInfo)),
+            Cmd::LimitBy(n, by) => {
+                let keys = by.iter().map(|e| Compiler { src, cols: &t.cols, aggs: None }.compile(e).map(|(c, _)| c)).collect::<EsResult<Vec<CE>>>()?;
+                let mut seen: HashMap<Vec<GroupKey>, usize> = HashMap::default();
+                let mut kept = Vec::with_capacity(t.rows.len());
+                for r in std::mem::take(&mut t.rows) {
+                    let key = keys.iter().map(|k| eval(k, &r, &[], w).map(|v| GroupKey::of(&v))).collect::<EsResult<Vec<GroupKey>>>()?;
+                    let c = seen.entry(key).or_default();
+                    if *c < *n {
+                        *c += 1;
+                        kept.push(r);
+                    }
+                }
+                t.rows = kept;
+            }
             c if is_row_wise(c) => {
                 let (p, out) = build_pipeline(src, std::slice::from_ref(c), t.cols.clone())?;
                 t.rows = p.run(std::mem::take(&mut t.rows), w)?;

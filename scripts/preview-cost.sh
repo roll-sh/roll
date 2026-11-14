@@ -54,8 +54,9 @@ export ROLL_HOME=$HOME_DIR ROLL_API=$API ROLL_PROXY=127.0.0.1:${P}432 ROLL_REDIS
   ROLL_KAFKA=127.0.0.1:${P}092 ROLL_S3=127.0.0.1:${P}900 ROLL_STORAGE_API=127.0.0.1:${P}901 \
   ROLL_QUEUES_AMQP=127.0.0.1:${P}672 ROLL_QUEUES_MANAGEMENT=127.0.0.1:${P}673 ROLL_QUEUES_STOMP=127.0.0.1:${P}613 ROLL_QUEUES_WEB_STOMP=127.0.0.1:${P}674 \
   ROLL_QUEUES_MQTT=127.0.0.1:${P}883 ROLL_QUEUES_WEB_MQTT=127.0.0.1:${P}675 ROLL_QUEUES_STREAM=127.0.0.1:${P}552 ROLL_QUEUES_HTTP=127.0.0.1:${P}680 \
+  ROLL_SEARCH_HTTP=127.0.0.1:${P}200 \
   ROLL_NOSQL_CQL=127.0.0.1:${P}042 ROLL_NOSQL_CQL_SHARD_AWARE=127.0.0.1:${P}043 ROLL_NOSQL_ALTERNATOR=127.0.0.1:${P}000 ROLL_NOSQL_REST=127.0.0.1:${P}100 \
-  ROLL_CODE_PREVIEW_DOMAIN=$DOMAIN ROLL_PRODUCTS=${PREVIEW_PRODUCTS:-code,postgres,redis,storage,nosql,queues,streams,tasks} RUST_LOG=${RUST_LOG:-info}
+  ROLL_CODE_PREVIEW_DOMAIN=$DOMAIN ROLL_PRODUCTS=${PREVIEW_PRODUCTS:-code,postgres,redis,storage,nosql,queues,streams,tasks,search} RUST_LOG=${RUST_LOG:-info}
 unset ROLL_ADMIN_TOKEN ROLL_CODE_TOKEN
 say "starting rolld ($ROLL_PRODUCTS) in $HOME_DIR"
 nice -n 10 "$BIN" >"$HOME_DIR/rolld.log" 2>&1 &
@@ -78,6 +79,11 @@ api POST /v1/storage/buckets '{"name":"assets"}' >/dev/null
 NOSQL=$(api POST /v1/nosql/databases '{"name":"events"}' | jq_ "d['id']")
 api POST /v1/queues/vhosts '{"name":"jobs"}' >/dev/null
 STREAM=$(api POST /v1/streams '{"name":"clicks"}' | jq_ "d['id']")
+# A search cluster with a document the preview's branch must read.
+SEARCH_C=$(api POST /v1/search/clusters '{"name":"catalog"}')
+SEARCH=$(echo "$SEARCH_C" | jq_ "d['id']")
+SEARCH_URL_PARENT=$(echo "$SEARCH_C" | jq_ "d['url'].replace('://', '://' + d['username'] + ':' + d['password'] + '@', 1)")
+curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/1?refresh=true" -H 'content-type: application/json' -d '{"name":"parent"}' >/dev/null
 PG=$(api POST /v1/projects '{"name":"shop-db"}' | jq_ "d['id']")
 # A real-looking row in the parent, which previews mask.
 PG_PARENT_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['parent_id'] is None][0]")
@@ -110,7 +116,7 @@ PY
 resp "$REDIS_URL" 20000 parent
 
 PRJ=$(api POST /v1/workspace/projects '{"name":"shop"}' | jq_ "d['id']")
-for r in "repo/acme%2Fweb" "postgres/$PG" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work"; do
+for r in "repo/acme%2Fweb" "postgres/$PG" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work" "search/$SEARCH"; do
   api PUT "/v1/workspace/projects/$PRJ/resources/$r" '{"x":0,"y":0}' >/dev/null
 done
 api PUT "/v1/previews/projects/$PRJ/settings" "{\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"}}}" >/dev/null
@@ -162,6 +168,9 @@ PG_MASKED=$(api POST "/v1/endpoints/$PG_BRANCH_EP/query" '{"sql":"SELECT email F
 PG_PARENT=$(api POST "/v1/endpoints/$PG_PARENT_EP/query" '{"sql":"SELECT email FROM users WHERE id = 1"}' | jq_ "d['results'][0]['rows'][0][0]")
 case "$PG_MASKED" in user-*@example.invalid) ;; *) echo "the Postgres branch should read masked, not $PG_MASKED"; exit 1;; esac
 [ "$PG_PARENT" = "ada@example.com" ] || { echo "the parent changed: $PG_PARENT"; exit 1; }
+# The search branch reads the parent's document, and its own writes stay in it.
+BRANCH_SEARCH=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='search'][0]")
+[ -n "$BRANCH_SEARCH" ] || { echo "no search branch in the preview"; exit 1; }
 
 say "visit it: cold start"
 T2=$(now_ms)
@@ -173,6 +182,15 @@ T4=$(now_ms); curl -sS -o /dev/null -b "$JAR" -H "Host: $HOST" "http://$API/"; T
 # from before the mask are) and isn't a superuser.
 APP_DB=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
 case "$APP_DB" in postgres://br_*) ;; *) echo "the service's DATABASE_URL should be the branch's own role, not ${APP_DB%%@*}…"; exit 1;; esac
+# The service's ELASTICSEARCH_URL is the branch's: it reads the parent's document; a write stays in
+# the branch.
+APP_ES=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^ELASTICSEARCH_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
+[ -n "$APP_ES" ] || { echo "the service has no ELASTICSEARCH_URL"; exit 1; }
+ES_READ=$(curl -sf "$APP_ES/products/_doc/1" | jq_ "d['_source']['name']")
+[ "$ES_READ" = "parent" ] || { echo "the search branch should read the parent's document, not $ES_READ"; exit 1; }
+curl -sf -XPUT "$APP_ES/products/_doc/2?refresh=true" -H 'content-type: application/json' -d '{"name":"branch"}' >/dev/null
+ES_PARENT_SEES=$(curl -s -o /dev/null -w '%{http_code}' "$SEARCH_URL_PARENT/products/_doc/2")
+[ "$ES_PARENT_SEES" = 404 ] || { echo "a write to the search branch reached the parent ($ES_PARENT_SEES)"; exit 1; }
 APP_WAL=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT length(pg_read_binary_file('pg_wal/' || pg_walfile_name(pg_current_wal_lsn())))" 2>&1 | head -1 || true)
 case "$APP_WAL" in *"permission denied"*) ;; *) echo "the branch's role should be refused the WAL: $APP_WAL"; exit 1;; esac
 APP_MASKED=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT email FROM users WHERE id = 1" 2>&1 | head -1 || true)
@@ -354,7 +372,9 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 [ "$N" = 0 ] || { api GET "/v1/previews?project=$PRJ"; exit 1; }
-PARENTS_OK=$( (api GET "/v1/redis/databases/$REDIS" | jq_ "d['id']"; api GET /v1/storage/buckets/assets | jq_ "d['name']"; api GET "/v1/nosql/databases/$NOSQL" | jq_ "d['id']") | wc -l)
+PARENTS_OK=$( (api GET "/v1/redis/databases/$REDIS" | jq_ "d['id']"; api GET /v1/storage/buckets/assets | jq_ "d['name']"; api GET "/v1/nosql/databases/$NOSQL" | jq_ "d['id']"; api GET "/v1/search/clusters/$SEARCH" | jq_ "d['id']") | wc -l)
+SEARCH_BRANCH_GONE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${ROLL_ADMIN_TOKEN:-}" "http://$API/v1/search/clusters/$BRANCH_SEARCH")
+[ "$SEARCH_BRANCH_GONE" = 404 ] || { echo "the search branch should be gone after landing ($SEARCH_BRANCH_GONE)"; exit 1; }
 BRANCHES_LEFT=$(api GET /v1/redis/databases | jq_ "len([x for x in d if x['name'].startswith('pv-')])")
 
 cat <<EOF
@@ -379,5 +399,5 @@ cat <<EOF
 | ignore_paths: docs/ | $KEPT |
 | \`[skip preview]\` in the title, then without it | removed, then a new preview |
 | The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |
-| After landing: parents present / preview Redis branches left | $PARENTS_OK of 3 / $BRANCHES_LEFT |
+| After landing: parents present / preview Redis branches left | $PARENTS_OK of 4 / $BRANCHES_LEFT |
 EOF

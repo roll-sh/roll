@@ -1057,6 +1057,44 @@ impl PointsReader {
         }
     }
 
+    /// A bound of a 1-d tree past which at least `rank` points lie, read from the split values
+    /// alone (no leaf is read): with `from_top`, a value such that at least `rank` points are
+    /// `>=` it, otherwise one such that at least `rank` points are `<=` it. The bound is the
+    /// edge of the leaf holding the `rank`-th point, so up to a leaf's worth more lie past it.
+    /// `None` when the tree has fewer than `rank` points or more than one dimension.
+    pub fn rank_bound(&self, rank: u64, from_top: bool) -> Option<Vec<u8>> {
+        if self.spec.index_dims != 1 || rank == 0 || rank > self.num_points {
+            return None;
+        }
+        let (mut min, mut max) = self.index_bounds();
+        let (mut node, mut count, mut rank) = (1usize, self.num_points as usize, rank as usize);
+        while node < self.leaves {
+            let bpd = self.spec.bytes_per_dim as usize;
+            let split = &self.split_vals[node * bpd..(node + 1) * bpd];
+            let left = count * subtree_leaves(2 * node, self.leaves) / subtree_leaves(node, self.leaves);
+            let right = count - left;
+            // Points of the left subtree are <= the split, those of the right one >= it.
+            if from_top {
+                if rank <= right {
+                    min.copy_from_slice(split);
+                    (node, count) = (2 * node + 1, right);
+                } else {
+                    rank -= right;
+                    max.copy_from_slice(split);
+                    (node, count) = (2 * node, left);
+                }
+            } else if rank <= left {
+                max.copy_from_slice(split);
+                (node, count) = (2 * node, left);
+            } else {
+                rank -= left;
+                min.copy_from_slice(split);
+                (node, count) = (2 * node + 1, right);
+            }
+        }
+        Some(if from_top { min } else { max })
+    }
+
     /// Estimated number of points matching the visitor's query (no leaf is read): full counts
     /// of inside cells plus half of crossing leaves, like Lucene.
     pub fn estimate_point_count(&self, visitor: &mut dyn PointVisitor) -> u64 {
@@ -1483,6 +1521,33 @@ mod tests {
                     subtree_leaves(node, leaves),
                     subtree_leaves(2 * node, leaves) + subtree_leaves(2 * node + 1, leaves)
                 );
+            }
+        }
+    }
+
+    /// At least `rank` points lie past the bound, and at most a leaf's worth more.
+    #[test]
+    fn rank_bounds_hold_their_rank() {
+        let mut rng = StdRng::seed_from_u64(5);
+        for &(n, spread) in &[(1usize, 10i32), (700, 5), (5000, 1_000_000), (20_000, 40)] {
+            let spec = PointsSpec::new(1, 8);
+            let vals: Vec<i32> = (0..n).map(|_| rng.gen_range(-spread..spread)).collect();
+            let docs: Vec<u32> = (0..n as u32).collect();
+            let packed: Vec<u8> = vals.iter().flat_map(|&v| enc(v, 8)).collect();
+            let mut out = Vec::new();
+            write_points(&spec, &docs, &packed, &SpillOptions::default(), &mut out).unwrap();
+            let r = PointsReader::open(Slice::from(out), &spec).unwrap();
+            assert_eq!(r.rank_bound(n as u64 + 1, true), None);
+            for rank in [1u64, 2, 10, 513, 4000, n as u64] {
+                if rank > n as u64 {
+                    continue;
+                }
+                let top = encode::i64_from(&r.rank_bound(rank, true).unwrap()) as i32;
+                let above = vals.iter().filter(|&&v| v >= top).count() as u64;
+                assert!(above >= rank && above < rank + 2 * MAX_POINTS_IN_LEAF as u64 + vals.iter().filter(|&&v| v == top).count() as u64, "n={n} rank={rank}");
+                let bottom = encode::i64_from(&r.rank_bound(rank, false).unwrap()) as i32;
+                let below = vals.iter().filter(|&&v| v <= bottom).count() as u64;
+                assert!(below >= rank && below < rank + 2 * MAX_POINTS_IN_LEAF as u64 + vals.iter().filter(|&&v| v == bottom).count() as u64, "n={n} rank={rank}");
             }
         }
     }

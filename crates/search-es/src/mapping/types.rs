@@ -675,6 +675,38 @@ fn set_once(cur: &Value, new: &Value, _: &mut Vec<String>) -> bool {
     cur.is_null() || cur == new
 }
 
+/// `semantic_text` (`SemanticTextFieldMapper`): the endpoint that embeds the field's text, the
+/// one that embeds queries, the model settings the first embedded document records (task type,
+/// and for dense models dimensions, similarity and element type), chunking and the embeddings'
+/// index options. The embeddings live in hidden nested chunks (`crate::xpack::inference::semantic`).
+pub static SEMANTIC_TEXT: &[ParamDef] = &[
+    p("inference_id", Str, Dv::Str(crate::xpack::inference::semantic::DEFAULT_INFERENCE_ID), Updatable).ser(Ser::Always),
+    p("search_inference_id", Str, Dv::Null, Updatable).nullable().ser(Ser::NonNull),
+    p("model_settings", Json, Dv::Null, Merge::Check { check: model_settings_merge, show: crate::mapping::params::conflict_string }).nullable().ser(Ser::NonNull),
+    p("chunking_settings", Json, Dv::Null, Updatable).nullable().ser(Ser::NonNull),
+    p("index_options", Json, Dv::Null, Updatable).nullable().ser(Ser::NonNull),
+    META,
+];
+
+/// `SemanticFieldMapper.canMergeModelSettings`: settings, once recorded, change only to equal
+/// ones.
+fn model_settings_merge(cur: &Value, new: &Value, conflicts: &mut Vec<String>) -> bool {
+    use crate::xpack::inference::semantic::ModelSettings;
+    let same = match (ModelSettings::parse(cur), ModelSettings::parse(new)) {
+        (Ok(a), Ok(b)) => a.compatible(&b),
+        _ => cur == new,
+    };
+    if cur.is_null() || new.is_null() || same {
+        return true;
+    }
+    conflicts.push("Cannot update parameter [model_settings] from [] to []".into());
+    false
+}
+
+fn validate_semantic_text(f: &FieldMapper, _ctx: &MappingCtx) -> Result<(), EsError> {
+    crate::xpack::inference::semantic::validate_mapper(f)
+}
+
 pub static WILDCARD: &[ParamDef] = &[IGNORE_ABOVE, p("null_value", Str, Dv::Null, Fixed).nullable(), META];
 
 pub static JOIN: &[ParamDef] = &[
@@ -788,6 +820,31 @@ pub static COUNTED_KEYWORD: &[ParamDef] = &[META, INDEX];
 
 pub static VERSION: &[ParamDef] = &[META];
 
+/// The analysis-icu plugin's `icu_collation_keyword` (`ICUCollationKeywordFieldMapper.Builder`
+/// parameters, in its order).
+pub static ICU_COLLATION_KEYWORD: &[ParamDef] = &[
+    INDEX,
+    DOC_VALUES,
+    STORE,
+    KEYWORD_INDEX_OPTIONS,
+    p("norms", Bool, FALSE, TrueToFalse),
+    p("rules", Str, Dv::Null, Fixed).nullable(),
+    p("language", Str, Dv::Null, Fixed).nullable(),
+    p("country", Str, Dv::Null, Fixed).nullable(),
+    p("variant", Str, Dv::Null, Fixed).nullable(),
+    p("strength", Str, Dv::Null, Fixed).nullable(),
+    p("decomposition", Str, Dv::Null, Fixed).nullable(),
+    p("alternate", Str, Dv::Null, Fixed).nullable(),
+    p("case_level", Bool, FALSE, Fixed),
+    p("case_first", Str, Dv::Null, Fixed).nullable(),
+    p("numeric", Bool, FALSE, Fixed),
+    p("variable_top", Str, Dv::Null, Fixed).nullable(),
+    p("hiragana_quaternary_mode", Bool, FALSE, Fixed).nullable(),
+    p("ignore_above", Int { min: 0, max: INT_MAX, msg: Some("[ignore_above] must be positive, got [{v}]") }, Dv::Int(INT_MAX), Updatable),
+    p("null_value", Str, Dv::Null, Fixed).nullable(),
+    META,
+];
+
 macro_rules! def {
     ($name:expr, $params:expr, $family:expr) => {
         TypeDef { name: $name, params: $params, fields_at: usize::MAX, multi_fields: true, in_multi_field: true, validate: None, family: $family }
@@ -817,6 +874,7 @@ pub static TYPES: &[TypeDef] = &[
     def!("geo_shape", GEO_SHAPE, Family::Geo),
     def!("half_float", HALF_FLOAT, Family::Numeric).with_validate(validate_number),
     TypeDef { multi_fields: false, ..def!("histogram", HISTOGRAM, Family::Other) },
+    def!("icu_collation_keyword", ICU_COLLATION_KEYWORD, Family::Keyword).with_validate(validate_icu_collation),
     def!("integer", INTEGER, Family::Numeric).with_validate(validate_number),
     def!("integer_range", RANGE, Family::Range).with_validate(validate_range),
     def!("ip", IP, Family::Ip).with_validate(validate_scripted),
@@ -829,10 +887,12 @@ pub static TYPES: &[TypeDef] = &[
     TypeDef { in_multi_field: false, ..def!("pattern_text", PATTERN_TEXT, Family::Text) },
     TypeDef { multi_fields: false, in_multi_field: false, ..def!("percolator", META_ONLY, Family::Other) },
     def!("point", POINT, Family::Geo),
-    TypeDef { multi_fields: false, ..def!("rank_feature", RANK_FEATURE, Family::Other) },
+    TypeDef { multi_fields: false, validate: Some(validate_rank_feature), ..def!("rank_feature", RANK_FEATURE, Family::Other) },
     TypeDef { multi_fields: false, ..def!("rank_features", RANK_FEATURES, Family::Other) },
     def!("scaled_float", SCALED_FLOAT, Family::Numeric).with_validate(validate_number),
     TypeDef { multi_fields: false, ..def!("search_as_you_type", SEARCH_AS_YOU_TYPE, Family::Text) },
+    // Multi-fields and `copy_to` sources are allowed in the new format; it can't be a multi-field.
+    TypeDef { in_multi_field: false, validate: Some(validate_semantic_text), ..def!("semantic_text", SEMANTIC_TEXT, Family::Other) },
     def!("shape", SHAPE, Family::Geo),
     def!("short", SHORT, Family::Numeric).with_validate(validate_number),
     TypeDef { multi_fields: false, in_multi_field: false, ..def!("sparse_vector", SPARSE_VECTOR, Family::Vector) },
@@ -997,7 +1057,6 @@ pub fn lookup(name: &str) -> Option<&'static TypeDef> {
 /// Types Elasticsearch knows but roll search refuses, with the reason.
 pub fn unsupported(name: &str) -> Option<&'static str> {
     match name {
-        "semantic_text" => Some("semantic_text fields need an inference service, which roll search doesn't provide"),
         "rank_vectors" => Some("rank_vectors fields are not supported by roll search"),
         _ => None,
     }
@@ -1055,6 +1114,16 @@ fn validate_number(f: &FieldMapper, ctx: &MappingCtx) -> Result<(), EsError> {
     Ok(())
 }
 
+/// `RankFeatureFieldMapper`'s `null_value` validator.
+fn validate_rank_feature(f: &FieldMapper, ctx: &MappingCtx) -> Result<(), EsError> {
+    if let Some(v) = f.effective("null_value", ctx).as_f64()
+        && v <= 0.0
+    {
+        return Err(EsError::illegal_argument("[null_value] must be a positive normal float for field of type [rank_feature]"));
+    }
+    Ok(())
+}
+
 /// `TDigestFieldMapper.Builder`'s compression check (`TDigestState.MAX_COMPRESSION`).
 fn validate_tdigest(f: &FieldMapper, ctx: &MappingCtx) -> Result<(), EsError> {
     let c = f.effective("compression", ctx).as_f64().unwrap_or(100.0);
@@ -1072,6 +1141,30 @@ fn validate_date(f: &FieldMapper, ctx: &MappingCtx) -> Result<(), EsError> {
     validate_scripted(f, ctx)?;
     precludes(f, ctx, "script", &["null_value", "ignore_malformed"])?;
     Ok(())
+}
+
+/// An `icu_collation_keyword`'s collator settings.
+pub fn icu_collation_params(f: &FieldMapper) -> search_analysis::CollationParams {
+    let s = |k: &str| f.raw(k).and_then(Value::as_str).map(str::to_string);
+    let b = |k: &str| f.raw(k).and_then(Value::as_bool);
+    search_analysis::CollationParams {
+        rules: s("rules"),
+        language: s("language"),
+        country: s("country"),
+        variant: s("variant"),
+        strength: s("strength"),
+        decomposition: s("decomposition"),
+        alternate: s("alternate"),
+        case_level: b("case_level"),
+        case_first: s("case_first"),
+        numeric: b("numeric"),
+        variable_top: s("variable_top"),
+    }
+}
+
+/// The collator builds (`ICUCollationKeywordFieldMapper.Builder.buildCollator`).
+fn validate_icu_collation(f: &FieldMapper, _ctx: &MappingCtx) -> Result<(), EsError> {
+    search_analysis::Collation::new(&icu_collation_params(f)).map(|_| ()).map_err(EsError::illegal_argument)
 }
 
 fn validate_keyword(f: &FieldMapper, ctx: &MappingCtx) -> Result<(), EsError> {

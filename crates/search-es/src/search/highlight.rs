@@ -47,6 +47,9 @@ pub struct Spec {
     /// (`CustomUnifiedHighlighter.weightMatchesUnsupported`): not with knn, nested or join
     /// queries. Set by the caller from the search source ([`weight_matches_supported`]).
     pub weight_matches: bool,
+    /// The query embeddings of `semantic_text` fields, for the `semantic` highlighter (set by
+    /// the caller from the rewritten query, `xpack::inference::highlight::probes`).
+    pub semantic: Vec<(String, crate::xpack::inference::highlight::Probe)>,
 }
 
 /// Whether a search's queries support Lucene's matches API, which weight matches need:
@@ -119,7 +122,7 @@ impl Spec {
                 global.insert(k.clone(), v.clone());
             }
         }
-        Ok(Spec { global, fields, weight_matches: true })
+        Ok(Spec { global, fields, weight_matches: true, semantic: Vec::new() })
     }
 }
 
@@ -272,8 +275,32 @@ pub fn highlight_hit(
     for fs in &spec.fields {
         let names: Vec<String> = if fs.pattern.contains('*') { qctx.table.matching(&fs.pattern) } else { vec![fs.pattern.clone()] };
         for name in names {
+            // `semantic_text`: the `semantic` highlighter (its default).
+            if let Some(crate::mapping::MapperRef::Field(sf)) = qctx.idx.mapping.lookup(&name)
+                && sf.ty == "semantic_text"
+            {
+                let ty = get(&fs.opts, &spec.global, "type").and_then(Value::as_str);
+                if ty.is_none_or(|t| t == "semantic")
+                    && let Some(settings) = crate::xpack::inference::semantic::model_settings(sf)
+                {
+                    let probe = spec.semantic.iter().find(|(f, _)| *f == name).map(|(_, p)| p);
+                    let fragments = usize_of(get(&fs.opts, &spec.global, "number_of_fragments"), 5);
+                    let by_score = get(&fs.opts, &spec.global, "order").and_then(Value::as_str) == Some("score");
+                    let similarity = settings.similarity.as_deref().unwrap_or("dot_product");
+                    if let Some(snippets) = crate::xpack::inference::highlight::highlight(src, &name, probe, similarity, fragments, by_score, &|f| {
+                        qctx.table.source_filter.as_ref().is_none_or(|fls| fls.searchable(f))
+                    }) {
+                        out.insert(name.clone(), Value::Arr(snippets.into_iter().map(Value::from).collect()));
+                    }
+                }
+                continue;
+            }
             let Some(f) = qctx.field(&name) else { continue };
             if !highlightable(&f) || (fs.pattern.contains('*') && f.name.rsplit('.').next().is_some_and(|l| l.starts_with('_'))) {
+                continue;
+            }
+            // The `semantic` highlighter leaves other fields alone.
+            if get(&fs.opts, &spec.global, "type").and_then(Value::as_str) == Some("semantic") {
                 continue;
             }
             let mut o = options(&f, &fs.opts, &spec.global, qctx.idx)?;

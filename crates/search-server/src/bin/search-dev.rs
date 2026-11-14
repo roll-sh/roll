@@ -127,6 +127,8 @@ async fn run() -> anyhow::Result<()> {
         node_settings.push(("reindex.remote.whitelist".to_string(), "127.0.0.1:*".to_string()));
         // The file-realm superuser Elasticsearch's test clusters define (some tests log in as it).
         node_settings.push(("roll.security.file_users".to_string(), "x_pack_rest_user:x-pack-test-password:superuser".to_string()));
+        // The services of Elasticsearch's `inference-service-test` plugin, which its test clusters load.
+        node_settings.push(("roll.inference.test_services".to_string(), "true".to_string()));
         if let Some((_, port)) = args.listen.rsplit_once(':') {
             node_settings.push(("http.publish_port".to_string(), port.to_string()));
         }
@@ -158,6 +160,8 @@ async fn run() -> anyhow::Result<()> {
         test_features: args.test_features || args.yaml_test_cluster,
         // One tenant: the host's numbers are its own.
         host_metrics: true,
+        // As rolld does: stored secrets sealed under ROLL_SECRET_KEY when it's set.
+        sealer: std::env::var("ROLL_SECRET_KEY").ok().and_then(|k| search_es::seal::Sealer::from_secret(&k)),
         ..NodeConfig::default()
     };
     let stores: Arc<dyn search_server::StoreProvider> = match &args.data_dir {

@@ -8,6 +8,11 @@
 //! completion before it answers (roll's searches don't outlive their request); with
 //! `keep_on_completion` the response is kept in [`super::async_results`] under an
 //! Elasticsearch-format id for `keep_alive` (5 days by default).
+//!
+//! With `allow_partial_search_results` (the URL, then the body, then
+//! `xpack.eql.default_allow_partial_results`), failed shards leave their events out and are
+//! reported in `shard_failures`; a sequence query with shard failures then returns no
+//! sequences unless `allow_partial_sequence_results` is set.
 
 pub mod exec;
 pub mod parser;
@@ -117,8 +122,8 @@ fn parse_request(ctx: &Ctx) -> EsResult<Request> {
         TimeValue::parse(&k, "wait_for_completion_timeout").map_err(|e| field_error(ctx, "wait_for_completion_timeout", e))?;
     }
     let mut keep_on_completion = bool_field(ctx, m, "keep_on_completion")?.unwrap_or(false);
-    bool_field(ctx, m, "allow_partial_search_results")?;
-    bool_field(ctx, m, "allow_partial_sequence_results")?;
+    let partial_search = bool_field(ctx, m, "allow_partial_search_results")?;
+    let partial_sequence = bool_field(ctx, m, "allow_partial_sequence_results")?;
     if ctx.has_query("wait_for_completion_timeout") {
         ctx.time_param("wait_for_completion_timeout", TimeValue::MINUS_ONE)?;
     }
@@ -127,8 +132,12 @@ fn parse_request(ctx: &Ctx) -> EsResult<Request> {
     }
     keep_on_completion = ctx.bool_param("keep_on_completion", keep_on_completion)?;
     ctx.bool_param("ccs_minimize_roundtrips", true)?;
-    ctx.bool_param("allow_partial_search_results", true)?;
-    ctx.bool_param("allow_partial_sequence_results", false)?;
+    // The URL wins over the body, and the cluster's defaults apply when neither says.
+    let state = ctx.cluster.state();
+    let default = |key: &str, fallback: bool| state.metadata.cluster_setting(key).map_or(fallback, |v| v == "true");
+    let partial_search = ctx.bool_param("allow_partial_search_results", partial_search.unwrap_or_else(|| default("xpack.eql.default_allow_partial_results", true)))?;
+    let partial_sequence =
+        ctx.bool_param("allow_partial_sequence_results", partial_sequence.unwrap_or_else(|| default("xpack.eql.default_allow_partial_sequence_results", false)))?;
     let mut errors = Vec::new();
     if query.is_empty() {
         errors.push("query is null or empty".to_string());
@@ -158,8 +167,9 @@ fn parse_request(ctx: &Ctx) -> EsResult<Request> {
                     break;
                 }
                 Value::Obj(_) => {}
+                // Elasticsearch names the class of the field's name here, not of its definition.
                 _ => {
-                    errors.push(format!("Expected map for runtime field [{name}] definition but got [{}]", def.to_es_string()));
+                    errors.push(format!("Expected map for runtime field [{name}] definition but got [String]"));
                     break;
                 }
             }
@@ -186,13 +196,15 @@ fn parse_request(ctx: &Ctx) -> EsResult<Request> {
         max_samples_per_key: max_samples as usize,
         ignore_unavailable: ctx.bool_param("ignore_unavailable", true)?,
         expand_wildcards: ctx.query("expand_wildcards").unwrap_or("open").to_string(),
+        allow_partial_search_results: partial_search,
+        allow_partial_sequence_results: partial_sequence,
     };
     ctx.bool_param("allow_no_indices", true)?;
     Ok(Request { query, settings, keep_alive_ms: keep_alive.map_or(DEFAULT_KEEP_ALIVE_MS, |k| k.as_millis()), keep_on_completion })
 }
 
-fn response(took: i64, out: exec::Output) -> Map {
-    let (kind, list) = match out {
+fn response(took: i64, result: exec::Results) -> Map {
+    let (kind, list) = match result.output {
         exec::Output::Events(e) => ("events", e),
         exec::Output::Sequences(s) => ("sequences", s),
     };
@@ -201,6 +213,9 @@ fn response(took: i64, out: exec::Output) -> Map {
     m.insert("is_running".into(), false.into());
     m.insert("took".into(), took.into());
     m.insert("timed_out".into(), false.into());
+    if !result.shard_failures.is_empty() {
+        m.insert("shard_failures".into(), Value::Arr(result.shard_failures));
+    }
     m.insert(
         "hits".into(),
         obj! {

@@ -1,0 +1,1081 @@
+{
+  "description" : "analysis-kuromoji: search, normal and extended modes, user dictionary and n-best, the filters' attributes in explain, numbers, completion, iteration marks and width, settings errors",
+  "steps" : [
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "kuromoji_tokenizer",
+        "text" : "関西国際空港でJRの切符を買った。"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "関西",
+            "start_offset" : 0,
+            "end_offset" : 2,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "関西国際空港",
+            "start_offset" : 0,
+            "end_offset" : 6,
+            "type" : "word",
+            "position" : 0,
+            "positionLength" : 3
+          },
+          {
+            "token" : "国際",
+            "start_offset" : 2,
+            "end_offset" : 4,
+            "type" : "word",
+            "position" : 1
+          },
+          {
+            "token" : "空港",
+            "start_offset" : 4,
+            "end_offset" : 6,
+            "type" : "word",
+            "position" : 2
+          },
+          {
+            "token" : "で",
+            "start_offset" : 6,
+            "end_offset" : 7,
+            "type" : "word",
+            "position" : 3
+          },
+          {
+            "token" : "JR",
+            "start_offset" : 7,
+            "end_offset" : 9,
+            "type" : "word",
+            "position" : 4
+          },
+          {
+            "token" : "の",
+            "start_offset" : 9,
+            "end_offset" : 10,
+            "type" : "word",
+            "position" : 5
+          },
+          {
+            "token" : "切符",
+            "start_offset" : 10,
+            "end_offset" : 12,
+            "type" : "word",
+            "position" : 6
+          },
+          {
+            "token" : "を",
+            "start_offset" : 12,
+            "end_offset" : 13,
+            "type" : "word",
+            "position" : 7
+          },
+          {
+            "token" : "買っ",
+            "start_offset" : 13,
+            "end_offset" : 15,
+            "type" : "word",
+            "position" : 8
+          },
+          {
+            "token" : "た",
+            "start_offset" : 15,
+            "end_offset" : 16,
+            "type" : "word",
+            "position" : 9
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : {
+          "type" : "kuromoji_tokenizer",
+          "mode" : "extended",
+          "discard_punctuation" : false
+        },
+        "text" : "ｿｰｽｺｰﾄﾞをＸＹＺで読む！"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "ｿ",
+            "start_offset" : 0,
+            "end_offset" : 1,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "ｰ",
+            "start_offset" : 1,
+            "end_offset" : 2,
+            "type" : "word",
+            "position" : 1
+          },
+          {
+            "token" : "ｽ",
+            "start_offset" : 2,
+            "end_offset" : 3,
+            "type" : "word",
+            "position" : 2
+          },
+          {
+            "token" : "ｺ",
+            "start_offset" : 3,
+            "end_offset" : 4,
+            "type" : "word",
+            "position" : 3
+          },
+          {
+            "token" : "ｰ",
+            "start_offset" : 4,
+            "end_offset" : 5,
+            "type" : "word",
+            "position" : 4
+          },
+          {
+            "token" : "ﾄ",
+            "start_offset" : 5,
+            "end_offset" : 6,
+            "type" : "word",
+            "position" : 5
+          },
+          {
+            "token" : "ﾞ",
+            "start_offset" : 6,
+            "end_offset" : 7,
+            "type" : "word",
+            "position" : 6
+          },
+          {
+            "token" : "を",
+            "start_offset" : 7,
+            "end_offset" : 8,
+            "type" : "word",
+            "position" : 7
+          },
+          {
+            "token" : "Ｘ",
+            "start_offset" : 8,
+            "end_offset" : 9,
+            "type" : "word",
+            "position" : 8
+          },
+          {
+            "token" : "Ｙ",
+            "start_offset" : 9,
+            "end_offset" : 10,
+            "type" : "word",
+            "position" : 9
+          },
+          {
+            "token" : "Ｚ",
+            "start_offset" : 10,
+            "end_offset" : 11,
+            "type" : "word",
+            "position" : 10
+          },
+          {
+            "token" : "で",
+            "start_offset" : 11,
+            "end_offset" : 12,
+            "type" : "word",
+            "position" : 11
+          },
+          {
+            "token" : "読む",
+            "start_offset" : 12,
+            "end_offset" : 14,
+            "type" : "word",
+            "position" : 12
+          },
+          {
+            "token" : "！",
+            "start_offset" : 14,
+            "end_offset" : 15,
+            "type" : "word",
+            "position" : 13
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : {
+          "type" : "kuromoji_tokenizer",
+          "mode" : "normal",
+          "nbest_examples" : "/成田空港-成田/",
+          "user_dictionary_rules" : [
+            "東京スカイツリー,東京 スカイツリー,トウキョウ スカイツリー,カスタム名詞"
+          ]
+        },
+        "text" : "東京スカイツリーと成田空港"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "東京",
+            "start_offset" : 0,
+            "end_offset" : 2,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "東京スカイツリー",
+            "start_offset" : 0,
+            "end_offset" : 8,
+            "type" : "word",
+            "position" : 0,
+            "positionLength" : 2
+          },
+          {
+            "token" : "スカイツリー",
+            "start_offset" : 2,
+            "end_offset" : 8,
+            "type" : "word",
+            "position" : 1
+          },
+          {
+            "token" : "と",
+            "start_offset" : 8,
+            "end_offset" : 9,
+            "type" : "word",
+            "position" : 2
+          },
+          {
+            "token" : "成田",
+            "start_offset" : 9,
+            "end_offset" : 11,
+            "type" : "word",
+            "position" : 3
+          },
+          {
+            "token" : "成田空港",
+            "start_offset" : 9,
+            "end_offset" : 13,
+            "type" : "word",
+            "position" : 3,
+            "positionLength" : 2
+          },
+          {
+            "token" : "空港",
+            "start_offset" : 11,
+            "end_offset" : 13,
+            "type" : "word",
+            "position" : 4
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "kuromoji_tokenizer",
+        "filter" : [
+          "kuromoji_baseform",
+          "kuromoji_part_of_speech",
+          {
+            "type" : "kuromoji_readingform",
+            "use_romaji" : true
+          },
+          "kuromoji_stemmer"
+        ],
+        "text" : "サーバーで飲みました",
+        "explain" : true
+      },
+      "status" : 200,
+      "response" : {
+        "detail" : {
+          "custom_analyzer" : true,
+          "charfilters" : [ ],
+          "tokenizer" : {
+            "name" : "kuromoji_tokenizer",
+            "tokens" : [
+              {
+                "token" : "サーバー",
+                "start_offset" : 0,
+                "end_offset" : 4,
+                "type" : "word",
+                "position" : 0,
+                "baseForm" : null,
+                "bytes" : "[e3 82 b5 e3 83 bc e3 83 90 e3 83 bc]",
+                "inflectionForm" : null,
+                "inflectionForm (en)" : null,
+                "inflectionType" : null,
+                "inflectionType (en)" : null,
+                "partOfSpeech" : "名詞-一般",
+                "partOfSpeech (en)" : "noun-common",
+                "positionLength" : 1,
+                "pronunciation" : "サーバー",
+                "pronunciation (en)" : "saba",
+                "reading" : "サーバー",
+                "reading (en)" : "saba",
+                "termFrequency" : 1
+              },
+              {
+                "token" : "で",
+                "start_offset" : 4,
+                "end_offset" : 5,
+                "type" : "word",
+                "position" : 1,
+                "baseForm" : null,
+                "bytes" : "[e3 81 a7]",
+                "inflectionForm" : null,
+                "inflectionForm (en)" : null,
+                "inflectionType" : null,
+                "inflectionType (en)" : null,
+                "partOfSpeech" : "助詞-格助詞-一般",
+                "partOfSpeech (en)" : "particle-case-misc",
+                "positionLength" : 1,
+                "pronunciation" : "デ",
+                "pronunciation (en)" : "de",
+                "reading" : "デ",
+                "reading (en)" : "de",
+                "termFrequency" : 1
+              },
+              {
+                "token" : "飲み",
+                "start_offset" : 5,
+                "end_offset" : 7,
+                "type" : "word",
+                "position" : 2,
+                "baseForm" : "飲む",
+                "bytes" : "[e9 a3 b2 e3 81 bf]",
+                "inflectionForm" : "連用形",
+                "inflectionForm (en)" : "conjunctive",
+                "inflectionType" : "五段・マ行",
+                "inflectionType (en)" : "5-row-cons-m",
+                "partOfSpeech" : "動詞-自立",
+                "partOfSpeech (en)" : "verb-main",
+                "positionLength" : 1,
+                "pronunciation" : "ノミ",
+                "pronunciation (en)" : "nomi",
+                "reading" : "ノミ",
+                "reading (en)" : "nomi",
+                "termFrequency" : 1
+              },
+              {
+                "token" : "まし",
+                "start_offset" : 7,
+                "end_offset" : 9,
+                "type" : "word",
+                "position" : 3,
+                "baseForm" : "ます",
+                "bytes" : "[e3 81 be e3 81 97]",
+                "inflectionForm" : "連用形",
+                "inflectionForm (en)" : "conjunctive",
+                "inflectionType" : "特殊・マス",
+                "inflectionType (en)" : "special-masu",
+                "partOfSpeech" : "助動詞",
+                "partOfSpeech (en)" : "auxiliary-verb",
+                "positionLength" : 1,
+                "pronunciation" : "マシ",
+                "pronunciation (en)" : "mashi",
+                "reading" : "マシ",
+                "reading (en)" : "mashi",
+                "termFrequency" : 1
+              },
+              {
+                "token" : "た",
+                "start_offset" : 9,
+                "end_offset" : 10,
+                "type" : "word",
+                "position" : 4,
+                "baseForm" : null,
+                "bytes" : "[e3 81 9f]",
+                "inflectionForm" : "基本形",
+                "inflectionForm (en)" : "base",
+                "inflectionType" : "特殊・タ",
+                "inflectionType (en)" : "special-da",
+                "partOfSpeech" : "助動詞",
+                "partOfSpeech (en)" : "auxiliary-verb",
+                "positionLength" : 1,
+                "pronunciation" : "タ",
+                "pronunciation (en)" : "ta",
+                "reading" : "タ",
+                "reading (en)" : "ta",
+                "termFrequency" : 1
+              }
+            ]
+          },
+          "tokenfilters" : [
+            {
+              "name" : "kuromoji_baseform",
+              "tokens" : [
+                {
+                  "token" : "サーバー",
+                  "start_offset" : 0,
+                  "end_offset" : 4,
+                  "type" : "word",
+                  "position" : 0,
+                  "baseForm" : null,
+                  "bytes" : "[e3 82 b5 e3 83 bc e3 83 90 e3 83 bc]",
+                  "inflectionForm" : null,
+                  "inflectionForm (en)" : null,
+                  "inflectionType" : null,
+                  "inflectionType (en)" : null,
+                  "keyword" : false,
+                  "partOfSpeech" : "名詞-一般",
+                  "partOfSpeech (en)" : "noun-common",
+                  "positionLength" : 1,
+                  "pronunciation" : "サーバー",
+                  "pronunciation (en)" : "saba",
+                  "reading" : "サーバー",
+                  "reading (en)" : "saba",
+                  "termFrequency" : 1
+                },
+                {
+                  "token" : "で",
+                  "start_offset" : 4,
+                  "end_offset" : 5,
+                  "type" : "word",
+                  "position" : 1,
+                  "baseForm" : null,
+                  "bytes" : "[e3 81 a7]",
+                  "inflectionForm" : null,
+                  "inflectionForm (en)" : null,
+                  "inflectionType" : null,
+                  "inflectionType (en)" : null,
+                  "keyword" : false,
+                  "partOfSpeech" : "助詞-格助詞-一般",
+                  "partOfSpeech (en)" : "particle-case-misc",
+                  "positionLength" : 1,
+                  "pronunciation" : "デ",
+                  "pronunciation (en)" : "de",
+                  "reading" : "デ",
+                  "reading (en)" : "de",
+                  "termFrequency" : 1
+                },
+                {
+                  "token" : "飲む",
+                  "start_offset" : 5,
+                  "end_offset" : 7,
+                  "type" : "word",
+                  "position" : 2,
+                  "baseForm" : "飲む",
+                  "bytes" : "[e9 a3 b2 e3 82 80]",
+                  "inflectionForm" : "連用形",
+                  "inflectionForm (en)" : "conjunctive",
+                  "inflectionType" : "五段・マ行",
+                  "inflectionType (en)" : "5-row-cons-m",
+                  "keyword" : false,
+                  "partOfSpeech" : "動詞-自立",
+                  "partOfSpeech (en)" : "verb-main",
+                  "positionLength" : 1,
+                  "pronunciation" : "ノミ",
+                  "pronunciation (en)" : "nomi",
+                  "reading" : "ノミ",
+                  "reading (en)" : "nomi",
+                  "termFrequency" : 1
+                },
+                {
+                  "token" : "ます",
+                  "start_offset" : 7,
+                  "end_offset" : 9,
+                  "type" : "word",
+                  "position" : 3,
+                  "baseForm" : "ます",
+                  "bytes" : "[e3 81 be e3 81 99]",
+                  "inflectionForm" : "連用形",
+                  "inflectionForm (en)" : "conjunctive",
+                  "inflectionType" : "特殊・マス",
+                  "inflectionType (en)" : "special-masu",
+                  "keyword" : false,
+                  "partOfSpeech" : "助動詞",
+                  "partOfSpeech (en)" : "auxiliary-verb",
+                  "positionLength" : 1,
+                  "pronunciation" : "マシ",
+                  "pronunciation (en)" : "mashi",
+                  "reading" : "マシ",
+                  "reading (en)" : "mashi",
+                  "termFrequency" : 1
+                },
+                {
+                  "token" : "た",
+                  "start_offset" : 9,
+                  "end_offset" : 10,
+                  "type" : "word",
+                  "position" : 4,
+                  "baseForm" : null,
+                  "bytes" : "[e3 81 9f]",
+                  "inflectionForm" : "基本形",
+                  "inflectionForm (en)" : "base",
+                  "inflectionType" : "特殊・タ",
+                  "inflectionType (en)" : "special-da",
+                  "keyword" : false,
+                  "partOfSpeech" : "助動詞",
+                  "partOfSpeech (en)" : "auxiliary-verb",
+                  "positionLength" : 1,
+                  "pronunciation" : "タ",
+                  "pronunciation (en)" : "ta",
+                  "reading" : "タ",
+                  "reading (en)" : "ta",
+                  "termFrequency" : 1
+                }
+              ]
+            },
+            {
+              "name" : "kuromoji_part_of_speech",
+              "tokens" : [
+                {
+                  "token" : "サーバー",
+                  "start_offset" : 0,
+                  "end_offset" : 4,
+                  "type" : "word",
+                  "position" : 0,
+                  "baseForm" : null,
+                  "bytes" : "[e3 82 b5 e3 83 bc e3 83 90 e3 83 bc]",
+                  "inflectionForm" : null,
+                  "inflectionForm (en)" : null,
+                  "inflectionType" : null,
+                  "inflectionType (en)" : null,
+                  "keyword" : false,
+                  "partOfSpeech" : "名詞-一般",
+                  "partOfSpeech (en)" : "noun-common",
+                  "positionLength" : 1,
+                  "pronunciation" : "サーバー",
+                  "pronunciation (en)" : "saba",
+                  "reading" : "サーバー",
+                  "reading (en)" : "saba",
+                  "termFrequency" : 1
+                },
+                {
+                  "token" : "飲む",
+                  "start_offset" : 5,
+                  "end_offset" : 7,
+                  "type" : "word",
+                  "position" : 2,
+                  "baseForm" : "飲む",
+                  "bytes" : "[e9 a3 b2 e3 82 80]",
+                  "inflectionForm" : "連用形",
+                  "inflectionForm (en)" : "conjunctive",
+                  "inflectionType" : "五段・マ行",
+                  "inflectionType (en)" : "5-row-cons-m",
+                  "keyword" : false,
+                  "partOfSpeech" : "動詞-自立",
+                  "partOfSpeech (en)" : "verb-main",
+                  "positionLength" : 1,
+                  "pronunciation" : "ノミ",
+                  "pronunciation (en)" : "nomi",
+                  "reading" : "ノミ",
+                  "reading (en)" : "nomi",
+                  "termFrequency" : 1
+                }
+              ]
+            },
+            {
+              "name" : "__anonymous__kuromoji_readingform",
+              "tokens" : [
+                {
+                  "token" : "saba",
+                  "start_offset" : 0,
+                  "end_offset" : 4,
+                  "type" : "word",
+                  "position" : 0,
+                  "baseForm" : null,
+                  "bytes" : "[73 61 62 61]",
+                  "inflectionForm" : null,
+                  "inflectionForm (en)" : null,
+                  "inflectionType" : null,
+                  "inflectionType (en)" : null,
+                  "keyword" : false,
+                  "partOfSpeech" : "名詞-一般",
+                  "partOfSpeech (en)" : "noun-common",
+                  "positionLength" : 1,
+                  "pronunciation" : "サーバー",
+                  "pronunciation (en)" : "saba",
+                  "reading" : "サーバー",
+                  "reading (en)" : "saba",
+                  "termFrequency" : 1
+                },
+                {
+                  "token" : "nomi",
+                  "start_offset" : 5,
+                  "end_offset" : 7,
+                  "type" : "word",
+                  "position" : 2,
+                  "baseForm" : "飲む",
+                  "bytes" : "[6e 6f 6d 69]",
+                  "inflectionForm" : "連用形",
+                  "inflectionForm (en)" : "conjunctive",
+                  "inflectionType" : "五段・マ行",
+                  "inflectionType (en)" : "5-row-cons-m",
+                  "keyword" : false,
+                  "partOfSpeech" : "動詞-自立",
+                  "partOfSpeech (en)" : "verb-main",
+                  "positionLength" : 1,
+                  "pronunciation" : "ノミ",
+                  "pronunciation (en)" : "nomi",
+                  "reading" : "ノミ",
+                  "reading (en)" : "nomi",
+                  "termFrequency" : 1
+                }
+              ]
+            },
+            {
+              "name" : "kuromoji_stemmer",
+              "tokens" : [
+                {
+                  "token" : "saba",
+                  "start_offset" : 0,
+                  "end_offset" : 4,
+                  "type" : "word",
+                  "position" : 0,
+                  "baseForm" : null,
+                  "bytes" : "[73 61 62 61]",
+                  "inflectionForm" : null,
+                  "inflectionForm (en)" : null,
+                  "inflectionType" : null,
+                  "inflectionType (en)" : null,
+                  "keyword" : false,
+                  "partOfSpeech" : "名詞-一般",
+                  "partOfSpeech (en)" : "noun-common",
+                  "positionLength" : 1,
+                  "pronunciation" : "サーバー",
+                  "pronunciation (en)" : "saba",
+                  "reading" : "サーバー",
+                  "reading (en)" : "saba",
+                  "termFrequency" : 1
+                },
+                {
+                  "token" : "nomi",
+                  "start_offset" : 5,
+                  "end_offset" : 7,
+                  "type" : "word",
+                  "position" : 2,
+                  "baseForm" : "飲む",
+                  "bytes" : "[6e 6f 6d 69]",
+                  "inflectionForm" : "連用形",
+                  "inflectionForm (en)" : "conjunctive",
+                  "inflectionType" : "五段・マ行",
+                  "inflectionType (en)" : "5-row-cons-m",
+                  "keyword" : false,
+                  "partOfSpeech" : "動詞-自立",
+                  "partOfSpeech (en)" : "verb-main",
+                  "positionLength" : 1,
+                  "pronunciation" : "ノミ",
+                  "pronunciation (en)" : "nomi",
+                  "reading" : "ノミ",
+                  "reading (en)" : "nomi",
+                  "termFrequency" : 1
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "kuromoji_tokenizer",
+        "filter" : [
+          "kuromoji_number",
+          "ja_stop"
+        ],
+        "text" : "これは一〇〇〇円と三千二百万円、１２，３４５．６７ドルです"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "1000",
+            "start_offset" : 3,
+            "end_offset" : 7,
+            "type" : "word",
+            "position" : 2
+          },
+          {
+            "token" : "円",
+            "start_offset" : 7,
+            "end_offset" : 8,
+            "type" : "word",
+            "position" : 3
+          },
+          {
+            "token" : "32000000",
+            "start_offset" : 9,
+            "end_offset" : 14,
+            "type" : "word",
+            "position" : 5
+          },
+          {
+            "token" : "円",
+            "start_offset" : 14,
+            "end_offset" : 15,
+            "type" : "word",
+            "position" : 6
+          },
+          {
+            "token" : "1234567",
+            "start_offset" : 16,
+            "end_offset" : 25,
+            "type" : "word",
+            "position" : 7
+          },
+          {
+            "token" : "ドル",
+            "start_offset" : 25,
+            "end_offset" : 27,
+            "type" : "word",
+            "position" : 8
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "char_filter" : [
+          "kuromoji_iteration_mark"
+        ],
+        "tokenizer" : "kuromoji_tokenizer",
+        "filter" : [
+          "hiragana_uppercase",
+          "katakana_uppercase"
+        ],
+        "text" : "時々こゝろ、ちょっとジャズ"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "時時",
+            "start_offset" : 0,
+            "end_offset" : 2,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "こころ",
+            "start_offset" : 2,
+            "end_offset" : 5,
+            "type" : "word",
+            "position" : 1
+          },
+          {
+            "token" : "ちよつと",
+            "start_offset" : 6,
+            "end_offset" : 10,
+            "type" : "word",
+            "position" : 2
+          },
+          {
+            "token" : "ジヤズ",
+            "start_offset" : 10,
+            "end_offset" : 13,
+            "type" : "word",
+            "position" : 3
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "analyzer" : "kuromoji",
+        "text" : "ＪＲ新宿駅の近くにビールを飲みに行こうか"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "jr",
+            "start_offset" : 0,
+            "end_offset" : 2,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "新宿",
+            "start_offset" : 2,
+            "end_offset" : 4,
+            "type" : "word",
+            "position" : 1
+          },
+          {
+            "token" : "駅",
+            "start_offset" : 4,
+            "end_offset" : 5,
+            "type" : "word",
+            "position" : 2
+          },
+          {
+            "token" : "近く",
+            "start_offset" : 6,
+            "end_offset" : 8,
+            "type" : "word",
+            "position" : 4
+          },
+          {
+            "token" : "ビール",
+            "start_offset" : 9,
+            "end_offset" : 12,
+            "type" : "word",
+            "position" : 6
+          },
+          {
+            "token" : "飲む",
+            "start_offset" : 13,
+            "end_offset" : 15,
+            "type" : "word",
+            "position" : 8
+          },
+          {
+            "token" : "行く",
+            "start_offset" : 16,
+            "end_offset" : 18,
+            "type" : "word",
+            "position" : 10
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ja",
+      "body" : {
+        "settings" : {
+          "analysis" : {
+            "analyzer" : {
+              "q" : {
+                "type" : "kuromoji_completion",
+                "mode" : "query"
+              },
+              "n" : {
+                "type" : "kuromoji",
+                "mode" : "normal",
+                "stopwords" : [
+                  "寿司"
+                ],
+                "user_dictionary_rules" : [
+                  "東京スカイツリー,東京 スカイツリー,トウキョウ スカイツリー,カスタム名詞"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ja"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ja/_analyze",
+      "body" : {
+        "analyzer" : "q",
+        "text" : "ｿｰｽｺｰﾄﾞをかいはつs"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "ソースコードをかいはつs",
+            "start_offset" : 0,
+            "end_offset" : 13,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "soーsukoーdowokaihatus",
+            "start_offset" : 0,
+            "end_offset" : 13,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "soーsukoーdookaihatus",
+            "start_offset" : 0,
+            "end_offset" : 13,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "soーsukoーdowokaihatsus",
+            "start_offset" : 0,
+            "end_offset" : 13,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "soーsukoーdookaihatsus",
+            "start_offset" : 0,
+            "end_offset" : 13,
+            "type" : "word",
+            "position" : 0
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ja/_analyze",
+      "body" : {
+        "analyzer" : "n",
+        "text" : "東京スカイツリーで寿司を食べた"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "東京",
+            "start_offset" : 0,
+            "end_offset" : 2,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "スカイツリ",
+            "start_offset" : 2,
+            "end_offset" : 8,
+            "type" : "word",
+            "position" : 1
+          },
+          {
+            "token" : "食べる",
+            "start_offset" : 12,
+            "end_offset" : 14,
+            "type" : "word",
+            "position" : 5
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-ja",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : {
+          "type" : "kuromoji_tokenizer",
+          "user_dictionary_rules" : [
+            "東京,東京,トウキョウ,名詞",
+            "#c",
+            "東京,東京,トウキョウ,地名"
+          ]
+        },
+        "text" : "東京"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Found duplicate term [東京] in user dictionary at line [3]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Found duplicate term [東京] in user dictionary at line [3]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : {
+          "type" : "kuromoji_tokenizer",
+          "user_dictionary_rules" : [
+            "東京,東 京,トウキョウ,名詞"
+          ]
+        },
+        "text" : "東京"
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "runtime_exception",
+              "reason" : "Illegal user dictionary entry 東京 - the number of segmentations (2) does not the match number of readings (1)"
+            }
+          ],
+          "type" : "runtime_exception",
+          "reason" : "Illegal user dictionary entry 東京 - the number of segmentations (2) does not the match number of readings (1)"
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : {
+          "type" : "kuromoji_tokenizer",
+          "mode" : "fast"
+        },
+        "text" : "東京"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No enum constant org.apache.lucene.analysis.ja.JapaneseTokenizer.Mode.FAST"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No enum constant org.apache.lucene.analysis.ja.JapaneseTokenizer.Mode.FAST"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

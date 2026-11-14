@@ -1,0 +1,403 @@
+{
+  "description" : "analysis-stempel: the polish analyzer (which ignores its settings), polish_stem with keywords and short words, polish_stop's named list, ignore_case and remove_trailing",
+  "steps" : [
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "analyzer" : "polish",
+        "text" : "Studenci byli w Warszawie, a kobiety czytały najpiękniejsze książki."
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "student",
+            "start_offset" : 0,
+            "end_offset" : 8,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "warszawa",
+            "start_offset" : 16,
+            "end_offset" : 25,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          },
+          {
+            "token" : "a",
+            "start_offset" : 27,
+            "end_offset" : 28,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "kobieta",
+            "start_offset" : 29,
+            "end_offset" : 36,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "czytać",
+            "start_offset" : 37,
+            "end_offset" : 44,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "piękny",
+            "start_offset" : 45,
+            "end_offset" : 59,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          },
+          {
+            "token" : "książek",
+            "start_offset" : 60,
+            "end_offset" : 67,
+            "type" : "<ALPHANUM>",
+            "position" : 8
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          "polish_stop",
+          "polish_stem"
+        ],
+        "text" : "Nie chcę tego ale mogę"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "chcieć",
+            "start_offset" : 4,
+            "end_offset" : 8,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "mogę",
+            "start_offset" : 18,
+            "end_offset" : 22,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          {
+            "type" : "polish_stop",
+            "stopwords" : [
+              "_polish_",
+              "kot"
+            ]
+          }
+        ],
+        "text" : "ale kot i pies"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "pies",
+            "start_offset" : 10,
+            "end_offset" : 14,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          {
+            "type" : "polish_stop",
+            "stopwords" : "_none_"
+          }
+        ],
+        "text" : "ale kot"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "ale",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "kot",
+            "start_offset" : 4,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          {
+            "type" : "polish_stop",
+            "ignore_case" : true,
+            "stopwords" : [
+              "Kot"
+            ]
+          }
+        ],
+        "text" : "KOT pies"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "pies",
+            "start_offset" : 4,
+            "end_offset" : 8,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          {
+            "type" : "polish_stop",
+            "remove_trailing" : false
+          }
+        ],
+        "text" : "pies ale"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "pies",
+            "start_offset" : 0,
+            "end_offset" : 4,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "ale",
+            "start_offset" : 5,
+            "end_offset" : 8,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "keyword",
+        "filter" : [
+          "polish_stem"
+        ],
+        "text" : "ab"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "ab",
+            "start_offset" : 0,
+            "end_offset" : 2,
+            "type" : "word",
+            "position" : 0
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "keyword_repeat",
+          "polish_stem"
+        ],
+        "text" : "studenci"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "studenci",
+            "start_offset" : 0,
+            "end_offset" : 8,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "student",
+            "start_offset" : 0,
+            "end_offset" : 8,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "analyzer" : "polish",
+        "text" : "Studenci",
+        "explain" : true
+      },
+      "status" : 200,
+      "response" : {
+        "detail" : {
+          "custom_analyzer" : false,
+          "analyzer" : {
+            "name" : null,
+            "tokens" : [
+              {
+                "token" : "student",
+                "start_offset" : 0,
+                "end_offset" : 8,
+                "type" : "<ALPHANUM>",
+                "position" : 0,
+                "bytes" : "[73 74 75 64 65 6e 74]",
+                "keyword" : false,
+                "positionLength" : 1,
+                "termFrequency" : 1
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-polish",
+      "body" : {
+        "settings" : {
+          "analysis" : {
+            "analyzer" : {
+              "pl" : {
+                "type" : "polish",
+                "stopwords" : [
+                  "studenci"
+                ]
+              }
+            }
+          }
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "text",
+              "analyzer" : "pl"
+            },
+            "k" : {
+              "type" : "keyword",
+              "normalizer" : "lowercase"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-polish"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-polish/_analyze",
+      "body" : {
+        "analyzer" : "pl",
+        "text" : "Studenci studenta"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "student",
+            "start_offset" : 0,
+            "end_offset" : 8,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "student",
+            "start_offset" : 9,
+            "end_offset" : 17,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-polish",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

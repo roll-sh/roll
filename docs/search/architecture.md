@@ -122,6 +122,52 @@ branch instantly and keep their data on object storage.
   and orderings match Elasticsearch to the float. Top-k disjunctions use block-max MaxScore and
   WAND; conjunctions use block-max skipping; `track_total_hits` defaults to 10 000 as in
   Elasticsearch, which lets the pruning work.
+- Field sorts prune with the first key's points tree or terms (Lucene's competitive iterators).
+  Docs that arrive against the sort (logs indexed oldest first, sorted `@timestamp` desc) would
+  each beat the queue's worst entry, so a numeric first key is collected in bands of its values:
+  the points tree names an edge with about twice the queue's expected matches past it, only docs
+  inside it compare against the queue, the pruner skips the rest once the count passes its
+  threshold, and the segment runs again for the next band if this one came up short. Later
+  passes count nothing, so hits, ties and totals are a single pass's (`search-index`
+  `collector/top_field.rs`, `Band`).
+
+## Language analysis data
+
+The analysis plugins' data ships inside the binary and is read in place: a table nobody uses is
+never paged in, and none of it is decoded onto the heap at startup.
+
+| data | used by | size | licence |
+| ---- | ------- | ---: | ------- |
+| Apache Commons Codec 1.15's Beider-Morse rules and Daitch-Mokotoff rules (`phonetic/data/`) | `phonetic` (parsed on first use per name type) | 234 KB | Apache-2.0 |
+| Lucene's Polish stemmer table `stemmer_20000.tbl`, converted by `tools/gen_stempel.py` | `polish_stem`, `polish` | 763 KB | Apache-2.0 |
+| Lucene's Polish stop words (from Carrot2) | `polish_stop`, `polish` | 2 KB | BSD |
+| `morfologik-ukrainian-search` 3.7.5's `ukrainian.dict` (from dict_uk; GPL/LGPL, CC BY-NC-SA 4.0 or Apache-2.0, used under Apache-2.0) | `ukrainian` | 6.6 MB | Apache-2.0 |
+| Lucene's Ukrainian stop words | `ukrainian` | 16 KB | Apache-2.0 |
+| Lucene 10.5.1's Kuromoji dictionaries (built from IPADIC mecab-ipadic-2.7.0-20070801), packed by `examples/gen_cjk_dicts.rs` (`kuromoji/ipadic.dict`) | `kuromoji_tokenizer` and the `kuromoji` filters and analyzers | 3.9 MB | IPADIC licence (NAIST), Apache-2.0 |
+| Lucene 10.5.1's Nori dictionaries (built from mecab-ko-dic 2.1.1-20180720), packed the same way (`nori/mecab-ko-dic.dict`) | `nori_tokenizer` and the `nori` filters and analyzer | 6.1 MB | Apache-2.0 |
+| Lucene 10.5.1's smartcn dictionaries (`coredict.mem`, `bigramdict.mem`, derived from ICTCLAS) (`smartcn/hhmm.dict`) | `smartcn_tokenizer`, `smartcn` | 2.8 MB | Apache-2.0 |
+| Lucene's Japanese stop words and stop tags, romaji map and Chinese stop words | `ja_stop`, `kuromoji_part_of_speech`, `kuromoji_completion`, `smartcn_stop` | 23 KB | Apache-2.0 |
+| ICU4J 77.1's normalization data (`nfc`, `nfkc`, `nfkc_cf`, `nfkc_scf`, `uts46` `.nrm`) and Lucene's `utr30.nrm` (`icu/data/`) | `icu_normalizer`, `icu_folding`, `icu_analyzer`, the CJK engine's NFKC | 321 KB | Unicode-3.0; Apache-2.0 |
+| ICU4J 77.1's root word break rules (`word.brk`) and Lucene's `Default.brk` | `icu_tokenizer` | 46 KB | Unicode-3.0; Apache-2.0 |
+| ICU4J 77.1's dictionaries `thaidict`, `laodict`, `khmerdict`, `burmesedict`, `cjdict` | `icu_tokenizer` (Thai, Lao, Khmer, Burmese, Chinese and Japanese runs; Korean runs use `cjdict` too) | 3.0 MB | Unicode-3.0 |
+| ICU4X 2.3's compiled collation data (`icu_collator_data`) | `icu_collation`, `icu_collation_keyword` | compiled in | Unicode-3.0 |
+
+The code that reads them ports Apache Commons Codec (Apache-2.0), Lucene's Egothor stemmer
+(Apache-2.0), Morfologik 2.1.1 (BSD) and ICU4J 77.1's `Normalizer2Impl`, `RuleBasedBreakIterator`,
+dictionary break engines, `BytesTrie`, `CharsTrie` and `CodePointTrie` (Unicode-3.0). New crates:
+`icu_collator`, `icu_locale_core`, `icu_collections` and `icu_properties` (with its `unstable`
+`UnicodeSet` parser) from ICU4X 2.3, all Unicode-3.0.
+
+The three CJK dictionaries are zstd-compressed (12.8 MB of the binary) and decompressed once per
+process on first use, into memory every index and cluster on the node shares: a node that never
+analyzes Japanese, Korean or Chinese text keeps its resident set (24 MiB idle for `search-dev`,
+unchanged), and the first use adds about 24 MiB (Japanese), 38 MiB (Korean) and 5 MiB (Chinese).
+`tools/cjk_dicts.sh` regenerates them from Lucene's jars: its `DumpDicts.java` reads out what only
+Lucene can (the FSTs, smartcn's serialized tables), the FSTs are rebuilt with the `fst` crate
+(MIT/Unlicense) and the connection costs are stored with duplicate rows and columns folded
+(mecab-ko-dic's 3,822 × 2,693 matrix has 1,902 × 1,908 distinct values: 7.3 MB in memory instead of
+20.6); every other Lucene dictionary file is kept byte for byte. The analyzers port Lucene's
+`org.apache.lucene.analysis.morph`, `.ja`, `.ko` and `.cn.smart` packages (Apache-2.0).
 
 ## Idle cost
 
@@ -159,6 +205,26 @@ password, or `<user>@<cluster>`), `Authorization: ApiKey base64(id:secret)` wher
 cluster, `Authorization: Bearer <cluster>_<secret>`, or the TLS SNI/`Host` label under the node's
 domain (`<cluster>.search.<domain>`). Secrets are compared in constant time. Each cluster has
 request-rate and in-flight byte budgets so one tenant can't starve the node.
+
+APIs built on other APIs (EQL, ES|QL, SQL, PPL, graph, vector tiles, `terms_enum`, transforms'
+preview, rollup search, downsampling, search applications, …) make their inner requests as
+the client (`xpack::internal::as_caller`, set for every x-pack and opensearch-dialect API at
+dispatch): those requests are authorized, and read under document and field level security,
+as the client; only work on the cluster's own system indices uses `call_system`. Background
+work runs as the user who set it up (`as_principal`): a watch as its user, a rollup job as its
+creator, a transform as the user who put or last updated it. A superuser's requests and jobs
+run with the cluster's authority, as before.
+
+Secrets a cluster stores for later use are sealed in its state (`search-es` `seal.rs`): a
+watch's HTTP passwords and `Authorization` headers, connector secrets and Fleet secrets.
+AES-256-GCM under a key derived from the deployment's `ROLL_SECRET_KEY` (rolld; search-dev
+reads the same variable), a fresh nonce per value and the value's kind as associated data. They
+travel sealed through cluster states, snapshots and branches, and are opened only to send a
+request or to answer that secret's own read API; a node with another key refuses to open them
+without naming either. With no key they are stored as given, as Elasticsearch does without
+`xpack.watcher.encrypt_sensitive_data`. ES|QL data sources still refuse S3 secrets, as
+Elasticsearch does without cluster state encryption. Users' passwords are hashes and API keys
+are kept as hashes, never sealed.
 
 ## On the fleet (roll cloud)
 

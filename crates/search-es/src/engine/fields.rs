@@ -110,7 +110,8 @@ impl Kind {
             "text" | "annotated_text" => Kind::Text,
             "match_only_text" | "pattern_text" => Kind::MatchOnlyText,
             "search_as_you_type" => Kind::SearchAsYouType,
-            "keyword" => Kind::Keyword,
+            // The analysis-icu plugin's collation keys: keyword terms normalized by a collator.
+            "keyword" | "icu_collation_keyword" => Kind::Keyword,
             "constant_keyword" => Kind::ConstantKeyword,
             "wildcard" => Kind::Wildcard,
             "version" => Kind::Version,
@@ -388,6 +389,10 @@ pub struct FieldTable {
     /// The mapping has vector fields (`dense_vector`, `rank_vectors`, `sparse_vector`), which
     /// fetched `_source` leaves out by default.
     pub has_vectors: bool,
+    /// The vector fields whose values the stored `_source` leaves out (by name), patched back
+    /// by the readers that need them (`source_vectors`); set by the engine from the index's
+    /// settings.
+    pub stripped_vectors: Vec<Arc<FieldInfo>>,
     /// `copy_to` targets and the fields copying into them (`MappingLookup.sourcePaths`):
     /// the fields API reads a target's values from its sources.
     pub copy_sources: HashMap<String, Vec<String>>,
@@ -446,9 +451,21 @@ impl FieldTable {
 
     /// The table a reader under field level security sees (`FieldSubsetReader`): the fields
     /// `visible` refuses are unmapped, and so are aliases to them and their internal
-    /// sub-fields (`title._index_prefix` follows `title`). Engine field numbers are kept.
+    /// sub-fields (`title._index_prefix` follows `title`, and a `semantic_text` field's hidden
+    /// chunk embeddings `body.inference.chunks.embeddings` follow `body`). Engine field numbers
+    /// are kept.
     pub fn filtered(&self, visible: impl Fn(&str) -> bool) -> FieldTable {
-        let shown = |k: &str| visible(k.split("._").next().unwrap_or(k));
+        let semantic_owner = |k: &str| -> Option<String> {
+            let p = k.strip_suffix(".inference.chunks.embeddings")?;
+            matches!(self.mapping.lookup(p), Some(crate::mapping::MapperRef::Field(f)) if f.ty == "semantic_text").then(|| p.to_string())
+        };
+        let shown = |k: &str| {
+            let base = k.split("._").next().unwrap_or(k);
+            match semantic_owner(base) {
+                Some(owner) => visible(&owner),
+                None => visible(base),
+            }
+        };
         FieldTable {
             schema: self.schema.clone(),
             fields: self.fields.iter().filter(|(k, _)| shown(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),
@@ -459,14 +476,16 @@ impl FieldTable {
             analysis: self.analysis.clone(),
             key: self.key,
             has_vectors: self.has_vectors,
+            stripped_vectors: self.stripped_vectors.clone(),
             copy_sources: self.copy_sources.clone(),
             source_filter: self.source_filter.clone(),
         }
     }
 
-    /// [`FieldTable::filtered`] by a role's field permissions, which also filter `_source`.
+    /// [`FieldTable::filtered`] by a role's field permissions (masked fields are unmapped too),
+    /// which also filter `_source`.
     pub fn restricted(&self, f: &crate::xpack::security::dls::FieldFilter) -> FieldTable {
-        FieldTable { source_filter: Some(Arc::new(f.clone())), ..self.filtered(|n| f.allows(n)) }
+        FieldTable { source_filter: Some(Arc::new(f.clone())), ..self.filtered(|n| f.searchable(n)) }
     }
 
     /// A document's `_source` as this table's reader may see it.
@@ -535,6 +554,7 @@ impl FieldTable {
             analysis,
             key: (0, 0, 0),
             has_vectors: false,
+            stripped_vectors: Vec::new(),
             copy_sources: HashMap::new(),
             source_filter: None,
         };
@@ -610,6 +630,10 @@ impl FieldTable {
                     for (mk, mf) in &f.fields {
                         let mpath = format!("{path}.{mk}");
                         self.add_field(mf, &mpath, nested, Some(&path), ctx, numbers, sims)?;
+                    }
+                    // A `semantic_text` field's embeddings are in hidden nested chunks.
+                    if let Some(h) = f.semantic_hidden() {
+                        crate::stack::maybe_grow(|| self.walk(h, &path, nested, ctx, numbers, sims))?;
                     }
                     // Mapped sub-fields of a `flattened` field are fields of their own
                     // (`<path>.<key>`).
@@ -794,6 +818,18 @@ impl FieldTable {
                     let psa = sa.with_shingles(max).map_err(es_error)?;
                     self.sub_text(&sub, n, &info, pa, psa, IndexOptions::DocsAndFreqsAndPositions.min(opts), sim.clone())?;
                     info.prefix_field = Some((n, 1, 19));
+                    // Each shingle subfield's prefix queries go to the same prefix field
+                    // (`ShingleFieldType.setPrefixFieldType`).
+                    for &(size, sn) in &info.shingle_fields {
+                        let name = format!("{path}._{size}gram");
+                        if let Some(sf) = self.fields.get(&name) {
+                            let mut sf = (**sf).clone();
+                            sf.prefix_field = Some((n, 1, 19));
+                            let sf = Arc::new(sf);
+                            self.by_number.insert(sn, sf.clone());
+                            self.fields.insert(name, sf);
+                        }
+                    }
                 }
                 if let Some(Value::Obj(p)) = f.raw("index_prefixes") {
                     let min = p.get("min_chars").and_then(Value::as_i64).unwrap_or(2) as usize;
@@ -891,6 +927,10 @@ impl FieldTable {
                     }
                 } else if b("split_queries_on_whitespace", false) {
                     info.whitespace_analyzer = self.analysis.analyzer("whitespace");
+                }
+                if info.ty == "icu_collation_keyword" {
+                    let params = crate::mapping::types::icu_collation_params(f);
+                    info.normalizer = Some(search_analysis::Collation::normalizer(path, &params).map_err(EsError::illegal_argument)?);
                 }
                 info.ignore_above = ignore_above();
                 if let Some(tv) = term_vector(f, ctx) {

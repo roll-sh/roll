@@ -64,6 +64,11 @@ docker_() {
 
 search_dev() {
   if [[ -n ${SEARCH_DEV:-} ]]; then
+    # A missing binary would be bind-mounted as a directory Docker creates as root.
+    if [[ ! -f $SEARCH_DEV ]]; then
+      echo "bench-search: SEARCH_DEV=$SEARCH_DEV is not a file" >&2
+      exit 1
+    fi
     echo "$SEARCH_DEV"
     return
   fi
@@ -84,10 +89,13 @@ wait_http() { # url seconds
 
 running() { [[ -n $(docker_ ps -q -f "name=^$1\$") ]]; }
 
+# The disk watermarks are off: the host's disk is shared, and a reference that blocks index
+# creation (OpenSearch's create-index block past the high watermark) measures nothing.
 start_es() {
   if ! running "$ES_NAME"; then
     docker_ run --rm -d --name "$ES_NAME" --cpuset-cpus "$CPUS" -m "$MEM" \
       -e discovery.type=single-node -e xpack.security.enabled=false \
+      -e cluster.routing.allocation.disk.threshold_enabled=false \
       -e xpack.license.self_generated.type=trial -e "ES_JAVA_OPTS=-Xms2g -Xmx2g" \
       -p "127.0.0.1:$ES_PORT:9200" "docker.elastic.co/elasticsearch/elasticsearch:$ES_VERSION" >/dev/null
   fi
@@ -99,6 +107,7 @@ start_os() {
   if ! running "$OS_NAME"; then
     docker_ run --rm -d --name "$OS_NAME" --cpuset-cpus "$CPUS" -m "$MEM" \
       -e discovery.type=single-node -e DISABLE_SECURITY_PLUGIN=true -e DISABLE_INSTALL_DEMO_CONFIG=true \
+      -e cluster.routing.allocation.disk.threshold_enabled=false \
       -e "OPENSEARCH_JAVA_OPTS=-Xms2g -Xmx2g" \
       -p "127.0.0.1:$OS_PORT:9200" "opensearchproject/opensearch:$OS_VERSION" >/dev/null
   fi

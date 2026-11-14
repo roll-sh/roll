@@ -361,3 +361,232 @@ export function visibleColumns(picked: string[] | null, available: string[], max
 export function toggleColumn(shown: string[], column: string): string[] {
   return shown.includes(column) ? shown.filter((c) => c !== column) : [...shown, column];
 }
+
+/** One row of an index's mapping as the browser lists it. */
+export interface MappingRow {
+  /** Full path: `user.name`, `title.keyword`. */
+  name: string;
+  type: string;
+  /** Nesting under objects and multi-fields (indents the row). */
+  depth: number;
+  /** A runtime field (computed at search time, not stored). */
+  runtime?: boolean;
+  /** A multi-field of its parent (`title.keyword`). */
+  multi?: boolean;
+  /** What changes how the field is indexed or searched, in a few words each. */
+  notes: string[];
+}
+
+/** The settings of a field worth a word in the mapping table. */
+function fieldNotes(d: Record<string, unknown>): string[] {
+  const notes: string[] = [];
+  const str = (k: string) => (typeof d[k] === "string" || typeof d[k] === "number" ? String(d[k]) : null);
+  const type = typeof d.type === "string" ? d.type : null;
+  if (type === "semantic_text") notes.push(`inference ${str("inference_id") ?? "(default endpoint)"}`);
+  if (str("search_inference_id")) notes.push(`search inference ${str("search_inference_id")}`);
+  if (type === "dense_vector") {
+    if (str("dims")) notes.push(`${str("dims")} dims`);
+    if (str("element_type") && d.element_type !== "float") notes.push(`${str("element_type")} elements`);
+    if (str("similarity")) notes.push(str("similarity")!);
+    const opts = d.index_options as { type?: string } | undefined;
+    if (opts?.type) notes.push(opts.type);
+  }
+  if (type === "knn_vector") {
+    if (str("dimension")) notes.push(`${str("dimension")} dims`);
+    if (str("space_type")) notes.push(str("space_type")!);
+    const method = d.method as { name?: string; engine?: string } | undefined;
+    if (method?.name) notes.push(method.engine ? `${method.name} (${method.engine})` : method.name);
+  }
+  if (str("analyzer")) notes.push(`analyzer ${str("analyzer")}`);
+  if (str("search_analyzer")) notes.push(`search analyzer ${str("search_analyzer")}`);
+  if (str("normalizer")) notes.push(`normalizer ${str("normalizer")}`);
+  if (str("ignore_above")) notes.push(`ignore above ${str("ignore_above")}`);
+  if (str("format")) notes.push(`format ${str("format")}`);
+  if (str("scaling_factor")) notes.push(`scaling factor ${str("scaling_factor")}`);
+  if (str("path") && type === "alias") notes.push(`→ ${str("path")}`);
+  if (str("value") && type === "constant_keyword") notes.push(`= ${str("value")}`);
+  if (d.copy_to) notes.push(`copied to ${([] as unknown[]).concat(d.copy_to).join(", ")}`);
+  if (d.index === false) notes.push("not indexed");
+  if (d.doc_values === false) notes.push("no doc values");
+  if (d.store === true) notes.push("stored");
+  if (d.enabled === false) notes.push("not parsed");
+  if (d.dynamic !== undefined && d.dynamic !== true && d.dynamic !== "true") notes.push(`dynamic ${String(d.dynamic)}`);
+  if (d.script) notes.push("script");
+  return notes;
+}
+
+/**
+ * An index's `GET /<index>/_mapping` as rows: every field in mapping order (an object before its
+ * fields, a field before its multi-fields), then runtime fields. The first index of the response
+ * gives the order; fields only other indices have (a pattern, a data stream's backing indices)
+ * follow in theirs.
+ */
+export function mappingRows(resp: unknown): MappingRow[] {
+  const rows: MappingRow[] = [];
+  const seen = new Set<string>();
+  const walk = (props: unknown, prefix: string, depth: number, extra: Partial<MappingRow>) => {
+    if (!props || typeof props !== "object") return;
+    for (const [name, def] of Object.entries(props as Record<string, unknown>)) {
+      if (!def || typeof def !== "object") continue;
+      const d = def as Record<string, unknown>;
+      const full = prefix + name;
+      if (!seen.has(full)) {
+        seen.add(full);
+        rows.push({ name: full, type: typeof d.type === "string" ? d.type : "object", depth, notes: fieldNotes(d), ...extra });
+      }
+      walk(d.properties, `${full}.`, depth + 1, {});
+      walk(d.fields, `${full}.`, depth + 1, { multi: true });
+    }
+  };
+  const indices = resp && typeof resp === "object" ? Object.values(resp as Record<string, unknown>) : [];
+  const mappings = indices.map((i) => (i as { mappings?: { properties?: unknown; runtime?: unknown } } | null)?.mappings).filter((m) => !!m);
+  for (const m of mappings) walk(m!.properties, "", 0, {});
+  for (const m of mappings) walk(m!.runtime, "", 0, { runtime: true });
+  return rows;
+}
+
+/** The index-wide settings of a mapping worth a word (`dynamic`, `_source`, `subobjects`). */
+export function mappingNotes(resp: unknown): string[] {
+  const first = resp && typeof resp === "object" ? Object.values(resp as Record<string, unknown>)[0] : null;
+  const m = (first as { mappings?: Record<string, unknown> } | null)?.mappings;
+  if (!m) return [];
+  const notes: string[] = [];
+  if (m.dynamic !== undefined && m.dynamic !== true && m.dynamic !== "true") notes.push(`dynamic: ${String(m.dynamic)}`);
+  const source = m._source as { mode?: string; enabled?: boolean } | undefined;
+  if (source?.mode) notes.push(`_source: ${source.mode}`);
+  if (source?.enabled === false) notes.push("_source: disabled");
+  if (m.subobjects === false || m.subobjects === "false") notes.push("subobjects: false");
+  if (Array.isArray(m.dynamic_templates) && m.dynamic_templates.length) notes.push(`${m.dynamic_templates.length} dynamic template${m.dynamic_templates.length === 1 ? "" : "s"}`);
+  return notes;
+}
+
+/** Field types the new-index editor offers (`dense_vector` is `knn_vector` on OpenSearch). */
+export const NEW_FIELD_TYPES = ["text", "keyword", "long", "double", "boolean", "date", "ip", "geo_point", "semantic_text", "dense_vector"] as const;
+export type NewFieldType = (typeof NEW_FIELD_TYPES)[number];
+
+/** One field of the new-index editor. */
+export interface NewField {
+  /** A path: `user.name` maps `name` under the object `user`. */
+  name: string;
+  type: NewFieldType;
+  /** text: the analyzer (`standard` when unset) and a `.keyword` sub-field for sorting. */
+  analyzer?: string;
+  keyword?: boolean;
+  /** semantic_text: the endpoint (required: the default, ELSER, can't run on roll). */
+  inferenceId?: string;
+  /** dense_vector: dimensions and similarity (`cosine`, `dot_product`, `l2_norm`). */
+  dims?: number;
+  similarity?: "cosine" | "dot_product" | "l2_norm";
+}
+
+const OS_SPACE: Record<string, string> = { cosine: "cosinesimil", dot_product: "innerproduct", l2_norm: "l2" };
+
+function fieldMapping(f: NewField, opensearch: boolean): Record<string, unknown> {
+  switch (f.type) {
+    case "text": {
+      const m: Record<string, unknown> = { type: "text" };
+      if (f.analyzer && f.analyzer !== "standard") m.analyzer = f.analyzer;
+      if (f.keyword) m.fields = { keyword: { type: "keyword", ignore_above: 256 } };
+      return m;
+    }
+    case "semantic_text":
+      return f.inferenceId ? { type: "semantic_text", inference_id: f.inferenceId } : { type: "semantic_text" };
+    case "dense_vector": {
+      const sim = f.similarity ?? "cosine";
+      if (opensearch) return { type: "knn_vector", dimension: f.dims ?? 0, space_type: OS_SPACE[sim] };
+      return { type: "dense_vector", dims: f.dims ?? 0, similarity: sim };
+    }
+    default:
+      return { type: f.type };
+  }
+}
+
+/** What would make Elasticsearch refuse the fields, or `null`. Rows without a name are skipped. */
+export function newIndexProblem(fields: NewField[], opensearch: boolean): string | null {
+  const named = fields.filter((f) => f.name.trim());
+  const names = new Set<string>();
+  for (const f of named) {
+    const n = f.name.trim();
+    if (n.split(".").some((p) => !p)) return `"${n}": a field name can't start or end with a dot, or hold two in a row.`;
+    if (names.has(n)) return `"${n}" is listed twice.`;
+    names.add(n);
+    if (f.type === "dense_vector") {
+      const max = opensearch ? 16000 : 4096;
+      if (!Number.isInteger(f.dims) || (f.dims ?? 0) < 1 || (f.dims ?? 0) > max) return `"${n}": dimensions are a whole number from 1 to ${max}.`;
+    }
+    if (f.type === "semantic_text" && opensearch) return `"${n}": semantic_text is Elasticsearch's; on OpenSearch, use a knn_vector field with an ingest pipeline.`;
+    // Without one, Elasticsearch embeds with its ELSER endpoint, which needs machine learning
+    // nodes: every write would fail.
+    if (f.type === "semantic_text" && !f.inferenceId) return `"${n}": pick an embeddings endpoint (the default, ELSER, needs machine learning nodes, which roll doesn't run).`;
+  }
+  for (const n of names) {
+    const parts = n.split(".");
+    for (let i = 1; i < parts.length; i++) {
+      const parent = parts.slice(0, i).join(".");
+      if (names.has(parent)) return `"${parent}" is a field and also holds "${n}": make "${parent}" an object (leave it out) or rename one.`;
+    }
+  }
+  return null;
+}
+
+/** The `PUT /<index>` body of the editor's fields (dotted names as objects). */
+export function newIndexBody(fields: NewField[], dynamic: "true" | "strict", opensearch: boolean): Record<string, unknown> {
+  const properties: Record<string, unknown> = {};
+  for (const f of fields) {
+    const name = f.name.trim();
+    if (!name) continue;
+    const parts = name.split(".");
+    let at = properties;
+    for (const p of parts.slice(0, -1)) {
+      const obj = (at[p] ??= { properties: {} }) as { properties: Record<string, unknown> };
+      at = obj.properties;
+    }
+    at[parts[parts.length - 1]] = fieldMapping(f, opensearch);
+  }
+  const mappings: Record<string, unknown> = {};
+  if (dynamic === "strict") mappings.dynamic = "strict";
+  mappings.properties = properties;
+  const body: Record<string, unknown> = { mappings };
+  if (opensearch && fields.some((f) => f.name.trim() && f.type === "dense_vector")) body.settings = { "index.knn": true };
+  return body;
+}
+
+/** A documents view's time range: the last stretch of time (`null`: all of it), or a span picked
+ * on the histogram (epoch ms, end excluded). */
+export type TimeRange = { last: string | null } | { gte: number; lt: number };
+
+export const TIME_PRESETS: { label: string; value: string | null }[] = [
+  { label: "15m", value: "15m" },
+  { label: "1h", value: "1h" },
+  { label: "24h", value: "24h" },
+  { label: "7d", value: "7d" },
+  { label: "30d", value: "30d" },
+  { label: "all", value: null },
+];
+
+/** The field a time-based index is browsed by: `@timestamp` (Elastic Common Schema, data
+ * streams), else `timestamp`, else its only top-level date field. */
+export function timeFieldOf(fields: MappedField[]): string | null {
+  const dates = fields.filter((f) => f.type === "date" || f.type === "date_nanos").map((f) => f.name);
+  for (const name of ["@timestamp", "timestamp"]) if (dates.includes(name)) return name;
+  const top = dates.filter((n) => !n.includes("."));
+  return top.length === 1 ? top[0] : null;
+}
+
+/** The `range` filter of a time range, or `null` for all time. */
+export function timeFilter(field: string, range: TimeRange): Record<string, unknown> | null {
+  if ("gte" in range) return { range: { [field]: { gte: range.gte, lt: range.lt, format: "epoch_millis" } } };
+  return range.last ? { range: { [field]: { gte: `now-${range.last}` } } } : null;
+}
+
+/** One bar of the documents-over-time histogram. */
+export interface TimeBucket {
+  key: number;
+  count: number;
+}
+
+/** The buckets of the documents view's `over_time` aggregation. */
+export function timeBuckets(resp: unknown): TimeBucket[] {
+  const b = (resp as { aggregations?: { over_time?: { buckets?: { key: number; doc_count: number }[] } } } | null)?.aggregations?.over_time?.buckets ?? [];
+  return b.map((x) => ({ key: x.key, count: x.doc_count }));
+}

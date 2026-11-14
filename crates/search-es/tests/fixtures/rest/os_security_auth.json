@@ -1,0 +1,999 @@
+{
+  "dialect" : "opensearch",
+  "description" : "OpenSearch Security: authinfo, account, authentication and the authorization of requests by roles and role mappings (OpenSearch 3.9.0)",
+  "steps" : [
+    {
+      "req" : "GET /_plugins/_security/authinfo",
+      "mask" : [
+        "remote_address"
+      ],
+      "status" : 200,
+      "response" : {
+        "user" : "User [name=admin, backend_roles=[admin], requestedTenant=null]",
+        "user_name" : "admin",
+        "user_requested_tenant" : null,
+        "remote_address" : "172.17.0.1:48886",
+        "backend_roles" : [
+          "admin"
+        ],
+        "custom_attribute_names" : [ ],
+        "roles" : [
+          "all_access"
+        ],
+        "tenants" : {
+          "global_tenant" : true,
+          "admin_tenant" : true,
+          "admin" : true
+        },
+        "principal" : null,
+        "peer_certificates" : "0",
+        "sso_logout_url" : null
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/account",
+      "status" : 200,
+      "response" : {
+        "user_name" : "admin",
+        "is_reserved" : true,
+        "is_hidden" : false,
+        "is_internal_user" : true,
+        "user_requested_tenant" : null,
+        "backend_roles" : [
+          "admin"
+        ],
+        "custom_attribute_names" : [ ],
+        "tenants" : {
+          "global_tenant" : true,
+          "admin_tenant" : true,
+          "admin" : true
+        },
+        "roles" : [
+          "all_access"
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/account",
+      "body" : {
+        "current_password" : "x",
+        "password" : "Esm-pass-1234!"
+      },
+      "status" : 403,
+      "response" : {
+        "status" : "FORBIDDEN",
+        "message" : "Resource 'admin' is reserved."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u1",
+      "body" : {
+        "password" : "Esm-pass-1234!",
+        "backend_roles" : [
+          "b1"
+        ],
+        "attributes" : {
+          "team" : "t1"
+        }
+      },
+      "status" : 201,
+      "response" : {
+        "status" : "CREATED",
+        "message" : "'esm-u1' created."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/roles/esm-r1",
+      "body" : {
+        "cluster_permissions" : [
+          "cluster_composite_ops"
+        ],
+        "index_permissions" : [
+          {
+            "index_patterns" : [
+              "esm-${user_name}-*",
+              "esm-docs"
+            ],
+            "allowed_actions" : [
+              "crud"
+            ]
+          }
+        ],
+        "tenant_permissions" : [
+          {
+            "tenant_patterns" : [
+              "global_tenant"
+            ],
+            "allowed_actions" : [
+              "kibana_all_read"
+            ]
+          }
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "status" : "CREATED",
+        "message" : "'esm-r1' created."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/rolesmapping/esm-r1",
+      "body" : {
+        "backend_roles" : [
+          "b1"
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "status" : "CREATED",
+        "message" : "'esm-r1' created."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/authinfo",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "mask" : [
+        "remote_address"
+      ],
+      "status" : 200,
+      "response" : {
+        "user" : "User [name=esm-u1, backend_roles=[b1], requestedTenant=null]",
+        "user_name" : "esm-u1",
+        "user_requested_tenant" : null,
+        "remote_address" : "172.17.0.1:48886",
+        "backend_roles" : [
+          "b1"
+        ],
+        "custom_attribute_names" : [
+          "attr.internal.team"
+        ],
+        "roles" : [
+          "esm-r1"
+        ],
+        "tenants" : {
+          "global_tenant" : false,
+          "esm-u1" : true
+        },
+        "principal" : null,
+        "peer_certificates" : "0",
+        "sso_logout_url" : null
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/account",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 200,
+      "response" : {
+        "user_name" : "esm-u1",
+        "is_reserved" : false,
+        "is_hidden" : false,
+        "is_internal_user" : true,
+        "user_requested_tenant" : null,
+        "backend_roles" : [
+          "b1"
+        ],
+        "custom_attribute_names" : [
+          "attr.internal.team"
+        ],
+        "tenants" : {
+          "global_tenant" : false,
+          "esm-u1" : true
+        },
+        "roles" : [
+          "esm-r1"
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/health",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 200,
+      "response" : {
+        "message" : null,
+        "mode" : "strict",
+        "status" : "UP",
+        "settings" : {
+          "plugins.security.cache.ttl_minutes" : 60
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/internalusers",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 403,
+      "response" : {
+        "status" : "FORBIDDEN",
+        "message" : "No permission to access REST API: User esm-u1 with Security roles [esm-r1] does not have any role privileged for admin access. No ssl info found in request."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/roles/esm-r1",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 403,
+      "response" : {
+        "status" : "FORBIDDEN",
+        "message" : "No permission to access REST API: User esm-u1 with Security roles [esm-r1] does not have any role privileged for admin access. No ssl info found in request."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 403,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "security_exception",
+              "reason" : "no permissions for [cluster:monitor/health] and User [name=esm-u1, backend_roles=[b1], requestedTenant=null]"
+            }
+          ],
+          "type" : "security_exception",
+          "reason" : "no permissions for [cluster:monitor/health] and User [name=esm-u1, backend_roles=[b1], requestedTenant=null]"
+        },
+        "status" : 403
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-docs",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-docs"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-other",
+      "body" : { },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-other"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-docs/_doc/1?refresh=true",
+      "body" : {
+        "k" : "a"
+      },
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-docs",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-docs/_doc/2?refresh=true",
+      "body" : {
+        "k" : "b",
+        "extra" : 1
+      },
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-docs",
+        "_id" : "2",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /esm-docs/_doc/1",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 200,
+      "response" : {
+        "_index" : "esm-docs",
+        "_id" : "1",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "k" : "a"
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /esm-docs/_search?filter_path=hits.total",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /esm-other/_search",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 403,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "security_exception",
+              "reason" : "no permissions for [indices:data/read/search] and User [name=esm-u1, backend_roles=[b1], requestedTenant=null]"
+            }
+          ],
+          "type" : "security_exception",
+          "reason" : "no permissions for [indices:data/read/search] and User [name=esm-u1, backend_roles=[b1], requestedTenant=null]"
+        },
+        "status" : 403
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /esm-*/_search?filter_path=hits.total",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 403,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "security_exception",
+              "reason" : "no permissions for [indices:data/read/search] and User [name=esm-u1, backend_roles=[b1], requestedTenant=null]"
+            }
+          ],
+          "type" : "security_exception",
+          "reason" : "no permissions for [indices:data/read/search] and User [name=esm-u1, backend_roles=[b1], requestedTenant=null]"
+        },
+        "status" : 403
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_search?filter_path=hits.total",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 403,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "security_exception",
+              "reason" : "no permissions for [indices:data/read/search] and User [name=esm-u1, backend_roles=[b1], requestedTenant=null]"
+            }
+          ],
+          "type" : "security_exception",
+          "reason" : "no permissions for [indices:data/read/search] and User [name=esm-u1, backend_roles=[b1], requestedTenant=null]"
+        },
+        "status" : 403
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-other/_doc/1",
+      "body" : {
+        "k" : "a"
+      },
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 403,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "security_exception",
+              "reason" : "no permissions for [indices:data/write/index] and User [name=esm-u1, backend_roles=[b1], requestedTenant=null]"
+            }
+          ],
+          "type" : "security_exception",
+          "reason" : "no permissions for [indices:data/write/index] and User [name=esm-u1, backend_roles=[b1], requestedTenant=null]"
+        },
+        "status" : 403
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /esm-docs/_mapping",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 403,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "security_exception",
+              "reason" : "no permissions for [indices:admin/mappings/get] and User [name=esm-u1, backend_roles=[b1], requestedTenant=null]"
+            }
+          ],
+          "type" : "security_exception",
+          "reason" : "no permissions for [indices:admin/mappings/get] and User [name=esm-u1, backend_roles=[b1], requestedTenant=null]"
+        },
+        "status" : 403
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-docs/_delete_by_query?refresh=true",
+      "body" : {
+        "query" : {
+          "term" : {
+            "k" : "b"
+          }
+        }
+      },
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 403,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "security_exception",
+              "reason" : "no permissions for [indices:admin/refresh] and User [name=esm-u1, backend_roles=[b1], requestedTenant=null]"
+            }
+          ],
+          "type" : "security_exception",
+          "reason" : "no permissions for [indices:admin/refresh] and User [name=esm-u1, backend_roles=[b1], requestedTenant=null]"
+        },
+        "status" : 403
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_index\":\"esm-docs\",\"_id\":\"3\"}}\n{\"k\":\"c\"}\n{\"index\":{\"_index\":\"esm-other\",\"_id\":\"3\"}}\n{\"k\":\"c\"}\n",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh",
+        "Content-Type" : "application/x-ndjson"
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 32,
+        "errors" : true,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "esm-docs",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 3,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-other",
+              "_id" : "3",
+              "status" : 403,
+              "error" : {
+                "type" : "security_exception",
+                "reason" : "no permissions for [indices:data/write/bulk[s], indices:data/write/index] and User [name=esm-u1, backend_roles=[b1], requestedTenant=null]"
+              }
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /esm-docs/_count",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 200,
+      "response" : {
+        "count" : 2,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/authinfo",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOndyb25nLXBhc3N3b3Jk"
+      },
+      "status" : 401,
+      "text" : "Unauthorized",
+      "response_headers" : {
+        "content-type" : "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/authinfo",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLW5vYm9keTpFc20tcGFzcy0xMjM0IQ=="
+      },
+      "status" : 401,
+      "text" : "Unauthorized",
+      "response_headers" : {
+        "content-type" : "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/account",
+      "body" : {
+        "current_password" : "wrong-pass",
+        "password" : "correcthorsebattery"
+      },
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "BAD_REQUEST",
+        "message" : "Could not validate your current password."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/account",
+      "body" : {
+        "current_password" : "Esm-pass-1234!",
+        "password" : "abc"
+      },
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Weak password"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/account",
+      "body" : {
+        "password" : "correcthorsebattery"
+      },
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Invalid configuration",
+        "missing_mandatory_keys" : {
+          "keys" : "current_password"
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/account",
+      "body" : {
+        "current_password" : "Esm-pass-1234!"
+      },
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "BAD_REQUEST",
+        "message" : "Both provided password and hash cannot be null/empty."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/account",
+      "body" : {
+        "current_password" : "Esm-pass-1234!",
+        "password" : "correcthorsebattery"
+      },
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 200,
+      "response" : {
+        "status" : "OK",
+        "message" : "'esm-u1' updated."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/account",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 401,
+      "text" : "Unauthorized",
+      "response_headers" : {
+        "content-type" : "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/account",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOmNvcnJlY3Rob3JzZWJhdHRlcnk="
+      },
+      "status" : 200,
+      "response" : {
+        "user_name" : "esm-u1",
+        "is_reserved" : false,
+        "is_hidden" : false,
+        "is_internal_user" : true,
+        "user_requested_tenant" : null,
+        "backend_roles" : [
+          "b1"
+        ],
+        "custom_attribute_names" : [
+          "attr.internal.team"
+        ],
+        "tenants" : {
+          "global_tenant" : false,
+          "esm-u1" : true
+        },
+        "roles" : [
+          "esm-r1"
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/roles/esm-sec",
+      "body" : {
+        "cluster_permissions" : [
+          "restapi:admin/roles"
+        ]
+      },
+      "status" : 403,
+      "response" : {
+        "status" : "FORBIDDEN",
+        "message" : "Access denied"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/rolesmapping/esm-sec",
+      "body" : {
+        "users" : [
+          "esm-u1"
+        ]
+      },
+      "status" : 404,
+      "response" : {
+        "status" : "NOT_FOUND",
+        "message" : "role 'esm-sec' not found."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/roles/esm-sec",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOmNvcnJlY3Rob3JzZWJhdHRlcnk="
+      },
+      "status" : 403,
+      "response" : {
+        "status" : "FORBIDDEN",
+        "message" : "No permission to access REST API: User esm-u1 with Security roles [esm-r1] does not have any role privileged for admin access. No ssl info found in request."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/internalusers/esm-u1",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOmNvcnJlY3Rob3JzZWJhdHRlcnk="
+      },
+      "status" : 403,
+      "response" : {
+        "status" : "FORBIDDEN",
+        "message" : "No permission to access REST API: User esm-u1 with Security roles [esm-r1] does not have any role privileged for admin access. No ssl info found in request."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/rolesmapping/all_access",
+      "body" : {
+        "users" : [
+          "esm-u1"
+        ],
+        "backend_roles" : [
+          "admin"
+        ],
+        "description" : "Maps admin to all_access"
+      },
+      "status" : 200,
+      "response" : {
+        "status" : "OK",
+        "message" : "'all_access' updated."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/internalusers/esm-u1",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXUxOmNvcnJlY3Rob3JzZWJhdHRlcnk="
+      },
+      "status" : 200,
+      "response" : {
+        "esm-u1" : {
+          "attributes" : {
+            "team" : "t1"
+          },
+          "backend_roles" : [
+            "b1"
+          ],
+          "hash" : "",
+          "hidden" : false,
+          "opendistro_security_roles" : [ ],
+          "reserved" : false,
+          "static" : false
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/rolesmapping/all_access",
+      "body" : {
+        "backend_roles" : [
+          "admin"
+        ],
+        "description" : "Maps admin to all_access"
+      },
+      "status" : 200,
+      "response" : {
+        "status" : "OK",
+        "message" : "'all_access' updated."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u5",
+      "body" : {
+        "password" : "Esm-pass-1234!",
+        "opendistro_security_roles" : [
+          "readall"
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "status" : "CREATED",
+        "message" : "'esm-u5' created."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/authinfo",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXU1OkVzbS1wYXNzLTEyMzQh"
+      },
+      "mask" : [
+        "remote_address"
+      ],
+      "status" : 200,
+      "response" : {
+        "user" : "User [name=esm-u5, backend_roles=[], requestedTenant=null]",
+        "user_name" : "esm-u5",
+        "user_requested_tenant" : null,
+        "remote_address" : "172.17.0.1:48886",
+        "backend_roles" : [ ],
+        "custom_attribute_names" : [ ],
+        "roles" : [
+          "readall"
+        ],
+        "tenants" : {
+          "esm-u5" : true
+        },
+        "principal" : null,
+        "peer_certificates" : "0",
+        "sso_logout_url" : null
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /esm-docs/_search?filter_path=hits.total",
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXU1OkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-docs/_doc/9",
+      "body" : {
+        "k" : "a"
+      },
+      "headers" : {
+        "Authorization" : "Basic ZXNtLXU1OkVzbS1wYXNzLTEyMzQh"
+      },
+      "status" : 403,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "security_exception",
+              "reason" : "no permissions for [indices:data/write/index] and User [name=esm-u5, backend_roles=[], requestedTenant=null]"
+            }
+          ],
+          "type" : "security_exception",
+          "reason" : "no permissions for [indices:data/write/index] and User [name=esm-u5, backend_roles=[], requestedTenant=null]"
+        },
+        "status" : 403
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    }
+  ]
+}

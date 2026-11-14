@@ -9,16 +9,24 @@ import {
   deleteRequest,
   formatJson,
   hitSources,
+  mappingNotes,
+  mappingRows,
   nextSort,
   parseDocument,
   sortClause,
   sortField,
+  TIME_PRESETS,
+  timeBuckets,
+  timeFieldOf,
+  timeFilter,
   sourceCells,
   toggleColumn,
   visibleColumns,
   writeRequest,
   type MappedField,
   type TableSort,
+  type TimeBucket,
+  type TimeRange,
 } from "@/lib/search-docs";
 import { Segmented } from "../redis/shared";
 import { btn, Confirm, CopyButton, input, Panel, primary, useCopy } from "../ui";
@@ -49,11 +57,24 @@ interface SearchResult {
   hits: Hit[];
 }
 
-/** The request the documents view sends, also offered as a console request. */
-export function documentsQuery(q: string, from: number, sort: TableSort | null = null) {
-  const query = q.trim() ? { query_string: { query: q.trim() } } : { match_all: {} };
-  const s = sortClause(sort);
-  return s ? { query, from, size: PAGE, track_total_hits: true, sort: s } : { query, from, size: PAGE, track_total_hits: true };
+/**
+ * The request the documents view sends, also offered as a console request. On a time-based index
+ * (`time`) it keeps to the time range, sorts newest first unless a column sorts, and the first
+ * page counts documents over time (`auto_date_histogram`, counted from the points tree).
+ */
+export function documentsQuery(q: string, from: number, sort: TableSort | null = null, time: { field: string; range: TimeRange } | null = null) {
+  const text = q.trim() ? { query_string: { query: q.trim() } } : { match_all: {} };
+  const filter = time ? timeFilter(time.field, time.range) : null;
+  const query = filter ? { bool: { must: [text], filter: [filter] } } : text;
+  const s = sortClause(sort) ?? (time ? [{ [time.field]: "desc" }] : null);
+  return {
+    query,
+    from,
+    size: PAGE,
+    track_total_hits: true,
+    ...(s ? { sort: s } : {}),
+    ...(time && from === 0 ? { aggs: { over_time: { auto_date_histogram: { field: time.field, buckets: 60 } } } } : {}),
+  };
 }
 
 /** Columns picked for an index's table, kept in the browser per cluster and index. */
@@ -180,7 +201,7 @@ export function IndexBrowser({
       title={
         <span className="flex min-w-0 items-center gap-2">
           <span className="truncate font-mono text-[13px]">{index.index}</span>
-          <span className="shrink-0 font-mono text-[11px] text-subtle">
+          <span className="hidden shrink-0 font-mono text-[11px] text-subtle sm:inline">
             {formatCount(index.docs)} docs · {formatBytes(index.size_bytes)}
           </span>
         </span>
@@ -243,49 +264,158 @@ export function IndexBrowser({
         </div>
       </div>
       {view === "documents" && <Documents key={generation} cluster={cluster} index={index.index} onChanged={onChanged} onOpenConsole={onOpenConsole} />}
-      {view === "mapping" && <JsonDoc cluster={cluster} path={`${path}/_mapping`} onOpenConsole={onOpenConsole} />}
+      {view === "mapping" && <MappingView cluster={cluster} path={`${path}/_mapping`} onOpenConsole={onOpenConsole} />}
       {view === "settings" && <JsonDoc cluster={cluster} path={`${path}/_settings`} onOpenConsole={onOpenConsole} />}
     </Panel>
   );
 }
 
-/** Pretty JSON of one GET (mapping, settings). */
-function JsonDoc({ cluster, path, onOpenConsole }: { cluster: SearchCluster; path: string; onOpenConsole: (text: string) => void }) {
+/** The text of one GET, reloaded when the path changes. */
+function useGet(cluster: string, path: string) {
   const [text, setText] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const { copied, copy } = useCopy();
-
   useEffect(() => {
     let alive = true;
     setText(null);
     setErr(null);
-    esRaw(cluster.id, "GET", path).then(
-      (r) => alive && setText(formatJson(r.text)),
+    esRaw(cluster, "GET", path).then(
+      (r) => alive && setText(r.text),
       (e) => alive && setErr(e instanceof Error ? e.message : String(e)),
     );
     return () => {
       alive = false;
     };
-  }, [cluster.id, path]);
+  }, [cluster, path]);
+  return { text, err };
+}
 
+/** Copy and open-in-console buttons of a GET's view. */
+function DocTools({ path, text, onOpenConsole }: { path: string; text: string | null; onOpenConsole: (text: string) => void }) {
+  const { copied, copy } = useCopy();
+  return (
+    <span className="flex gap-1">
+      {text && <CopyButton id="doc" text={text} copied={copied} onCopy={copy} />}
+      <button onClick={() => onOpenConsole(`GET ${path}`)} className="rounded-md p-1 text-subtle transition hover:text-fg" title="Open in console">
+        <SquareTerminal className="size-3.5" />
+      </button>
+    </span>
+  );
+}
+
+function Loading({ err }: { err: string | null }) {
+  return err ? (
+    <p className="px-5 py-4 text-[13px] text-danger">{err}</p>
+  ) : (
+    <p className="px-5 py-4 text-[13px] text-subtle">
+      <span className="shimmer">Loading…</span>
+    </p>
+  );
+}
+
+/** Pretty JSON of one GET (settings). */
+function JsonDoc({ cluster, path, onOpenConsole }: { cluster: SearchCluster; path: string; onOpenConsole: (text: string) => void }) {
+  const { text, err } = useGet(cluster.id, path);
+  const pretty = useMemo(() => (text === null ? null : formatJson(text)), [text]);
   return (
     <div className="relative">
-      <div className="absolute top-3 right-4 flex gap-1">
-        {text && <CopyButton id="doc" text={text} copied={copied} onCopy={copy} />}
-        <button onClick={() => onOpenConsole(`GET ${path}`)} className="rounded-md p-1 text-subtle transition hover:text-fg" title="Open in console">
-          <SquareTerminal className="size-3.5" />
-        </button>
+      <div className="absolute top-3 right-4">
+        <DocTools path={path} text={pretty} onOpenConsole={onOpenConsole} />
       </div>
-      {err ? (
-        <p className="px-5 py-4 text-[13px] text-danger">{err}</p>
-      ) : text === null ? (
-        <p className="px-5 py-4 text-[13px] text-subtle">
-          <span className="shimmer">Loading…</span>
-        </p>
+      {pretty === null ? (
+        <Loading err={err} />
       ) : (
         <pre className="rise max-h-[32rem] overflow-auto px-5 py-4 font-mono text-[12px] leading-relaxed">
-          <JsonText text={text} />
+          <JsonText text={pretty} />
         </pre>
+      )}
+    </div>
+  );
+}
+
+/** An index's mapping: its fields as a table (type, and what changes how each is indexed), or the JSON. */
+function MappingView({ cluster, path, onOpenConsole }: { cluster: SearchCluster; path: string; onOpenConsole: (text: string) => void }) {
+  const { text, err } = useGet(cluster.id, path);
+  const [raw, setRaw] = useState(false);
+  const [filter, setFilter] = useState("");
+  const pretty = useMemo(() => (text === null ? null : formatJson(text)), [text]);
+  const parsed = useMemo(() => {
+    if (text === null) return null;
+    try {
+      const resp: unknown = JSON.parse(text);
+      return { rows: mappingRows(resp), notes: mappingNotes(resp) };
+    } catch {
+      return { rows: [], notes: [] };
+    }
+  }, [text]);
+  const q = filter.trim().toLowerCase();
+  const rows = parsed ? (q ? parsed.rows.filter((r) => r.name.toLowerCase().includes(q) || r.type.includes(q)) : parsed.rows) : [];
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-3 px-5 pt-3">
+        <div className="w-36">
+          <Segmented
+            value={raw ? "json" : "fields"}
+            options={[
+              { label: "fields", value: "fields" },
+              { label: "json", value: "json" },
+            ]}
+            onChange={(v) => setRaw(v === "json")}
+          />
+        </div>
+        {!raw && parsed && parsed.rows.length > 12 && (
+          <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter fields" className={`${input} w-48`} aria-label="Filter fields" />
+        )}
+        {!raw && parsed?.notes.map((n) => (
+          <span key={n} className="font-mono text-[11px] text-subtle">
+            {n}
+          </span>
+        ))}
+        <span className="ml-auto">
+          <DocTools path={path} text={pretty} onOpenConsole={onOpenConsole} />
+        </span>
+      </div>
+      {pretty === null || parsed === null ? (
+        <Loading err={err} />
+      ) : raw ? (
+        <pre className="rise max-h-[32rem] overflow-auto px-5 py-4 font-mono text-[12px] leading-relaxed">
+          <JsonText text={pretty} />
+        </pre>
+      ) : parsed.rows.length === 0 ? (
+        <p className="px-5 py-4 text-[13px] text-muted">No fields mapped yet: the first document maps its fields (unless dynamic mapping is off).</p>
+      ) : (
+        <div className="rise max-h-[32rem] overflow-auto px-5 py-3">
+          <table className="w-full text-[13px]">
+            <thead className="sticky top-0 bg-panel text-left text-[11px] text-subtle">
+              <tr className="border-b border-line">
+                <th className="py-2 pr-3 font-normal">Field</th>
+                <th className="py-2 pr-3 font-normal">Type</th>
+                <th className="py-2 font-normal">Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={`${r.runtime ? "rt:" : ""}${r.name}`} className="border-b border-line last:border-0 align-top">
+                  <td className="py-1.5 pr-3 font-mono text-[12px]" style={q ? undefined : { paddingLeft: `${r.depth * 14}px` }}>
+                    <span className={r.multi ? "text-muted" : undefined}>{q || r.depth === 0 ? r.name : r.name.slice(r.name.lastIndexOf(".") + 1)}</span>
+                  </td>
+                  <td className="whitespace-nowrap py-1.5 pr-3 font-mono text-[12px] text-muted">
+                    {r.type}
+                    {r.runtime && <span className="text-subtle"> · runtime</span>}
+                  </td>
+                  <td className="py-1.5 text-[12px] text-muted">{r.notes.join(" · ")}</td>
+                </tr>
+              ))}
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={3} className="py-3 text-muted">
+                    No field matches.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
@@ -321,7 +451,9 @@ function Documents({
   const [layout, setLayout] = useState<Layout>("rows");
   const [adding, setAdding] = useState(false);
   const [sort, setSort] = useState<TableSort | null>(null);
-  const [fields, setFields] = useState<MappedField[]>([]);
+  const [fields, setFields] = useState<MappedField[] | null>(null);
+  const [range, setRange] = useState<TimeRange>({ last: null });
+  const [buckets, setBuckets] = useState<TimeBucket[]>([]);
   const colKey = columnsKey(cluster.id, index);
   const [picked, setPicked] = useState<string[] | null>(null);
 
@@ -330,9 +462,9 @@ function Documents({
     setPicked(loadColumns(colKey));
   }, [colKey]);
 
-  // The mapping says which columns can sort (and by which field), and offers fields the page lacks.
+  // The mapping says which columns can sort (and by which field), offers fields the page lacks,
+  // and whether the index is browsed by time. The first search waits for it.
   useEffect(() => {
-    if (layout !== "table") return;
     let live = true;
     esJson(cluster.id, "GET", `${indexPath(index)}/_mapping`).then(
       (m) => live && setFields(mappingFields(m)),
@@ -341,14 +473,18 @@ function Documents({
     return () => {
       live = false;
     };
-  }, [cluster.id, index, layout]);
+  }, [cluster.id, index]);
+  const timeField = useMemo(() => (fields ? timeFieldOf(fields) : null), [fields]);
+  const time = useMemo(() => (timeField ? { field: timeField, range } : null), [timeField, range]);
 
   const load = useCallback(async () => {
+    if (fields === null) return;
     setLoading(true);
     try {
-      const r = await esRaw<SearchResponse>(cluster.id, "POST", `${indexPath(index)}/_search`, documentsQuery(applied, from, sort));
+      const r = await esRaw<SearchResponse>(cluster.id, "POST", `${indexPath(index)}/_search`, documentsQuery(applied, from, sort, time));
       const sources = hitSources(r.text);
       setResult({ took: r.value.took, total: r.value.hits.total, hits: r.value.hits.hits.map((h, i) => ({ ...h, source: sources[i] })) });
+      if (time && from === 0) setBuckets(timeBuckets(r.value));
       setErr(null);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -356,7 +492,7 @@ function Documents({
     } finally {
       setLoading(false);
     }
-  }, [cluster.id, index, applied, from, sort]);
+  }, [cluster.id, index, applied, from, sort, time, fields]);
 
   useEffect(() => {
     load();
@@ -365,14 +501,14 @@ function Documents({
   const total = result?.total;
   const hits = result?.hits ?? [];
   const last = from + hits.length;
-  const consoleText = `POST ${indexPath(index)}/_search\n${JSON.stringify(documentsQuery(applied, from, sort), null, 2)}`;
+  const consoleText = `POST ${indexPath(index)}/_search\n${JSON.stringify(documentsQuery(applied, from, sort, time), null, 2)}`;
   const cells = useMemo(() => (layout === "table" ? hits.map((h) => sourceCells(h.source)) : []), [layout, hits]);
   const pagePaths = useMemo(() => columnsOf(cells.map((c) => c.keys()), Infinity), [cells]);
   const columns = visibleColumns(picked, pagePaths);
   // Mapped leaves the page has no value for yet. Objects aren't columns, and neither are
   // multi-fields (`title.keyword`): they index the parent's value, `_source` has none of their own.
   const available = useMemo(() => {
-    const leafTypes = new Map(fields.map((f) => [f.name, f.type]));
+    const leafTypes = new Map((fields ?? []).map((f) => [f.name, f.type]));
     const isMultiField = (name: string) => {
       for (let i = name.lastIndexOf("."); i > 0; i = name.lastIndexOf(".", i - 1)) {
         const t = leafTypes.get(name.slice(0, i));
@@ -380,7 +516,7 @@ function Documents({
       }
       return false;
     };
-    const mapped = fields.filter((f) => f.type !== "object" && f.type !== "nested" && !pagePaths.includes(f.name) && !isMultiField(f.name)).map((f) => f.name);
+    const mapped = (fields ?? []).filter((f) => f.type !== "object" && f.type !== "nested" && !pagePaths.includes(f.name) && !isMultiField(f.name)).map((f) => f.name);
     return [...pagePaths, ...mapped];
   }, [pagePaths, fields]);
   const pick = (cols: string[] | null) => {
@@ -462,6 +598,18 @@ function Documents({
           }}
         />
       )}
+      {time && (
+        <TimeHistogram
+          field={time.field}
+          range={range}
+          buckets={buckets}
+          total={result?.total}
+          onRange={(r) => {
+            setFrom(0);
+            setRange(r);
+          }}
+        />
+      )}
       {err ? (
         <p className="px-5 py-4 text-[13px] text-danger">{err}</p>
       ) : !result ? (
@@ -479,7 +627,7 @@ function Documents({
               <tr className="border-b border-line text-left text-subtle">
                 <th className="px-5 py-2 font-normal">_id</th>
                 {columns.map((c) => {
-                  const field = sortField(c, fields);
+                  const field = sortField(c, fields ?? []);
                   const active = sort?.column === c ? sort.order : null;
                   return (
                     <th key={c} className="max-w-56 px-3 py-2 font-normal" aria-sort={active === "asc" ? "ascending" : active === "desc" ? "descending" : undefined}>
@@ -495,7 +643,7 @@ function Documents({
                           {active === "desc" && <ArrowDown className="size-3 shrink-0" strokeWidth={1.5} />}
                         </button>
                       ) : (
-                        <span className="block truncate" title={fields.length ? `${c} (not sortable)` : c}>
+                        <span className="block truncate" title={fields?.length ? `${c} (not sortable)` : c}>
                           {c}
                         </span>
                       )}
@@ -751,6 +899,73 @@ function SourceView({
       <pre className="max-h-96 overflow-auto px-5 py-3 pr-32 font-mono text-[12px] leading-relaxed">
         <JsonText text={text} />
       </pre>
+    </div>
+  );
+}
+
+/** A time on the histogram: with its date unless it's today (or the span crosses days), with
+ * seconds when buckets are shorter than a minute. */
+function when(ms: number, o: { day: boolean; seconds: boolean }) {
+  return new Date(ms).toLocaleString("en-US", {
+    ...(o.day ? { month: "short", day: "numeric" } : {}),
+    hour: "2-digit",
+    minute: "2-digit",
+    ...(o.seconds ? { second: "2-digit" } : {}),
+    hour12: false,
+  });
+}
+
+/**
+ * Documents over time on a time-based index (Kibana Discover's histogram): the range presets, a
+ * bar per bucket of the current query, and a click on a bar narrows the range to it.
+ */
+function TimeHistogram({ field, range, buckets, total, onRange }: { field: string; range: TimeRange; buckets: TimeBucket[]; total?: { value: number; relation: string }; onRange: (r: TimeRange) => void }) {
+  const max = Math.max(1, ...buckets.map((b) => b.count));
+  const span = buckets.length > 1 ? buckets[buckets.length - 1].key - buckets[0].key : 0;
+  const step = buckets.length > 1 ? buckets[1].key - buckets[0].key : 0;
+  const first = buckets[0]?.key ?? Date.now();
+  const fmt = { day: span >= 86_400_000 || new Date(first).toDateString() !== new Date().toDateString(), seconds: step > 0 && step < 60_000 };
+  const end = (i: number) => buckets[i + 1]?.key ?? buckets[i].key + (step || 1000);
+  return (
+    <div className="space-y-2 border-b border-line px-5 py-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="w-72 max-w-full">
+          <Segmented value={"last" in range ? (range.last ?? "all") : "custom"} options={TIME_PRESETS.map((p) => ({ label: p.label, value: p.value ?? "all" }))} onChange={(v) => onRange({ last: v === "all" ? null : v })} />
+        </div>
+        {"gte" in range && (
+          <button type="button" onClick={() => onRange({ last: null })} className={btn} title="Back to all time">
+            {when(range.gte, { day: true, seconds: range.lt - range.gte < 60_000 })} – {when(range.lt, { day: false, seconds: range.lt - range.gte < 60_000 })} <X className="size-3" />
+          </button>
+        )}
+        <span className="ml-auto font-mono text-[11px] text-subtle">
+          by {field}
+          {total && ` · ${formatCount(total.value)}${total.relation === "gte" ? "+" : ""} documents`}
+        </span>
+      </div>
+      {buckets.length > 0 ? (
+        <>
+          <div className="flex h-16 items-end gap-px" role="list" aria-label="Documents over time">
+            {buckets.map((b, i) => (
+              <button
+                key={b.key}
+                type="button"
+                role="listitem"
+                onClick={() => onRange({ gte: b.key, lt: end(i) })}
+                title={`${when(b.key, fmt)} · ${formatCount(b.count)}`}
+                className="group flex h-full min-w-0 flex-1 items-end"
+              >
+                <span className="w-full rounded-t-sm bg-fg/20 transition-[height,background-color] duration-200 ease-out group-hover:bg-accent motion-reduce:transition-none" style={{ height: b.count ? `${Math.max(4, (100 * b.count) / max)}%` : "0" }} />
+              </button>
+            ))}
+          </div>
+          <div className="flex justify-between font-mono text-[11px] text-subtle">
+            <span>{when(buckets[0].key, fmt)}</span>
+            <span>{when(end(buckets.length - 1), fmt)}</span>
+          </div>
+        </>
+      ) : (
+        <p className="text-[12px] text-subtle">No documents in this range.</p>
+      )}
     </div>
   );
 }

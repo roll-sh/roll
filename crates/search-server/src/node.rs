@@ -121,6 +121,8 @@ pub struct NodeConfig {
     /// and recording a snapshot) must be before the sweep after a wake drops it
     /// ([`search_es::api::snapshots::sweep_leftover_copies`]).
     pub snapshot_leftover_grace: Duration,
+    /// Seals the secrets clusters store (`search_es::seal`; `None`: stored as given).
+    pub sealer: Option<Arc<search_es::seal::Sealer>>,
 }
 
 impl Default for NodeConfig {
@@ -140,6 +142,7 @@ impl Default for NodeConfig {
             memory_budget: None,
             unload_memory_only: false,
             snapshot_leftover_grace: search_es::api::snapshots::LEFTOVER_GRACE,
+            sealer: None,
         }
     }
 }
@@ -1007,6 +1010,7 @@ impl Node {
         cfg.node_settings = self.cfg.node_settings.clone();
         cfg.test_features = self.cfg.test_features;
         cfg.host_metrics = self.cfg.host_metrics;
+        cfg.sealer = self.cfg.sealer.clone();
         let mut cluster = Cluster::open(cfg, store).await?;
         cluster.node.id = stable_node_id(&spec.name);
         if cluster.state().version <= 1 {

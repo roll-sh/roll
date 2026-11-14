@@ -34,6 +34,7 @@ pub mod rest;
 pub mod routes;
 pub mod scripting;
 pub mod search;
+pub mod seal;
 pub mod search_source;
 pub mod stack;
 pub mod tasks;

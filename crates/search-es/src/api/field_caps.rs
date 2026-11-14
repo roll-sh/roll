@@ -44,6 +44,8 @@ struct Cap {
     dimension: bool,
     metric: Option<String>,
     meta: BTreeMap<String, String>,
+    /// A field whose values an inference endpoint embeds (`semantic_text`).
+    inference: bool,
 }
 
 impl Cap {
@@ -59,6 +61,7 @@ impl Cap {
             dimension: false,
             metric: None,
             meta: BTreeMap::new(),
+            inference: false,
         }
     }
 }
@@ -104,7 +107,7 @@ const OS_METADATA: &[(&str, &str, bool, bool)] = &[
 fn family(ty: &str) -> &str {
     match ty {
         "constant_keyword" | "wildcard" => "keyword",
-        "match_only_text" | "pattern_text" => "text",
+        "match_only_text" | "pattern_text" | "semantic_text" => "text",
         "token_count" => "integer",
         other => other,
     }
@@ -183,8 +186,9 @@ fn index_fields(idx: &IndexMeta, runtime_request: &Map) -> Vec<(String, Cap)> {
                 _ => continue,
             },
             MapperRef::Field(f) => {
-                let (s, ag) = flags(f, &ctx);
+                let (s, ag) = if f.ty == "semantic_text" { (true, false) } else { flags(f, &ctx) };
                 let mut c = Cap::new(family(f.ty), s, ag);
+                c.inference = f.ty == "semantic_text";
                 if let Some(Value::Obj(meta)) = f.raw("meta") {
                     for (k, v) in meta {
                         c.meta.insert(k.clone(), v.to_es_string());
@@ -630,7 +634,7 @@ fn respond(
             m.insert("searchable".into(), searchable.into());
             m.insert("aggregatable".into(), aggregatable.into());
             if !os {
-                m.insert("inference".into(), false.into());
+                m.insert("inference".into(), all(|c| c.inference).into());
             }
             let dims = entries.iter().filter(|(_, c)| c.dimension).count();
             if dims == entries.len() {

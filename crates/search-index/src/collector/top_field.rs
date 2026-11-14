@@ -717,6 +717,9 @@ pub struct TopFieldCollector {
     /// Counts segments: queue entries whose `generation` differs are translated into the
     /// current segment's native space before comparing.
     generation: u32,
+    /// The range every match's first key field has a value in, when the query requires one
+    /// ([`required_range`]): bands start inside it.
+    query_range: Option<(i64, i64)>,
 }
 
 impl TopFieldCollector {
@@ -740,7 +743,17 @@ impl TopFieldCollector {
             shared: None,
             flushed: 0,
             generation: 0,
+            query_range: None,
         }
+    }
+
+    /// The query this collector runs for: a range it requires on the first key's field places
+    /// the first band inside it (see [`Band`]).
+    pub fn with_query(mut self, q: &QueryRef) -> Self {
+        if let Some(SortKey::Field(fs)) = self.keys.first() {
+            self.query_range = required_range(q.as_ref(), fs.field);
+        }
+        self
     }
 
     /// Counts hits against the threshold together with the other collectors of a concurrent
@@ -828,6 +841,42 @@ impl TopFieldCollector {
     }
 }
 
+/// The doc values integers (inclusive bounds) every match of `q` has a value of `field` in,
+/// when its required clauses include a range on the field: a range query, or a boolean
+/// query's `must` and `filter` ranges intersected.
+pub fn required_range(q: &dyn crate::search::Query, field: u32) -> Option<(i64, i64)> {
+    use crate::query::{BooleanQuery, BoostQuery, ConstantScoreQuery, DocValuesRangeQuery, DvRange, IndexOrDocValuesQuery, IndexSortRangeQuery, Occur, PointRangeQuery};
+    let any = q.as_any();
+    if let Some(r) = any.downcast_ref::<DocValuesRangeQuery>() {
+        return match r.range {
+            DvRange::Long { lower, upper } if r.field == field => Some((lower, upper)),
+            _ => None,
+        };
+    }
+    if let Some(r) = any.downcast_ref::<PointRangeQuery>() {
+        let w = r.bytes_per_dim;
+        return (r.field == field && r.lower.len() == w && (w == 4 || w == 8)).then(|| (point_int(w, &r.lower), point_int(w, &r.upper)));
+    }
+    if let Some(r) = any.downcast_ref::<IndexSortRangeQuery>() {
+        return (r.field == field).then_some((r.lower, r.upper));
+    }
+    if let Some(r) = any.downcast_ref::<IndexOrDocValuesQuery>() {
+        return required_range(r.dv.as_ref(), field).or_else(|| required_range(r.index.as_ref(), field));
+    }
+    if let Some(r) = any.downcast_ref::<ConstantScoreQuery>() {
+        return required_range(r.query.as_ref(), field);
+    }
+    if let Some(r) = any.downcast_ref::<BoostQuery>() {
+        return required_range(r.query.as_ref(), field);
+    }
+    let b = any.downcast_ref::<BooleanQuery>()?;
+    b.clauses
+        .iter()
+        .filter(|c| matches!(c.occur, Occur::Must | Occur::Filter))
+        .filter_map(|c| required_range(c.query.as_ref(), field))
+        .reduce(|(a, b), (c, d)| (a.max(c), b.min(d)))
+}
+
 /// Whether `keys` is a prefix of the index sort (same fields, directions and missing).
 pub fn can_early_terminate(keys: &[SortKey], sort: Option<&IndexSort>) -> bool {
     let Some(sort) = sort else { return false };
@@ -881,7 +930,80 @@ struct TopFieldLeaf<'a> {
     /// The segment's docs before this one sort before `search_after` (a segment sorted by the
     /// request's sort): not visited once the total hits passed their threshold.
     skip_before: u32,
+    /// The caller runs further passes over the segment when asked
+    /// ([`LeafCollector::allow_passes`]).
+    passes: bool,
+    /// The first pass, which counts hits; later ones only collect the docs it left.
+    counting: bool,
+    /// Collection by bands of the first key's values (see [`Band`]).
+    band: Option<Band>,
+    /// Bands were considered for this segment (once: see [`TopFieldLeaf::start_band`]).
+    band_tried: bool,
+    /// Hits before a band may start ([`BAND_START_HITS`] or four queues); 0: bands can't help
+    /// this segment, which then keeps no statistics for them.
+    band_start: u64,
+    /// Hits the first pass counted in this segment, its first hit, and the doc where the count
+    /// passed its threshold: the hits per doc since the first hit size a band (a range's hits
+    /// lie together).
+    seg_hits: u64,
+    first_hit: u32,
+    passed_at: Option<u32>,
+    /// Hits the first pass queued in this segment, and how many it had queued when its hits
+    /// last reached a power of two and the one before (the queue's changes over the last
+    /// doubling of the hits).
+    seg_inserts: u64,
+    pow2_inserts: [u64; 2],
+    /// Docs outside the band the first pass counted before its threshold passed, with their
+    /// scores: when the band comes up short they are offered to the queue instead of visited
+    /// again. Buffered from the band's start until `deferred_end` (`u32::MAX` while the count
+    /// is still short of the threshold); `None`: not buffered, or more than [`DEFER_CAP`].
+    deferred: Vec<(u32, f32)>,
+    deferred_end: Option<u32>,
 }
+
+/// Collection in bands of the first key's values, for sorts the docs arrive against: a
+/// descending sort over values that grow with doc ids (logs: `@timestamp` desc) has every doc
+/// beat the queue's worst entry, so the competitive docs are all those still to come and the
+/// pruner can skip nothing (Lucene's `NumericComparator` has the same worst case).
+///
+/// Once a segment counted [`BAND_START_HITS`] hits and the queue still changes often (or the
+/// count passed its threshold and the pruner can't narrow the docs to visit), the points tree
+/// names a value `lo` with about twice the queue's worth of expected matches at or
+/// before it (at the hits per doc since the segment's first hit; past `search_after` or a range
+/// the query requires), unless ties make that band hold an eighth of the segment. From then on
+/// only docs at or before `lo` compare against the queue; the others are just counted until the
+/// hit count passes its threshold, and then the pruner skips them. A query with fewer hits
+/// never bands. When the pass ends, the queue is either full of hits at or
+/// before `lo` (nothing past it can enter: done), or the segment runs again from the same doc
+/// for the next band, `(lo, lo']`, sized from what this one yielded; the band after
+/// [`MAX_BANDS`] is unbounded. Docs before the first band started were collected in full by the
+/// first pass, and later passes count nothing, so hits, totals and tie order are those of one
+/// pass.
+struct Band {
+    /// Docs whose first key sorts after this (doc values integer, its native) wait for a later
+    /// pass; `None`: the last band.
+    lo: Option<(i64, Native)>,
+    /// Docs whose first key sorts at or before this were collected by an earlier pass.
+    hi: Option<Native>,
+    /// Points at or before `lo`, counted from the sort's start (past `search_after`'s).
+    rank: u64,
+    /// Points at or before `hi`, likewise.
+    prev_rank: u64,
+    /// The doc the first band started at: later passes run from it.
+    from: u32,
+    /// Docs this pass took inside the band.
+    found: u64,
+    /// Bands so far.
+    count: u32,
+}
+
+/// Bands after which the next one is unbounded.
+const MAX_BANDS: u32 = 4;
+/// The most docs outside a band a segment buffers (see `TopFieldLeaf::deferred`).
+const DEFER_CAP: usize = 1 << 16;
+/// Hits a segment counts before its first band (at least four times the queue): enough to
+/// tell the hits per doc, few enough that inserting them all costs little.
+const BAND_START_HITS: u64 = 256;
 
 const MIN_SKIP_INTERVAL: u32 = 32;
 /// A bottom the sampling passed over is tried again after this many more docs: a queue that
@@ -891,6 +1013,9 @@ const RETRY_DOCS: u32 = 4096;
 /// `TermOrdValComparator.MAX_TERMS`).
 const MAX_COMPETITIVE_TERMS: u64 = 1024;
 const MAX_SKIP_INTERVAL: u32 = 8192;
+/// Competitive docs few enough that the pruner derives them again less often (see
+/// [`Pruner::update`]).
+const SMALL_SET: u64 = 1024;
 
 /// Lucene's numeric sort optimization (`NumericComparator` with points): once the hit count
 /// passed the threshold and the queue is full, the docs whose value of the first sort key can
@@ -913,6 +1038,10 @@ struct Pruner {
     reverse: bool,
     /// The bound `search_after` puts on the other side, in the doc values' integer space.
     after: Option<i64>,
+    /// A further bound on that side: a band's upper edge (see [`Band`]).
+    cap: Option<i64>,
+    /// The segment collects by bands: small competitive sets are derived again less often.
+    banded: bool,
     /// Whether docs without a value can compete (then nothing can be skipped).
     missing_competitive: bool,
     /// Every doc of the segment has a value: with `search_after`, the bound alone prunes
@@ -953,7 +1082,9 @@ fn native_int(kind: SortType, n: Native) -> Option<i64> {
 impl Pruner {
     /// A pruner for the first key when it can use the field's points.
     fn new(c: &TopFieldCollector, seg: &SegmentContext, keys: &[LeafKeyKind], after: Option<&[Native]>) -> Option<Pruner> {
-        if c.threshold == u64::MAX || c.n == 0 || c.early_terminate {
+        // (With exact totals, `threshold == u64::MAX`, it prunes only the passes after the first,
+        // which count nothing: see [`Band`].)
+        if c.n == 0 || c.early_terminate {
             return None;
         }
         let SortKey::Field(fs) = c.keys.first()? else { return None };
@@ -973,6 +1104,8 @@ impl Pruner {
                 width: 0,
                 reverse: fs.reverse,
                 after: None,
+                cap: None,
+            banded: false,
                 missing_competitive: false,
                 all_valued: false,
                 set: None,
@@ -1020,6 +1153,8 @@ impl Pruner {
             width,
             reverse: fs.reverse,
             after,
+            cap: None,
+            banded: false,
             missing_competitive,
             all_valued: points.doc_count() >= seg.reader.max_doc(),
             set: None,
@@ -1066,6 +1201,8 @@ impl Pruner {
             width: 0,
             reverse: fs.reverse,
             after,
+            cap: None,
+            banded: false,
             missing_competitive: false,
             all_valued: terms.stats().doc_count >= seg.reader.max_doc(),
             set: None,
@@ -1187,7 +1324,14 @@ impl Pruner {
             return;
         }
         self.calls += 1;
-        if !std::mem::take(&mut self.force) && self.calls > 256 && (self.calls & (self.interval - 1)) != self.interval - 1 {
+        // Sampled once updates get frequent. Inside a band, a set this small costs less to visit
+        // than to derive on every bottom (each update reads a leaf of the points tree, and a
+        // queue filling up inside a band updates on every insert): every 32nd. Either way the
+        // latest bottom is retried a few thousand docs later (`competitive_from`).
+        let small = self.banded && self.set.is_some() && self.cost <= SMALL_SET;
+        if !std::mem::take(&mut self.force)
+            && ((self.calls > 256 && (self.calls & (self.interval - 1)) != self.interval - 1) || (small && self.calls & 31 != 31))
+        {
             self.pending = true;
             return;
         }
@@ -1199,11 +1343,12 @@ impl Pruner {
         // Competitive values: at least the bottom (descending) or at most it (ascending),
         // strictly beyond it when ties lose. An empty range (`lo > hi`) leaves no doc.
         // (`None`: no value lies strictly beyond the bottom.)
+        let far = self.far();
         let bounds = match (self.reverse, strict) {
-            (true, false) => Some((bottom, self.after.unwrap_or(i64::MAX))),
-            (true, true) => bottom.checked_add(1).map(|lo| (lo, self.after.unwrap_or(i64::MAX))),
-            (false, false) => Some((self.after.unwrap_or(i64::MIN), bottom)),
-            (false, true) => bottom.checked_sub(1).map(|hi| (self.after.unwrap_or(i64::MIN), hi)),
+            (true, false) => Some((bottom, far.unwrap_or(i64::MAX))),
+            (true, true) => bottom.checked_add(1).map(|lo| (lo, far.unwrap_or(i64::MAX))),
+            (false, false) => Some((far.unwrap_or(i64::MIN), bottom)),
+            (false, true) => bottom.checked_sub(1).map(|hi| (far.unwrap_or(i64::MIN), hi)),
         };
         let (lo, hi) = bounds.unwrap_or((i64::MAX, i64::MIN));
         if lo > hi {
@@ -1225,6 +1370,37 @@ impl Pruner {
         self.update_interval(true);
     }
 
+    /// The bound on the far side of the competitive values: `search_after`'s or the band's
+    /// cap, whichever is tighter.
+    fn far(&self) -> Option<i64> {
+        match (self.after, self.cap) {
+            (Some(a), Some(c)) => Some(if self.reverse { a.min(c) } else { a.max(c) }),
+            (a, c) => a.or(c),
+        }
+    }
+
+    /// Starts over for another pass over the segment.
+    fn restart(&mut self) {
+        self.set = None;
+        self.cost = self.reader.max_doc() as u64;
+        self.last = None;
+        self.calls = 0;
+        self.interval = MIN_SKIP_INTERVAL;
+        self.fails = 0;
+        self.pending = false;
+        self.retry_at = 0;
+        self.force = false;
+    }
+
+    /// Points strictly before `v` in sort order (greater when descending, smaller ascending).
+    fn count_before(&self, points: &search_codec::PointsReader, v: i64) -> u64 {
+        let (lo, hi) = if self.reverse { (v.checked_add(1), Some(i64::MAX)) } else { (Some(i64::MIN), v.checked_sub(1)) };
+        let (Some(lo), Some(hi)) = (lo, hi) else { return 0 };
+        let mut c = CountRange { lo, hi, width: self.width, n: 0 };
+        let inside = points.count_inside(&mut c);
+        inside + c.n
+    }
+
     #[inline]
     fn next_from(&mut self, doc: u32) -> u32 {
         use crate::search::Scorer;
@@ -1241,6 +1417,37 @@ impl Pruner {
     }
 }
 
+/// Counts the points in `[lo, hi]` that crossing leaves hold (with
+/// [`search_codec::PointsReader::count_inside`]).
+struct CountRange {
+    lo: i64,
+    hi: i64,
+    width: usize,
+    n: u64,
+}
+
+impl search_codec::PointVisitor for CountRange {
+    fn compare(&mut self, min: &[u8], max: &[u8]) -> search_codec::Relation {
+        let (a, b) = (point_int(self.width, min), point_int(self.width, max));
+        if a > self.hi || b < self.lo {
+            search_codec::Relation::CellOutsideQuery
+        } else if a < self.lo || b > self.hi {
+            search_codec::Relation::CellCrossesQuery
+        } else {
+            search_codec::Relation::CellInsideQuery
+        }
+    }
+    fn visit(&mut self, _doc: u32) {
+        self.n += 1;
+    }
+    fn visit_value(&mut self, _doc: u32, packed: &[u8]) {
+        let v = point_int(self.width, packed);
+        if v >= self.lo && v <= self.hi {
+            self.n += 1;
+        }
+    }
+}
+
 /// Collects the docs from `from` on whose point lies in `[lo, hi]`.
 struct RangeDocs {
     lo: i64,
@@ -1250,10 +1457,16 @@ struct RangeDocs {
     b: crate::util::bitset::DocIdSetBuilder,
 }
 
+/// The doc values integer of a packed 1-d point `width` bytes wide.
+#[inline]
+fn point_int(width: usize, packed: &[u8]) -> i64 {
+    if width == 8 { encode::i64_from(&packed[..8]) } else { encode::i32_from(&packed[..4]) as i64 }
+}
+
 impl RangeDocs {
     #[inline]
     fn value(&self, packed: &[u8]) -> i64 {
-        if self.width == 8 { encode::i64_from(&packed[..8]) } else { encode::i32_from(&packed[..4]) as i64 }
+        point_int(self.width, packed)
     }
 }
 
@@ -1432,14 +1645,19 @@ impl TopFieldLeaf<'_> {
     /// Narrows the competitive docs to the queue's worst value (after `doc`).
     /// Re-derives the competitive docs; `from` is the first doc still to be collected.
     fn prune(&mut self, from: u32) {
-        if !self.c.passed {
+        // Later passes count nothing: they may skip from the start.
+        if !self.c.passed && self.counting {
             return;
         }
         let Some(p) = self.pruner.as_mut() else { return };
+        let edge = self.band.as_ref().and_then(|b| b.lo).map(|(v, _)| v);
         let Some(b) = self.bottom.as_ref() else {
-            // Queue not full yet: `search_after` alone bounds the competitive values
-            // (Lucene's `NumericComparator` with a top value).
-            if p.after.is_some() && p.all_valued {
+            if let Some(v) = edge {
+                // Docs past the band's edge wait for a later pass.
+                p.update(v, from, false);
+            } else if p.after.is_some() && p.all_valued {
+                // Queue not full yet: `search_after` alone bounds the competitive values
+                // (Lucene's `NumericComparator` with a top value).
                 p.update(if p.reverse { i64::MIN } else { i64::MAX }, from, false);
             }
             return;
@@ -1464,9 +1682,169 @@ impl TopFieldLeaf<'_> {
             (SortType::Keyword, Native::Ord(o)) => Some(o),
             (kind, n) => native_int(kind, n),
         };
-        if let Some(v) = v {
-            p.update(v, from, strict);
+        match (v, edge) {
+            // The band's edge prunes more than a bottom past it.
+            (Some(v), Some(e)) if (p.reverse && e > v) || (!p.reverse && e < v) => p.update(e, from, false),
+            (None, Some(e)) => p.update(e, from, false),
+            (Some(v), _) => p.update(v, from, strict),
+            (None, None) => {}
         }
+    }
+
+    /// Starts collecting by bands (see [`Band`]) from doc `from` on, when the first key is a
+    /// numeric field the points tree can bound and the bound beats the queue's worst entry.
+    fn start_band(&mut self, from: u32, pruning_failed: bool) {
+        if !self.passes || !self.counting || self.band_tried || self.scripted || self.doc_first || self.c.early_terminate || self.c.n == 0 {
+            return;
+        }
+        // Only where the pruner alone does badly: it found no competitive set it could use, or
+        // the docs arrive against the sort, telling as over the last doubling of the hits (from
+        // a power of two to the next) at least four times the queue entered it. In random order
+        // about `n ln 2` do whatever the count. Fewer than eight queues' worth of hits tell
+        // nothing.
+        let n = self.c.n as u64;
+        if !pruning_failed && self.seg_hits >= 8 * n && self.pow2_inserts[1] - self.pow2_inserts[0] < 4 * n {
+            return;
+        }
+        self.band_tried = true;
+        let Some(p) = self.pruner.as_ref() else { return };
+        if p.absent || p.width == 0 || p.missing_competitive {
+            return;
+        }
+        let Some(points) = p.reader.points(p.field) else { return };
+        let n = self.c.n as u64;
+        // Twice the queue's worth of matches, at the hits per doc since this segment's first
+        // hit (or in the segments before).
+        let (hits, seen) = if self.seg_hits > 0 {
+            (self.seg_hits, u64::from(from - self.first_hit))
+        } else {
+            (self.c.total, u64::from(self.base) + u64::from(from))
+        };
+        let want = if seen > 0 && hits > 0 { (2 * n * seen).div_ceil(hits) } else { 16 * n }.max(n);
+        // Points past `search_after` or the query's range can't be hits.
+        let range_far = self.c.query_range.map(|(lo, hi)| if p.reverse { hi } else { lo });
+        let far = match (p.after, range_far) {
+            (Some(a), Some(r)) => Some(if p.reverse { a.min(r) } else { a.max(r) }),
+            (a, r) => a.or(r),
+        };
+        let skip = far.map_or(0, |a| p.count_before(points, a));
+        // A band holding much of the segment would save little.
+        if want.saturating_mul(8) > points.size().saturating_sub(skip) {
+            return;
+        }
+        let rank = skip + want;
+        let Some(edge) = points.rank_bound(rank, p.reverse) else { return };
+        let raw = point_int(p.width, &edge);
+        // Values that tie by the thousand (counts, zero amounts) make a band far wider than its
+        // rank: one that holds much of the segment would save little.
+        let (lo, hi) = if p.reverse { (raw, far.unwrap_or(i64::MAX)) } else { (far.unwrap_or(i64::MIN), raw) };
+        if points.estimate_point_count(&mut CountRange { lo, hi, width: p.width, n: 0 }).saturating_mul(8) > points.size() {
+            return;
+        }
+        let LeafKeyKind::Field(lk, m) = &self.keys[0] else { return };
+        let native = lk.num(raw);
+        // A queue whose worst entry is at or before the edge already prunes past it.
+        if let Some(b) = &self.bottom
+            && cmp_native(b[0], native, &lk.sort, *m) != Ordering::Greater
+        {
+            return;
+        }
+        // A single-valued field's hits have their sort value inside the range the query requires:
+        // the pruner needn't look past it. (A doc with several values may match through one and
+        // sort by another.)
+        let single = lk.fast.is_some() && lk.nested.is_none();
+        if single && let Some(r) = range_far {
+            let p = self.pruner.as_mut().expect("checked above");
+            p.cap = Some(r);
+        }
+        if let Some(p) = self.pruner.as_mut() {
+            p.banded = true;
+        }
+        self.band = Some(Band { lo: Some((raw, native)), hi: None, rank, prev_rank: skip, from, found: 0, count: 1 });
+        self.deferred_end = (!self.c.passed).then_some(u32::MAX);
+    }
+
+    /// Accounts a hit the first pass counted (bands possible), and starts a band once enough
+    /// were counted.
+    #[inline]
+    fn band_stats(&mut self, doc: u32, just_passed: bool) {
+        if self.seg_hits == 0 {
+            self.first_hit = doc;
+        }
+        self.seg_hits += 1;
+        if just_passed {
+            self.passed_at = Some(doc);
+            // From here the pruner skips docs: a later pass visits them from this one on.
+            if self.deferred_end == Some(u32::MAX) {
+                self.deferred_end = Some(doc);
+            }
+        }
+        if self.seg_hits & (self.seg_hits - 1) == 0 {
+            self.pow2_inserts = [self.pow2_inserts[1], self.seg_inserts];
+        }
+        if self.seg_hits == self.band_start && !just_passed {
+            self.start_band(doc + 1, false);
+            self.prune(doc + 1);
+            // No band, and exact totals leave no other chance for one: stop accounting.
+            if self.band.is_none() && self.c.threshold == u64::MAX {
+                self.band_start = 0;
+            }
+        }
+    }
+
+    /// The queue is full of hits at or before the band's edge `lo`: nothing past it can enter.
+    fn band_done(&self, lo: Native) -> bool {
+        let LeafKeyKind::Field(lk, m) = &self.keys[0] else { return true };
+        self.bottom.as_ref().is_some_and(|b| cmp_native(b[0], lo, &lk.sort, *m) != Ordering::Greater)
+    }
+
+    /// Offers a doc the first pass deferred to the queue, as collecting it would have. It comes
+    /// after docs with higher ids, so a tie with the queue's worst entry is decided by the ids.
+    fn offer(&mut self, doc: u32, score: f32) -> Result<()> {
+        self.compute(doc, score);
+        let gdoc = self.base + doc;
+        if let Some(a) = &self.after {
+            match self.cmp(&self.natives, a) {
+                Ordering::Less => return Ok(()),
+                Ordering::Equal => match self.c.after.as_ref().and_then(|x| x.1) {
+                    Some(ad) if gdoc > ad => {}
+                    _ => return Ok(()),
+                },
+                Ordering::Greater => {}
+            }
+        }
+        if let Some(b) = &self.bottom {
+            let worse = match self.cmp(&self.natives, b) {
+                Ordering::Less => false,
+                Ordering::Equal => self.c.worst().is_some_and(|w| w.doc < gdoc),
+                Ordering::Greater => true,
+            };
+            if worse {
+                return Ok(());
+            }
+        }
+        self.insert(doc, score)
+    }
+
+    /// Whether `doc` lies in the current band (taking it into account), when collecting by
+    /// bands.
+    #[inline]
+    fn in_band(&mut self, doc: u32) -> bool {
+        let Some(band) = self.band.as_mut() else { return true };
+        let LeafKeyKind::Field(lk, m) = &mut self.keys[0] else { return true };
+        let v = lk.native(doc);
+        if let Some((_, lo)) = band.lo
+            && cmp_native(v, lo, &lk.sort, *m) == Ordering::Greater
+        {
+            return false;
+        }
+        if let Some(hi) = band.hi
+            && cmp_native(v, hi, &lk.sort, *m) != Ordering::Greater
+        {
+            return false;
+        }
+        band.found += 1;
+        true
     }
 
     /// With `_doc` ascending first, whether `gdoc` sorts after the full queue's worst entry
@@ -1517,7 +1895,87 @@ impl LeafCollector for TopFieldLeaf<'_> {
     }
 
     fn skips(&self) -> bool {
-        self.pruner.is_some() || self.skip_before > 0
+        // A pass counting every hit skips nothing.
+        (self.pruner.is_some() && (self.c.threshold != u64::MAX || !self.counting)) || self.skip_before > 0
+    }
+
+    fn allow_passes(&mut self) {
+        self.passes = true;
+        let numeric = self.pruner.as_ref().is_some_and(|p| p.width > 0 && !p.absent && !p.missing_competitive);
+        if numeric && !self.scripted && !self.doc_first && !self.c.early_terminate && self.c.n > 0 {
+            self.band_start = BAND_START_HITS.max(4 * self.c.n as u64);
+        }
+        // With the queue already full (or the count already past its threshold), bands start
+        // with the segment, sized by the segments before; otherwise once this one counted enough
+        // hits (or the count passes).
+        if self.bottom.is_some() || self.c.passed {
+            self.start_band(0, false);
+            self.prune(0);
+        }
+    }
+
+    fn next_pass(&mut self) -> Option<u32> {
+        let (_, lo) = self.band.as_ref()?.lo?;
+        if self.band_done(lo) {
+            return None;
+        }
+        // The docs outside the band counted before the threshold passed: offered now, instead
+        // of visited again. A pass that never passed it saw every match; otherwise the next one
+        // starts where the pruner began to skip.
+        if let Some(end) = self.deferred_end.take() {
+            for (doc, score) in std::mem::take(&mut self.deferred) {
+                let _ = self.offer(doc, score);
+            }
+            if end == u32::MAX {
+                return None;
+            }
+            let band = self.band.as_mut()?;
+            band.from = band.from.max(end);
+            if self.band_done(lo) {
+                return None;
+            }
+        }
+        let band = self.band.as_mut()?;
+        let LeafKeyKind::Field(lk, m) = &self.keys[0] else { return None };
+        let p = self.pruner.as_mut()?;
+        let points = p.reader.points(p.field)?;
+        // The next band: as many more points as this one held, times the matches still wanted
+        // over those it yielded; after an empty band, enough points for twice the queue at the
+        // hits per doc the first pass counted.
+        let n = self.c.n as u64;
+        let held = (band.rank - band.prev_rank).max(n);
+        let scanned = u64::from(self.passed_at.map_or(p.reader.max_doc(), |d| d + 1) - self.first_hit);
+        let more = match band.found {
+            0 if self.seg_hits > 0 => (2 * n * scanned).div_ceil(self.seg_hits).max(held.saturating_mul(2)),
+            0 => held.saturating_mul(16),
+            f => held.saturating_mul((2 * n).div_ceil(f).clamp(2, 64)),
+        };
+        let rank = band.rank.saturating_add(more);
+        band.hi = Some(lo);
+        band.prev_rank = band.rank;
+        band.rank = rank;
+        band.found = 0;
+        band.count += 1;
+        band.lo = if band.count > MAX_BANDS {
+            None
+        } else {
+            points.rank_bound(rank, p.reverse).map(|e| {
+                let raw = point_int(p.width, &e);
+                (raw, lk.num(raw))
+            })
+        };
+        // An edge past the queue's worst entry prunes less than the entry.
+        if let (Some((_, e)), Some(b)) = (band.lo, &self.bottom)
+            && cmp_native(e, b[0], &lk.sort, *m) == Ordering::Greater
+        {
+            band.lo = None;
+        }
+        p.restart();
+        p.cap = native_int(lk.sort.kind, lo);
+        let from = band.from;
+        self.counting = false;
+        self.prune(from);
+        Some(from)
     }
 
     #[inline]
@@ -1547,10 +2005,16 @@ impl LeafCollector for TopFieldLeaf<'_> {
     }
 
     fn collect(&mut self, doc: u32, scorer: &mut dyn Scorable) -> Result<()> {
-        self.c.total += 1;
-        let just_passed = self.c.note_hit();
-        if self.c.passed {
-            self.c.relation = TotalRelation::GreaterThanOrEqualTo;
+        let mut just_passed = false;
+        if self.counting {
+            self.c.total += 1;
+            just_passed = self.c.note_hit();
+            if self.band_start > 0 {
+                self.band_stats(doc, just_passed);
+            }
+            if self.c.passed {
+                self.c.relation = TotalRelation::GreaterThanOrEqualTo;
+            }
         }
         let score = if self.scores || self.script_score { scorer.score() } else { f32::NAN };
         if self.scores && score > self.c.max_score {
@@ -1571,8 +2035,27 @@ impl LeafCollector for TopFieldLeaf<'_> {
         if just_passed {
             // The hit count just passed the threshold: pruning may start, whatever this doc
             // turns out to be (one before `search_after` must not keep it from starting:
-            // Lucene's `setHitsThresholdReached` runs on the count alone).
+            // Lucene's `setHitsThresholdReached` runs on the count alone). A pruner that can't
+            // narrow the docs to visit calls for a band.
             self.prune(doc + 1);
+            let failed = self.pruner.as_ref().is_some_and(|p| p.set.is_none() && !p.absent);
+            self.start_band(doc + 1, failed);
+            self.prune(doc + 1);
+            // The last chance for a band in this segment: without one, stop accounting.
+            if self.band.is_none() {
+                self.band_start = 0;
+            }
+        }
+        if self.band.is_some() && !self.in_band(doc) {
+            if self.deferred_end == Some(u32::MAX) {
+                if self.deferred.len() < DEFER_CAP {
+                    self.deferred.push((doc, score));
+                } else {
+                    self.deferred_end = None;
+                    self.deferred = Vec::new();
+                }
+            }
+            return Ok(());
         }
         if self.doc_first {
             let gdoc = self.base + doc;
@@ -1687,6 +2170,9 @@ impl TopFieldLeaf<'_> {
     /// Callers only insert into a full queue a doc that beats its worst entry, so that entry
     /// is evicted first and its buffers reused: no allocation once the queue is full.
     fn insert(&mut self, doc: u32, score: f32) -> Result<()> {
+        if self.counting && self.band_start > 0 {
+            self.seg_inserts += 1;
+        }
         let gdoc = self.base + doc;
         let generation = self.c.generation;
         let c = &mut *self.c;
@@ -1772,6 +2258,18 @@ impl Collector for TopFieldCollector {
             scripted,
             doc_first: false,
             skip_before: 0,
+            passes: false,
+            counting: true,
+            band: None,
+            band_tried: false,
+            band_start: 0,
+            seg_hits: 0,
+            first_hit: 0,
+            passed_at: None,
+            seg_inserts: 0,
+            pow2_inserts: [0; 2],
+            deferred: Vec::new(),
+            deferred_end: None,
         };
         if let Some((vals, _)) = leaf.c.after.clone() {
             if vals.len() != leaf.keys.len() {

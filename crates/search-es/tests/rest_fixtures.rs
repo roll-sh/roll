@@ -11,7 +11,10 @@
 //! `ROLL_ES_CAPTURE=http://127.0.0.1:19200 cargo test -p search-es --test rest_fixtures -- --ignored`.
 //! Scenarios with `"dialect": "opensearch"` are captured from a real OpenSearch 3.9.0 instead
 //! (`ROLL_ES_CAPTURE=<opensearch url> ROLL_ES_CAPTURE_ONLY=os_`) and replayed against the
-//! opensearch dialect.
+//! opensearch dialect. A reference with security enabled (the `os_security*` scenarios: the
+//! Security plugin over plain HTTP, `plugins.security.ssl.http.enabled=false`) takes its
+//! admin's credentials from `ROLL_ES_CAPTURE_AUTH=admin:<password>`: they go with every step
+//! that sends no `Authorization` of its own, as roll runs a step without one as the owner.
 //! Capturing only creates and deletes objects named `esm-*` and never changes cluster settings.
 
 use search_es::json::{Map, Value, parse};
@@ -20,6 +23,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 const DEFAULT_MASKS: &[&str] = &[
+    // A hit's node id (explain): random on both sides, and not always mixed case.
+    "_node",
     "uuid",
     "index_uuid",
     "cluster_uuid",
@@ -316,7 +321,13 @@ async fn capture() {
         return;
     };
     let only = std::env::var("ROLL_ES_CAPTURE_ONLY").ok();
-    let client = reqwest::Client::new();
+    let mut defaults = reqwest::header::HeaderMap::new();
+    if let Ok(auth) = std::env::var("ROLL_ES_CAPTURE_AUTH") {
+        use base64::Engine;
+        let basic = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(auth));
+        defaults.insert(reqwest::header::AUTHORIZATION, basic.parse().unwrap());
+    }
+    let client = reqwest::Client::builder().default_headers(defaults).build().unwrap();
     for (file, scenario) in scenarios() {
         if only.as_deref().is_some_and(|o| !file.contains(o)) {
             continue;
@@ -451,6 +462,14 @@ async fn cleanup(client: &reqwest::Client, base: &str) {
         for r in v.get("results").and_then(Value::as_array).cloned().unwrap_or_default() {
             if let Some(n) = r.get("synonyms_set").and_then(Value::as_str).filter(|n| n.starts_with("esm")) {
                 del(format!("{base}/_synonyms/{n}")).await;
+            }
+        }
+    }
+    // OpenSearch Security's entries (mappings before the roles they name).
+    for ty in ["internalusers", "rolesmapping", "roles", "actiongroups"] {
+        if let Some(Value::Obj(m)) = get(format!("{base}/_plugins/_security/api/{ty}")).await {
+            for n in m.keys().filter(|n| n.starts_with("esm")) {
+                del(format!("{base}/_plugins/_security/api/{ty}/{n}")).await;
             }
         }
     }

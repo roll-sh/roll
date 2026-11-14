@@ -219,7 +219,22 @@ impl ReadyWrite {
 pub async fn index_one_ahead(ctx: &Ctx<'_>, expr: &str, args: WriteArgs, source: Bytes, auto_id: bool, ahead: Option<Ahead<'_>>) -> EsResult<Indexed> {
     let cluster = ctx.cluster;
     let existed = ctx.state().metadata.data_streams.contains_key(expr);
-    let target = write::resolve_target(cluster, expr, &args, ctx.now_ms).await?;
+    // Elasticsearch runs a request's pipeline before it creates a missing index or checks
+    // `require_alias`: both apply to the index the pipeline leaves the document in.
+    let pipelined = args.pipeline.as_deref().is_some_and(|p| p != "_none");
+    let name = resolve::resolve_date_math(expr, ctx.now_ms).unwrap_or_else(|_| expr.to_string());
+    let named = Original { fresh: write::resolve_existing(&ctx.state(), &name).is_none() && !existed, require_alias: args.require_alias && pipelined, name };
+    let target = if named.require_alias {
+        write::resolve_target(cluster, expr, &WriteArgs { require_alias: false, ..args.clone() }, ctx.now_ms).await?
+    } else {
+        write::resolve_target(cluster, expr, &args, ctx.now_ms).await?
+    };
+    // An index the write created and no pipeline can move it out of (otherwise `index_resolved`
+    // warns where the document lands).
+    let pipeline_of = |k: &str| target.index.settings.get(k).is_some_and(|p| p != "_none");
+    if named.fresh && !pipelined && (args.pipeline.as_deref() == Some("_none") || !pipeline_of("index.default_pipeline")) && !pipeline_of("index.final_pipeline") {
+        warn_auto_created(ctx, &named.name);
+    }
     // Backing indices only take writes that carry their sequence numbers (`IndexRequest`
     // targeting a backing index directly).
     let direct = target.index.name == expr;
@@ -253,7 +268,7 @@ pub async fn index_one_ahead(ctx: &Ctx<'_>, expr: &str, args: WriteArgs, source:
         barrier();
     }
     let Some(initial_ds) = initial_ds else {
-        return index_resolved(ctx, target, args, source, auto_id).await.map(Indexed::Done);
+        return index_resolved(ctx, target, args, source, auto_id, &named).await.map(Indexed::Done);
     };
     let original = parse_doc(&source).ok();
     let mut args = args;
@@ -264,7 +279,7 @@ pub async fn index_one_ahead(ctx: &Ctx<'_>, expr: &str, args: WriteArgs, source:
     }
     let given_id = args.id.clone();
     let routing = args.routing.clone();
-    let r = index_resolved(ctx, target, args, source, auto_id).await;
+    let r = index_resolved(ctx, target, args, source, auto_id, &named).await;
     let e = match r {
         Ok(o) => return Ok(Indexed::Done(o)),
         Err(e) => e,
@@ -304,7 +319,59 @@ pub async fn index_one_ahead(ctx: &Ctx<'_>, expr: &str, args: WriteArgs, source:
     }
 }
 
-async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, mut args: WriteArgs, source: Bytes, mut auto_id: bool) -> EsResult<WriteOutcome> {
+/// Elasticsearch's deprecation warnings for a dot-prefixed index a write created
+/// (`DotPrefixValidator`, which Elastic products skip, and `AutoCreateAction`'s notice for a
+/// visible one). Data streams and system indices get none.
+fn warn_auto_created(ctx: &Ctx<'_>, name: &str) {
+    if !name.starts_with('.') || crate::meta::names::dot_name_allowed(name) {
+        return;
+    }
+    let st = ctx.state();
+    let Some(idx) = st.metadata.indices.get(name) else { return };
+    ctx.warn_all(crate::meta::names::index_name_warnings(name));
+    if !idx.is_hidden() {
+        ctx.warn_even_for_products(format!(
+            "index name [{name}] starts with a dot '.', in the next major version, index names starting with a dot are reserved for hidden indices and system indices"
+        ));
+    }
+}
+
+/// The index a write named, as it stood before the write resolved (and maybe created) it.
+struct Original {
+    /// The name, date math resolved.
+    name: String,
+    /// Nothing by that name existed: resolving the write created it.
+    fresh: bool,
+    /// `require_alias` is checked after the request's pipeline ran.
+    require_alias: bool,
+}
+
+/// Deletes the index or data stream `name` a write created for a document its pipeline sent
+/// elsewhere or refused, as Elasticsearch creates indices only after ingest. Only while nothing
+/// was written to it (every shard's sequence numbers unused): a concurrent write keeps it.
+async fn drop_created(cluster: &crate::cluster::Cluster, name: &str) {
+    let st = cluster.state();
+    let stream = st.metadata.data_streams.get(name).cloned();
+    let indices: Vec<Arc<IndexMeta>> = match &stream {
+        Some(d) => d.indices.iter().filter_map(|i| st.metadata.indices.get(i).cloned()).collect(),
+        None => st.metadata.indices.get(name).cloned().into_iter().collect(),
+    };
+    let untouched = indices.iter().all(|idx| match cluster.engine.loaded(&idx.uuid) {
+        Some(e) => (0..idx.number_of_shards()).all(|s| e.shard(s).shard.max_seq_no() < 0),
+        None => true,
+    });
+    if indices.is_empty() || !untouched {
+        return;
+    }
+    let names = vec![name.to_string()];
+    let _ = if stream.is_some() {
+        cluster.update(move |st| crate::api::data_streams::delete_data_streams(st, &names)).await
+    } else {
+        cluster.update(move |st| crate::api::indices::delete_indices(st, &names)).await
+    };
+}
+
+async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, mut args: WriteArgs, source: Bytes, mut auto_id: bool, original: &Original) -> EsResult<WriteOutcome> {
     let cluster = ctx.cluster;
     let mut id = args.id.clone().unwrap_or_else(crate::meta::names::time_based_id);
     let mut executed = Vec::new();
@@ -312,7 +379,29 @@ async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, mut args: WriteArg
     // Ingest runs before auto ids exist.
     let ingest_args = if auto_id { std::borrow::Cow::Owned(WriteArgs { id: None, ..args.clone() }) } else { std::borrow::Cow::Borrowed(&args) };
     let requested = target.index.name.clone();
-    let (target, value, source) = match crate::ingest::run_for_write(cluster, target, &ingest_args, &id, value, source, ctx.now_ms, Some(&ctx.ingest_nanos)).await? {
+    let ran = crate::ingest::run_for_write(cluster, target, &ingest_args, &id, value, source, ctx.now_ms, Some(&ctx.ingest_nanos)).await;
+    let ran = match ran {
+        // An index the write created and the pipeline moved the document out of (or refused it
+        // into) was never Elasticsearch's to create. A data stream's failure store may still
+        // take the document (`index_one_ahead`).
+        Ok(crate::ingest::Outcome::Index(ref t, ..)) if original.fresh && t.index.name != requested => {
+            drop_created(cluster, &original.name).await;
+            ran
+        }
+        Ok(crate::ingest::Outcome::Index(..)) if original.require_alias && !ctx.state().has_alias(&original.name) && !ctx.state().metadata.data_stream_aliases.contains_key(&original.name) => {
+            if original.fresh {
+                drop_created(cluster, &original.name).await;
+            }
+            let n = &original.name;
+            return Err(EsError::index_not_found_msg(n, format!("no such index [{n}] and [require_alias] request flag is [true] and [{n}] is not an alias")));
+        }
+        Err(e) if original.fresh && !ctx.state().metadata.data_streams.contains_key(&original.name) => {
+            drop_created(cluster, &original.name).await;
+            Err(e)
+        }
+        other => other,
+    };
+    let (target, value, source) = match ran? {
         crate::ingest::Outcome::Index(t, v, s, ingested) => {
             // A pipeline that moved the document (`_index`, `reroute`): the write is authorized
             // again where it lands.
@@ -320,7 +409,14 @@ async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, mut args: WriteArg
                 crate::xpack::security::check_moved_write(ctx, &t.index.name)?;
             }
             if let Some(ingested) = ingested {
-                let crate::ingest::Ingested { args: changed, executed: ran } = *ingested;
+                let crate::ingest::Ingested { args: changed, executed: ran, created } = *ingested;
+                // The pipelines ran: warn where the document landed.
+                if original.fresh && t.index.name == requested {
+                    warn_auto_created(ctx, &original.name);
+                }
+                for c in &created {
+                    warn_auto_created(ctx, c);
+                }
                 let new_id = changed.id.clone().unwrap_or_else(|| id.clone());
                 if new_id != id {
                     id = new_id;
@@ -555,7 +651,18 @@ pub fn get_one(ctx: &Ctx, idx: &Arc<IndexMeta>, id: &str, args: &GetArgs) -> EsR
     if args.realtime {
         shard.shard.note_realtime_get(id.as_bytes()).map_err(crate::engine::convert::index_error)?;
     }
-    let doc = shard.shard.get(id.as_bytes(), args.realtime).map_err(crate::engine::convert::index_error)?;
+    // Vectors kept out of the stored source come back from the vector values: every reader of
+    // a get (the get APIs, `_update`, the knn `lookup` builder) sees them as Elasticsearch's does.
+    let table = engine.table();
+    let mut doc = if table.stripped_vectors.is_empty() {
+        shard.shard.get(id.as_bytes(), args.realtime)
+    } else {
+        shard.shard.get_with_vectors(id.as_bytes(), args.realtime, &crate::engine::source_vectors::numbers(&table.stripped_vectors))
+    }
+    .map_err(crate::engine::convert::index_error)?;
+    if let Some(d) = &mut doc {
+        crate::engine::source_vectors::patch_doc(&table.stripped_vectors, d)?;
+    }
     let c = &shard.counters;
     c.get_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     c.get_time_nanos.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -661,6 +768,20 @@ pub fn get(ctx: &Ctx, head: bool) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default().to_string();
     let args = get_args(ctx)?;
     let idx = single_index(ctx, expr)?;
+    crate::api::warn_system_access(ctx, std::slice::from_ref(&idx.name));
+    if let Some(source) = crate::xpack::security::users::security_document(&ctx.state(), &idx.name, &id) {
+        if head {
+            return Ok(Reply::Empty(200));
+        }
+        let mut m = Map::new();
+        for (k, v) in [("_index", Value::from(idx.name.clone())), ("_id", Value::from(id)), ("_version", Value::from(1)), ("_seq_no", Value::from(0)), ("_primary_term", Value::from(1)), ("found", Value::Bool(true))] {
+            m.insert(k.into(), v);
+        }
+        if args.source.as_ref().is_none_or(|fs| fs.fetch) {
+            m.insert("_source".into(), source);
+        }
+        return Ok(Reply::Body(200, Value::Obj(m)));
+    }
     let got = get_one(ctx, &idx, &id, &args)?;
     if head {
         return Ok(Reply::Empty(if got.is_some() { 200 } else { 404 }));

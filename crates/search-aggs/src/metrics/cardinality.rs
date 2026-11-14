@@ -620,7 +620,7 @@ impl Aggregator for CardinalityAgg {
                 }
                 Reader::Geo { r, missing, text } => {
                     for i in 0..b.len() {
-                        let points = r.points(b.docs[i]);
+                        let points = r.points(b.docs[i])?;
                         if points.is_empty() {
                             if let Some(h) = *missing {
                                 self.hll(b.ords[i]).collect(h);

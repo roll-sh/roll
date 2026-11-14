@@ -134,6 +134,15 @@ pub fn shard_exception(idx: &IndexMeta, e: EsError) -> EsError {
     EsError::new(400, "query_shard_exception", reason).with_meta("index_uuid", idx.uuid.as_str()).with_meta("index", idx.name.as_str()).caused_by(e)
 }
 
+/// `ICUCollationKeywordFieldMapper`'s refusal of term-pattern queries (collation keys keep no
+/// characters to match).
+fn collation_refuses(f: &FieldInfo, query: &str) -> EsResult<()> {
+    if f.ty == "icu_collation_keyword" {
+        return Err(EsError::java(500, "unsupported_operation_exception", format!("[{query}] queries are not supported on [icu_collation_keyword] fields.")));
+    }
+    Ok(())
+}
+
 /// A `query_shard_exception` of its own (no cause).
 pub fn qse(ctx: &QueryCtx, reason: impl Into<String>) -> EsError {
     EsError::new(400, "query_shard_exception", reason).with_meta("index_uuid", ctx.idx.uuid.as_str()).with_meta("index", ctx.idx.name.as_str())
@@ -876,6 +885,7 @@ impl<'a> QueryCtx<'a> {
             }
             return Ok(match_none("The \"prefix\" query is against a field that does not exist"));
         };
+        collation_refuses(&f, "prefix")?;
         let rw = self.rewrite_of(rewrite)?;
         let wrap = |q: MultiTermQuery| -> QueryRef { self.multi_term(&f, match rw { Some(r) => q.with_rewrite(r), None => q }) };
         if f.kind == Kind::Version {
@@ -944,6 +954,7 @@ impl<'a> QueryCtx<'a> {
             }
             return Ok(match_none("The \"wildcard\" query is against a field that does not exist"));
         };
+        collation_refuses(&f, "wildcard")?;
         self.expensive("wildcard")?;
         Self::check_keyed(&f, "wildcard")?;
         let rw = self.rewrite_of(rewrite)?;
@@ -987,6 +998,7 @@ impl<'a> QueryCtx<'a> {
             }
             return Ok(match_none("The \"regexp\" query is against a field that does not exist"));
         };
+        collation_refuses(&f, "regexp")?;
         self.expensive("regexp")?;
         Self::check_keyed(&f, "regexp")?;
         self.check_regex_length(&r.value, "Regexp")?;
@@ -1021,6 +1033,7 @@ impl<'a> QueryCtx<'a> {
 
     fn fuzzy_query(&self, fz: &crate::query::term_level::Fuzzy) -> EsResult<QueryRef> {
         let Some(f) = self.field(&fz.field) else { return Ok(match_none("The \"fuzzy\" query was rewritten to a \"match_none\" query.")) };
+        collation_refuses(&f, "fuzzy")?;
         self.expensive("fuzzy")?;
         Self::check_keyed(&f, "fuzzy")?;
         let value = value_text(&fz.value);

@@ -247,3 +247,55 @@ async fn clusters_and_requests() {
     assert_eq!(names.len(), 2, "{names:?}");
     e.control.shutdown().await.unwrap();
 }
+
+/// `roll search keys`: a data key, printed once, works against the cluster, is listed, and
+/// stops working once revoked.
+#[tokio::test]
+async fn api_keys() {
+    let e = env().await;
+    e.roll(&["search", "clusters", "create", "keyed"]).await;
+    let out = e.roll(&["search", "keys", "create", "keyed", "ingest worker", "--expires-in", "1d"]).await;
+    assert!(out.contains("data access") && out.contains("(shown once)") && out.contains("expires"), "{out}");
+    let key = field(&out, "api_key");
+    let url = out.lines().find_map(|l| l.strip_prefix("ELASTICSEARCH_URL=")).and_then(|r| r.split_whitespace().next()).unwrap().to_string();
+    let http = reqwest::Client::new();
+    let put = |id: &str| http.put(format!("{url}/notes/_doc/{id}")).header("Authorization", format!("ApiKey {key}")).json(&serde_json::json!({"t": id})).send();
+    assert_eq!(put("1").await.unwrap().status().as_u16(), 201);
+    let out = e.roll(&["search", "keys", "list", "keyed"]).await;
+    assert!(out.contains("ingest worker") && out.contains("data") && !out.contains(&key), "{out}");
+    let listed = e.roll_json(&["search", "keys", "list", "keyed"]).await;
+    let id = listed[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(e.roll(&["search", "keys", "revoke", "keyed", &id]).await.trim(), format!("revoked {id}"));
+    assert_eq!(put("2").await.unwrap().status().as_u16(), 401);
+    assert_eq!(e.roll(&["search", "keys", "list", "keyed"]).await.trim(), "no keys");
+
+    // An OpenSearch-flavor cluster's key is an internal user: a username and password, shown once.
+    e.roll(&["search", "clusters", "create", "oskeyed", "--flavor", "opensearch"]).await;
+    let out = e.roll(&["search", "keys", "create", "oskeyed", "os worker"]).await;
+    let (user, pw) = (field(&out, "username"), field(&out, "password"));
+    assert!(user.ends_with("@oskeyed") && out.contains("OPENSEARCH_USERNAME="), "{out}");
+    let put = http.put(format!("{url}/notes/_doc/1")).basic_auth(&user, Some(&pw)).json(&serde_json::json!({"t": 1})).send().await.unwrap();
+    assert_eq!(put.status().as_u16(), 201);
+    let listed = e.roll_json(&["search", "keys", "list", "oskeyed"]).await;
+    let id = listed[0]["id"].as_str().unwrap().to_string();
+    assert_eq!((listed[0]["name"].as_str(), listed[0]["access"].as_str()), (Some("os worker"), Some("data")), "{listed}");
+    e.roll(&["search", "keys", "revoke", "oskeyed", &id]).await;
+    assert_eq!(e.roll(&["search", "keys", "list", "oskeyed"]).await.trim(), "no keys");
+}
+
+/// `roll search inference`: the built-in endpoints are listed, a create without a key in the
+/// environment stops before anything is sent (the key never goes on the command line), and an
+/// unknown endpoint is named.
+#[tokio::test]
+async fn inference_endpoints() {
+    let e = env().await;
+    e.roll(&["search", "clusters", "create", "sem"]).await;
+    let out = e.roll(&["search", "inference", "list", "sem"]).await;
+    assert!(out.contains(".elser-2-elasticsearch") && out.contains("built in"), "{out}");
+    let out = e.roll_with(&["search", "inference", "create", "sem", "emb", "--model", "m", "--api-key-env", "ROLL_TEST_NO_SUCH_KEY"], None).await;
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("set ROLL_TEST_NO_SUCH_KEY"), "{out:?}");
+    let out = e.roll_with(&["search", "inference", "delete", "sem", "nope"], None).await;
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nope"), "{out:?}");
+}

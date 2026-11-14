@@ -861,7 +861,7 @@ impl Sent {
 }
 
 /// `next()` of the root sentence iterator from `pos` (< `s.len()`).
-fn sentence_next(s: &[u16], pos: usize) -> usize {
+pub(crate) fn sentence_next(s: &[u16], pos: usize) -> usize {
     let mut i = pos;
     let mut result = next_index(s, i);
     let mut lookahead = 0usize;
@@ -1144,7 +1144,7 @@ impl ThaiTokenizer {
 /// `SegmentingTokenizerBase.isSafeEnd`: only line breaks end a chunk (Lucene 10.5's
 /// `ThaiTokenizer` does not add whitespace), so a line of more than 1024 units is cut hard.
 #[inline]
-fn is_safe_end(u: u16) -> bool {
+pub(crate) fn is_safe_end(u: u16) -> bool {
     matches!(u, 0x0D | 0x0A | 0x85 | 0x2028 | 0x2029)
 }
 

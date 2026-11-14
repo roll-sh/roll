@@ -24,3 +24,4 @@ mod wake;
 
 pub use control::{ClusterOptions, ConsoleRequest, ConsoleResponse, Control, ControlError, Defaults, SearchConfig, SqlCatalog};
 pub use pricing::{Cost, Pricing};
+pub use search_es::seal::Sealer;

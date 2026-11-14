@@ -8,8 +8,13 @@
 //! reaches any term and costs O(size) per segment, whatever the dictionary size. Version
 //! prefixes apply to the decoded text and IP prefixes to the address text, so those scan
 //! from `search_after`. Other enumerable fields (`constant_keyword`, `wildcard`) run a `terms`
-//! aggregation in key order through the core search API. Like Elasticsearch 9.5.5, `boolean`
-//! fields, `flattened` roots and non-keyword fields (text, numbers) answer an empty list.
+//! aggregation in key order through the core search API, on just those indices. Like
+//! Elasticsearch 9.5.5, `boolean` fields, `flattened` roots and non-keyword fields (text,
+//! numbers) answer an empty list.
+//!
+//! Under document and field level security an index takes part only when the reader sees the
+//! field and every document of it (`TransportTermsEnumAction.canAccess`): enumerating a
+//! dictionary can't tell which documents a term came from.
 
 use crate::error::{EsError, EsResult};
 use crate::json::Value;
@@ -41,8 +46,9 @@ struct Dict {
     key_prefix: Vec<u8>,
 }
 
-/// The dictionary of `field` in an index (`Err(())`: not enumerated directly; `Ok(None)`:
-/// nothing to enumerate, as Elasticsearch answers for booleans and flattened roots).
+/// The dictionary of `field` in an index (`Err(())`: enumerated by an aggregation; `Ok(None)`:
+/// nothing to enumerate, as Elasticsearch answers for booleans, flattened roots and fields
+/// that aren't keywords).
 fn dict_of(table: &crate::engine::fields::FieldTable, field: &str) -> Result<Option<Dict>, ()> {
     let fi = match table.get(field) {
         Some(f) => f.clone(),
@@ -62,8 +68,8 @@ fn dict_of(table: &crate::engine::fields::FieldTable, field: &str) -> Result<Opt
         "version" => terms(TermKind::Version),
         // `terms_enum` for ip only works with doc values.
         "ip" if fi.doc_values => Ok(Some(Dict { number: fi.number, doc_values: true, kind: TermKind::Ip, key_prefix: Vec::new() })),
-        "boolean" | "flattened" | "ip" | "keyword" => Ok(None),
-        _ => Err(()),
+        "constant_keyword" | "wildcard" => Err(()),
+        _ => Ok(None),
     }
 }
 
@@ -93,10 +99,15 @@ fn ip_bytes(s: &str) -> Option<Vec<u8>> {
     })
 }
 
+/// A term found: its bytes (the merge order) and its text.
+type Found = (Vec<u8>, String);
+
 /// A request's matching rules over one dictionary.
 struct Matcher<'a> {
     prefix: &'a str,
     ci: bool,
+    /// `search_after` as given.
+    after_text: Option<&'a str>,
     /// The encoded `search_after` (exclusive), without the key prefix.
     after: Option<Vec<u8>>,
     size: usize,
@@ -124,7 +135,7 @@ impl Matcher<'_> {
     }
 
     /// Up to `size` matching terms of one segment, as (term bytes, text).
-    fn segment(&self, reader: &search_codec::reader::SegmentReader, d: &Dict, out: &mut Vec<(Vec<u8>, String)>) {
+    fn segment(&self, reader: &search_codec::reader::SegmentReader, d: &Dict, out: &mut Vec<Found>) {
         use std::ops::Bound;
         let mut found = 0;
         if d.doc_values {
@@ -184,9 +195,16 @@ impl Matcher<'_> {
     }
 }
 
-/// The terms of `field` over the shards of `targets` (`None`: some index's field isn't
-/// enumerated directly, so the aggregation path answers).
-fn enumerate(cluster: &crate::cluster::Cluster, targets: &str, field: &str, prefix: &str, ci: bool, after: Option<&str>, size: usize) -> EsResult<Option<Vec<String>>> {
+/// The terms of `field` over the shards of `targets` the reader may enumerate, as (term bytes,
+/// text), unsorted; and the indices whose field an aggregation enumerates instead.
+fn enumerate(
+    cluster: &crate::cluster::Cluster,
+    security: Option<&crate::xpack::security::dls::ReadSecurity>,
+    targets: &str,
+    field: &str,
+    m: &Matcher<'_>,
+) -> EsResult<(Vec<Found>, Vec<String>)> {
+    use crate::xpack::security::dls::READ;
     let st = cluster.state();
     let req = crate::search::SearchRequest {
         indices: crate::meta::resolve::split_expressions(targets),
@@ -209,26 +227,47 @@ fn enumerate(cluster: &crate::cluster::Cluster, targets: &str, field: &str, pref
     };
     let shards = crate::search::shard_targets(cluster, &st, &req)?;
     drop(st);
-    let mut out: Vec<(Vec<u8>, String)> = Vec::new();
+    let mut out: Vec<Found> = Vec::new();
+    let mut by_aggregation: Vec<String> = Vec::new();
+    let mut readable: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
     for t in shards {
-        let Ok(dict) = dict_of(&t.table(), field) else { return Ok(None) };
-        let Some(dict) = dict else { continue };
-        let after = after.map(|a| match dict.kind {
+        if let Some(sec) = security {
+            let ok = match readable.get(&t.idx.name) {
+                Some(ok) => *ok,
+                None => {
+                    let sees_field = sec.fields(READ, &t.idx.name).is_none_or(|f| f.searchable(field));
+                    let ok = sees_field && sec.reads_every_document(cluster, READ, &t.idx)?;
+                    readable.insert(t.idx.name.clone(), ok);
+                    ok
+                }
+            };
+            if !ok {
+                continue;
+            }
+        }
+        let dict = match dict_of(&t.table(), field) {
+            Ok(Some(d)) => d,
+            Ok(None) => continue,
+            Err(()) => {
+                if !by_aggregation.contains(&t.idx.name) {
+                    by_aggregation.push(t.idx.name.clone());
+                }
+                continue;
+            }
+        };
+        let after = m.after_text.map(|a| match dict.kind {
             TermKind::Raw => a.as_bytes().to_vec(),
             TermKind::Version => search_aggs::version_string::encode(a).unwrap_or_else(|_| a.as_bytes().to_vec()),
             // An unparseable address fails the shard in Elasticsearch; nothing follows it here.
             TermKind::Ip => ip_bytes(a).unwrap_or_else(|| vec![0xff; 17]),
         });
-        let m = Matcher { prefix, ci, after, size };
+        let m = Matcher { after, ..*m };
         let searcher = t.searcher()?;
         for seg in searcher.segments() {
             m.segment(&seg.reader, &dict, &mut out);
         }
     }
-    out.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    out.dedup_by(|a, b| a.0 == b.0);
-    out.truncate(size);
-    Ok(Some(out.into_iter().map(|(_, t)| t).collect()))
+    Ok((out, by_aggregation))
 }
 
 /// A Lucene regexp matching strings that start with `prefix` (case-insensitively if asked).
@@ -253,9 +292,11 @@ pub fn prefix_regex(prefix: &str, case_insensitive: bool) -> String {
     out
 }
 
-/// The number of shards of the indices `index` resolves to.
+/// The number of shards of the indices `index` resolves to (for `_shards`, of indices the
+/// request was authorized for: with the cluster's authority, not the client's settings
+/// privilege, which `terms_enum` doesn't need).
 async fn shard_count(ctx: &Ctx<'_>, index: &str) -> EsResult<i64> {
-    let settings = internal::call(ctx.cluster, "GET", &format!("/{}/_settings/index.number_of_shards?flat_settings=true", enc(index)), None).await?;
+    let settings = internal::call_system(ctx.cluster, "GET", &format!("/{}/_settings/index.number_of_shards?flat_settings=true", enc(index)), None).await?;
     Ok(settings
         .as_object()
         .into_iter()
@@ -279,6 +320,10 @@ pub async fn terms_enum(ctx: &Ctx<'_>) -> EsResult<Reply> {
             None => return Err(EsError::action_request_validation(&["field cannot be null".into()])),
         },
     };
+    let timeout_ms = body.get("timeout").and_then(|t| crate::units::TimeValue::parse(&t.to_es_string(), "timeout").ok()).map(|t| t.as_millis()).unwrap_or(1000);
+    if timeout_ms > 60_000 {
+        return Err(EsError::action_request_validation(&["Timeout cannot be > 1 minute".into()]));
+    }
     let prefix = body.get("string").map(Value::to_es_string).unwrap_or_default();
     // The shards collect until they hold `size` terms, checked after adding one: a size of 0
     // or less returns the first term.
@@ -318,38 +363,41 @@ pub async fn terms_enum(ctx: &Ctx<'_>) -> EsResult<Reply> {
         total_shards = shard_count(ctx, &targets).await?;
     }
     let started = std::time::Instant::now();
-    let timeout_ms = body.get("timeout").and_then(|t| crate::units::TimeValue::parse(&t.to_es_string(), "timeout").ok()).map(|t| t.as_millis()).unwrap_or(1000);
-    // A reader under document or field level security sees only its documents' terms of the
-    // fields it may read: the search below runs as that reader, never the terms dictionary.
-    let restricted = crate::xpack::security::dls::ReadSecurity::of(ctx).is_some();
-    if !restricted && let Some(terms) = enumerate(ctx.cluster, &targets, &field, &prefix, ci, after.as_deref(), size as usize)? {
-        let complete = (started.elapsed().as_millis() as i64) < timeout_ms;
-        return Reply::ok(obj! { "_shards" => shards(total_shards), "terms" => Value::Arr(terms.into_iter().map(Value::from).collect()), "complete" => complete });
+    let security = crate::xpack::security::dls::ReadSecurity::of(ctx);
+    let m = Matcher { prefix: &prefix, ci, after_text: after.as_deref(), after: None, size: size as usize };
+    let (mut out, by_aggregation) = enumerate(ctx.cluster, security.as_ref(), &targets, &field, &m)?;
+    if !by_aggregation.is_empty() {
+        out.extend(aggregated(ctx, &by_aggregation.join(","), &field, &prefix, ci, after.as_deref(), size).await?.into_iter().map(|t| (t.clone().into_bytes(), t)));
     }
-    // `constant_keyword` and `wildcard`: a terms aggregation in key order (a constant keyword
-    // has one term; wildcard values come from doc values).
+    out.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    out.dedup_by(|a, b| a.0 == b.0);
+    out.truncate(size as usize);
+    let complete = (started.elapsed().as_millis() as i64) < timeout_ms;
+    Reply::ok(obj! { "_shards" => shards(total_shards), "terms" => Value::Arr(out.into_iter().map(|(_, t)| Value::from(t)).collect()), "complete" => complete })
+}
+
+/// The terms of a `constant_keyword` or `wildcard` field: a terms aggregation in key order (a
+/// constant keyword has one term; wildcard values come from doc values) on `indices`, which
+/// the reader sees all of.
+async fn aggregated(ctx: &Ctx<'_>, indices: &str, field: &str, prefix: &str, ci: bool, after: Option<&str>, size: i64) -> EsResult<Vec<String>> {
     let fetch = size + i64::from(after.is_some()) * 1000;
-    let mut terms_agg = obj! { "field" => field.clone(), "size" => fetch, "order" => obj! { "_key" => "asc" }, "min_doc_count" => 1 };
+    let mut terms_agg = obj! { "field" => field, "size" => fetch, "order" => obj! { "_key" => "asc" }, "min_doc_count" => 1 };
     if !prefix.is_empty()
         && let Value::Obj(m) = &mut terms_agg
     {
-        m.insert("include".into(), prefix_regex(&prefix, ci).into());
+        m.insert("include".into(), prefix_regex(prefix, ci).into());
     }
     let q = obj! { "size" => 0, "aggs" => obj! { "t" => obj! { "terms" => terms_agg } } };
-    let uri = format!("/{}/_search?ignore_unavailable=true", enc(&targets));
-    let r = if restricted { internal::call_as(ctx, ctx.cluster, "POST", &uri, Some(&q)).await? } else { internal::call(ctx.cluster, "POST", &uri, Some(&q)).await? };
-    let mut terms: Vec<Value> = r
+    let uri = format!("/{}/_search?ignore_unavailable=true", enc(indices));
+    let r = internal::call(ctx.cluster, "POST", &uri, Some(&q)).await?;
+    Ok(r
         .pointer(&["aggregations", "t", "buckets"])
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|b| b.get("key_as_string").or_else(|| b.get("key")).map(Value::to_es_string))
-        .filter(|t| after.as_ref().is_none_or(|a| t.as_str() > a.as_str()))
-        .map(Value::from)
-        .collect();
-    terms.truncate(size as usize);
-    let complete = (started.elapsed().as_millis() as i64) < timeout_ms;
-    Reply::ok(obj! { "_shards" => shards(total_shards), "terms" => Value::Arr(terms), "complete" => complete })
+        .filter(|t| after.is_none_or(|a| t.as_str() > a))
+        .collect())
 }
 
 #[cfg(test)]
@@ -371,14 +419,14 @@ mod tests {
         assert!(!has_prefix("k", "kk", true));
         assert_eq!(ip_text(&ip_bytes("10.0.5.1").unwrap()), "10.0.5.1");
         assert_eq!(ip_text(&ip_bytes("2001:db8::1").unwrap()), "2001:db8::1");
-        let m = Matcher { prefix: "k01", ci: false, after: None, size: 3 };
+        let m = Matcher { prefix: "k01", ci: false, after_text: None, after: None, size: 3 };
         assert!(m.past(TermKind::Raw, b"k02"));
         assert!(!m.past(TermKind::Raw, b"k011"));
         assert!(!m.past(TermKind::Raw, b"a"));
         // Version prefixes apply to the decoded text, so they never end a scan.
         assert!(!m.past(TermKind::Version, b"zzz"));
         let enc = search_aggs::version_string::encode("1.11000.0").unwrap();
-        let v = Matcher { prefix: "1.1100", ci: false, after: None, size: 3 };
+        let v = Matcher { prefix: "1.1100", ci: false, after_text: None, after: None, size: 3 };
         assert_eq!(v.text(TermKind::Version, &enc).as_deref(), Some("1.11000.0"));
     }
 }

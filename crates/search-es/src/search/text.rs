@@ -118,6 +118,11 @@ pub fn field_query(ctx: &QueryCtx, field: &str, value: &Value, ty: MatchType, o:
         if matches!(field, "_id" | "_index" | "_routing" | "_ignored" | "_tier") && matches!(ty, MatchType::Boolean | MatchType::Phrase) {
             return Ok(Some(ctx.unmapped_or_meta_term(field, std::slice::from_ref(value), false, "term")?));
         }
+        // A time series index's `_tsid` is a metadata field no `match` query can search.
+        if field == "_tsid" && matches!(ty, MatchType::Boolean) && crate::engine::tsdb::is_time_series(ctx.idx) {
+            let e = EsError::illegal_argument("Field [_tsid] of type [_tsid] does not support match queries");
+            return if o.lenient { Ok(Some(lenient_none(field, &e))) } else { Err(e) };
+        }
         // `Queries.newUnmappedFieldsQuery`.
         return Ok(Some(match_none(&format!("unmapped fields [{field}]"))));
     };

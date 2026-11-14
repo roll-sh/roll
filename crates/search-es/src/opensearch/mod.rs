@@ -59,9 +59,16 @@ pub fn implemented(api: Api) -> bool {
             | Api::PplGrammar
             | Api::QuerySettings
     ) || ism::implemented(api)
+        || crate::xpack::security::opensearch::api::implemented(api)
 }
 
+/// Runs an opensearch-dialect API; its internal calls are made as the client (see
+/// `xpack::dispatch`).
 pub async fn dispatch(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    crate::xpack::internal::as_caller(crate::xpack::internal::Caller::of(ctx), Box::pin(dispatch_api(ctx))).await
+}
+
+async fn dispatch_api(ctx: &Ctx<'_>) -> EsResult<Reply> {
     match ctx.api {
         Api::CreatePit => pit::create(ctx),
         Api::GetAllPits => pit::list(ctx),
@@ -81,6 +88,7 @@ pub async fn dispatch(ctx: &Ctx<'_>) -> EsResult<Reply> {
         Api::PplGrammar => ppl::grammar(ctx),
         Api::QuerySettings => ppl::settings(ctx).await,
         api if ism::implemented(api) => ism::dispatch(ctx).await,
+        api if crate::xpack::security::opensearch::api::implemented(api) => crate::xpack::security::opensearch::api::dispatch(ctx).await,
         other => Err(crate::error::EsError::not_implemented(other.name())),
     }
 }

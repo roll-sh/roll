@@ -71,6 +71,15 @@ impl Cond {
         format!("[{}: {v}]", self.name())
     }
 
+    /// The condition in a `RolloverInfo`'s `met_conditions` (`Condition.toXContent`).
+    fn met_value(&self) -> Value {
+        match self {
+            Cond::Age(_, t) => Value::from(t.string_rep()),
+            Cond::Docs(_, n) | Cond::PrimaryShardDocs(_, n) => Value::from(*n),
+            Cond::Size(_, b) | Cond::PrimaryShardSize(_, b) => Value::from(b.human()),
+        }
+    }
+
     fn evaluate(&self, s: &Stats) -> bool {
         let ge = |kind: Kind, have: i64, want: i64| match kind {
             Kind::Max | Kind::Min => have >= want,
@@ -285,10 +294,16 @@ fn target_of(st: &ClusterState, target: &str, new_index: Option<&str>, req: &Req
 }
 
 /// Stats of the index conditions are evaluated against: primaries' refreshed document counts
-/// and store sizes from the engine (zero when the index's shards aren't loaded), and its age.
+/// and store sizes from the engine (an unloaded open index's shards are opened: a cluster woken
+/// for a lifecycle's rollover hasn't loaded them yet), and its age.
 fn stats_of(cluster: &crate::Cluster, idx: &IndexMeta, now_ms: i64) -> Stats {
     let mut s = Stats { age_ms: (now_ms - idx.creation_date()).max(0), ..Stats::default() };
-    if let Some(e) = cluster.engine.loaded(&idx.uuid) {
+    let engine = match cluster.engine.loaded(&idx.uuid) {
+        Some(e) => Some(e),
+        None if !idx.is_closed() => cluster.engine.index(cluster, &cluster.state(), idx).ok(),
+        None => None,
+    };
+    if let Some(e) = engine {
         for shard in &e.shards {
             let mut b = Map::new();
             b.insert("docs".into(), obj! { "count" => 0 });
@@ -331,17 +346,31 @@ fn rollover_response(old: &str, new: &str, rolled: bool, dry_run: bool, lazy: bo
     }
 }
 
+/// The conditions of `conds` that `results` says were met, as a `RolloverInfo` keeps them.
+fn met_conditions(conds: &[Cond], results: &Map) -> Map {
+    conds.iter().filter(|c| results.get(&c.label()) == Some(&Value::Bool(true))).map(|c| (c.name(), c.met_value())).collect()
+}
+
+/// Records on `index` that it was rolled over for `target` at `now_ms`.
+fn record_rollover(st: &mut ClusterState, index: &str, target: &str, met_conditions: Map, now_ms: i64) {
+    if let Some(old) = st.metadata.indices.get(index) {
+        let mut old = (**old).clone();
+        old.rollover_info.insert(target.to_string(), crate::meta::RolloverInfo { met_conditions, time: now_ms });
+        st.metadata.indices.insert(index.to_string(), Arc::new(old));
+    }
+}
+
 /// The rollover a lazily rolled-over data stream (`rollover_on_write`) does on its next write;
 /// a no-op once another write did it.
 pub fn rollover_on_write(st: &mut ClusterState, data_stream: &str, now_ms: i64) -> EsResult<()> {
     if !st.metadata.data_streams.get(data_stream).is_some_and(|d| d.rollover_on_write) {
         return Ok(());
     }
-    apply(st, data_stream, None, CreateRequest::default(), now_ms).map(|_| ())
+    apply(st, data_stream, None, CreateRequest::default(), Map::new(), now_ms).map(|_| ())
 }
 
 /// Rolls `target` over in `st` (no condition checks); returns the new index name.
-fn apply(st: &mut ClusterState, target: &str, new_index: Option<&str>, create: CreateRequest, now_ms: i64) -> EsResult<(String, String)> {
+fn apply(st: &mut ClusterState, target: &str, new_index: Option<&str>, create: CreateRequest, met: Map, now_ms: i64) -> EsResult<(String, String)> {
     let req = Request { conditions: Vec::new(), has_create_parts: false, create: CreateRequest::default() };
     match target_of(st, target, new_index, &req)? {
         Target2::DataStream => {
@@ -364,6 +393,7 @@ fn apply(st: &mut ClusterState, target: &str, new_index: Option<&str>, create: C
             // The data stream's mode follows its write index (a template change applies here).
             d.index_mode = st.metadata.indices.get(&name).and_then(|i| i.settings.get("index.mode")).map(str::to_string);
             st.metadata.data_streams.insert(target.to_string(), Arc::new(d));
+            record_rollover(st, &old, target, met, now_ms);
             Ok((old, name))
         }
         Target2::Alias { write } => {
@@ -398,6 +428,7 @@ fn apply(st: &mut ClusterState, target: &str, new_index: Option<&str>, create: C
                 old_idx.aliases.remove(target);
             }
             old_idx.aliases_version += 1;
+            old_idx.rollover_info.insert(target.to_string(), crate::meta::RolloverInfo { met_conditions: met, time: now_ms });
             st.metadata.indices.insert(old_idx.name.clone(), Arc::new(old_idx));
             st.check_write_indices()?;
             Ok((write.name.clone(), name))
@@ -502,6 +533,7 @@ async fn rollover_failure_store(ctx: &Ctx<'_>, target: &str, req: &Request, dry_
         return Reply::ok(rollover_response(&source, &trial, false, dry_run, false, false, results));
     }
     let t = target.to_string();
+    let met = met_conditions(&req.conditions, &results);
     let (old, new) = ctx
         .cluster
         .update(move |st| {
@@ -521,7 +553,8 @@ async fn rollover_failure_store(ctx: &Ctx<'_>, target: &str, req: &Request, dry_
             d.failure_indices.push(name.clone());
             d.generation = generation;
             d.failure_rollover_on_write = false;
-            st.metadata.data_streams.insert(t, Arc::new(d));
+            st.metadata.data_streams.insert(t.clone(), Arc::new(d));
+            record_rollover(st, &old, &t, met, now);
             Ok((old, name))
         })
         .await?;
@@ -614,10 +647,11 @@ pub async fn rollover(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if dry_run || !met {
         return Reply::ok(rollover_response(&source, &trial_name, false, dry_run, false, false, results));
     }
+    let met = met_conditions(&req.conditions, &results);
     let create = req.create;
     let t = target.clone();
     let ni = new_index.clone();
-    let (old, new) = ctx.cluster.update(move |st| apply(st, &t, ni.as_deref(), create, now)).await?;
+    let (old, new) = ctx.cluster.update(move |st| apply(st, &t, ni.as_deref(), create, met, now)).await?;
     Reply::ok(rollover_response(&old, &new, true, false, false, true, results))
 }
 

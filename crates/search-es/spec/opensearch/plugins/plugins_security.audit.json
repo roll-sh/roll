@@ -1,0 +1,44 @@
+{
+  "plugins_security.audit": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/security/access-control/api/",
+      "description": "The audit logging configuration."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_security/api/audit",
+          "methods": [
+            "GET",
+            "PATCH"
+          ]
+        },
+        {
+          "path": "/_plugins/_security/api/audit/config",
+          "methods": [
+            "PUT"
+          ]
+        },
+        {
+          "path": "/_opendistro/_security/api/audit",
+          "methods": [
+            "GET",
+            "PATCH"
+          ]
+        },
+        {
+          "path": "/_opendistro/_security/api/audit/config",
+          "methods": [
+            "PUT"
+          ]
+        }
+      ]
+    },
+    "params": {},
+    "body": {
+      "description": "The configuration, or a JSON patch",
+      "required": false
+    }
+  }
+}

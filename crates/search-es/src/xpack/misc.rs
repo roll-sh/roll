@@ -106,6 +106,13 @@ pub fn xpack_usage(ctx: &Ctx) -> EsResult<Reply> {
         if let Some(Value::Obj(e)) = m.get_mut("esql") {
             ctx.cluster.xpack.esql_telemetry.fill(e);
         }
+        m.insert("inference".into(), crate::xpack::inference::usage(ctx.cluster, &st));
+        if let Some(Value::Obj(r)) = m.get_mut("rollup") {
+            r.insert("number_of_rollup_jobs".into(), x.len(crate::xpack::rollup::JOBS).into());
+        }
+        if let (Some(Value::Obj(slm)), Some(Value::Obj(extra))) = (m.get_mut("slm"), crate::xpack::slm::usage(&st)) {
+            slm.extend(extra);
+        }
         let rules_family = crate::xpack::entsearch::query_rules::RULESETS;
         let rulesets: Vec<usize> = x.iter(rules_family).map(|(_, r)| r.get("rules").and_then(Value::as_array).map_or(0, |a| a.len())).collect();
         let total_rules: usize = rulesets.iter().sum();

@@ -175,7 +175,7 @@ impl Ahead {
 
 /// Whether writes to `idx` (named directly) go straight to it: no data stream, no time series,
 /// no ingest pipeline (`request_pipeline`: the request names `_none`).
-fn plain_index(st: &crate::meta::ClusterState, idx: &IndexMeta, request_pipeline: bool) -> bool {
+pub(crate) fn plain_index(st: &crate::meta::ClusterState, idx: &IndexMeta, request_pipeline: bool) -> bool {
     if st.metadata.data_stream_of(&idx.name).is_some() || crate::engine::tsdb::is_time_series(idx) || idx.mapping.data_stream_timestamp == Some(true) {
         return false;
     }
@@ -190,8 +190,11 @@ fn plain_index(st: &crate::meta::ClusterState, idx: &IndexMeta, request_pipeline
 fn prepare_one(t: &Target, ctx: &mut crate::mapping::MappingCtx, id: &str, routing: Option<&str>, source: &bytes::Bytes) -> Option<Prepared> {
     let (engine, idx) = (&t.engine, &t.idx);
     let table = engine.table();
-    // Index-time scripts run in the sequential path.
-    if table.key.0 < idx.mapping_version || crate::search::index_time::has_scripts(&idx.mapping) {
+    // Index-time scripts and `semantic_text` inference run in the sequential path.
+    if table.key.0 < idx.mapping_version
+        || crate::search::index_time::has_scripts(&idx.mapping)
+        || !crate::xpack::inference::semantic::fields(&idx.mapping).is_empty()
+    {
         return None;
     }
     // Plain documents of a plain mapping go from bytes to fields directly (`document::fast`);

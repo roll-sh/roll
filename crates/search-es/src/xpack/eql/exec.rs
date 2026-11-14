@@ -59,12 +59,23 @@ pub struct Settings {
     pub max_samples_per_key: usize,
     pub ignore_unavailable: bool,
     pub expand_wildcards: String,
+    /// Failed shards leave their events out instead of failing the request.
+    pub allow_partial_search_results: bool,
+    /// With shard failures, sequences are matched over the shards that answered; otherwise a
+    /// sequence query with shard failures returns no sequences.
+    pub allow_partial_sequence_results: bool,
 }
 
 /// What a query returned.
 pub enum Output {
     Events(Vec<Value>),
     Sequences(Vec<Value>),
+}
+
+/// A query's output and the shards that failed while it ran (`shard_failures`).
+pub struct Results {
+    pub output: Output,
+    pub shard_failures: Vec<Value>,
 }
 
 // --- schema ----------------------------------------------------------------------------------
@@ -120,6 +131,8 @@ fn type_display(t: &str) -> &str {
 }
 
 async fn schema(cluster: &Cluster, s: &Settings) -> EsResult<Schema> {
+    // The request's runtime fields are columns too.
+    let body = s.runtime_mappings.as_ref().map(|rm| obj! { "runtime_mappings" => rm.clone() });
     let uri = format!(
         "/{}/_field_caps?fields=*&ignore_unavailable={}&allow_no_indices=true&expand_wildcards={}",
         enc(&s.index),
@@ -130,7 +143,7 @@ async fn schema(cluster: &Cluster, s: &Settings) -> EsResult<Schema> {
         let msg = format!("Unknown index [{}]", s.index);
         EsError::index_not_found_bare(&msg).caused_by(EsError::new(400, "verification_exception", format!("Found 1 problem\nline -1:-1: {msg}")))
     };
-    let caps = internal::call(cluster, "GET", &uri, None).await.map_err(|e| if e.kind == "index_not_found_exception" { unknown() } else { e })?;
+    let caps = internal::call(cluster, if body.is_some() { "POST" } else { "GET" }, &uri, body.as_ref()).await.map_err(|e| if e.kind == "index_not_found_exception" { unknown() } else { e })?;
     if caps.get("indices").and_then(Value::as_array).is_none_or(|a| a.is_empty()) {
         return Err(unknown());
     }
@@ -219,6 +232,30 @@ struct Verifier<'a> {
     src: &'a str,
     schema: &'a Schema,
     problems: Vec<(usize, String)>,
+    /// The fields the query names. Elasticsearch resolves only these (and their sub-fields)
+    /// from the mappings, so an unknown column's suggestions come from them.
+    named: Vec<String>,
+}
+
+/// Lucene's `LevenshteinDistance.getDistance`: 1 minus the edit distance over the longer
+/// length, in UTF-16 units.
+fn similarity(target: &str, other: &str) -> f32 {
+    let (sa, ob) = (utf16(target), utf16(other));
+    let (n, m) = (sa.len(), ob.len());
+    if n == 0 || m == 0 {
+        return if n == m { 1.0 } else { 0.0 };
+    }
+    let mut p: Vec<usize> = (0..=n).collect();
+    let mut d = vec![0usize; n + 1];
+    for j in 1..=m {
+        d[0] = j;
+        for i in 1..=n {
+            let cost = usize::from(sa[i - 1] != ob[j - 1]);
+            d[i] = (d[i - 1] + 1).min(p[i] + 1).min(p[i - 1] + cost);
+        }
+        std::mem::swap(&mut p, &mut d);
+    }
+    1.0 - p[n] as f32 / n.max(m) as f32
 }
 
 const ORDINALS: [&str; 4] = ["first", "second", "third", "fourth"];
@@ -267,6 +304,25 @@ impl Verifier<'_> {
         self.src[e.start..e.end].to_string()
     }
 
+    /// `UnresolvedAttribute.errorMessage` with the verifier's suggestions: the resolved
+    /// primitive columns at least half similar (`StringUtils.findSimilar`), most similar first.
+    fn unknown_column(&self, name: &str) -> String {
+        let mut scored: Vec<(f32, &String)> = self
+            .schema
+            .fields
+            .iter()
+            .filter(|(f, info)| info.ty != FType::Other && self.named.iter().any(|n| *f == n || f.strip_prefix(n.as_str()).is_some_and(|r| r.starts_with('.'))))
+            .map(|(f, _)| (similarity(name, f), f))
+            .filter(|(d, _)| *d >= 0.5)
+            .collect();
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        match scored.as_slice() {
+            [] => format!("Unknown column [{name}]"),
+            [(_, one)] => format!("Unknown column [{name}], did you mean [{one}]?"),
+            many => format!("Unknown column [{name}], did you mean any of [{}]?", many.iter().map(|(_, f)| f.as_str()).collect::<Vec<_>>().join(", ")),
+        }
+    }
+
     fn problem(&mut self, at: usize, msg: String) {
         self.problems.push((at, msg));
     }
@@ -296,7 +352,8 @@ impl Verifier<'_> {
                     Some(SType::Null)
                 }
                 None => {
-                    self.problem(e.start, format!("Unknown column [{name}]"));
+                    let msg = self.unknown_column(name);
+                    self.problem(e.start, msg);
                     None
                 }
             },
@@ -465,9 +522,10 @@ impl Verifier<'_> {
             && f.ty == FType::Text
             && f.exact.is_none()
         {
+            // Elasticsearch's `:` predicate carries just the operator as its source text.
+            let text = if matches!(whole.kind, ExprKind::Match { kind: MatchKind::Seq, .. }) { ":".to_string() } else { self.text(whole) };
             let msg = format!(
-                "[{}] cannot operate on {ordinal} argument field of data type [text]: No keyword/multi-field defined exact matches for [{name}]; define one or use MATCH/QUERY instead",
-                self.text(whole)
+                "[{text}] cannot operate on {ordinal} argument field of data type [text]: No keyword/multi-field defined exact matches for [{name}]; define one or use MATCH/QUERY instead"
             );
             self.problem(whole.start, msg);
         }
@@ -1269,6 +1327,8 @@ struct Ctx<'a> {
     schema: Schema,
     ts_type: FType,
     pit: Option<String>,
+    /// The failed shards of every search so far, once per shard.
+    failures: Vec<Value>,
 }
 
 /// One event as the matching algorithms see it.
@@ -1400,11 +1460,24 @@ impl Ctx<'_> {
             body.insert("runtime_mappings".into(), rm.clone());
         }
         body.insert("track_total_hits".into(), false.into());
-        let r = internal::call(self.cluster, "POST", "/_search?allow_partial_search_results=false", Some(&Value::Obj(body))).await?;
+        let uri = format!("/_search?allow_partial_search_results={}", self.s.allow_partial_search_results);
+        let r = internal::call(self.cluster, "POST", &uri, Some(&Value::Obj(body))).await?;
         if let Some(id) = r.get("pit_id").map(Value::to_es_string) {
             self.pit = Some(id);
         }
+        self.note_failures(&r);
         Ok(r.pointer(&["hits", "hits"]).and_then(Value::as_array).cloned().unwrap_or_default())
+    }
+
+    /// Keeps a search response's shard failures (searches only answer with them when partial
+    /// results are allowed).
+    fn note_failures(&mut self, r: &Value) {
+        let same = |a: &Value, b: &Value| a.get("index") == b.get("index") && a.get("shard") == b.get("shard");
+        for f in r.pointer(&["_shards", "failures"]).and_then(Value::as_array).into_iter().flatten() {
+            if !self.failures.iter().any(|x| same(x, f)) {
+                self.failures.push(f.clone());
+            }
+        }
     }
 
     fn fields_spec(&self, fields: &[String]) -> Value {
@@ -1566,7 +1639,7 @@ impl Ctx<'_> {
     }
 
     /// `_source` (and the requested `fields`) of events, by `(index, id)`.
-    async fn fetch(&self, refs: &[(String, String)]) -> EsResult<HashMap<(String, String), Value>> {
+    async fn fetch(&mut self, refs: &[(String, String)]) -> EsResult<HashMap<(String, String), Value>> {
         let mut out = HashMap::new();
         let mut by_index: Vec<(String, Vec<String>)> = Vec::new();
         for (i, id) in refs {
@@ -1598,8 +1671,13 @@ impl Ctx<'_> {
                 if let Some(rm) = &self.s.runtime_mappings {
                     body.insert("runtime_mappings".into(), rm.clone());
                 }
-                let uri = format!("/{}/_search?ignore_unavailable=true&allow_no_indices=true&expand_wildcards=all", enc(index));
+                let uri = format!(
+                    "/{}/_search?ignore_unavailable=true&allow_no_indices=true&expand_wildcards=all&allow_partial_search_results={}",
+                    enc(index),
+                    self.s.allow_partial_search_results
+                );
                 let r = internal::call(self.cluster, "POST", &uri, Some(&Value::Obj(body))).await?;
+                self.note_failures(&r);
                 for h in r.pointer(&["hits", "hits"]).and_then(Value::as_array).into_iter().flatten() {
                     let key = (h.get("_index").map(Value::to_es_string).unwrap_or_default(), h.get("_id").map(Value::to_es_string).unwrap_or_default());
                     out.insert(key, event_json(h));
@@ -1709,7 +1787,8 @@ fn plan_stage(f: &EventFilter, keys: &[Expr], missing: bool, schema: &Schema, v:
     for k in keys {
         if let ExprKind::Field { name, optional } = &k.kind {
             if !schema.fields.contains_key(name) && !optional {
-                v.problem(k.start, format!("Unknown column [{name}]"));
+                let msg = v.unknown_column(name);
+                v.problem(k.start, msg);
             }
             key_list.push((name.clone(), *optional));
         }
@@ -1726,9 +1805,21 @@ enum Plan {
 }
 
 /// Verifies and runs a statement.
-pub async fn run(cluster: &Cluster, src: &str, stmt: &Statement, s: &Settings) -> EsResult<Output> {
+pub async fn run(cluster: &Cluster, src: &str, stmt: &Statement, s: &Settings) -> EsResult<Results> {
     let schema = schema(cluster, s).await?;
-    let mut v = Verifier { src, schema: &schema, problems: Vec::new() };
+    let mut named = vec![s.timestamp_field.clone(), s.event_category_field.clone()];
+    named.extend(s.tiebreaker_field.clone());
+    let raw = Schema { fields: HashMap::new() };
+    let mut name_filter = |f: &EventFilter, keys: &[Expr]| {
+        collect_fields(&f.condition, &mut named, &raw);
+        keys.iter().for_each(|k| collect_fields(k, &mut named, &raw));
+    };
+    match &stmt.query {
+        Query::Event(f) => name_filter(f, &[]),
+        Query::Sequence { terms, until, .. } => terms.iter().chain(until).for_each(|t| name_filter(&t.filter, &t.keys)),
+        Query::Sample { terms } => terms.iter().for_each(|t| name_filter(&t.filter, &t.keys)),
+    }
+    let mut v = Verifier { src, schema: &schema, problems: Vec::new(), named };
     // The timestamp, tiebreaker and category fields must exist.
     let needs_category = match &stmt.query {
         Query::Event(f) => f.category.is_some(),
@@ -1736,15 +1827,18 @@ pub async fn run(cluster: &Cluster, src: &str, stmt: &Statement, s: &Settings) -
         Query::Sample { terms } => terms.iter().any(|t| t.filter.category.is_some()),
     };
     if !matches!(stmt.query, Query::Sample { .. }) && !schema.fields.contains_key(&s.timestamp_field) {
-        v.problem(usize::MAX, format!("Unknown column [{}]", s.timestamp_field));
+        let msg = v.unknown_column(&s.timestamp_field);
+        v.problem(usize::MAX, msg);
     }
     if let Some(tb) = &s.tiebreaker_field
         && !schema.fields.contains_key(tb)
     {
-        v.problem(usize::MAX, format!("Unknown column [{tb}]"));
+        let msg = v.unknown_column(tb);
+        v.problem(usize::MAX, msg);
     }
     if needs_category && !schema.fields.contains_key(&s.event_category_field) {
-        v.problem(0, format!("Unknown column [{}]", s.event_category_field));
+        let msg = v.unknown_column(&s.event_category_field);
+        v.problem(0, msg);
     }
     let plan_term = |t: &Term, v: &mut Verifier| plan_stage(&t.filter, &t.keys, t.missing, &schema, v);
     let plan = match &stmt.query {
@@ -1770,7 +1864,7 @@ pub async fn run(cluster: &Cluster, src: &str, stmt: &Statement, s: &Settings) -
     };
     v.finish()?;
     let ts_type = schema.fields.get(&s.timestamp_field).map_or(FType::Date, |f| f.ty);
-    let mut ctx = Ctx { cluster, s, schema, ts_type, pit: None };
+    let mut ctx = Ctx { cluster, s, schema, ts_type, pit: None, failures: Vec::new() };
     ctx.open_pit().await?;
     let lim = combine_limits(s.size, s.tail, &stmt.pipes);
     let result = match &plan {
@@ -1779,7 +1873,7 @@ pub async fn run(cluster: &Cluster, src: &str, stmt: &Statement, s: &Settings) -
         Plan::Sample(stages) => samples(&mut ctx, stages).await,
     };
     ctx.close_pit().await;
-    result
+    Ok(Results { output: result?, shard_failures: ctx.failures })
 }
 
 async fn events(ctx: &mut Ctx<'_>, st: &Stage, lim: Limit) -> EsResult<Output> {
@@ -1906,6 +2000,11 @@ async fn sequences(ctx: &mut Ctx<'_>, stages: &[Stage], until: Option<&Stage>, m
             pool.extend(ctx.stage_events(st, &mut held).await?);
             missing_groups[i] = Some(group(&pool, base..pool.len()));
         }
+    }
+    // Sequences over the shards that answered could be wrong (a failed shard may hold the
+    // events that complete or break them), so they're only returned when asked for.
+    if !ctx.failures.is_empty() && !ctx.s.allow_partial_sequence_results {
+        return Ok(Output::Sequences(Vec::new()));
     }
     let positive: Vec<usize> = (0..n).filter(|i| !stages[*i].missing).collect();
     let first_pos = positive[0];

@@ -177,6 +177,8 @@ struct Request {
     profile: bool,
     /// `settings.column_metadata`.
     column_metadata: bool,
+    /// `settings.approximation`.
+    approximation: bool,
 }
 
 fn parse_request(ctx: &Ctx, body: &Value, async_api: bool) -> EsResult<Request> {
@@ -211,6 +213,7 @@ fn parse_request(ctx: &Ctx, body: &Value, async_api: bool) -> EsResult<Request> 
         time_zone,
         profile: m.get("profile").and_then(Value::as_bool).unwrap_or(false),
         column_metadata: m.get("settings").and_then(|s| s.get("column_metadata")).is_some_and(|v| v.as_bool() == Some(true) || v.as_str() == Some("true")),
+        approximation: m.get("settings").and_then(|s| s.get("approximation")).is_some_and(|v| !matches!(v, Value::Null | Value::Bool(false))),
     })
 }
 
@@ -316,6 +319,7 @@ async fn run(ctx: &Ctx<'_>, req: &Request) -> EsResult<(Map, exec::Table)> {
     let shape = if req.profile { profile::Shape::of(&q) } else { profile::Shape::default() };
     let used = telemetry::Used::of(&q, &ctx.state());
     let column_metadata = q.settings.column_metadata;
+    let approximation = q.settings.approximation || req.approximation;
     let result = exec::execute(ctx.cluster, q, req.filter.clone(), &mut w).await;
     telemetry.record(kibana, Some(&used), result.is_err(), started.elapsed().as_millis() as i64);
     // Warnings recorded before a failure (the implicit limit's, added while analyzing) go out
@@ -345,8 +349,36 @@ async fn run(ctx: &Ctx<'_>, req: &Request) -> EsResult<(Map, exec::Table)> {
             rows: table.rows.iter().map(|r| keep.iter().map(|i| r[*i].clone()).collect()).collect(),
         };
     }
+    // Query approximation's columns for each estimated aggregate: roll computes exactly, so the
+    // confidence interval is the value itself and the result is certified.
+    let mut approx_meta: Vec<(String, Value)> = Vec::new();
+    if approximation {
+        for name in &stats.approx {
+            let Some(i) = table.cols.iter().position(|c| c.name == *name) else { continue };
+            let ty = table.cols[i].ty;
+            for r in table.rows.iter_mut() {
+                let v = r[i].clone();
+                r.push(if v.is_null() { value::V::Null } else { value::V::Multi(vec![v.clone(), v]) });
+                r.push(value::V::Bool(true));
+            }
+            for (kind, ty) in [("confidence_interval", ty), ("certified", value::DataType::Boolean)] {
+                let col = format!("_approximation_{kind}({name})");
+                approx_meta.push((col.clone(), crate::obj! { "approximation" => crate::obj! { "type" => kind, "column" => name.clone() } }));
+                table.cols.push(exec::Col { name: col, ty });
+            }
+        }
+    }
     let mut columns = exec::columns_json(&table);
     union_types(&mut columns, &stats.original_types);
+    if let Value::Arr(cols) = &mut columns {
+        for c in cols.iter_mut() {
+            if let Value::Obj(m) = c
+                && let Some((_, meta)) = approx_meta.iter().find(|(n, _)| Some(n.as_str()) == m.get("name").and_then(Value::as_str))
+            {
+                m.insert("_meta".into(), meta.clone());
+            }
+        }
+    }
     if column_metadata && let Value::Arr(cols) = &mut columns {
         for c in cols.iter_mut() {
             if let Value::Obj(m) = c

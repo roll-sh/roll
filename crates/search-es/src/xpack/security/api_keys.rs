@@ -54,6 +54,7 @@ pub fn authenticate(cluster: &Cluster, value: &str) -> EsResult<Principal> {
         metadata: k.get("owner_metadata").cloned().unwrap_or_else(Value::object),
         realm_name: "_es_api_key",
         realm_type: "_es_api_key",
+        authenticating: None,
         kind: AuthKind::ApiKey(Box::new(super::ApiKeyAuth {
             id: id.to_string(),
             name: k.get("name").cloned().unwrap_or(Value::Null),
@@ -333,16 +334,9 @@ pub async fn grant(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if let Some(target) = body.get("run_as").and_then(Value::as_str) {
         let st = ctx.state();
         let eff = super::effective(&super::file_roles(ctx.cluster), &st, &owner);
-        let allowed = eff.own.iter().any(|r| r.run_as.iter().any(|p| super::privileges::glob(p, target)));
-        match super::users::lookup_user(ctx.cluster, target).filter(|_| allowed) {
+        match super::users::lookup_user(ctx.cluster, target).filter(|_| eff.allows_run_as(target)) {
             Some(u) => owner = u,
-            None => {
-                return Err(EsError::security(403, format!(
-                    "action [cluster:admin/xpack/security/user/authenticate] is unauthorized for {}, because user [{}] is unauthorized to run as [{target}]",
-                    super::who(&owner),
-                    owner.username
-                )));
-            }
+            None => return Err(super::run_as_denied(&owner, "cluster:admin/xpack/security/user/authenticate", target)),
         }
     }
     let key = body.get("api_key").cloned().unwrap_or_else(Value::object);
@@ -492,10 +486,15 @@ pub fn query_keys(ctx: &Ctx) -> EsResult<Reply> {
     let all = manages_all(ctx);
     let with_limited_by = ctx.bool_param("with_limited_by", false)?;
     let objs: Vec<(String, Value)> = st.metadata.xpack.iter(KEYS).filter(|(_, k)| all || owned_by(k, p)).map(|(i, k)| (i.clone(), k.clone())).collect();
+    let aggregations = req.aggs.as_ref().map(|a| query::aggregate(&req, a, &objs, &key_fields)).transpose()?;
     let (total, page) = query::run(&req, objs, &key_fields)?;
     let sorted = !req.sort.is_empty();
     let hits = page.into_iter().map(|(k, keys)| query::with_sort(key_view(&k, with_limited_by, None), keys, sorted)).collect();
-    Reply::ok(query::response(total, "api_keys", hits))
+    let mut out = query::response(total, "api_keys", hits);
+    if let (Some(a), Value::Obj(m)) = (aggregations, &mut out) {
+        m.insert("aggregations".into(), a);
+    }
+    Reply::ok(out)
 }
 
 pub async fn invalidate(ctx: &Ctx<'_>) -> EsResult<Reply> {

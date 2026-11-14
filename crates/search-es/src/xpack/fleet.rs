@@ -18,6 +18,8 @@ use crate::xpack::{internal, store};
 use std::sync::Arc;
 
 pub const SECRETS: &str = "fleet_secret";
+/// What a Fleet secret's value is sealed as ([`crate::seal`]).
+const SECRET_KIND: &str = "fleet secret";
 
 /// The one index `expr` names (an index, alias or data stream write index).
 fn single_index(ctx: &Ctx, expr: &str) -> EsResult<Option<Arc<IndexMeta>>> {
@@ -209,8 +211,9 @@ pub async fn post_secret(ctx: &Ctx<'_>) -> EsResult<Reply> {
     };
     let id = crate::meta::names::time_based_id();
     let out = id.clone();
+    let entry = crate::seal::seal_value(ctx.cluster, SECRET_KIND, value);
     let now = ctx.now_ms;
-    ctx.cluster.update(move |st| store::put(st, SECRETS, &id, obj! { "value" => value }, now).map(|_| ())).await?;
+    ctx.cluster.update(move |st| store::put(st, SECRETS, &id, entry, now).map(|_| ())).await?;
     Reply::ok(obj! { "id" => out })
 }
 
@@ -222,7 +225,7 @@ fn no_secret(id: &str) -> EsError {
 pub fn get_secret(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default();
     match ctx.state().metadata.xpack.get(SECRETS, id) {
-        Some(s) => Reply::ok(obj! { "id" => id, "value" => s.get("value").cloned().unwrap_or(Value::Null) }),
+        Some(s) => Reply::ok(obj! { "id" => id, "value" => crate::seal::open_value(ctx.cluster, SECRET_KIND, s)? }),
         None => Err(no_secret(id)),
     }
 }
