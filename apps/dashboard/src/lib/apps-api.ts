@@ -765,7 +765,7 @@ export const appsApi = {
   rollbackPrevious: (id: string, e: string) => call<Deployment>("POST", `${env(id, e)}/rollback`),
   /** The live image again with the current variables and settings: no build, same revision. */
   redeploy: (id: string, e: string, body: { message?: string } = {}) => call<Deployment>("POST", `${env(id, e)}/redeploy`, body),
-  promote: (id: string, e: string, from: string) => call<Deployment>("POST", `${env(id, e)}/promote`, { from }),
+  promote: (id: string, e: string, from: string, expect?: string) => call<Deployment>("POST", `${env(id, e)}/promote`, { from, ...(expect ? { expect } : {}) }),
   backups: (id: string, e: string) => call<Backup[]>("GET", `${env(id, e)}/volume/backups`),
   /** A new deploy hook (the old one stops working): its URL, shown once. */
   createHook: async (id: string, e: string) => `${ROLL_API}${(await call<{ path: string }>("POST", `${env(id, e)}/hook`)).path}`,
