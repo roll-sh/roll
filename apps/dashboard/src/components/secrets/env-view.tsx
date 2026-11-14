@@ -565,6 +565,10 @@ function SecretRow({
                 leases
               </Link>
             </span>
+          ) : s.tags.includes("sensitive") ? (
+            <span className="flex items-center gap-1 text-[11px] text-subtle" title="Sensitive: only roll's runtimes and syncs read it, never a person or a token">
+              <Lock className="size-3" /> sensitive, never shown
+            </span>
           ) : (
             <Reveal className="flex-1" load={() => api.value(env.slug, s.key, path)} />
           )}

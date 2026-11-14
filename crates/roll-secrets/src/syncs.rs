@@ -437,7 +437,7 @@ impl Secrets {
     fn sync_caller(&self, r: &Row) -> Result<Caller> {
         let principal = format!("sync:{}", r.info.id);
         if r.info.created_by == "operator" {
-            return Ok(Caller { principal, grants: Arc::new(Everything), ip: None });
+            return Ok(Caller { principal, grants: Arc::new(Everything), ip: None, runtime: false });
         }
         let gone = || Error::Forbidden(format!("{} made this sync and can't reach secrets any more: make the sync again", r.info.created_by));
         // A person's: as they are now, while their account can sign in.
@@ -457,7 +457,7 @@ impl Secrets {
         // A roll-access grant: as it is now, or gone once revoked or expired.
         if !ours {
             let g = self.grants.as_ref().and_then(|g| g.grant(token)).ok_or_else(gone)?;
-            return Ok(Caller { principal, grants: Arc::new(crate::access::GrantGrants(g)), ip: None });
+            return Ok(Caller { principal, grants: Arc::new(crate::access::GrantGrants(g)), ip: None, runtime: false });
         }
         type Grants = (Option<String>, Option<String>, String, Option<i64>, Option<i64>);
         let found: Option<Grants> = self.db.read(|c| {
@@ -476,7 +476,7 @@ impl Secrets {
             paths: paths.and_then(|p| serde_json::from_str(&p).ok()),
             actions: from_json(&actions),
         };
-        Ok(Caller { principal, grants: Arc::new(scope), ip: None })
+        Ok(Caller { principal, grants: Arc::new(scope), ip: None, runtime: false })
     }
 
     /// One pass over the syncs (the sweeper): push those whose environment changed.
@@ -530,11 +530,16 @@ impl Secrets {
 
     /// Push a claimed sync and record what happened. `true`: it pushed.
     fn push_sync(&self, r: Row, hold: i64, digest: Option<String>, force: bool) -> bool {
-        let caller = self.sync_caller(&r);
+        // Within what its maker may do; a machine delivering to a platform, so it carries
+        // sensitive keys too.
+        let caller = self.sync_caller(&r).map(|mut c| {
+            c.runtime = true;
+            c
+        });
         let outcome = caller.and_then(|caller| self.push_once(&r, &caller, digest, force));
         let now = self.db.now_ms().unwrap_or(hold - HOLD_MS);
         let (project, id, env, path) = (r.project.as_str(), r.info.id.as_str(), r.info.environment.as_str(), r.info.path.as_str());
-        let actor = Caller { principal: format!("sync:{id}"), grants: Arc::new(Everything), ip: None };
+        let actor = Caller { principal: format!("sync:{id}"), grants: Arc::new(Everything), ip: None, runtime: true };
         let ok = outcome.is_ok();
         let res = self.db.write(|c| {
             match &outcome {

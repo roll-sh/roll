@@ -555,6 +555,24 @@ only the host is shown. An answer is read once, never logged, and never part of 
 a key still links to can't be deleted, nor one with a retired credential still waiting out its
 grace period (its revocation goes through the rotator).
 
+### Sensitive keys
+
+A key tagged `sensitive` (`roll secrets set KEY --tag sensitive`, or its tags in the dashboard) can be
+written but never read back by a person or a token, as Vercel's sensitive environment variables and
+Doppler's restricted secrets: only roll's runtimes (apps, previews, checks, sandboxes, tasks), syncs
+pushing to their platform, and workload identities' logins (CI) get its value.
+
+- Everywhere else it's withheld: `…/values` and `roll run` leave it out and name it in `withheld` (so
+  `roll run` still starts, saying so); `…/secrets/{key}/value` and a version written while it was
+  sensitive answer 403; a reference to it doesn't resolve (`${KEY}` can't carry it into another key);
+  a change request's values hide it (reviewers approve without seeing it); a backup carries its name,
+  not its value. The operator is no exception.
+- Sensitive is for good: a write that takes the tag off is refused (delete the key and set it again
+  for a value people can read). Versions from before it was tagged stay readable: they were never
+  sensitive.
+- In-process callers say what they are (`Caller::runtime`): `Caller::consumer` (roll's runtimes) and
+  a sync's push are; tokens, people and the operator aren't.
+
 ## Consumption
 
 ### `roll secrets` and `roll run`
@@ -1468,7 +1486,7 @@ type Change = { seq: number; environment: string; path: string; message: string;
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
 // what: added | changed | deleted | comment | tags | link | rotated
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; withheld: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */ };

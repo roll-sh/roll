@@ -157,7 +157,7 @@ impl Secrets {
                 Some(u) => Arc::new(crate::access::Within(grant, self.own_projects(&u.user)?)),
                 None => Arc::new(grant),
             };
-            return Ok(Caller { principal: format!("token:{}", g.id), grants, ip });
+            return Ok(Caller { principal: format!("token:{}", g.id), grants, ip, runtime: false });
         }
         if let Some(t) = roll_auth::bearer(&parts.headers).filter(|t| t.starts_with(PREFIX)) {
             let mut caller = self.token_caller(t, ip.as_deref())?;
@@ -194,7 +194,7 @@ impl Secrets {
         if admin {
             return Ok(Caller::operator());
         }
-        Ok(Caller { principal: user.to_string(), grants: Arc::new(self.own_projects(user)?), ip: None })
+        Ok(Caller { principal: user.to_string(), grants: Arc::new(self.own_projects(user)?), ip: None, runtime: false })
     }
 
     /// The projects `user` owns, as the workspace has them now, and their roll code owner.
@@ -275,7 +275,7 @@ impl Secrets {
             Some(i) => format!("identity:{i}"),
             None => format!("token:{}", t.id),
         };
-        Ok(Caller { principal, grants: Arc::new(scope), ip: None })
+        Ok(Caller { principal, grants: Arc::new(scope), ip: None, runtime: false })
     }
 
     pub fn tokens(&self, project: &str, caller: &Caller) -> Result<Vec<Token>> {

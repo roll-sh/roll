@@ -141,6 +141,8 @@ pub struct Values {
     /// Keys whose value is a dynamic link's short-lived credential (it ends with its lease: a
     /// consumer that can't renew it, such as a service that scales to zero, should refuse them).
     pub dynamic: Vec<String>,
+    /// Sensitive keys left out (only roll's runtimes and syncs read them).
+    pub withheld: Vec<String>,
     /// Keys whose value comes from a link to a resource (any mode): a consumer that reaches
     /// resources another way (a container on a private network) knows which addresses to rewrite.
     pub linked: Vec<String>,
@@ -345,6 +347,9 @@ impl Secrets {
         let dek = self.project(project)?;
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let e = entries.iter().find(|e| e.row.key == key).ok_or_else(|| Error::NotFound(format!("no secret {key} in {slug}:{path}")))?;
+        if names::sensitive(&e.row.tags) && !caller.runtime {
+            return Err(Error::Forbidden(format!("{key} is sensitive: its value reaches only roll's runtimes and syncs, never a person or a token")));
+        }
         let mut r = Resolver::new(self, project, &dek, caller, resolve, &caller.principal);
         let (v, problem) = r.entry(e);
         let leases = r.finish(slug)?;
@@ -365,7 +370,12 @@ impl Secrets {
         let mut r = Resolver::new(self, project, &dek, caller, resolve, &who);
         let mut values = BTreeMap::new();
         let mut problems = vec![];
+        let mut withheld = vec![];
         for e in &entries {
+            if names::sensitive(&e.row.tags) && !caller.runtime {
+                withheld.push(e.row.key.clone());
+                continue;
+            }
             let (v, problem) = r.entry(e);
             if let Some(p) = problem {
                 problems.push(Problem { key: e.row.key.clone(), problem: p });
@@ -390,7 +400,7 @@ impl Secrets {
         self.audit_now(project, caller, action, Some(slug), Some(&path), &keys, &summary);
         let dynamic = entries.iter().filter(|e| e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic)).map(|e| e.row.key.clone()).collect();
         let linked = entries.iter().filter(|e| e.row.link.is_some()).map(|e| e.row.key.clone()).collect();
-        Ok(Values { values, problems, leases, dynamic, linked })
+        Ok(Values { values, problems, leases, dynamic, linked, withheld })
     }
 
     /// A folder's own values as they were after change `seq` (or at time `at`): what was stored
@@ -413,7 +423,13 @@ impl Secrets {
         let mut values = BTreeMap::new();
         let mut problems = vec![];
         let mut linked = vec![];
+        let mut withheld = vec![];
         for v in state.into_iter().filter(|v| v.owner.is_empty() && v.path == path) {
+            // A version written while the key was sensitive stays out of reach.
+            if !caller.runtime && names::sensitive(&crate::from_json::<Vec<String>>(&v.tags)) {
+                withheld.push(v.key);
+                continue;
+            }
             let link: Option<Link> = v.link.as_deref().and_then(|l| serde_json::from_str(l).ok());
             if link.is_some() {
                 linked.push(v.key.clone());
@@ -433,7 +449,7 @@ impl Secrets {
         }
         let keys: Vec<String> = values.keys().cloned().collect();
         self.audit_now(project, caller, "secrets.export", Some(slug), Some(&path), &keys, &format!("exported {} as of change #{seq}", crate::write::plural(keys.len(), "value")));
-        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked }))
+        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, withheld }))
     }
 
     /// A digest of a folder's effective secrets (keys, where they come from, versions,
@@ -530,15 +546,18 @@ impl Secrets {
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
         let owner = self.owner_of(kind, caller);
-        let (id, ct, link): (String, Option<Vec<u8>>, Option<String>) = self.db.read(|c| {
+        let (id, ct, link, tags): (String, Option<Vec<u8>>, Option<String>, String) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             c.query_row(
-                "SELECT secret_id, value, link FROM versions WHERE env_id = ? AND path = ? AND key = ? AND owner = ? AND version = ?",
+                "SELECT secret_id, value, link, tags FROM versions WHERE env_id = ? AND path = ? AND key = ? AND owner = ? AND version = ?",
                 params![env.id, path, key, owner, version],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .map_err(|_| Error::NotFound(format!("no version {version} of {key}")))
         })?;
+        if !caller.runtime && names::sensitive(&crate::from_json::<Vec<String>>(&tags)) {
+            return Err(Error::Forbidden(format!("version {version} of {key} was written while it was sensitive: only roll's runtimes and syncs read it")));
+        }
         let v = match (ct, link) {
             (Some(ct), _) => dek.open(&value_aad(project, &id, version), &ct)?,
             (None, Some(l)) => {
@@ -771,6 +790,10 @@ impl<'a> Resolver<'a> {
         let id = format!("{}:{}:{}", e.row.env_id, e.row.path, e.row.key);
         if let Some(d) = self.done.get(&id) {
             return d.clone();
+        }
+        // A reference can't carry a sensitive value to someone who couldn't read it directly.
+        if names::sensitive(&e.row.tags) && !self.caller.runtime {
+            return (Value::default(), Some(format!("{} is sensitive: only roll's runtimes and syncs read it", e.row.key)));
         }
         if let Some(at) = self.stack.iter().position(|s| *s == id) {
             let mut chain: Vec<String> = self.stack[at..].iter().map(|s| s.rsplit(':').next().unwrap_or_default().to_string()).collect();

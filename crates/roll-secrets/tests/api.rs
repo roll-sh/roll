@@ -1007,6 +1007,26 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
 }
 
 #[tokio::test]
+async fn a_sensitive_keys_value_reaches_only_roll_s_runtimes() {
+    let api = Api::new().await;
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "PAYMENTS_KEY", "value": "sk_live_sensitive", "tags": ["sensitive"] }, { "op": "set", "key": "WRAPPED", "value": "Bearer ${PAYMENTS_KEY}" }] }))).await;
+    // Not to a person or a token: left out of values (named in `withheld`), refused on its own, not
+    // carried by a reference, not in history.
+    let v = api.values("production", "/").await;
+    assert!(v["values"].get("PAYMENTS_KEY").is_none() && v["withheld"] == json!(["PAYMENTS_KEY"]), "{v}");
+    assert!(v["problems"].to_string().contains("PAYMENTS_KEY is sensitive"), "{v}");
+    assert_eq!(api.call(Method::GET, "/environments/production/secrets/PAYMENTS_KEY/value", None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(api.call(Method::GET, "/environments/production/secrets/PAYMENTS_KEY/versions/1/value", None).await.0, StatusCode::FORBIDDEN);
+    // Sensitive is for good.
+    let (s, e) = api.call(Method::PUT, "/environments/production/secrets/PAYMENTS_KEY", Some(json!({ "tags": [] }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("sensitive for good"), "{e}");
+    // roll's own runtimes (apps, previews, checks) get it, and the reference resolves for them.
+    let (s, p) = (api.secrets.clone(), api.project.clone());
+    let got = tokio::task::spawn_blocking(move || s.values(&p, "production", "/", true, Some("app:web"), &roll_secrets::Caller::consumer("app:web")).unwrap()).await.unwrap();
+    assert_eq!((got.values["PAYMENTS_KEY"].expose(), got.values["WRAPPED"].expose()), ("sk_live_sensitive", "Bearer sk_live_sensitive"));
+}
+
+#[tokio::test]
 async fn reads_unlike_the_reader_are_alerted() {
     let api = Api::new().await;
     api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
