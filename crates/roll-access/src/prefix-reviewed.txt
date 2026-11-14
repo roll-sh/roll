@@ -10,6 +10,7 @@ GET /v1/apps/services/{id}/environments/{env}/deploys
 POST /v1/apps/services/{id}/environments/{env}/deploys
 GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}
 POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/cancel
+GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/commits
 GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs
 POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback
 GET /v1/apps/services/{id}/environments/{env}/domains
