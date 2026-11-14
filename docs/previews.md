@@ -916,7 +916,9 @@ Ranked by what a person notices first. Done so far:
 - roll apps' `pv-…` environments private, their 401 page linked through roll;
 - search mapping changes with the Postgres schema changes;
 - NoSQL column masks per preview, and search field masks (`search:<cluster>`, rewritten in the
-  branch only);
+  branch only, then every segment that still held a masked value expunged as the branch's own,
+  since a term dictionary (`_terms_enum`, suggesters) keeps deleted documents' terms: the
+  branch's term dictionary is checked empty of them live);
 - copy-on-write stream branches (shared chunks, refcounted deletes) and Postgres `schema` mode;
 - a monthly budget per project, `roll preview open`, and following logs in the dashboard;
 - a second adversarial review and its fixes (and a stream branch's cut that waits for aborting
