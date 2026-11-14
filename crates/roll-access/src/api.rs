@@ -136,7 +136,9 @@ async fn me(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
 async fn catalog_view(State(a): S) -> Json<Value> {
     let rows: Vec<_> = catalog::rows().iter().map(catalog::view).collect();
     Json(json!({
-        "products": PRODUCTS,
+        // What this node runs: a rule on a product that's off grants nothing here. Rules may still
+        // name any of `PRODUCTS` (another node, a product turned on later).
+        "products": PRODUCTS.iter().filter(|p| a.config.products.is_empty() || matches!(**p, "workspace" | "access") || a.config.products.iter().any(|o| o == **p)).collect::<Vec<_>>(),
         "actions": Action::ALL,
         "presets": presets(),
         "routes": rows,

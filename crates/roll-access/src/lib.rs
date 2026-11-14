@@ -226,6 +226,9 @@ pub struct Config {
     /// Take the client's address from `X-Forwarded-For` (behind roll's edge): its first entry, or,
     /// with `trusted_proxies`, the right-most one that isn't a proxy.
     pub trust_forwarded_for: bool,
+    /// The products this node runs (rule names; the workspace and access always): the token
+    /// builder offers only them. Empty: every product (tests, embedding).
+    pub products: Vec<String>,
     /// When set, `X-Forwarded-For` counts only from these peers (the edge's addresses), and the
     /// client is the right-most address in it that isn't one of them: what a client wrote into the
     /// header itself is never taken (`ROLL_TRUSTED_PROXIES`).
@@ -249,6 +252,7 @@ impl Default for Config {
             locked: false,
             audit_days: 90,
             trust_forwarded_for: false,
+            products: Vec::new(),
             trusted_proxies: Vec::new(),
             approval_wait: std::time::Duration::from_secs(55),
             refresh_grace: std::time::Duration::from_millis(store::REFRESH_GRACE_MS as u64),
