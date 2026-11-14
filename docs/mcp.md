@@ -539,8 +539,12 @@ start from one. `outputSchema` per tool: it would double `tools/list` for client
 `structuredContent` as JSON anyway.
 
 Done lately: a person's canvas no longer widens a project rule (`Workspace::trusts`, built on
-secrets' branch) and people's tokens reach secrets; the approval of people's tokens checked live
-with accounts and mail (`users-live/approval.sh`: waits, 401 `pending_approval`, the admin mailed,
+secrets' branch) and people's tokens reach secrets; the sixteenth review's #25 findings fixed: a
+person's OAuth connection past the policy waits too (it didn't), a waiting token's rules are frozen
+until an admin decides (an approval took whatever it had become), widening and waiting again are one
+transaction, admins' mail is cleaned names and once an hour per token, and tokens made before the
+policy show as `unapproved` in an admin's checkup; the approval of people's tokens checked live with
+accounts and mail (`users-live/approval.sh`: waits, 401 `pending_approval`, the admin mailed,
 approved from the CLI, the person mailed, then 200); a person's pending token leads an admin's
 checkup ("Needs attention": approve or deny), and stays out of the person's own (#25); admins are
 mailed when a person's token waits for them (who asked, what it may do, the link to decide;

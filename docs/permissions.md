@@ -561,8 +561,12 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   Admins are mailed when one waits (who asked, what it may do, where to decide; never a secret).
   Only an admin decides, never the person or a token, and the person is mailed either way
   (`roll token list --pending`, `roll token approve|deny <id>` from the CLI).
-  Widening an approved token's rules past the policy makes it wait again. One their token makes
-  stays within that token, so it doesn't wait.
+  Widening an approved token's rules past the policy makes it wait again, in the same
+  transaction. A waiting token's rules can't change until an admin decides (409), so an approval
+  never takes rules the admin didn't see. A person's OAuth connection waits the same way. One
+  their token makes stays within that token, so it doesn't wait. A person's token made before the
+  policy asked keeps working, and an admin's checkup lists it as `unapproved` to approve or deny.
+  Admins are mailed at most once an hour per waiting token.
 - **It acts as them, never as more.** On every request the evaluator looks the person up as they
   are now (`roll_auth::Sessions::person`, never cached): disabled or gone, the token answers 401.
   A product's own background work that looks a stored grant up (`roll_auth::Grants::grant`: a

@@ -837,7 +837,23 @@ async fn the_audit_log_streams_to_a_sink() {
 async fn a_persons_token_past_the_policy_waits_for_an_admin() {
     let d = Daemon::new(50);
     d.people.add("usr_alice", "alice");
+    // Made before the policy asked: it works, and an admin's checkup says it was never approved.
+    let early_rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "admin": "allow" } }]);
+    let (_, early) = d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "early", "rules": early_rules }))).await;
+    let early_id = early["grant"]["id"].as_str().unwrap().to_string();
     assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "approve_people": ["reveal", "admin"] }))).await.0, StatusCode::OK);
+    let kinds = |list: &Value, id: &str| list.as_array().unwrap().iter().find(|c| c["grant"]["id"] == json!(id)).map(|c| c["findings"].as_array().unwrap().iter().map(|f| f["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>()).unwrap_or_default();
+    let (_, admins) = d.call(OPERATOR, Method::GET, "/v1/access/checkup", None).await;
+    assert_eq!(kinds(&admins, &early_id).first().map(String::as_str), Some("unapproved"), "{admins}");
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{early_id}/approve"), None).await.0, StatusCode::OK);
+    let (_, admins) = d.call(OPERATOR, Method::GET, "/v1/access/checkup", None).await;
+    assert!(!kinds(&admins, &early_id).iter().any(|k| k == "unapproved"), "approved now: {admins}");
+    // Her OAuth connection past the policy waits too, as her tokens do.
+    let (_, client) = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "client_name": "Cursor", "redirect_uris": ["http://127.0.0.1:43112/cb"] }))).await;
+    let consent = json!({ "client_id": client["client_id"], "redirect_uri": "http://127.0.0.1:43112/cb", "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", "rules": [{ "product": "workspace", "resources": "*", "actions": { "reveal": "allow" } }] });
+    assert_eq!(d.as_user("usr_alice", Method::POST, "/v1/access/oauth/authorize", Some(consent)).await.0, StatusCode::OK);
+    let (_, hers) = d.as_user("usr_alice", Method::GET, "/v1/access/tokens", None).await;
+    assert!(hers.as_array().unwrap().iter().any(|g| g["kind"] == "oauth" && g["pending"] == true), "{hers}");
     let read = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]);
     let reveal = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "reveal": "allow" } }]);
     // Within the policy: it works at once.
@@ -849,6 +865,8 @@ async fn a_persons_token_past_the_policy_waits_for_an_admin() {
     let (token, id) = (made["token"].as_str().unwrap().to_string(), made["grant"]["id"].as_str().unwrap().to_string());
     let (s, e) = d.call(&token, Method::GET, "/v1/workspace/projects", None).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::UNAUTHORIZED, Some("pending_approval")), "{e}");
+    // What the admin will decide doesn't change under them.
+    assert_eq!(d.as_user("usr_alice", Method::PATCH, &format!("/v1/access/tokens/{id}"), Some(json!({ "rules": [{ "product": "*", "resources": "*", "actions": { "admin": "allow" } }] }))).await.0, StatusCode::CONFLICT);
     // It leads an admin's checkup; hers doesn't list it (she sees it waits, and it isn't hers to decide).
     let (_, admins) = d.call(OPERATOR, Method::GET, "/v1/access/checkup", None).await;
     let first = admins.as_array().unwrap().iter().find(|c| c["grant"]["id"] == json!(id)).map(|c| c["findings"][0]["kind"].clone());

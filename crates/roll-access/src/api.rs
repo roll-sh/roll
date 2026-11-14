@@ -318,6 +318,7 @@ const CHECKUP_TIGHTEN: usize = 200;
 async fn checkup(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
     // A person's checkup is of their own tokens.
     let who = who(&a, &ext)?;
+    let policy = a.policy_now();
     let out = blocking(a, move |a| {
         let now = code_sql::now_ms();
         let counts = a.store.network_counts()?;
@@ -339,6 +340,10 @@ async fn checkup(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
             // A person sees that their own waits elsewhere; deciding it isn't theirs.
             if matches!(who, Who::User(_)) {
                 findings.retain(|f| f.kind != "pending");
+            } else if g.user.is_some() && !g.pending && g.approved_at.is_none() && g.live(now) && policy.needs_approval(&g.rules, g.ask_otherwise) {
+                // A person's token made before the policy asked: it works, unapproved, until an
+                // admin decides it.
+                findings.insert(0, crate::checkup::Finding { kind: "unapproved", why: "a person's token that reaches what the policy has an admin approve, made before the policy asked: approve it or deny it".into(), fix: "approve" });
             }
             if !findings.is_empty() {
                 out.push(json!({
@@ -461,17 +466,18 @@ impl Access {
 
     /// Admins hear that a person's token waits for one of them (GitHub mails organization owners):
     /// who asked, what it reaches, and where to decide. Never its secret.
-    fn tell_admins_waiting(self: &Arc<Self>, g: &crate::store::Grant, handle: &str) {
+    pub(crate) fn tell_admins_waiting(self: &Arc<Self>, g: &crate::store::Grant, handle: &str) {
+        let (name, handle) = (crate::mail_name(&g.name), crate::mail_name(handle));
         let reaches: Vec<String> = g.rules.0.iter().map(|r| format!("  {}: {}", r.product, r.actions.keys().map(|a| a.as_str()).collect::<Vec<_>>().join(", "))).collect();
         let text = format!(
             "{handle} made the token \"{}\", which waits for an admin's approval. It may:\n{}{}\n\nApprove or deny it: {}/dashboard/access/tokens/{}\n",
-            g.name,
+            name,
             reaches.join("\n"),
             if g.ask_otherwise { "\n  and ask for anything else" } else { "" },
             self.web_url(),
             g.id
         );
-        self.tell_admins(&format!("pending:{}", g.id), format!("A roll token waits for your approval: \"{}\" ({handle})", g.name), text);
+        self.tell_admins(&format!("pending:{}", g.id), format!("A roll token waits for your approval: \"{name}\" ({handle})"), text);
     }
 }
 
@@ -541,6 +547,11 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
     let change: GrantChange = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
     let who = who(&a, &ext)?;
     let target = visible_grant(&a, &who, &id).await?;
+    // What an admin is deciding doesn't change under them: a waiting token's reach is fixed until
+    // they do (an approval would otherwise take rules they never saw).
+    if target.pending && (change.rules.is_some() || change.ask_otherwise.is_some()) {
+        return Err(Error::Conflict("it waits for an admin's approval: its rules can't change until they decide (revoke it and make another)".into()));
+    }
     let person = matches!(who, Who::User(_));
     let who_handle = match &who {
         Who::User(u) => Some(u.handle.clone()),
@@ -572,14 +583,11 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
     let again = person
         && (change.rules.is_some() || change.ask_otherwise.is_some())
         && a.policy_now().needs_approval(change.rules.as_ref().unwrap_or(&target.rules), change.ask_otherwise.unwrap_or(target.ask_otherwise));
-    let updated = blocking(a.clone(), move |a| {
-        a.store.update(&id, &change)?;
-        if again {
-            a.store.set_pending(&id)?;
-        }
-        a.store.get(&id)
-    })
-    .await?;
+    let mut change = change;
+    if again {
+        change.pending = Some(true);
+    }
+    let updated = blocking(a.clone(), move |a| a.store.update(&id, &change)).await?;
     if again {
         a.tell_admins_waiting(&updated, &asker);
     }
@@ -603,10 +611,11 @@ async fn decide_token(a: Arc<Access>, ext: &Extensions, id: String, approve: boo
     }
     let g = blocking(a.clone(), move |a| a.store.decide_pending(&id, approve)).await?;
     if let Some(user) = g.user.as_deref() {
+        let name = crate::mail_name(&g.name);
         let (subject, text) = if approve {
-            (format!("Your roll token \"{}\" was approved", g.name), "An admin approved it: it works now.\n".to_string())
+            (format!("Your roll token \"{name}\" was approved"), "An admin approved it: it works now.\n".to_string())
         } else {
-            (format!("Your roll token \"{}\" was denied", g.name), "An admin denied it, so it's revoked. Make one that reaches less, or ask them.\n".to_string())
+            (format!("Your roll token \"{name}\" was denied"), "An admin denied it, so it's revoked. Make one that reaches less, or ask them.\n".to_string())
         };
         a.tell(Some(user), None, subject, text);
     }
