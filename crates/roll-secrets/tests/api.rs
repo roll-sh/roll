@@ -1036,6 +1036,11 @@ async fn a_projects_ca_signs_short_lived_certificates_for_its_names_only() {
     // A name outside its domains is refused; managed certificates live twice their rotation.
     let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/WEB_CERT", Some(json!({ "link": link("certificate", "managed", json!("web.example.com")) }))).await;
     assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("doesn't sign for web.example.com"), "{e}");
+    // A managed certificate rotates before it ends, or isn't taken.
+    for options in [json!({ "names": "web.svc.internal" }), json!({ "names": "web.svc.internal", "rotate_days": 60 })] {
+        let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/WEB_CERT", Some(json!({ "link": { "kind": "pki", "ref": ca["id"], "field": "certificate", "mode": "managed", "options": options } }))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    }
     api.ok(Method::PUT, "/environments/staging/secrets/WEB_CERT", Some(json!({ "link": link("certificate", "managed", json!("web.svc.internal, *.web.svc.internal")) }))).await;
     let stored = api.values("staging", "/").await["values"]["WEB_CERT"].as_str().unwrap().to_string();
     let (_, der) = parse_x509_pem(stored.as_bytes()).unwrap();
@@ -1054,11 +1059,9 @@ async fn an_ssh_ca_signs_short_lived_user_certificates_for_its_principals() {
     let ca_pub = ca["public_key"].as_str().unwrap();
     assert!(ca_pub.starts_with("ssh-ed25519 AAAA"), "{ca_pub}");
     let link = |field: &str, principals: &str| json!({ "kind": "ssh", "ref": ca["id"], "field": field, "mode": "dynamic", "options": { "principals": principals, "ttl_minutes": 30 } });
+    // A login the CA doesn't sign for is refused when it's linked.
     let (s, e) = api.call(Method::PUT, "/environments/production/secrets/ROOT_CERT", Some(json!({ "link": link("certificate", "root") }))).await;
-    // A dynamic link issues at resolve: the refusal comes from the first one.
-    let refused = if s.is_success() { api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "job:x" }))).await } else { e };
-    assert!(refused.to_string().contains("doesn't sign for root"), "{refused}");
-    api.call(Method::DELETE, "/environments/production/secrets/ROOT_CERT", None).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("doesn't sign for root"), "{e}");
     api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "SSH_CERT", "link": link("certificate", "deploy") }, { "op": "set", "key": "SSH_KEY", "link": link("private_key", "deploy") }] }))).await;
     let r = api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "job:release" }))).await;
     let (cert, key) = (r["values"]["SSH_CERT"].as_str().unwrap(), r["values"]["SSH_KEY"].as_str().unwrap());

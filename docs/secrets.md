@@ -570,10 +570,12 @@ TLS certificates for services (mTLS between them), with no CA to run.
   certificate's names in `options.names` (a list, or comma-separated; the dashboard's Link dialog
   asks): DNS names under the CA's domains, a wildcard one level under one, or IP addresses where
   allowed; anything else is refused, naming the domains. `dynamic` gives each lease its own
-  certificate for the lease's TTL plus five minutes; `managed` stores one and rotates it, valid for
-  twice `rotate_days` (30 by default) so a rotation always comes first; both at most `max_days`
-  (90 by default, 397 at most). Certificates are for servers and clients both (`serverAuth`,
-  `clientAuth`), with a random 128-bit serial.
+  certificate for the lease's TTL plus five minutes; `managed` stores one and rotates it every
+  `rotate_days` (required, and at most half the CA's `max_days`; the Link dialog asks), valid for
+  twice that, so a rotation always comes first. Both are at most `max_days` (90 by default, 397 at
+  most) and never past the CA's own end. A link's names and rotation are checked when it's written.
+  Certificates are for servers and clients both (`serverAuth`, `clientAuth`; the key only signs),
+  with a random 128-bit serial.
 - A certificate can't be taken back: there are no revocation lists, so lifetimes stay short, and a
   lease that ends leaves its certificate valid until it expires. A CA a key links to can't be
   deleted; deleting one leaves what it signed valid until it expires.
@@ -590,9 +592,10 @@ long-lived public keys on every server. Servers trust one CA key (`TrustedUserCA
   a certificate lives.
 - The link kind `ssh` has `certificate` (the `…-cert.pub` line) and `private_key` (an unencrypted
   OpenSSH key), one credential, with the logins in `options.principals` (the Link dialog asks); a
-  login the CA doesn't allow is refused. Each issue makes a new Ed25519 key and a user certificate
-  (`permit-pty`, `permit-port-forwarding`; the key id names the lease): `dynamic` for the lease's TTL
-  plus five minutes, `managed` for twice `rotate_days` (one day by default), at most `max_hours`.
+  login the CA doesn't allow is refused when it's linked. Each lease gets a new Ed25519 key and a
+  user certificate (`permit-pty`, `permit-port-forwarding`; the key id names the lease) for its TTL
+  plus five minutes, at most `max_hours`. Links are `dynamic` only: a certificate lives hours, and a
+  managed rotation counts in days.
 - The certificate and key formats are OpenSSH's (`PROTOCOL.certkeys`, `PROTOCOL.key`), written by roll
   and checked against OpenSSH 10: `ssh-keygen -L` reads them, and `sshd` with `TrustedUserCAKeys`
   takes the certificate for its principal and nobody else's. A certificate can't be taken back, so
@@ -1643,7 +1646,8 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
-Measured again on 2026-11-14 (load about 20): values at 9,900 keys took 89–122 ms on SQLite and
+An independent security review of #43–#45 (the issuer's keys and tokens, CA name constraints, SSH
+formats) is running. Measured again on 2026-11-14 (load about 20): values at 9,900 keys took 89–122 ms on SQLite and
 155 ms on Postgres, within the noise of the Performance table; nothing to fix. Reviewed again on
 2026-11-14: an independent security review of #39–#41 found racing rotations
 could reset the login in use (now a claim never takes a busy role), a `#` in a password shown as
@@ -1661,19 +1665,14 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **A project's own certificate authority** (Vault's PKI engine, Infisical's PKI): a CA per
-   project (its key sealed like a value), and `dynamic` links that issue a short-lived TLS
-   certificate and key per lease for the names the CA's policy allows, for mTLS between services.
-2. **SSH certificates** from a project's CA (Vault's SSH engine): a short-lived user certificate
-   per lease for the principals the policy allows.
-3. **AWS through roll's issuer** (once #38 and #43 land): `AssumeRoleWithWebIdentity` with roll's
+1. **AWS through roll's issuer** (once #38 and #43 land): `AssumeRoleWithWebIdentity` with roll's
    own token, so roll needs no AWS keys of its own and the trust policy pins `sub` as GCP's and
    Azure's do.
-4. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
+2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
    customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
-5. **Products say who owns a resource**, so a person's project can link their own databases,
+3. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams. Waits on products serving signed-in people.
-6. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
+4. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
    besides its owner.
 
 Open pull requests after this one:
@@ -1698,6 +1697,11 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#45, SSH certificates** (after #44): a project's SSH CA signs short-lived user certificates
+  for the logins it allows, and `roll ssh` uses them for one session; OpenSSH's formats, checked
+  with `ssh-keygen` and a real `sshd` login.
+- **#44, a project's own certificate authority** (after #20): short-lived TLS certificates for the
+  names its name-constrained CA allows, dynamic or managed; checked with a real TLS handshake.
 - **#43, dynamic GCP and Azure credentials** (after #20): roll as an OIDC issuer
   (`/v1/secrets/oidc`); GCP's workload identity federation and Azure's federated credentials trust
   its token for one project, checked with a decoy project at registration.

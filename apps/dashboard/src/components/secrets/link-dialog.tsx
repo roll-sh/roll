@@ -65,6 +65,7 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const [ttl, setTtl] = useState("60");
   const [certNames, setCertNames] = useState("");
   const [principals, setPrincipals] = useState("");
+  const [rotateDays, setRotateDays] = useState("30");
   const [busy, setBusy] = useState(false);
 
   const pickOf = (t: LinkTarget, f: LinkField): Pick => picks[`${t.kind}:${t.ref}:${f.field}`] ?? { on: false, key: f.suggest, mode: f.modes[0] };
@@ -90,6 +91,10 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const needsPrincipals = chosen.some((c) => c.t.kind === "ssh");
   const logins = principals.split(",").map((n) => n.trim()).filter(Boolean);
   const principalsOk = !needsPrincipals || logins.length > 0;
+  // A managed certificate rotates on a schedule, before it ends (it lives twice that).
+  const needsRotation = chosen.some((c) => c.t.kind === "pki" && c.p.mode === "managed");
+  const rotate = Number(rotateDays);
+  const rotateOk = !needsRotation || (Number.isInteger(rotate) && rotate >= 1 && rotate <= 198);
 
   const submit = async () => {
     const ops: Op[] = chosen.map((c) => ({
@@ -101,7 +106,11 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
         field: c.f.field,
         mode: c.p.mode,
         ...((c.p.mode === "dynamic" || c.t.kind === "pki" || c.t.kind === "ssh") && {
-          options: { ...(c.p.mode === "dynamic" && { ttl_minutes: ttlMinutes }), ...(c.t.kind === "pki" && { names }), ...(c.t.kind === "ssh" && { principals: logins }) },
+          options: {
+            ...(c.p.mode === "dynamic" && { ttl_minutes: ttlMinutes }),
+            ...(c.t.kind === "pki" && { names, ...(c.p.mode === "managed" && { rotate_days: rotate }) }),
+            ...(c.t.kind === "ssh" && { principals: logins }),
+          },
         }),
       },
     }));
@@ -180,6 +189,13 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
             <input value={principals} onChange={(e) => setPrincipals(e.target.value)} placeholder="deploy" spellCheck={false} className={`${sized} h-7 w-40 font-mono`} aria-label="SSH principals" />
           </label>
         )}
+        {needsRotation && (
+          <label className="flex items-center gap-1.5 text-[12px] text-muted">
+            Rotate every
+            <input value={rotateDays} onChange={(e) => setRotateDays(e.target.value)} inputMode="numeric" className={`${sized} h-7 w-14 font-mono`} aria-label="Rotate every (days)" />
+            days
+          </label>
+        )}
         {needsTtl && (
           <label className="flex items-center gap-1.5 text-[12px] text-muted">
             Lease
@@ -188,13 +204,13 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
           </label>
         )}
         <span className="text-[11.5px] text-danger">
-          {badKey ? `${badKey.p.key || "A key"} isn't a valid key` : dupKey ? `${dupKey.p.key} is picked twice` : !ttlOk ? "A lease is 1 minute to 7 days" : !namesOk ? "A certificate names what it's for" : !principalsOk ? "An SSH certificate names its logins" : ""}
+          {badKey ? `${badKey.p.key || "A key"} isn't a valid key` : dupKey ? `${dupKey.p.key} is picked twice` : !ttlOk ? "A lease is 1 minute to 7 days" : !namesOk ? "A certificate names what it's for" : !rotateOk ? "Rotate every 1 to 198 days" : !principalsOk ? "An SSH certificate names its logins" : ""}
         </span>
         <span className="ml-auto" />
         <button className={ghost} onClick={onClose}>
           Cancel
         </button>
-        <button className={primary} disabled={!chosen.length || !!badKey || !!dupKey || !ttlOk || !namesOk || !principalsOk || busy} onClick={submit}>
+        <button className={primary} disabled={!chosen.length || !!badKey || !!dupKey || !ttlOk || !namesOk || !rotateOk || !principalsOk || busy} onClick={submit}>
           {busy ? "Linking…" : `Link ${chosen.length || ""}`.trim()}
         </button>
       </div>

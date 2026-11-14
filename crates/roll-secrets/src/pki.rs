@@ -139,6 +139,17 @@ impl Provider {
     }
 }
 
+/// The names a link asks for, all of which the CA signs for.
+fn allowed(names: &[String], policy: &Policy) -> Result<()> {
+    if names.is_empty() || names.len() > 100 {
+        return Err(Error::BadRequest("a certificate link names what it's for: options.names, one to 100 DNS names (or IP addresses where the CA allows them)".into()));
+    }
+    match names.iter().find(|n| !policy.allows(n)) {
+        Some(n) => Err(Error::BadRequest(format!("the CA doesn't sign for {n}: it takes names under {}{}", policy.domains.join(", "), if policy.allow_ip { " and IP addresses" } else { "" }))),
+        None => Ok(()),
+    }
+}
+
 /// The names a link asks for: `options.names`, a list or a comma-separated string.
 fn names_of(link: &Link) -> Vec<String> {
     match link.options.get("names") {
@@ -169,15 +180,24 @@ impl LinkProvider for Provider {
         Err(Error::BadRequest("a certificate is issued: link it managed or dynamic".into()))
     }
 
+    /// Names the CA signs for, and for a managed certificate a rotation that always comes before
+    /// its end: refused when the link is written, not at its first issue.
+    fn check(&self, link: &Link) -> Result<()> {
+        let (_, _, policy) = self.open(&link.r#ref)?;
+        allowed(&names_of(link), &policy)?;
+        if link.mode == Mode::Managed {
+            let days = link.rotate_days().ok_or_else(|| Error::BadRequest("a managed certificate rotates on a schedule: set rotate_days (its certificate lives twice that)".into()))?;
+            if days * 2 > u64::from(policy.max_days) {
+                return Err(Error::BadRequest(format!("this CA's certificates live {} days at most: rotate_days is {} at most, so each is replaced before it ends", policy.max_days, policy.max_days / 2)));
+            }
+        }
+        Ok(())
+    }
+
     fn issue(&self, r#ref: &str, _credential: &str, link: &Link, _label: &str, ttl_minutes: Option<u64>) -> Result<Issued> {
         let (ca_pem, ca_key, policy) = self.open(r#ref)?;
         let names = names_of(link);
-        if names.is_empty() || names.len() > 100 {
-            return Err(Error::BadRequest("a certificate link names what it's for: options.names, one to 100 DNS names (or IP addresses where the CA allows them)".into()));
-        }
-        if let Some(n) = names.iter().find(|n| !policy.allows(n)) {
-            return Err(Error::BadRequest(format!("the CA doesn't sign for {n}: it takes names under {}{}", policy.domains.join(", "), if policy.allow_ip { " and IP addresses" } else { "" })));
-        }
+        allowed(&names, &policy)?;
         let minutes = match (link.mode, ttl_minutes) {
             (Mode::Dynamic, ttl) => ttl.unwrap_or(60) + 5,
             _ => link.rotate_days().unwrap_or(30) * 2 * 24 * 60,
@@ -191,9 +211,16 @@ impl LinkProvider for Provider {
         params.distinguished_name = rcgen::DistinguishedName::new();
         params.distinguished_name.push(rcgen::DnType::CommonName, names[0].clone());
         params.not_before = now - time::Duration::minutes(1);
-        params.not_after = now + time::Duration::minutes(minutes as i64);
+        // Never past the CA's own end.
+        let ca_end = x509_parser::pem::parse_x509_pem(ca_pem.as_bytes())
+            .ok()
+            .and_then(|(_, p)| x509_parser::parse_x509_certificate(&p.contents).ok().map(|(_, c)| c.validity().not_after.timestamp()))
+            .and_then(|t| time::OffsetDateTime::from_unix_timestamp(t).ok())
+            .ok_or_else(|| Error::Internal("the CA's certificate doesn't parse".into()))?;
+        params.not_after = (now + time::Duration::minutes(minutes as i64)).min(ca_end);
         params.serial_number = Some(rcgen::SerialNumber::from_slice(&serial()));
-        params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature, rcgen::KeyUsagePurpose::KeyEncipherment];
+        // An ECDSA key signs; it never enciphers (RFC 5480).
+        params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
         params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth, rcgen::ExtendedKeyUsagePurpose::ClientAuth];
         params.use_authority_key_identifier_extension = true;
         let cert = params.signed_by(&key, &issuer).map_err(|e| Error::Internal(format!("signing a certificate: {e}")))?;

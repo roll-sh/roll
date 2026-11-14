@@ -7,8 +7,9 @@
 //!   longest a certificate lives.
 //! - A link to it names its principals (`options.principals`); its fields `certificate` (the
 //!   `…-cert.pub` line) and `private_key` (an unencrypted OpenSSH key) are one credential. Each issue
-//!   makes a new Ed25519 key and a user certificate for it: `dynamic` for the lease's TTL plus five
-//!   minutes, `managed` for twice `rotate_days`; both at most the CA's `max_hours`.
+//!   makes a new Ed25519 key and a user certificate for it, for the lease's TTL plus five minutes
+//!   and at most the CA's `max_hours` (`dynamic` only: a certificate lives hours, and a managed
+//!   rotation counts in days).
 //! - A certificate can't be taken back (no revocation list kept), so lifetimes stay short.
 //!
 //! The formats are OpenSSH's `PROTOCOL.certkeys` and `PROTOCOL.key`, written here.
@@ -74,8 +75,9 @@ pub struct NewSshCa {
 }
 
 const FIELDS: &[Field] = &[
-    Field { field: "certificate", label: "Certificate", modes: &[Mode::Dynamic, Mode::Managed], secret: false, suggest: "SSH_CERT", credential: Some("login") },
-    Field { field: "private_key", label: "Private key", modes: &[Mode::Dynamic, Mode::Managed], secret: true, suggest: "SSH_KEY", credential: Some("login") },
+    // Dynamic only: a certificate lives hours, and a managed rotation counts in days.
+    Field { field: "certificate", label: "Certificate", modes: &[Mode::Dynamic], secret: false, suggest: "SSH_CERT", credential: Some("login") },
+    Field { field: "private_key", label: "Private key", modes: &[Mode::Dynamic], secret: true, suggest: "SSH_KEY", credential: Some("login") },
 ];
 
 fn aad(project: &str, id: &str) -> String {
@@ -169,14 +171,14 @@ fn private_key(key: &SigningKey, comment: &str) -> zeroize::Zeroizing<String> {
     out.extend_from_slice(&1u32.to_be_bytes());
     put_string(&mut out, &ed25519_blob(&public));
     put_string(&mut out, &private);
-    let body = b64(&out);
-    let mut pem = String::from("-----BEGIN OPENSSH PRIVATE KEY-----\n");
+    let body = zeroize::Zeroizing::new(b64(&out));
+    let mut pem = zeroize::Zeroizing::new(String::from("-----BEGIN OPENSSH PRIVATE KEY-----\n"));
     for line in body.as_bytes().chunks(70) {
         pem.push_str(std::str::from_utf8(line).expect("base64"));
         pem.push('\n');
     }
     pem.push_str("-----END OPENSSH PRIVATE KEY-----\n");
-    zeroize::Zeroizing::new(pem)
+    pem
 }
 
 fn new_key() -> SigningKey {
@@ -203,9 +205,20 @@ impl Provider {
         })?;
         let (project, name, key, policy, dek) = row.ok_or_else(|| Error::Link(format!("SSH CA {id} doesn't exist any more")))?;
         let (dek, _) = self.keys.open_dek(&project, &dek)?;
-        let seed = base64::engine::general_purpose::STANDARD.decode(dek.open(&aad(&project, id), &key)?.expose()).map_err(|_| Error::Internal("an SSH CA's key is damaged".into()))?;
-        let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| Error::Internal("an SSH CA's key is damaged".into()))?;
+        let seed = zeroize::Zeroizing::new(base64::engine::general_purpose::STANDARD.decode(dek.open(&aad(&project, id), &key)?.expose()).map_err(|_| Error::Internal("an SSH CA's key is damaged".into()))?);
+        let seed = zeroize::Zeroizing::new(<[u8; 32]>::try_from(seed.as_slice()).map_err(|_| Error::Internal("an SSH CA's key is damaged".into()))?);
         Ok((name, SigningKey::from_bytes(&seed), serde_json::from_str(&policy).map_err(|_| Error::Internal("an SSH CA's policy isn't JSON".into()))?))
+    }
+}
+
+/// Principals a link asks for, all of which the CA signs for.
+fn allowed(name: &str, principals: &[String], policy: &SshPolicy) -> Result<()> {
+    if principals.is_empty() || principals.len() > 32 {
+        return Err(Error::BadRequest("an SSH certificate link names its principals (the server logins it's for): options.principals, 1–32 of them".into()));
+    }
+    match principals.iter().find(|p| !policy.principals.contains(p)) {
+        Some(p) => Err(Error::BadRequest(format!("{name} doesn't sign for {p}: it takes {}", policy.principals.join(", ")))),
+        None => Ok(()),
     }
 }
 
@@ -236,23 +249,20 @@ impl LinkProvider for Provider {
     }
 
     fn read(&self, _: &str, _: &str, _: &Link) -> Result<Value> {
-        Err(Error::BadRequest("an SSH certificate is issued: link it dynamic or managed".into()))
+        Err(Error::BadRequest("an SSH certificate is issued per lease: link it dynamic".into()))
+    }
+
+    /// The logins the CA signs for: refused when the link is written.
+    fn check(&self, link: &Link) -> Result<()> {
+        let (name, _, policy) = self.open(&link.r#ref)?;
+        allowed(&name, &principals_of(link), &policy)
     }
 
     fn issue(&self, r#ref: &str, _credential: &str, link: &Link, label: &str, ttl_minutes: Option<u64>) -> Result<Issued> {
         let (name, ca, policy) = self.open(r#ref)?;
         let principals = principals_of(link);
-        if principals.is_empty() || principals.len() > 32 {
-            return Err(Error::BadRequest("an SSH certificate link names its principals (the server logins it's for): options.principals, 1–32 of them".into()));
-        }
-        if let Some(p) = principals.iter().find(|p| !policy.principals.contains(p)) {
-            return Err(Error::BadRequest(format!("{name} doesn't sign for {p}: it takes {}", policy.principals.join(", "))));
-        }
-        let minutes = match (link.mode, ttl_minutes) {
-            (Mode::Dynamic, ttl) => ttl.unwrap_or(60) + 5,
-            _ => link.rotate_days().unwrap_or(1) * 2 * 24 * 60,
-        }
-        .min(u64::from(policy.max_hours) * 60);
+        allowed(&name, &principals, &policy)?;
+        let minutes = (ttl_minutes.unwrap_or(60) + 5).min(u64::from(policy.max_hours) * 60);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default();
         let (after, before) = (now.saturating_sub(60), now + minutes * 60);
         let user = new_key();
