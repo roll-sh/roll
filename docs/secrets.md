@@ -1588,6 +1588,14 @@ Done and in PR #20:
 
 Then change policies per folder (#53), as Infisical's approval policies on secret paths.
 
+An eighth independent review (2026-11-14, of moving in, change policies per folder and the
+seventh review's fixes) found no high-severity issue; it found folder gates a reviewer, a
+promotion, an import or a folder delete could get around, apply checking the gates outside its
+transaction, backups without folder policies (#53), Vault walks that took any error for an empty
+folder and had no bound, colliding AWS keys (#52), and a `--watch` that restarted on every poll
+after its references changed (#49): all fixed, the Vault and AWS ones checked live. Screenshots
+of folder policies and request gates are on #53.
+
 A seventh independent review (2026-11-14, of RabbitMQ, the OpenSearch names and the sixth
 review's fixes) found no high-severity issue; it found a RabbitMQ template copied in part (an
 exchange left open), `render --watch` rendering twice, throttled OCSP answers marked cacheable,
@@ -1673,10 +1681,12 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **An eighth independent review** of moving in (#52), change policies per folder (#53) and the
-   seventh review's fixes, and its fixes.
-2. **A screenshot of the folder policy and request gates** for #53, and of moving in for #52's
-   dashboard import dialog (it shows the CLI commands).
+1. **`roll run` masks values in what the command prints**, as 1Password's `op run` does and
+   GitHub Actions does for its own secrets: a value of 8 characters or more (and each of its
+   lines, and its JSON and URL encodings) becomes `<concealed by roll>` on stdout and stderr when
+   they aren't a terminal (CI logs, files), so a debug print doesn't put a key in a build log.
+   `--mask` forces it in a terminal and `--no-mask` turns it off.
+2. **A screenshot of moving in** for #52's dashboard import dialog (it shows the CLI commands).
 3. **When #50, #51 and #53 meet** (whichever land later): `requests.rs` and `write.rs` keep the
    canvas check before the provider (#51), check-and-set (#50) and folder gates (#53); a test of
    the three together.
