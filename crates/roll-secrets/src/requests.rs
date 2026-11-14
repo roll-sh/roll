@@ -269,9 +269,14 @@ impl Secrets {
     /// Open a request for `items` (a batch's, or a promotion's into a protected environment).
     pub(crate) fn open_request_items(&self, project: &str, slug: &str, path: &str, message: String, items: Vec<Item>, caller: &Caller) -> Result<Request> {
         let path = path.to_string();
+        let members = if items.iter().any(|i| matches!(i.action, ItemAction::Set { link: Some(Some(_)), .. })) { self.members(project)? } else { Default::default() };
         for i in &items {
             caller.need(if matches!(i.action, ItemAction::Delete) { Action::Delete } else { Action::Write }, &Scope::at(project, slug, &i.path))?;
             if let ItemAction::Set { link: Some(Some(l)), .. } = &i.action {
+                // The project's own resource before the product is asked about it.
+                if !members.contains(&(l.kind.clone(), l.r#ref.clone())) {
+                    return Err(Error::BadRequest(self.not_linkable(project, &l.kind, &l.r#ref)));
+                }
                 self.links.check(l)?;
             }
         }

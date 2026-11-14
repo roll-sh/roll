@@ -72,10 +72,11 @@ impl Secrets {
             let Some(provider) = offered(kind) else { continue };
             let name = provider.name(r);
             let pre = if per_kind.get(kind.as_str()).copied().unwrap_or(0) > 1 { prefix(name.as_deref().unwrap_or(r)) } else { String::new() };
+            let fields = provider.fields_for(r);
             let links: Vec<SuggestedLink> = provider
-                .suggested()
+                .suggested_for(r)
                 .iter()
-                .filter_map(|(field, mode)| provider.fields().iter().find(|f| f.field == *field).map(|f| SuggestedLink { key: format!("{pre}{}", f.suggest), field: f.field.to_string(), mode: *mode }))
+                .filter_map(|(field, mode)| fields.iter().find(|f| f.field == *field).map(|f| SuggestedLink { key: format!("{pre}{}", f.suggest), field: f.field.to_string(), mode: *mode }))
                 .collect();
             let environments: Vec<String> = envs
                 .iter()

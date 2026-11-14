@@ -192,7 +192,7 @@ fn links(api: Api) -> Links {
     l.register(Arc::new(Stream(api.clone())));
     l.register(Arc::new(Bucket(api.clone())));
     l.register(Arc::new(Nosql(api.clone())));
-    l.register(Arc::new(Search(api)));
+    l.register(Arc::new(Search(api, Default::default())));
     l
 }
 
@@ -524,24 +524,72 @@ impl LinkProvider for Nosql {
     }
 }
 
-/// Search clusters (roll search): where clients reach one (live), and API keys of their own
-/// (managed or dynamic) from `POST /v1/search/clusters/{id}/keys`; never the cluster's own
-/// password, which rotating would take from everyone else.
-struct Search(Api);
+/// Search clusters (roll search): where clients reach one (live), and credentials of their own
+/// (managed or dynamic) from `POST /v1/search/clusters/{id}/keys`: an API key on an Elasticsearch
+/// cluster, an internal user (`user`, `password`) on an OpenSearch one, which has no API keys.
+/// Never the cluster's own password, which rotating would take from everyone else.
+/// The product's API, and clusters' flavors as last read (`(when, flavor)`), so naming a
+/// cluster's fields for one request asks roll search once.
+struct Search(Api, std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>);
+
+const SEARCH_FIELDS: &[Field] = &[
+    live("url", "URL", false, "ELASTICSEARCH_URL"),
+    live("host", "Host", false, "ELASTICSEARCH_HOST"),
+    live("port", "Port", false, "ELASTICSEARCH_PORT"),
+    live("username", "Cluster name", false, "ELASTICSEARCH_USERNAME"),
+    issued("api_key", "API key (Authorization: ApiKey …)", true, "ELASTICSEARCH_API_KEY", "key"),
+    // OpenSearch's: a user of its own (`<user>@<cluster>`, which the node routes).
+    issued("user", "User (OpenSearch)", false, "OPENSEARCH_USERNAME", "key"),
+    issued("password", "Password (OpenSearch)", true, "OPENSEARCH_PASSWORD", "key"),
+];
+
+/// The same fields as an OpenSearch cluster's clients name them.
+const OPENSEARCH_FIELDS: &[Field] = &[
+    live("url", "URL", false, "OPENSEARCH_URL"),
+    live("host", "Host", false, "OPENSEARCH_HOST"),
+    live("port", "Port", false, "OPENSEARCH_PORT"),
+    live("username", "Cluster name", false, "OPENSEARCH_CLUSTER"),
+    issued("api_key", "API key (Elasticsearch only)", true, "ELASTICSEARCH_API_KEY", "key"),
+    issued("user", "User", false, "OPENSEARCH_USERNAME", "key"),
+    issued("password", "Password", true, "OPENSEARCH_PASSWORD", "key"),
+];
+
+impl Search {
+    /// The cluster's flavor (`elasticsearch`, `opensearch`), when roll search says; kept 30 s.
+    fn flavor(&self, r#ref: &str) -> Option<String> {
+        if let Some((at, f)) = self.1.lock().expect("flavors").get(r#ref)
+            && at.elapsed() < std::time::Duration::from_secs(30)
+        {
+            return Some(f.clone());
+        }
+        let f = self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(r#ref)), None).ok()?["flavor"].as_str().map(String::from)?;
+        let mut m = self.1.lock().expect("flavors");
+        if m.len() > 1_000 {
+            m.retain(|_, (at, _)| at.elapsed() < std::time::Duration::from_secs(30));
+        }
+        m.insert(r#ref.to_string(), (std::time::Instant::now(), f.clone()));
+        Some(f)
+    }
+}
 
 impl LinkProvider for Search {
     fn kind(&self) -> &str {
         "search"
     }
     fn fields(&self) -> &[Field] {
-        const F: &[Field] = &[
-            live("url", "URL", false, "ELASTICSEARCH_URL"),
-            live("host", "Host", false, "ELASTICSEARCH_HOST"),
-            live("port", "Port", false, "ELASTICSEARCH_PORT"),
-            live("username", "Cluster name", false, "ELASTICSEARCH_USERNAME"),
-            issued("api_key", "API key (Authorization: ApiKey …)", true, "ELASTICSEARCH_API_KEY", "key"),
-        ];
-        F
+        SEARCH_FIELDS
+    }
+    /// An OpenSearch cluster's fields are named as its clients read them (`OPENSEARCH_URL`).
+    fn fields_for(&self, r#ref: &str) -> Vec<Field> {
+        if self.flavor(r#ref).as_deref() == Some("opensearch") { OPENSEARCH_FIELDS.to_vec() } else { SEARCH_FIELDS.to_vec() }
+    }
+    fn suggested_for(&self, r#ref: &str) -> Vec<(&'static str, Mode)> {
+        match self.flavor(r#ref).as_deref() {
+            Some("opensearch") => vec![("url", Mode::Live), ("user", Mode::Managed), ("password", Mode::Managed)],
+            Some(_) => self.suggested().to_vec(),
+            // Not known (roll search didn't answer): where it is, never a guess at a credential.
+            None => vec![("url", Mode::Live)],
+        }
     }
     fn suggested(&self) -> &[(&'static str, Mode)] {
         &[("url", Mode::Live), ("api_key", Mode::Managed)]
@@ -566,7 +614,18 @@ impl LinkProvider for Search {
         }
         let k = self.0.call(Method::POST, &format!("/v1/search/clusters/{}/keys", enc(r#ref)), Some(body))?;
         let id = text(&k, "/id")?;
-        Ok(Issued { parts: BTreeMap::from([("api_key".to_string(), text(&k, "/api_key")?)]), handle: json!({ "id": id.expose() }) })
+        Ok(Issued { parts: search_parts(&k)?, handle: json!({ "id": id.expose() }) })
+    }
+    /// A field the cluster's flavor doesn't issue (an API key from OpenSearch, a user from
+    /// Elasticsearch) is refused when the link is written. A build of roll search that doesn't
+    /// say its flavor is taken at its word later, at the first issue.
+    fn check(&self, link: &Link) -> roll_secrets::Result<()> {
+        let c = self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(&link.r#ref)), None)?;
+        match (c["flavor"].as_str(), link.field.as_str()) {
+            (Some("opensearch"), "api_key") => Err(Error::BadRequest("an OpenSearch cluster has no API keys: link user and password (OPENSEARCH_USERNAME, OPENSEARCH_PASSWORD)".into())),
+            (Some("elasticsearch"), "user" | "password") => Err(Error::BadRequest("an Elasticsearch cluster issues API keys: link api_key (ELASTICSEARCH_API_KEY)".into())),
+            _ => Ok(()),
+        }
     }
     /// A key's expiry is set when it's made (roll search has no way to move it), so a renewal
     /// would leave a lease that outlives its key.
@@ -577,6 +636,15 @@ impl LinkProvider for Search {
         let Some(id) = h["id"].as_str() else { return Ok(()) };
         self.0.delete_gone(&format!("/v1/search/clusters/{}/keys/{}", enc(r#ref), enc(id)))
     }
+}
+
+/// What `…/keys` answered, by field: an API key (Elasticsearch), or a user and its password
+/// (OpenSearch).
+fn search_parts(k: &Json) -> roll_secrets::Result<BTreeMap<String, Value>> {
+    if k["api_key"].is_string() {
+        return Ok(BTreeMap::from([("api_key".to_string(), text(k, "/api_key")?)]));
+    }
+    Ok(BTreeMap::from([("user".to_string(), text(k, "/username")?), ("password".to_string(), text(k, "/password")?)]))
 }
 
 /// roll code's search for roll secrets' health (`code` check): whether a repository's default
@@ -740,6 +808,16 @@ mod tests {
     use axum::http::HeaderMap;
     use serde_json::{Value as Json, json};
     use std::sync::{Arc, Mutex};
+
+    /// A search link takes whichever credential the cluster's flavor issues.
+    #[test]
+    fn a_search_key_is_an_api_key_or_an_opensearch_user() {
+        let es = super::search_parts(&json!({ "id": "k1", "api_key": "abc" })).unwrap();
+        assert_eq!(es.keys().collect::<Vec<_>>(), ["api_key"]);
+        let os = super::search_parts(&json!({ "id": "roll-key-x", "username": "roll-key-x@logs", "password": "pw" })).unwrap();
+        assert_eq!((os["user"].expose(), os["password"].expose()), ("roll-key-x@logs", "pw"));
+        assert!(super::search_parts(&json!({ "id": "x" })).is_err());
+    }
 
     /// A KMS that decrypts one ciphertext, and only with roll secrets' encryption context.
     #[tokio::test(flavor = "multi_thread")]
