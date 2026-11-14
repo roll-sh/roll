@@ -1,15 +1,16 @@
-import { ChevronRight, GitBranch, Image, LoaderCircle, Plus, Terminal } from "lucide-react";
+import { ChevronRight, FileText, GitBranch, Image, LoaderCircle, Plus, Terminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { appsApi, parseEnv, SERVICE_NAME, type Plan, type Service, type ServiceType, type Source } from "@/lib/apps-api";
 import { codeApi, type GithubInstallation, type Owner, type Repo } from "@/lib/code-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { freeSpot, KIND_LABEL, resourceKey, suggestName, type ResourceView } from "@/lib/workspace-resources";
 import { PlaceError, refreshInventory, useWorkspace, workspace } from "@/lib/workspace-store";
+import { ImportPane } from "./import";
 import { LINKABLE } from "./variables";
 import { CopyField, Head, Label, Rows } from "../workspace/inspector";
 import { KindTile } from "../workspace/kind";
 
-type From = "repo" | "image" | "upload";
+type From = "repo" | "image" | "upload" | "file";
 
 /** Databases New service can make with the service (a template without a template). */
 type Store = "postgres" | "redis";
@@ -18,7 +19,8 @@ const STORES: Store[] = ["postgres", "redis"];
 const FROM: { value: From; label: string; Icon: typeof GitBranch }[] = [
   { value: "repo", label: "Repository", Icon: GitBranch },
   { value: "image", label: "Image", Icon: Image },
-  { value: "upload", label: "Your machine", Icon: Terminal },
+  { value: "upload", label: "roll up", Icon: Terminal },
+  { value: "file", label: "File", Icon: FileText },
 ];
 
 const field = "h-8 w-full rounded-lg border border-line-2 bg-canvas px-2.5 font-mono text-[12px] outline-none placeholder:text-subtle focus:border-accent/60";
@@ -44,11 +46,14 @@ export function NewServiceSheet({
   spot,
   onClose,
   onCreated,
+  onImported,
 }: {
   project: WorkspaceProject;
   spot: { x: number; y: number };
   onClose: () => void;
   onCreated: (s: Service) => void;
+  /** A file's services made (already on the canvas). */
+  onImported: (made: Service[]) => void;
 }) {
   const [from, setFrom] = useState<From>("repo");
   const [repos, setRepos] = useState<Repo[] | null>(null);
@@ -270,7 +275,9 @@ export function NewServiceSheet({
             <p className="mt-1.5 text-[11px] leading-relaxed text-subtle">Sealed, sent only to the image's own registry, never shown again.</p>
           </>
         )}
-        {from === "upload" ? (
+        {from === "file" ? (
+          <ImportPane project={project} spot={spot} onDone={onImported} />
+        ) : from === "upload" ? (
           <>
             <Label>From the app's directory</Label>
             <CopyField shown={`roll up --project ${shellQuote(project.name)}`} value={`roll up --project ${shellQuote(project.name)}`} />
@@ -391,11 +398,11 @@ export function NewServiceSheet({
         {error && <p className="mt-3 rounded-lg border border-danger/40 bg-danger/10 px-2.5 py-2 text-[11.5px] text-danger">{error}</p>}
       </div>
       <div className="flex items-center gap-2 border-t border-line px-3 py-2">
-        <span className="mr-auto text-[11px] text-subtle">{from === "upload" ? "Nothing is made until you run it." : "Deploys to production when it's made."}</span>
+        <span className="mr-auto text-[11px] text-subtle">{from === "upload" ? "Nothing is made until you run it." : from === "file" ? "A project's roll.toml, or a Compose file." : "Deploys to production when it's made."}</span>
         <button onClick={onClose} className="rounded-md px-2 py-1 text-[11.5px] text-muted hover:bg-white/[0.05] hover:text-fg">
           {from === "upload" ? "Done" : "Cancel"}
         </button>
-        {from !== "upload" && (
+        {from !== "upload" && from !== "file" && (
           <button
             onClick={create}
             disabled={!ready}

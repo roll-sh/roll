@@ -14,6 +14,7 @@ mod golang;
 mod java;
 mod node;
 mod php;
+pub mod project;
 mod python;
 mod ruby;
 mod static_site;

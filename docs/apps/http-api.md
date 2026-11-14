@@ -24,6 +24,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | --- | --- | --- | --- |
 | `GET /v1/apps` | | `Overview` | read |
 | `POST /v1/apps/plan` | `PlanRequest` | `Plan` | read |
+| `POST /v1/apps/import` | `{ roll_toml }` or `{ compose }` (each at most 1 MiB) | `ProjectImport` (read, nothing made: checked as `roll up --all` checks it; 400 says what's wrong) | read |
 | `GET /v1/apps/services?project=` | | `Service[]` | read |
 | `POST /v1/apps/services` | `NewService` | 201 `Service` | deploy* (a repo or image source deploys production at once; write for an upload source) |
 | `GET /v1/apps/projects/{project}/services` | | `Service[]` | read |
@@ -379,6 +380,20 @@ type Deployment = {
   finished_at: number | null;
   /** Milliseconds from the deploy's start to its first healthy answer. */
   ready_ms: number | null;
+};
+
+/** A project in one file: a root roll.toml's `[apps]` and `[databases]`, or a Compose file as them. */
+type ProjectImport = {
+  roll_toml: string;          // the file as roll.toml (a Compose file's, to keep)
+  notes: string[];            // what a Compose file's import left out, and why
+  apps: { [name: string]: {
+    source: { kind: "repo"; repo: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
+    branch: string | null;    // a repo's production branch
+    run: Patch<Run>;          // the run settings the entry names
+    links: { kind: "postgres" | "redis"; name: string }[]; // databases below, by name
+    variables: { [name: string]: string }; // set when the service is made, never over what it has
+  } };
+  databases: { [name: string]: { kind: "postgres" | "redis" } };
 };
 
 type PlanRequest = { repo: string; revision?: string; root?: string } | { files: Record<string, string> };

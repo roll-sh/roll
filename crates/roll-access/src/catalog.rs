@@ -1103,6 +1103,7 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/verify", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps", "apps", R, Tgt::Product),
     row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant),
+    row("POST", "/v1/apps/import", "apps", R, Tgt::AnyGrant),
     row("GET", "/v1/apps/projects/{project}/services", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/variables/values", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
     // What the next deploy changes: names of variables and settings, never a value.

@@ -121,6 +121,25 @@ export interface Service {
   environments: EnvironmentSummary[];
 }
 
+/** A project in one file (`POST /v1/apps/import`): a roll.toml's `[apps]` and `[databases]`, or a Compose file as them. */
+export interface ProjectImport {
+  /** The file as roll.toml (a Compose file's, to keep). */
+  roll_toml: string;
+  /** What a Compose file's import left out, and why. */
+  notes: string[];
+  apps: Record<
+    string,
+    {
+      source: { kind: "repo"; repo: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
+      branch: string | null;
+      run: Partial<Run>;
+      links: { kind: "postgres" | "redis"; name: string }[];
+      variables: Record<string, string>;
+    }
+  >;
+  databases: Record<string, { kind: "postgres" | "redis" }>;
+}
+
 export interface NewService {
   project: string;
   name: string;
@@ -656,6 +675,8 @@ export interface LogQuery {
 export const appsApi = {
   overview: () => call<Overview>("GET", "/v1/apps"),
   plan: (req: PlanRequest) => call<Plan>("POST", "/v1/apps/plan", req),
+  /** A roll.toml or Compose file read as a project (nothing made). */
+  importProject: (file: { roll_toml: string } | { compose: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
 
   services: (project?: string) => call<Service[]>("GET", `/v1/apps/services${qs({ project })}`),
   /** Makes the service and places its card; a repo or an image source deploys to production at once. */

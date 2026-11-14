@@ -3132,3 +3132,22 @@ async fn reference_variables_are_filled_at_the_deploy() {
     let (_, listed) = call(&w.api, "GET", &staging, None).await;
     assert!(!listed["vars"].as_array().unwrap().iter().any(|v| v["name"] == "PASS"), "a copy leaves sealed ones behind: {listed}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_compose_file_is_read_as_a_project_without_making_anything() {
+    let w = world().await;
+    let compose = "services:\n  web:\n    image: ghcr.io/acme/web:1\n    ports: [\"8080:3000\"]\n    environment: [\"MODE=prod\", \"DATABASE_URL=postgres://u:p@db:5432/x\"]\n    depends_on: [db]\n  db:\n    image: postgres:17\n";
+    let (st, v) = call(&w.api, "POST", "/v1/apps/import", Some(json!({ "compose": compose }))).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let web = &v["apps"]["web"];
+    assert_eq!(web["source"], json!({ "kind": "image", "image": "ghcr.io/acme/web:1" }), "{v}");
+    assert_eq!((web["run"]["port"].as_u64(), &web["links"], &web["variables"]), (Some(3000), &json!([{ "kind": "postgres", "name": "db" }]), &json!({ "MODE": "prod" })), "{v}");
+    assert_eq!(v["databases"]["db"]["kind"], "postgres", "{v}");
+    assert!(v["roll_toml"].as_str().unwrap().contains("[apps.web]") && v["notes"].as_array().is_some_and(|n| !n.is_empty()), "{v}");
+    // Read, not made; and a file that isn't a project says why.
+    let (_, all) = call(&w.api, "GET", "/v1/apps/services", None).await;
+    assert_eq!(all, json!([]));
+    let (st, v) = call(&w.api, "POST", "/v1/apps/import", Some(json!({ "roll_toml": "[apps.web]\nimage = \"a\"\nrepo = \"b/c\"\n" }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("app web"), "{v}");
+}
