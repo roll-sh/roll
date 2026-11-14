@@ -1651,6 +1651,16 @@ Jenkins, Buildkite, pods and units and a JSON value's secret fields (#54), a log
 that dropped a working token and ignored 401s (#56), and no way to rotate pinned keys in place
 (#57): all fixed. roll MCP has `secrets_reach` and `secrets_folder_policies` tools for #61 and #53.
 
+An eleventh independent review (2026-11-14, of VS Code, completions, browser-bundle names, reach and
+the tenth review's fixes) found two high-severity issues in #58, both fixed: "Move to roll" misread
+multi-line and commented `.env` entries (it now reads them as the CLI does and replaces the whole
+entry), and a repository's settings could send the token elsewhere (`roll.apiUrl` and
+`roll.project` come from your own settings only). It also found masking that changed data (#54:
+stdout is masked only in CI and never into a file; `ROLL_MASK=1` for pods and units), re-keyed
+identities outliving their re-keyer (#57), readers missed through imports and previews (#61), a
+kind of credential shown to read-only callers and references not judged (#60), a stalled renewal
+(#56) and a refused strict read keeping its leases (#55): all fixed.
+
 Then (2026-11-14, latest): `roll run` masks values in what the command prints when it isn't a
 terminal (#54), as 1Password's `op run` and GitHub Actions do; pulling into Kubernetes with External
 Secrets Operator (#55: its webhook provider, checked against ESO 2.15 on k3s) and
@@ -1757,8 +1767,8 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **An eleventh independent review** of VS Code (#58), completions (#59), browser-bundle names
-   (#60), reach (#61) and the tenth review's fixes, and its fixes.
+1. **A twelfth independent review** of the eleventh review's fixes (#54–#61), and its fixes; then a
+   live run of #58's "Move to roll" on a multi-line key in code-server.
 2. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
    #49 and #54 meet, `watch` keeps both (answered digests, streams and signals).
 3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
