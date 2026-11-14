@@ -246,10 +246,17 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    A/B; Rally rerun pending) and `terms_enum`; a full rerun of every Rally track with variance;
    one allocator policy (rolld's against search-dev's purge governor); `terms_enum`'s per-request
    overhead.
-2. **A second security review** of what landed since the first (the `_inference` API's outbound
-   calls and sealed keys, `semantic_text`, the new retrievers, workflow-restricted keys, service
-   tokens, OpenSearch Security's new endpoints, ES|QL's new functions). In progress
-   (`wip/search-secreview2`).
+2. **A second security review** of what landed since the first (the `_inference` API, `semantic_text`,
+   the new retrievers, workflow-restricted keys, service tokens, OpenSearch Security's new
+   endpoints, ES|QL's new functions) landed in 7288684b9: `semantic_text` under field level
+   security (queries and the semantic highlighter, `copy_to` sources included), an inference key
+   given already sealed is sealed again (it was opened and sent to the client's `url`; watches
+   already refuse one, connector and Fleet secrets always seal), and chunking, the semantic
+   highlighter and `TOP_SNIPPETS` are linear in the text. Sealing binds the kind, not the
+   cluster: branches copy a cluster's state under a new id. Left, low: file service tokens are
+   node-wide (off unless the operator sets `path.conf`), a simplified `rrf`/`linear` reads the
+   mappings of every index it expands to (no data returned), the inference `timeout` has no upper
+   bound.
 3. **Vector search's cost and speed** (scale to zero meets HNSW): RAM loaded and idle, cold start
    to the first `knn` answer, indexing, latency and recall@10 (filtered, in `rrf`), store bytes,
    against Elasticsearch 9.5.5 and OpenSearch 3.9 on 1M × 384 dims; then fix where roll loses. In
@@ -271,9 +278,10 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
 5. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
    endpoints, creates them (OpenAI or any compatible URL, Cohere, Anthropic; the API key sent
    once, sealed, never shown back), tests them with a sample, deletes them, and opens a
-   `semantic_text` quickstart in the console. Left: `semantic_text` in the index browser's
-   mapping view, a roll secret as an endpoint's key, MCP tools (they follow the routes; the MCP
-   thread).
+   `semantic_text` quickstart in the console. The index browser's mapping view is a field table
+   (type, inference endpoint, vector dims, similarity and index type, analyzers, what isn't
+   indexed; the JSON a toggle away). Left: a roll secret as an endpoint's key (after #20), MCP
+   tools (they follow the routes; the MCP thread).
 6. **Semantic search** (the largest gap against Elasticsearch 9 and Elastic Cloud after machine
    learning). Landed (compatibility.md, "Inference" and "`semantic_text`"): the `_inference` API
    (`openai` with `url`, `cohere`, `anthropic`; keys sealed, `roll_net::PublicOnly`; `rate_limit`
@@ -294,9 +302,11 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    user of OpenSearch Security with a data-only role of its own, `OPENSEARCH_URL` with
    `<user>@<cluster>:<password>@`; never the cluster's password or security);
    rolld's `RollResources` glue goes on apps' `Resources::link` / `unlink` with whichever of #29
-   and #26 reaches main second. Secrets' link provider (#20) asks for `access: "data"` keys;
-On OpenSearch-flavor clusters the keys route mints an internal user (`{username,
-   password}` instead of `api_key`), agreed with the secrets thread. The fleet test with every product on passed on this branch
+   and #26 reaches main second. Secrets' link provider (#20) asks for `access: "data"` keys; on
+   OpenSearch-flavor clusters the keys route mints an internal user (`{username, password}`
+   instead of `api_key`; secrets' side is #51, checked live once both are in one rolld). A
+   flavor switch doesn't carry keys across (an API key isn't an OpenSearch user): links made
+   before one are reissued. The fleet test with every product on passed on this branch
    (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall 1.2 s in
    the rolling restart).
 8. **Dashboard polish**: the index browser and console are on the per-index routes, and a
