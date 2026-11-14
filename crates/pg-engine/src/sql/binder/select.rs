@@ -5442,6 +5442,9 @@ impl Binder<'_, '_> {
                 // (An immutable call of constants is evaluated while planning.)
                 && let Some(e) = match e {
                     e @ Expr::Const(..) => Some(e),
+                    // (A PL/pgSQL call `user_call` left: one that failed, whose error the
+                    // statement's planning raises, or one waiting for it.)
+                    Expr::Subquery(sub) if !b.unplanned && super::fold::proc_call(&sub).is_some() => Some(Expr::Subquery(sub)),
                     Expr::Subquery(sub)
                         if sub.func == Some('i')
                             && sub.params.iter().all(|p| matches!(p, Expr::Const(..))) =>

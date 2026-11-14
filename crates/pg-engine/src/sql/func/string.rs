@@ -581,14 +581,14 @@ fn ascii(a: &[Value], _: &FnCtx) -> Result<Value> {
 }
 fn chr(a: &[Value], _: &FnCtx) -> Result<Value> {
     let n = int_arg(&a[0]);
+    if n < 0 {
+        bail!(INVALID_PARAMETER_VALUE, "character number must be positive");
+    }
     if n == 0 {
         bail!(PROGRAM_LIMIT_EXCEEDED, "null character not permitted");
     }
     let enc = db_enc();
     if enc != crate::types::mbconv::UTF8 && n > 127 {
-        if n < 0 {
-            bail!(INVALID_PARAMETER_VALUE, "character number must be positive");
-        }
         if crate::types::mbconv::max_length(enc) > 1 || n > 255 {
             bail!(PROGRAM_LIMIT_EXCEEDED, "requested character too large for encoding: {n}");
         }

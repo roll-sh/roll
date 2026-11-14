@@ -1878,7 +1878,9 @@ pub fn parse_value_ex(s: &str, ty: &DataType, ctx: &FormatCtx, explicit: bool) -
         T::Jsonb => Value::Jsonb(Arc::new(parse_jsonb(s)?)),
         T::JsonPath => Value::Text(Arc::from(super::jsonpath::normalize(s)?)),
         T::Array(elem) => Value::Array(Arc::new(parse_array(s, elem, ctx)?)),
-        T::Regclass => Value::Oid(resolve_reg(s, ctx, |n, x| n.rel_oid(x))?),
+        T::Regclass => Value::Oid(resolve_reg(s, ctx, |n, x| {
+            n.rel_oid(x).map_err(|e| if e.code == code::UNDEFINED_TABLE { e.routine("regclassin") } else { e })
+        })?),
         T::Regtype => Value::Oid(resolve_reg(s, ctx, |n, x| n.type_oid(x))?),
         T::Regproc => Value::Oid(resolve_reg(s, ctx, |n, x| n.proc_oid(x))?),
         T::Regprocedure => Value::Oid(resolve_reg(s, ctx, |n, x| n.procedure_oid(x))?),
@@ -1943,9 +1945,11 @@ pub fn parse_value_ex(s: &str, ty: &DataType, ctx: &FormatCtx, explicit: bool) -
             if let Some(labels) = ctx.names.as_ref().and_then(|n| n.enum_labels(*oid))
                 && !labels.iter().any(|l| l == s)
             {
+                // (format_type_be: qualified when its schema isn't on the search path.)
+                let shown = ctx.names.as_ref().and_then(|n| n.type_name(*oid)).unwrap_or_else(|| name.to_string());
                 bail!(
                     INVALID_TEXT_REPRESENTATION,
-                    "invalid input value for enum {name}: \"{s}\""
+                    "invalid input value for enum {shown}: \"{s}\""
                 );
             }
             crate::sql::func::system::check_safe_enum(*oid, s, name)?;

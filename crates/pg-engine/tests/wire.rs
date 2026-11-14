@@ -4574,6 +4574,90 @@ fn protocol_cases() {
         c("sessauth_ps", |a| session(a, &[], &[query("set session authorization pc_r1"), query("reset session authorization"), query("set session authorization pc_su")])),
         c("sessauth_rollback", |a| session(a, &[], &[query("begin; set session authorization pc_r1; rollback"), query("begin; set local session authorization pc_r1"), query("commit")])),
         c("sessauth_fail", |a| session(a, &[], &[query("set role pc_r1; select 1/0"), query("set session authorization pc_r1; select 1/0"), query("select current_user, current_setting('is_superuser')")])),
+        // An immutable PL/pgSQL call over constants runs while the statement is planned
+        // (evaluate_function): its NOTICE before the rows, once; its error at the Bind, or
+        // before any row; once per plan of a named statement; not in a generic plan's
+        // parameters, nor when CREATE TABLE stores a CHECK.
+        c("plf_setup", |a| session(a, &[
+            "create or replace function pc_fi(int) returns int language plpgsql immutable as $$ begin raise notice 'fi %', $1; return 10 / $1; end $$",
+            "create or replace function pc_fs(int) returns int language plpgsql stable as $$ begin raise notice 'fs %', $1; return 10 / $1; end $$",
+            "create or replace function pc_fsql(int) returns int language sql immutable as $$ select pc_fi($1) + 1 $$",
+        ], &[])),
+        c("plf_simple", |a| session(a, &["create temp table pf3 as select generate_series(1, 3) a"], &[query("select pc_fi(1) from pf3")])),
+        c("plf_simple_empty", |a| session(a, &["create temp table pf0(a int)"], &[query("select pc_fi(0) from pf0"), query("select a from pf0 where a = pc_fi(0)")])),
+        c("plf_stable", |a| session(a, &["create temp table pf3 as select generate_series(1, 2) a"], &[query("select pc_fs(1) from pf3")])),
+        c("plf_case", |a| session(a, &["create temp table pf3 as select generate_series(1, 3) a"], &[query("select case when a > 5 then pc_fi(0) end from pf3")])),
+        c("plf_bind", |a| ext(a, &[], &[parse("s", "select pc_fi(0)", &[]), describe(b'S', "s"), bind("", "s", &[], NONE, &[]), execute("", 0)])),
+        c("plf_named_once", |a| session(a, &[], &[
+            [parse("s", "select pc_fi(6)", &[]), sync()].concat(),
+            [bind("", "s", &[], NONE, &[]), execute("", 0), sync()].concat(),
+            [bind("", "s", &[], NONE, &[]), execute("", 0), sync()].concat(),
+        ])),
+        c("plf_custom_then_generic", |a| session(a, &[], &[
+            [parse("s", "select pc_fi($1::int)", &[]), sync()].concat(),
+            [bind("", "s", &[], &[Some(b"5".as_slice())], &[]), execute("", 0), sync()].concat(),
+            [bind("", "s", &[], &[Some(b"5".as_slice())], &[]), execute("", 0), sync()].concat(),
+            [bind("", "s", &[], &[Some(b"5".as_slice())], &[]), execute("", 0), sync()].concat(),
+            [bind("", "s", &[], &[Some(b"5".as_slice())], &[]), execute("", 0), sync()].concat(),
+            [bind("", "s", &[], &[Some(b"5".as_slice())], &[]), execute("", 0), sync()].concat(),
+            [bind("", "s", &[], &[Some(b"5".as_slice())], &[]), execute("", 0), sync()].concat(),
+        ])),
+        c("plf_prepare", |a| session(a, &["prepare plf_p as select pc_fi(4)"], &[query("execute plf_p"), query("execute plf_p")])),
+        c("plf_sql_body", |a| session(a, &[], &[query("select pc_fsql(1)")])),
+        c("plf_from_error", |a| session(a, &["create temp table pf0(a int)"], &[query("select * from pf0, pc_fi(0)")])),
+        c("plf_check", |a| session(a, &[], &[query("create temp table pfc(a int check (a < pc_fi(2)))"), query("insert into pfc values (1), (2)")])),
+        c("plf_explain", |a| session(a, &[], &[query("explain (costs off, verbose) select pc_fi(2)")])),
+        // Parameters of type oids no type has: set operations, windows, columns of a
+        // sub-select, data-modifying statements (positions are the key's).
+        c("badtype_union", |a| ext(a, &[], &[parse("", "select $1 union select $1", &[999999])])),
+        c("badtype_union_all", |a| ext(a, &[], &[parse("", "select $1 union all select $2", &[999999, 999999])])),
+        c("badtype_union_mixed", |a| ext(a, &[], &[parse("", "select $1 union all select 1", &[999999])])),
+        c("badtype_union_order", |a| ext(a, &[], &[parse("", "select $1 as x union all select $1 order by x", &[999999])])),
+        c("badtype_window_order", |a| ext(a, &[], &[parse("", "select row_number() over (partition by $1)", &[999999])])),
+        c("badtype_window_lag", |a| ext(a, &[], &[parse("", "select lag($1) over ()", &[999999])])),
+        c("badtype_window_ntile", |a| ext(a, &[], &[parse("", "select ntile($1) over ()", &[999999])])),
+        c("badtype_subcol", |a| ext(a, &[], &[parse("", "select x from (select $1 as x) s", &[999999])])),
+        c("badtype_subcol_func", |a| ext(a, &[], &[parse("", "select count(x) from (select $1 as x) s", &[999999])])),
+        c("badtype_subcol_isnull", |a| ext(a, &[], &[parse("s", "select x is null from (select $1 as x) s", &[999999]), describe(b'S', "s"), bind("", "s", &[], &[None], &[]), execute("", 0)])),
+        c("badtype_insert", |a| ext(a, &["create temp table bpt(a int, b text)"], &[parse("", "insert into bpt(b) values ($1)", &[999999])])),
+        c("badtype_insert_returning", |a| ext(a, &["create temp table bpt(a int, b text)"], &[parse("", "insert into bpt(a) values (1) returning $1", &[999999])])),
+        c("badtype_update_isnull", |a| ext(a, &["create temp table bpt(a int, b text)"], &[parse("s", "update bpt set a = 1 where $1 is null", &[999999]), describe(b'S', "s"), bind("", "s", &[], &[None], &[]), execute("", 0)])),
+        c("badtype_merge_unused", |a| ext(a, &["create temp table bpt(a int, b text)"], &[parse("s", "merge into bpt t using (select $1 as x, 1 as a) s on t.a = s.a when matched then do nothing", &[999999]), describe(b'S', "s"), bind("", "s", &[], &[None], &[]), execute("", 0)])),
+        // Errors of operators, functions and casts carry PostgreSQL's routine (folded or
+        // not), and messages a probe found differing.
+        c("loc_int", |a| session(a, &["create temp table li(a int4, b int2, c int8)", "insert into li values (2147483647, 32767, 9223372036854775807)"], &[
+            query("select 2147483647 + 1"),
+            query("select a * 2 from li"),
+            query("select b - (-1)::int2 - 1::int2 from li"),
+            query("select c + 1::int4 from li"),
+            query("select a::int2 from li"),
+            query("select -(c - c - 9223372036854775807 - 1) from li"),
+            query("select 1::int8 / 0::int2"),
+            query("select mod(1, 0)"),
+        ])),
+        c("loc_float_numeric", |a| session(a, &[], &[
+            query("select sqrt(-1::float8)"),
+            query("select ln(0::float8)"),
+            query("select 1::float8 / 0"),
+            query("select 1e308::float8 * 10"),
+            query("select 1e30::float8::int4"),
+            query("select acos(2::float8)"),
+            query("select 1::numeric / 0"),
+            query("select sqrt(-1::numeric)"),
+            query("select 'nan'::numeric::int8"),
+        ])),
+        c("loc_bind", |a| ext(a, &[], &[parse("", "select 1::int2 + 32767::int2", &[]), bind("", "", &[], NONE, &[]), execute("", 0)])),
+        c("loc_misc", |a| session(a, &["create schema if not exists lms", "create type lms.e as enum ('a')", "create domain lms.pos as int check (value > 0)"], &[
+            query("select 'b'::lms.e"),
+            query("select chr(-1)"),
+            query("select '1'::jsonb::bool"),
+            query("select 0::lms.pos"),
+            query("select 1 + 'a'::text"),
+            query("drop table if exists lms_nope"),
+        ])),
+        // COPY: FREEZE refused once the COPY started; CopyFail's line.
+        c("copy_freeze_refused", |a| session(a, &["create temp table cpf(a int)"], &[query("copy cpf from stdin with (freeze)"), [msg(b'd', b"1\n"), msg(b'c', b"")].concat()])),
+        c("copy_fail_line", |a| session(a, &["create temp table cpf(a int)"], &[query("copy cpf from stdin"), [msg(b'd', b"1\n2\n3"), msg(b'f', &cstr("bye"))].concat()])),
     ];
     let file = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/protocol_cases.out");
     if let Ok(addr) = std::env::var("PROTOCOL_RECORD") {

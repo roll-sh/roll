@@ -334,6 +334,7 @@ fn begin(t: &Arc<Table>, ctx: &ExecCtx) -> Result<FileReader> {
             filter: None,
             file_size: None,
             program: o.program,
+            refused: None,
         },
         name: o.filename,
         src,

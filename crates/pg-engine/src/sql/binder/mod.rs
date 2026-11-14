@@ -77,6 +77,21 @@ pub struct BoundQuery {
     /// Its EXPLAIN total cost, found with the Gathers when a plan choice needs it
     /// (`Session::plan_cost`), with the plan it is of.
     pub cost: std::sync::OnceLock<(Arc<Plan>, f64)>,
+    /// What planning ran or left of its immutable PL/pgSQL calls over constants
+    /// (evaluate_function).
+    pub procs: Procs,
+}
+
+/// A statement's immutable PL/pgSQL calls over constants, which PostgreSQL's planner runs
+/// (evaluate_function): their NOTICEs and errors come while it is planned, once per plan.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Procs {
+    /// Some ran, and their values are constants of the plan: a plan made again (for other
+    /// values, from a kept template) would run them again.
+    pub folded: bool,
+    /// Some were left as calls, the statement being only analyzed (a Parse, a Describe:
+    /// `Binder::defer_procs`): planning it for an execution binds it again.
+    pub deferred: bool,
 }
 
 /// A statement after parse analysis (`Binder::analyze_statement`), its top query level not
@@ -107,6 +122,7 @@ pub struct Analyzed {
     replannable: bool,
     /// Where its SELECT's own level placed the WHERE (`Binder::keep_site`).
     site: Option<Arc<custom::WhereSite>>,
+    procs: Procs,
 }
 
 /// What `Analyzed::plan` plans.
@@ -167,6 +183,7 @@ impl Analyzed {
             param_domains: self.param_domains.clone(),
             gathers: Default::default(),
             cost: Default::default(),
+            procs: self.procs,
         })
     }
 
@@ -201,6 +218,7 @@ impl Analyzed {
             param_domains: self.param_domains,
             gathers: Default::default(),
             cost: Default::default(),
+            procs: self.procs,
         })
     }
 
@@ -791,6 +809,13 @@ pub struct Binder<'b, 'a> {
     /// Binding the arms of a CASE: a constant call that fails stays a call until the CASE
     /// knows which arms are reachable (eval_const_expressions never simplifies the others).
     pub(crate) defer_fold: bool,
+    /// The statement is only analyzed (a Parse, a Describe): immutable PL/pgSQL calls over
+    /// constants, which the planner would run, stay calls (`Procs::deferred`).
+    pub defer_procs: bool,
+    /// Binding the body of a SQL function the planner runs: it is planned again when it
+    /// runs, its PL/pgSQL calls are run then.
+    pub(crate) skip_procs: bool,
+    pub(crate) procs: Procs,
     /// Inside `bind_statement`: the constant expressions that failed to fold, with their
     /// errors. Each stays unfolded; the statement fails with one only if it is still in
     /// the plan once the statement is planned (`fold::first_error`): Postgres folds in
@@ -973,6 +998,9 @@ impl<'b, 'a> Binder<'b, 'a> {
             planned_in_analysis: 0,
             unplanned_subs: Default::default(),
             defer_fold: false,
+            defer_procs: false,
+            skip_procs: false,
+            procs: Procs::default(),
             fold_err: None,
             agg_refs: None,
             sql_fn_statement: false,
@@ -1458,6 +1486,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             rls: Default::default(),
             replannable: self.planned_in_analysis == start,
             site: None,
+            procs: self.procs,
         }
     }
 

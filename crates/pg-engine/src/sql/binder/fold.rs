@@ -38,8 +38,43 @@ fn foldable(e: &Expr) -> bool {
         }
         Expr::Cast(a, ..) => a.is_const() && e.is_immutable(),
         Expr::NullIf(a, b, d, _) => a.is_const() && b.is_const() && d.volatility == 'i',
+        // (A PL/pgSQL call over constants that failed when the binder ran it.)
+        Expr::Subquery(s) => proc_call(s).is_some(),
         _ => false,
     }
+}
+
+/// The PL/pgSQL function of a scalar call (`Binder::user_call`'s sub-select over a
+/// `PlCall`) that evaluate_function runs while planning once its arguments are constants:
+/// immutable, returning neither a set nor a record (nor a domain, whose constant would lose
+/// it).
+fn proc_fn(s: &Subquery) -> Option<&crate::catalog::Function> {
+    fn body(p: &Plan) -> Option<&crate::catalog::Function> {
+        match p {
+            Plan::PlCall { func, scan: false, .. } => Some(func),
+            Plan::Project { input, .. } | Plan::Limit { input, .. } => body(input),
+            _ => None,
+        }
+    }
+    s.call.as_ref()?;
+    let f = body(&s.plan)?;
+    (f.language == "plpgsql"
+        && f.volatility == 'i'
+        && !f.returns_set
+        && !f.procedure
+        && f.ret != crate::types::DataType::Record
+        && f.out_cols.len() <= 1
+        && f.ret_domain.is_none())
+    .then_some(f)
+}
+
+/// `proc_fn` of a call over constants only (a strict one's not NULL, which
+/// simplify_function makes NULL without a call): planning runs it.
+pub(crate) fn proc_call(s: &Subquery) -> Option<&crate::catalog::Function> {
+    let f = proc_fn(s)?;
+    (s.params.iter().all(Expr::is_const)
+        && !(f.strict && s.params.iter().any(|p| matches!(p, Expr::Const(v, _) if v.is_null()))))
+    .then_some(f)
 }
 
 struct Cx<'a, 'c> {
@@ -530,6 +565,8 @@ pub(crate) fn param_folds(p: &Plan) -> bool {
                 Expr::NullIf(a, b, d, _) => {
                     d.volatility == 'i' && tree(a, depth + 1, param) && tree(b, depth + 1, param)
                 }
+                // (A PL/pgSQL call evaluate_function runs.)
+                Expr::Subquery(s) => proc_fn(s).is_some() && s.params.iter().all(|a| tree(a, depth + 1, param)),
                 _ => false,
             }
     }
@@ -537,7 +574,7 @@ pub(crate) fn param_folds(p: &Plan) -> bool {
         let mut found = false;
         for e in exprs(p) {
             e.walk(&mut |x| {
-                if !found && matches!(x, Expr::Call(..) | Expr::Cast(..) | Expr::NullIf(..)) {
+                if !found && matches!(x, Expr::Call(..) | Expr::Cast(..) | Expr::NullIf(..) | Expr::Subquery(..)) {
                     let mut param = false;
                     found = tree(x, 0, &mut param) && param;
                 }

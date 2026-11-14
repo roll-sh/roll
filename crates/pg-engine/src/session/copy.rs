@@ -442,6 +442,8 @@ pub struct CopyIn {
     pub file_size: Option<i64>,
     /// The data comes from a program (COPY FROM PROGRAM).
     pub program: bool,
+    /// CopyFrom refuses it (FREEZE where it can't): once the COPY started.
+    pub refused: Option<Error>,
 }
 
 /// COPY FROM data read so far, a batch at a time (`Session::copy_in_run`).
@@ -592,26 +594,26 @@ impl Session {
             } else {
                 Some(rv.schemaname.as_str())
             };
+            // (CopyFrom's FREEZE checks: after the COPY started, CopyInResponse sent.)
+            let mut refused = None;
             let t = match cat.lookup(schema, &rv.relname, &self.state.search_path())? {
                 Some(Relation::Table(t)) => {
                     // CopyFrom refuses FREEZE before it asks a foreign table's wrapper.
                     if format.freeze && (t.partkey.is_some() || t.is_foreign()) {
-                        return Err(Error::new(
+                        refused = Some(Error::new(
                             code::FEATURE_NOT_SUPPORTED,
                             format!(
                                 "cannot perform COPY FREEZE on a {} table",
                                 if t.is_foreign() { "foreign" } else { "partitioned" }
                             ),
                         ));
-                    }
-                    // A foreign table's wrapper would take the rows.
-                    if let Some(e) = cat.fdw_routine_error(&t) {
+                    } else if let Some(e) = cat.fdw_routine_error(&t) {
+                        // A foreign table's wrapper would take the rows.
                         return Err(e);
-                    }
-                    if format.freeze
+                    } else if format.freeze
                         && !self.txn.as_ref().unwrap().borrow().storage_new_here(t.oid)
                     {
-                        return Err(Error::new(
+                        refused = Some(Error::new(
                             code::OBJECT_NOT_IN_PREREQUISITE_STATE,
                             "cannot perform COPY FREEZE because the table was not created or truncated in the current subtransaction",
                         ));
@@ -706,6 +708,7 @@ impl Session {
                 filter,
                 file_size: None,
                 program: false,
+                refused,
             };
             if s.filename.is_empty() {
                 return Ok(Outcome::CopyIn(cin));
@@ -1062,6 +1065,9 @@ impl Session {
         c: &CopyIn,
         read: &mut dyn FnMut() -> Result<Option<Vec<u8>>>,
     ) -> Result<QueryResult> {
+        if let Some(e) = &c.refused {
+            return Err(e.clone());
+        }
         // CopyFrom's CheckValidResultRel, before any row is read: a foreign table's
         // wrapper must take rows.
         if c.table.is_foreign() {
@@ -1317,7 +1323,17 @@ impl CopyReader<'_> {
         while !self.eof && !self.null_stop && !self.batch_full() {
             let before = self.st.rows.len();
             let mut notices = Vec::new();
-            let parsed = match (self.read)()? {
+            let chunk = (self.read)().map_err(|e| {
+                // (CopyFail: the line being read when it came, CopyGetData under
+                // CopyFromErrorCallback.)
+                if e.code == code::QUERY_CANCELED && e.context.is_none() {
+                    let line = self.st.phys_lines + self.pending.iter().filter(|b| **b == b'\n').count() + 1;
+                    e.context(format!("COPY {}, line {line}", self.c.table.name))
+                } else {
+                    e
+                }
+            })?;
+            let parsed = match chunk {
                 Some(chunk) => {
                     self.pending.extend_from_slice(&chunk);
                     parse_copy_data(

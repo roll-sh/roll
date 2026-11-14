@@ -124,7 +124,7 @@ fn compact(t: u8, b: &[u8]) -> String {
     match t {
         b'E' | b'N' => {
             let mut f = Vec::new();
-            for &k in b"SCMDHFLR" {
+            for &k in b"SCMDHPWFLR" {
                 if let Some(p) = b.split(|c| *c == 0).find(|p| p.first() == Some(&k)) {
                     f.push(format!("{}={}", k as char, str_at(&p[1..])));
                 }

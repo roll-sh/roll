@@ -671,8 +671,10 @@ impl Session {
                 lit: None,
             };
             self.infer_params = true;
+            self.defer_procs = true;
             let b = self.bound(&q, &stmt, &[]);
             self.infer_params = false;
+            self.defer_procs = false;
             p.param_types = match b {
                 Ok(b) => {
                     // Parse analysis locks the relations the statement names (as it will
