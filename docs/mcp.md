@@ -509,9 +509,9 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Pending tokens from the CLI and in admins' mail** (#25): `roll token list --pending`,
-   `roll token approve|deny <id>`, and a mail to admins when a person's token waits (GitHub mails
-   organization owners), through accounts' list of admins.
+1. **Admins hear when a person's token waits** (#25; GitHub mails organization owners): a mail
+   to admins through accounts' list of admins. (`roll token list --pending` and
+   `roll token approve|deny` are in.)
 2. **Docs an agent can search** (Supabase's `search_docs`): roll's docs (docs/*.md) served by
    rolld under a read route and searched by a `docs_search` tool, so an agent looks up how a
    product works instead of guessing.
@@ -541,7 +541,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: people's tokens past the policy wait for an admin (#25; GitHub's organization approval:
+Done lately: `roll token list --pending` and `roll token approve|deny <id>` (#25); people's tokens past the policy wait for an admin (#25; GitHub's organization approval:
 `approve_people`, 401 `pending_approval`, approve or deny on the access page, the person mailed,
 widening waits again); the ninth review's findings (people's mail in roll's words only: names as
 words, an approval's mail without its resource, a leak's without where, one approval mail per token

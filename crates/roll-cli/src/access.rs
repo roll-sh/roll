@@ -18,6 +18,7 @@ pub enum Token {
     /// List tokens and OAuth connections, newest first.
     ///   roll token list --product secrets --resource prj_x4k9…   (the ones made for it)
     ///   roll token list --workloads                               (workloads' tokens for minutes)
+    ///   roll token list --pending                                 (people's, waiting for an admin)
     #[command(alias = "ls")]
     List {
         /// Only tokens with a rule on this product by name.
@@ -29,6 +30,9 @@ pub enum Token {
         /// Workload tokens instead (a CI job's, for minutes; the latest 500).
         #[arg(long, conflicts_with_all = ["product", "resource"])]
         workloads: bool,
+        /// Only people's tokens waiting for an admin's approval (the policy's approve_people).
+        #[arg(long, conflicts_with = "workloads")]
+        pending: bool,
     },
     /// Show a token's rules, expiry and last use.
     Show { id: String },
@@ -37,6 +41,10 @@ pub enum Token {
     Tools { id: String },
     /// Revoke a token or connection: every request with it fails from now on.
     Revoke { id: String },
+    /// Let a person's pending token work (an admin's; the person is mailed).
+    Approve { id: String },
+    /// Refuse a person's pending token: it's revoked, and they're mailed.
+    Deny { id: String },
     /// A new secret for a token, with the same rules; the old one stops working at once.
     Rotate {
         id: String,
@@ -366,7 +374,13 @@ fn when(ms: &Value) -> String {
 }
 
 fn print_grant(g: &Value) {
-    let state = if !g["revoked_at"].is_null() { "revoked" } else { "active" };
+    let state = if !g["revoked_at"].is_null() {
+        "revoked"
+    } else if g["pending"] == true {
+        "waits for an admin"
+    } else {
+        "active"
+    };
     println!("{}  {}  ({}, {state})", s(&g["id"]), s(&g["name"]), s(&g["kind"]));
     if let Some(c) = g["client"].as_object() {
         println!("  client: {}", s(&c["name"]).as_str());
@@ -404,6 +418,18 @@ pub fn date(ms: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// An admin's decision on a person's pending token.
+async fn decide(api: &Api, json_out: bool, id: &str, approve: bool) -> anyhow::Result<()> {
+    let verb = if approve { "approve" } else { "deny" };
+    let g = api.post(&format!("/v1/access/tokens/{id}/{verb}"), json!({})).await?;
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&g)?);
+    } else {
+        println!("{} {}: {}", s(&g["id"]), s(&g["name"]), if approve { "approved, it works now" } else { "denied and revoked" });
+    }
+    Ok(())
+}
+
 pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> {
     match cmd {
         Token::Create(c) => {
@@ -418,7 +444,9 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
             println!("\n{}\n", s(&made["token"]));
             eprintln!("Copy it now: it isn't shown again. Use it as ROLL_TOKEN, or as Authorization: Bearer for the API and MCP.");
         }
-        Token::List { product, resource, workloads } => {
+        Token::Approve { id } => decide(api, json_out, &id, true).await?,
+        Token::Deny { id } => decide(api, json_out, &id, false).await?,
+        Token::List { product, resource, workloads, pending } => {
             let mut query: Vec<String> = Vec::new();
             if workloads {
                 query.push("kind=workload".into());
@@ -435,9 +463,9 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 println!("{}", serde_json::to_string_pretty(&list)?);
                 return Ok(());
             }
-            let list = list.as_array().cloned().unwrap_or_default();
+            let list: Vec<Value> = list.as_array().cloned().unwrap_or_default().into_iter().filter(|g| !pending || g["pending"] == true).collect();
             if list.is_empty() {
-                if path.contains('?') {
+                if path.contains('?') || pending {
                     println!("none");
                 } else {
                     println!("no tokens yet: roll token create <name> --preset read-only");
