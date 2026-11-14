@@ -530,22 +530,51 @@ impl LinkProvider for Nosql {
 /// Never the cluster's own password, which rotating would take from everyone else.
 struct Search(Api);
 
+const SEARCH_FIELDS: &[Field] = &[
+    live("url", "URL", false, "ELASTICSEARCH_URL"),
+    live("host", "Host", false, "ELASTICSEARCH_HOST"),
+    live("port", "Port", false, "ELASTICSEARCH_PORT"),
+    live("username", "Cluster name", false, "ELASTICSEARCH_USERNAME"),
+    issued("api_key", "API key (Authorization: ApiKey …)", true, "ELASTICSEARCH_API_KEY", "key"),
+    // OpenSearch's: a user of its own (`<user>@<cluster>`, which the node routes).
+    issued("user", "User (OpenSearch)", false, "OPENSEARCH_USERNAME", "key"),
+    issued("password", "Password (OpenSearch)", true, "OPENSEARCH_PASSWORD", "key"),
+];
+
+/// The same fields as an OpenSearch cluster's clients name them.
+const OPENSEARCH_FIELDS: &[Field] = &[
+    live("url", "URL", false, "OPENSEARCH_URL"),
+    live("host", "Host", false, "OPENSEARCH_HOST"),
+    live("port", "Port", false, "OPENSEARCH_PORT"),
+    live("username", "Cluster name", false, "OPENSEARCH_CLUSTER"),
+    issued("api_key", "API key (Elasticsearch only)", true, "ELASTICSEARCH_API_KEY", "key"),
+    issued("user", "User", false, "OPENSEARCH_USERNAME", "key"),
+    issued("password", "Password", true, "OPENSEARCH_PASSWORD", "key"),
+];
+
+impl Search {
+    /// The cluster's flavor (`elasticsearch`, `opensearch`), when roll search says.
+    fn flavor(&self, r#ref: &str) -> Option<String> {
+        self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(r#ref)), None).ok()?["flavor"].as_str().map(String::from)
+    }
+}
+
 impl LinkProvider for Search {
     fn kind(&self) -> &str {
         "search"
     }
     fn fields(&self) -> &[Field] {
-        const F: &[Field] = &[
-            live("url", "URL", false, "ELASTICSEARCH_URL"),
-            live("host", "Host", false, "ELASTICSEARCH_HOST"),
-            live("port", "Port", false, "ELASTICSEARCH_PORT"),
-            live("username", "Cluster name", false, "ELASTICSEARCH_USERNAME"),
-            issued("api_key", "API key (Authorization: ApiKey …)", true, "ELASTICSEARCH_API_KEY", "key"),
-            // OpenSearch's: a user of its own (`<user>@<cluster>`, which the node routes).
-            issued("user", "User (OpenSearch)", false, "OPENSEARCH_USERNAME", "key"),
-            issued("password", "Password (OpenSearch)", true, "OPENSEARCH_PASSWORD", "key"),
-        ];
-        F
+        SEARCH_FIELDS
+    }
+    /// An OpenSearch cluster's fields are named as its clients read them (`OPENSEARCH_URL`).
+    fn fields_for(&self, r#ref: &str) -> Vec<Field> {
+        if self.flavor(r#ref).as_deref() == Some("opensearch") { OPENSEARCH_FIELDS.to_vec() } else { SEARCH_FIELDS.to_vec() }
+    }
+    fn suggested_for(&self, r#ref: &str) -> Vec<(&'static str, Mode)> {
+        match self.flavor(r#ref).as_deref() {
+            Some("opensearch") => vec![("url", Mode::Live), ("user", Mode::Managed), ("password", Mode::Managed)],
+            _ => self.suggested().to_vec(),
+        }
     }
     fn suggested(&self) -> &[(&'static str, Mode)] {
         &[("url", Mode::Live), ("api_key", Mode::Managed)]

@@ -105,6 +105,17 @@ pub trait LinkProvider: Send + Sync {
     fn suggested(&self) -> &[(&'static str, Mode)] {
         &[]
     }
+    /// The fields as offered for one resource: suggested key names can depend on it (a search
+    /// cluster's flavor names `OPENSEARCH_URL` rather than `ELASTICSEARCH_URL`).
+    fn fields_for(&self, r#ref: &str) -> Vec<Field> {
+        let _ = r#ref;
+        self.fields().to_vec()
+    }
+    /// [`LinkProvider::suggested`] for one resource.
+    fn suggested_for(&self, r#ref: &str) -> Vec<(&'static str, Mode)> {
+        let _ = r#ref;
+        self.suggested().to_vec()
+    }
     /// A resource's display name, if the product knows it.
     fn name(&self, r#ref: &str) -> Option<String> {
         let _ = r#ref;
@@ -221,7 +232,7 @@ impl crate::Secrets {
             .filter(|r| members.contains(&(r.kind.as_str().to_string(), r.r#ref.clone())))
             .filter_map(|r| {
                 let provider = self.links.0.get(r.kind.as_str())?;
-                Some(Target { kind: r.kind.as_str().into(), name: provider.name(&r.r#ref).unwrap_or_else(|| r.r#ref.clone()), r#ref: r.r#ref, fields: provider.fields().to_vec() })
+                Some(Target { kind: r.kind.as_str().into(), name: provider.name(&r.r#ref).unwrap_or_else(|| r.r#ref.clone()), fields: provider.fields_for(&r.r#ref), r#ref: r.r#ref })
             })
             .collect();
         if let Some(provider) = self.links.0.get(crate::rotators::KIND) {
