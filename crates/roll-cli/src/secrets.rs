@@ -644,8 +644,9 @@ pub struct Run {
     pub watch: bool,
     #[arg(long, default_value_t = 5, requires = "watch")]
     pub interval: u64,
-    /// Mask values in what the command prints even on a terminal (by default only output that
-    /// isn't one, a log or a file, is masked).
+    /// Mask values in both of the command's streams, wherever they go (also `ROLL_MASK=1`, for a
+    /// pod or a unit). By default: stderr when it isn't a terminal, and stdout only in CI and never
+    /// into a file, since stdout is often data (`pg_dump > dump.sql`).
     #[arg(long, conflicts_with = "no_mask")]
     pub mask: bool,
     /// Never mask values in what the command prints.

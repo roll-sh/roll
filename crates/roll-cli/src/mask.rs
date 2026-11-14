@@ -52,14 +52,15 @@ fn patterns<'a>(values: impl IntoIterator<Item = &'a str>) -> Vec<Vec<u8>> {
         // in a JSON key file would be masked wherever it's printed).
         if v.contains('\n') {
             v.lines().map(str::trim).filter(|l| !l.contains(char::is_whitespace)).for_each(&mut add);
-            // A JSON value (a cloud key file): its secret fields, and their lines (the private key).
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(v) {
-                let mut strings = vec![];
-                secret_fields(&json, false, &mut strings);
-                for s in strings {
-                    add(s);
-                    s.lines().map(str::trim).filter(|l| !l.contains(char::is_whitespace)).for_each(&mut add);
-                }
+        }
+        // A JSON value (a cloud key file, minified or not): its secret fields, and their lines
+        // (the private key's, once its `\n`s are read).
+        if v.trim_start().starts_with(['{', '[']) && let Ok(json) = serde_json::from_str::<serde_json::Value>(v) {
+            let mut strings = vec![];
+            secret_fields(&json, false, &mut strings);
+            for s in strings {
+                add(s);
+                s.lines().map(str::trim).filter(|l| !l.contains(char::is_whitespace)).for_each(&mut add);
             }
         }
         let json = serde_json::to_string(v).expect("a string");
@@ -218,21 +219,21 @@ pub struct Streams {
 }
 
 impl Streams {
-    /// `--no-mask`: neither. `--mask`: both. In CI (`CI` set, as every CI system does) both,
-    /// whatever they are: its logs are files (Jenkins) or terminals (Buildkite's PTY), never a
-    /// person's screen. Otherwise stderr when it isn't a terminal (diagnostics, never data), and
-    /// stdout when roll has no controlling terminal (a container, a systemd unit, a pod: its stdout
-    /// is a log) unless it's a file. In a person's shell, `| jq` and `> dump.sql` get the bytes as
-    /// they are.
+    /// `--no-mask`: neither. `--mask` (or `ROLL_MASK=1`, for a pod's or a unit's environment):
+    /// both. Otherwise stderr when it isn't a terminal, or in CI (`CI` set) where a PTY is a log
+    /// too: it's diagnostics, never data. stdout is data as often as a log (`pg_dump > dump.sql`,
+    /// `| gzip`, over ssh): it's masked only in CI, and never into a file, so nothing written as data
+    /// is ever changed unasked.
     pub fn choose(force: bool, off: bool) -> Streams {
         if off {
-            Streams { stdout: false, stderr: false }
-        } else if force || ci() {
-            Streams { stdout: true, stderr: true }
-        } else {
-            let stdout = std::io::stdout();
-            Streams { stdout: !stdout.is_terminal() && !regular_file(&stdout) && !controlling_terminal(), stderr: !std::io::stderr().is_terminal() }
+            return Streams { stdout: false, stderr: false };
         }
+        if force || std::env::var("ROLL_MASK").is_ok_and(|v| v == "1" || v == "true") {
+            return Streams { stdout: true, stderr: true };
+        }
+        let ci = ci();
+        let stdout = std::io::stdout();
+        Streams { stdout: ci && !regular_file(&stdout), stderr: ci || !std::io::stderr().is_terminal() }
     }
 
     pub fn any(self) -> bool {
@@ -242,11 +243,6 @@ impl Streams {
 
 fn ci() -> bool {
     std::env::var("CI").is_ok_and(|v| !v.is_empty() && v != "false" && v != "0")
-}
-
-/// Whether roll runs with a controlling terminal (a person's shell); a daemon or container has none.
-fn controlling_terminal() -> bool {
-    std::fs::File::open("/dev/tty").is_ok()
 }
 
 /// Whether `f` is a regular file (output redirected to one is data, not a log).
@@ -412,8 +408,9 @@ mod tests {
         // A line of structure in a multi-line value isn't a value: printed alone, it stays.
         let key_file = "{\n  \"type\": \"service_account\",\n  \"key\": \"abcdefgh12345678\"\n}";
         assert_eq!(masked(&[key_file], "  \"type\": \"service_account\",\n"), "  \"type\": \"service_account\",\n");
-        // Its string fields are values of their own (a cloud key file's key, printed alone).
+        // Its string fields are values of their own (a cloud key file's key, printed alone), minified too.
         assert_eq!(masked(&[key_file], "key=abcdefgh12345678"), "key=<concealed by roll>");
+        assert_eq!(masked(&[r#"{"type":"service_account","private_key":"zyxwvuts98765432"}"#], "pk zyxwvuts98765432"), "pk <concealed by roll>");
         assert_eq!(masked(&["p@ss w/rd\"x"], r#"{"pw":"p@ss w/rd\"x"} ?pw=p%40ss%20w%2Frd%22x"#), r#"{"pw":"<concealed by roll>"} ?pw=<concealed by roll>"#);
         assert!(Masker::new(["short", "true"]).is_none());
     }
