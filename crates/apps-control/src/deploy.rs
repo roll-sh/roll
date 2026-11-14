@@ -1156,12 +1156,26 @@ impl Apps {
     /// environments' active deployments, resume its queued deploys.
     pub async fn resume_service(self: &Arc<Self>, service: &str) {
         let known: Vec<String> = self.lives().iter().filter(|l| l.service == service).flat_map(|l| l.instances().into_iter().map(|i| i.name.clone())).collect();
+        // The live deployments' instances still running (the previous owner died, they didn't)
+        // stay, for `EnvLive::adopt` to keep; the rest (jobs, older deployments') go.
+        let sid = service.to_string();
+        let live_prefixes: Vec<String> = self
+            .db(move |s| s.environments(&sid))
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| e.active.map(|a| crate::live::instance_prefix(service, &e.name, &a)))
+            .collect();
         for name in self.deps.runtime.list(Some(service)).await {
             // A known instance's network sandbox (`<instance>-net`) and waker (`-wake`) are its own.
             let owner = name.strip_suffix("-net").or_else(|| name.strip_suffix("-wake")).unwrap_or(&name).to_string();
-            if !known.contains(&name) && !known.contains(&owner) {
-                self.deps.runtime.remove(&name).await;
+            if known.contains(&name) || known.contains(&owner) {
+                continue;
             }
+            if live_prefixes.iter().any(|p| owner.strip_prefix(p.as_str()).is_some_and(|n| n.parse::<u64>().is_ok())) && self.deps.runtime.running(&owner).await {
+                continue;
+            }
+            self.deps.runtime.remove(&name).await;
         }
         // Jobs an earlier process ran had their containers removed just above.
         let sid = service.to_string();

@@ -691,10 +691,14 @@ The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`,
   service's requests to the old owner, which sent them back, until the hop limit answered 508;
   now a forward that would go straight back to the node that sent it asks the backend instead of
   the node's memory (`Cluster::dispatch`). A node that takes a
-  service over starts from the store: it marks instances the previous owner had as unknown and
-  stops the Fargate tasks still running as the service's (`startedBy roll-apps-<service>`);
-  the next request starts a fresh one. (Adopting them instead, after checking their deployment,
-  would save that cold start; it isn't built.) Deploys in flight on a lost
+  service over starts from the store, and keeps what the previous owner left running of each
+  environment's live deployment (its instances' names say their deployment; one that answers is
+  taken as running, `EnvLive::adopt` with `Runtime::address`, the instance numbers after it), so
+  a node's death or a rolld restart costs visitors no cold start (`a_takeover_keeps_the_instances_
+  the_dead_owner_ran`, the nodes on one runtime). Anything else of the service's (older
+  deployments, jobs, one that doesn't answer) is removed. Docker answers `address` (a restart on
+  one host); Fargate doesn't yet for tasks another process started (`found`), so there a takeover
+  still stops them and starts fresh ("Next"). Deploys in flight on a lost
   node fail and are retried once by the new owner (builds are idempotent: same revision, same
   image tag).
 - Every catalog write that belongs to a service is a `code_sql` write closure; the switch of an
@@ -1530,11 +1534,10 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **A takeover adopts the old owner's running instances** (what "On the fleet" says isn't built):
-   the node that takes a service over finds its instances still running on the shared runtime
-   (Fargate's tasks `startedBy roll-apps-<service>`, checked against the live deployment) and
-   keeps them instead of stopping them for a cold start, so a node's death costs visitors
-   nothing; tested in the cluster harness with one fake runtime shared by the nodes.
+1. **Fargate keeps a dead owner's tasks too**: `running` and `address` for the tasks
+   `list` finds from another process (`found`: describe the task, RUNNING, its private address),
+   and `stop`/`suspend` on them, so a fleet takeover adopts instead of a cold start; checked on
+   the first AWS run (the fake covers the rest).
 2. **Crashed workers beyond the target go**: a worker whose backlog target fell while some of its
    instances were crashed keeps their records forever (an independent review): removed once the
    target is met, their exit kept in the crash list.

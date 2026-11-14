@@ -36,6 +36,8 @@ struct FakeInstance {
     exited: watch::Sender<Option<i32>>,
     /// Stopped: its requests in flight fail, as a killed process's do.
     killed: tokio_util::sync::CancellationToken,
+    /// Where it answers while running.
+    addr: Option<SocketAddr>,
 }
 
 #[derive(Default)]
@@ -251,7 +253,7 @@ impl Runtime for Fake {
         self.counts.creates.fetch_add(1, Ordering::SeqCst);
         let mut m = self.instances.lock();
         anyhow::ensure!(!m.contains_key(&spec.name), "{} exists", spec.name);
-        m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, exited: watch::channel(None).0, killed: Default::default() });
+        m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, addr: None, exited: watch::channel(None).0, killed: Default::default() });
         Ok(())
     }
 
@@ -296,6 +298,7 @@ impl Runtime for Fake {
         let mut m = self.instances.lock();
         let i = m.get_mut(name).expect("exists");
         i.state = FakeState::Running;
+        i.addr = addr;
         i.exited.send_replace(None);
         Ok(addr)
     }
@@ -405,6 +408,12 @@ impl Runtime for Fake {
 
     async fn running(&self, name: &str) -> bool {
         matches!(self.state(name), Some(FakeState::Running | FakeState::Paused))
+    }
+
+    async fn address(&self, name: &str) -> Option<SocketAddr> {
+        let m = self.instances.lock();
+        let i = m.get(name)?;
+        (i.state == FakeState::Running).then_some(i.addr).flatten()
     }
 
     async fn exited(&self, name: &str) -> Option<super::Exit> {

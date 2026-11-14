@@ -44,16 +44,22 @@ struct Fleet {
     ws: Arc<roll_workspace::Workspace>,
     db: code_sql::Db,
     members: roll_cluster::MemoryStore,
+    /// One runtime for every node (Fargate, one host's Docker): what a dead node ran keeps running.
+    shared: Option<Arc<Fake>>,
     _dir: tempfile::TempDir,
 }
 
 async fn fleet(n: usize) -> Fleet {
+    fleet_on(n, None).await
+}
+
+async fn fleet_on(n: usize, shared: Option<Arc<Fake>>) -> Fleet {
     let dir = tempfile::tempdir().unwrap();
     let ws = Arc::new(roll_workspace::Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
     let project = ws.create("", "acme", "", None).unwrap().id;
     let db = code_sql::Db::open_sqlite(&dir.path().join("apps.db"), code_sql::SqliteOptions { readers: 2, cache_kib: 1024 }).unwrap();
     let members = roll_cluster::MemoryStore::new();
-    let mut f = Fleet { nodes: Vec::new(), project, ws, db, members, _dir: dir };
+    let mut f = Fleet { nodes: Vec::new(), project, ws, db, members, shared, _dir: dir };
     for i in 0..n {
         f.join(&format!("n{i}")).await;
     }
@@ -74,7 +80,7 @@ impl Fleet {
         cfg.live.probe_every = Duration::from_millis(2);
         cfg.live.drain = Duration::from_millis(50);
         cfg.allow_private = true;
-        let fake = Fake::new();
+        let fake = self.shared.clone().unwrap_or_default();
         let deps = Deps {
             runtime: fake.clone(),
             builder: fake.clone(),
@@ -477,4 +483,44 @@ async fn call_with(r: &axum::Router, path: &str, headers: &[(&str, &str)]) -> (S
     let resp = r.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
     let status = resp.status();
     (status, serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+}
+
+/// On a runtime the nodes share (Fargate, one host's Docker), the node that takes a dead owner's
+/// service over keeps its instance running: the next visitor gets the same instance, nothing
+/// made or started again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_takeover_keeps_the_instances_the_dead_owner_ran() {
+    let shared = Fake::new();
+    let mut f = fleet_on(2, Some(shared.clone())).await;
+    let (id, h) = f.image_service(&f.nodes[0], "web").await;
+    let visit = |n: &Node| {
+        let (public, h) = (n.public.clone(), h.clone());
+        async move {
+            let resp = public.oneshot(Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap()).await.unwrap();
+            (resp.status(), serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+        }
+    };
+    let (st, before) = visit(&f.nodes[0]).await;
+    assert_eq!(st, StatusCode::OK, "{before}");
+    let key = apps_control::lease_key(&id);
+    let owner = f.nodes.iter().position(|n| n.apps.deps.cluster.owns(&key)).unwrap();
+    let dead = f.nodes.remove(owner);
+    dead.server.abort();
+    dead.apps.deps.cluster.fault_kill();
+    // Its loops stop too: a dead process tends nothing (here it would stop what it ran).
+    dead.apps.shutdown().await;
+    let (creates, starts) = (Fake::count(&shared.counts.creates), Fake::count(&shared.counts.starts));
+    let left = &f.nodes[0];
+    let mut after = Value::Null;
+    for _ in 0..300 {
+        let (st, body) = visit(left).await;
+        if st == StatusCode::OK && left.apps.deps.cluster.owns(&key) {
+            after = body;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(after["instance"], before["instance"], "the same instance answers: {after}");
+    assert_eq!((Fake::count(&shared.counts.creates), Fake::count(&shared.counts.starts)), (creates, starts), "nothing made or started again: {:?}", shared.instances(&id));
+    drop(dead);
 }

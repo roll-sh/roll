@@ -601,6 +601,14 @@ impl Runtime for Docker {
         Some(Usage { cpu_ns: usec * 1000, memory_bytes: mem })
     }
 
+    async fn address(&self, name: &str) -> Option<SocketAddr> {
+        if !self.running(name).await {
+            return None;
+        }
+        let (_, port) = self.id_and_port(name).await.ok()?;
+        port.map(|p| SocketAddr::from(([127, 0, 0, 1], p)))
+    }
+
     async fn list(&self, service: Option<&str>) -> Vec<String> {
         let filter = match service {
             Some(s) => format!("label={LABEL}={s}"),

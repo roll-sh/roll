@@ -18,6 +18,14 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+/// The names of a deployment's instances in an environment, but their number:
+/// `roll-apps-<service>-<env>-<deployment, 6>-`.
+pub fn instance_prefix(service: &str, env: &str, deployment: &str) -> String {
+    let short = deployment.strip_prefix("dep_").unwrap_or(deployment);
+    let svc = service.strip_prefix("svc_").unwrap_or(service);
+    format!("roll-apps-{svc}-{env}-{}-", &short[..short.len().min(6)])
+}
+
 /// How far back crashes count toward a crash loop.
 const CRASH_WINDOW: Duration = Duration::from_secs(600);
 
@@ -498,9 +506,7 @@ impl EnvLive {
 
     fn name_for(&self, tpl: &Template) -> String {
         let n = self.seq.fetch_add(1, Ordering::SeqCst);
-        let short = tpl.deployment.strip_prefix("dep_").unwrap_or(&tpl.deployment);
-        let svc = self.service.strip_prefix("svc_").unwrap_or(&self.service);
-        format!("roll-apps-{svc}-{}-{}-{n}", self.env, &short[..short.len().min(6)])
+        format!("{}{n}", instance_prefix(&self.service, &self.env, &tpl.deployment))
     }
 
     async fn make(&self, tpl: &Template) -> anyhow::Result<Arc<Inst>> {
@@ -1258,13 +1264,51 @@ impl EnvLive {
             return;
         }
         *self.template.lock() = Some(tpl.clone());
-        if tpl.run.kind == RunType::Web
-            && tpl.site.is_none()
-            && self.insts.lock().is_empty()
+        if tpl.site.is_some() || !self.insts.lock().is_empty() {
+            return;
+        }
+        // The live deployment's instances the previous owner ran, still running on the shared
+        // runtime (a node died, its containers or tasks didn't): kept, so its death costs
+        // visitors no cold start. One that doesn't answer is left for the reaper's sweep.
+        let kept = self.keep_running(&tpl).await;
+        if kept == 0
+            && tpl.run.kind == RunType::Web
             && let Ok(i) = self.make(&tpl).await
         {
             self.insts.lock().push(i);
         }
+    }
+
+    /// [`Self::adopt`]'s instances still running: how many it kept.
+    async fn keep_running(&self, tpl: &Template) -> usize {
+        let prefix = instance_prefix(&self.service, &self.env, &tpl.deployment);
+        let mut kept = 0;
+        for name in self.runtime.list(Some(&self.service)).await {
+            let Some(n) = name.strip_prefix(&prefix).and_then(|n| n.parse::<u64>().ok()) else { continue };
+            if !self.runtime.running(&name).await {
+                continue;
+            }
+            let addr = self.runtime.address(&name).await;
+            let up = match (tpl.run.kind, addr) {
+                (RunType::Web, Some(a)) => self.answers(a, None, tpl.run.h2c).await,
+                (RunType::Web, None) => false,
+                _ => true,
+            };
+            if !up {
+                continue;
+            }
+            let i = Inst::new(name.clone(), tpl.deployment.clone());
+            *i.phase.lock() = Phase::Running(addr);
+            *i.started_at.lock() = Some(now_ms());
+            self.insts.lock().push(i);
+            // New names after the ones kept.
+            self.seq.fetch_max(n + 1, Ordering::SeqCst);
+            kept += 1;
+        }
+        if kept > 0 {
+            self.log.stream(Stream::System).line(format!("kept {kept} instance{} the previous owner ran", if kept == 1 { "" } else { "s" }));
+        }
+        kept
     }
 
     pub fn set_capped(&self, on: bool) {
