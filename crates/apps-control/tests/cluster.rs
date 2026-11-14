@@ -22,6 +22,8 @@ use tower::ServiceExt;
 const SECRET: &[u8] = b"0123456789abcdef0123456789abcdef";
 
 struct Node {
+    /// Its internal API's address (`127.0.0.1:<port>`).
+    addr: String,
     apps: Arc<Apps>,
     api: axum::Router,
     public: axum::Router,
@@ -63,7 +65,8 @@ impl Fleet {
     async fn join(&mut self, id: &str) {
         let (ws, db, members) = (self.ws.clone(), self.db.clone(), self.members.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
+        let addr = listener.local_addr().unwrap().to_string();
+        let url = format!("http://{addr}");
         let cluster = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::new(members)), roll_cluster::ClusterConfig::for_tests(id, url, SECRET.to_vec())).unwrap();
         let home = tempfile::tempdir().unwrap();
         let mut cfg = AppsConfig::new(home.path().to_path_buf());
@@ -80,7 +83,8 @@ impl Fleet {
             resources: Arc::new(NoResources),
             resolver: Arc::new(StaticDns::default()),
             tls: Arc::new(NoTls),
-            objects: None,
+            // One object store for every node (a site's files, logs): what a takeover reads.
+            objects: Some(pg_storage::Objects::new(&pg_storage::StorageConfig::Local(self._dir.path().join("objects"))).unwrap()),
             cluster: cluster.clone(),
             workspace: Some(ws.clone()),
         };
@@ -92,7 +96,7 @@ impl Fleet {
             let _ = axum::serve(listener, internal.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
         })
         .abort_handle();
-        self.nodes.push(Node { public: apps_control::public::router(apps.clone()), api, apps, fake, _home: home, server });
+        self.nodes.push(Node { addr, public: apps_control::public::router(apps.clone()), api, apps, fake, _home: home, server });
     }
 }
 
@@ -115,6 +119,29 @@ impl Fleet {
         let key = apps_control::lease_key(service);
         let owner = self.nodes.iter().position(|n| n.apps.deps.cluster.owns(&key)).expect("an owner");
         (&self.nodes[owner], &self.nodes[(owner + 1) % self.nodes.len()])
+    }
+
+    /// A static site from an upload (the fake's built files), deployed (asked through `via`):
+    /// its id and hostname.
+    async fn static_site(&self, via: &Node) -> (String, String) {
+        let (_, svc) = call(&via.api, "POST", "/v1/apps/services", Some(json!({ "project": self.project, "name": "site", "source": {"kind": "upload"} }))).await;
+        let site = svc["id"].as_str().unwrap().to_string();
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::write(tree.path().join("index.html"), "<h1>hi</h1>").unwrap();
+        let mut bundle = Vec::new();
+        roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+        let req = Request::post(format!("/v1/apps/services/{site}/environments/production/deploys")).header("content-type", "application/gzip").body(Body::from(bundle)).unwrap();
+        let d: Value = serde_json::from_slice(&via.api.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let dep = d["id"].as_str().unwrap().to_string();
+        for _ in 0..1000 {
+            let (_, d) = call(&via.api, "GET", &format!("/v1/apps/services/{site}/environments/production/deploys/{dep}"), None).await;
+            if d["status"] == "active" {
+                let (_, e) = call(&via.api, "GET", &format!("/v1/apps/services/{site}/environments/production"), None).await;
+                return (site, host(&e["url"]));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the site didn't deploy");
     }
 
     /// An image service, deployed (asked through `via`).
@@ -166,26 +193,7 @@ async fn a_sites_rewrite_reaches_a_service_another_node_owns() {
     let via = &f.nodes[0];
     // The site: an upload the fake builds into a static site whose `_redirects` sends
     // `/api/*` to `service:api/v1/:splat`.
-    let (_, svc) = call(&via.api, "POST", "/v1/apps/services", Some(json!({ "project": f.project, "name": "site", "source": {"kind": "upload"} }))).await;
-    let site = svc["id"].as_str().unwrap().to_string();
-    let tree = tempfile::tempdir().unwrap();
-    std::fs::write(tree.path().join("index.html"), "<h1>hi</h1>").unwrap();
-    let mut bundle = Vec::new();
-    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
-    let req = Request::post(format!("/v1/apps/services/{site}/environments/production/deploys")).header("content-type", "application/gzip").body(Body::from(bundle)).unwrap();
-    let d: Value = serde_json::from_slice(&via.api.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
-    let dep = d["id"].as_str().unwrap().to_string();
-    let mut h = String::new();
-    for _ in 0..1000 {
-        let (_, d) = call(&via.api, "GET", &format!("/v1/apps/services/{site}/environments/production/deploys/{dep}"), None).await;
-        if d["status"] == "active" {
-            let (_, e) = call(&via.api, "GET", &format!("/v1/apps/services/{site}/environments/production"), None).await;
-            h = host(&e["url"]);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(!h.is_empty(), "the site didn't deploy");
+    let (site, h) = f.static_site(via).await;
     // The api on the node that doesn't own the site (made again until it is).
     let (site_owner, _) = f.owner_and_other(&site);
     let site_owner = site_owner.apps.deps.cluster.node_id().to_string();
@@ -333,4 +341,59 @@ async fn a_joining_node_takes_services_with_no_request_failing() {
     }
     assert!(moved, "the new node took at least one service");
     assert!(failed.is_empty(), "requests failed during the handoff: {failed:?}");
+}
+
+/// A static site whose owner dies is served by the node that takes it over: its files' tar
+/// from object storage, nothing built or run there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_static_sites_files_answer_on_the_node_that_takes_it_over() {
+    let mut f = fleet(2).await;
+    let (site, h) = f.static_site(&f.nodes[0]).await;
+    let key = apps_control::lease_key(&site);
+    let owner = f.nodes.iter().position(|n| n.apps.deps.cluster.owns(&key)).unwrap();
+    let dead = f.nodes.remove(owner);
+    dead.server.abort();
+    dead.apps.deps.cluster.fault_kill();
+    let left = &f.nodes[0];
+    let builds = apps_control::runtime::fake::Fake::count(&left.fake.counts.builds);
+    let mut page = None;
+    for _ in 0..300 {
+        let req = Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap();
+        let resp = left.public.clone().oneshot(req).await.unwrap();
+        if resp.status() == StatusCode::OK {
+            page = Some(String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(page.as_deref(), Some("<!doctype html><title>fake site</title>"));
+    assert!(left.apps.deps.cluster.owns(&key));
+    assert_eq!(apps_control::runtime::fake::Fake::count(&left.fake.counts.builds), builds, "nothing built again");
+    assert!(left.fake.instances(&site).is_empty(), "nothing runs: its files answer");
+    drop(dead);
+}
+
+/// A tunnel (`roll apps proxy`: a WebSocket carrying one TCP connection) opened at a node that
+/// doesn't own the service reaches the owner's instance: the upgrade is forwarded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tunnel_through_a_node_that_doesnt_own_the_service_reaches_its_port() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let f = fleet(2).await;
+    let (id, _) = f.image_service(&f.nodes[0], "web").await;
+    let (owner, other) = f.owner_and_other(&id);
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}/v1/apps/services/{id}/environments/production/tunnel", other.addr)).await.unwrap();
+    ws.send(Message::Binary(b"GET /through HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".to_vec().into())).await.unwrap();
+    let mut got = Vec::new();
+    while let Some(Ok(m)) = ws.next().await {
+        match m {
+            Message::Binary(b) if b.is_empty() => break,
+            Message::Binary(b) => got.extend_from_slice(&b),
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    let text = String::from_utf8_lossy(&got);
+    assert!(text.starts_with("HTTP/1.1 200") && text.contains(r#""path":"/through""#), "{text}");
+    assert!(owner.fake.instances(&id).iter().any(|(n, ..)| text.contains(n.as_str())), "the owner's instance answered: {text}");
 }
