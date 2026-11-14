@@ -333,7 +333,7 @@ impl roll_mcp::ToolSet for CodeTools {
                     t["annotations"]["destructiveHint"] = Value::Bool(true);
                 }
                 if let Some(props) = t["inputSchema"]["properties"].as_object_mut() {
-                    props.insert("approval".into(), serde_json::json!({ "type": "string", "description": "An approval id (apr_…) from an earlier call that needed the user's approval" }));
+                    props.insert("approval".into(), serde_json::json!({ "type": "string", "description": "apr_… from an approval_pending answer: waits, then runs" }));
                 }
                 t
             })
