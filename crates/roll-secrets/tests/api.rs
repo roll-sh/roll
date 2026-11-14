@@ -1927,6 +1927,13 @@ async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_ou
     let stored: String = api.db.read(|c| c.query_row("SELECT dek FROM projects WHERE project_id = ?", [api.project.as_str()], |r| r.get(0))).unwrap();
     assert!(stored.starts_with("kms:v1:"), "{stored}");
     assert_eq!(api.values("production", "/").await["values"]["STRIPE_KEY"], "sk_live_123", "the values didn't change");
+    // roll secrets' own link kinds open the key through the customer's too (a CA's, here).
+    api.secrets.set_public_api("https://roll.example".into());
+    let ca = api.ok(Method::POST, "/cas", Some(json!({ "name": "internal", "domains": ["svc.internal"] }))).await;
+    let link = json!({ "kind": "pki", "ref": ca["id"], "field": "certificate", "mode": "dynamic", "options": { "names": ["api.svc.internal"], "ttl_minutes": 60 } });
+    api.ok(Method::PUT, "/environments/production/secrets/TLS_CERT", Some(json!({ "link": link }))).await;
+    let cert = api.values("production", "/").await["values"]["TLS_CERT"].clone();
+    assert!(cert.as_str().is_some_and(|c| c.starts_with("-----BEGIN CERTIFICATE-----")), "{cert}");
     let node = |keyring: Keyring| {
         let opts = Options { keyring: Ok(keyring), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, clouds: None };
         Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap())
