@@ -143,7 +143,9 @@ async fn plan(State(apps): S, b: Bytes) -> R {
         if map.len() > 2000 || map.values().map(String::len).sum::<usize>() > 8 << 20 {
             return Err(Error::BadRequest("files is at most 2000 files and 8 MiB".into()));
         }
-        let p = apps_build::plan(&apps_build::MapTree(map), &overrides.overrides()).map_err(|e| Error::BadRequest(e.to_string()))?;
+        // As a new web service would build (a Procfile's `web:`).
+        let o = apps_build::Overrides { process: Some("web".into()), ..overrides.overrides() };
+        let p = apps_build::plan(&apps_build::MapTree(map), &o).map_err(|e| Error::BadRequest(e.to_string()))?;
         return ok(p);
     }
     let repo = v.get("repo").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("repo or files is required".into()))?.to_string();
@@ -181,7 +183,7 @@ async fn plan(State(apps): S, b: Bytes) -> R {
             build.start = build.start.or(ws.start);
             context = dir.clone();
         }
-        let o = build.overrides();
+        let o = apps_build::Overrides { process: Some("web".into()), ..build.overrides() };
         let p = tokio::task::spawn_blocking(move || apps_build::plan(&apps_build::DirTree::new(context), &o)).await.map_err(|e| Error::Internal(e.to_string()))?;
         p.map(|mut p| {
             p.notes.splice(0..0, said);

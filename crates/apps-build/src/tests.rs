@@ -679,3 +679,20 @@ fn the_datastores_an_app_uses_come_from_its_manifests() {
     assert_eq!(p.uses, vec![Postgres]);
     assert!(p.notes.iter().any(|n| n == "pg in package.json: it uses Postgres"), "{:?}", p.notes);
 }
+
+#[test]
+fn a_procfile_names_the_start_command_and_the_release_phase() {
+    let files = [("package.json", r#"{"scripts":{"start":"node index.js"}}"#), ("Procfile", "# processes\nweb: node server.js --port $PORT\nworker: node jobs.js\nrelease: npx prisma migrate deploy\nbad line\n")];
+    let web = plan(&tree(&files), &Overrides { process: Some("web".into()), ..Default::default() }).unwrap();
+    assert_eq!(web.start.as_deref(), Some("node server.js --port $PORT"));
+    assert!(web.dockerfile.contains("exec node server.js --port $PORT"), "{}", web.dockerfile);
+    assert_eq!(web.release.as_deref(), Some("npx prisma migrate deploy"));
+    assert!(web.notes.iter().any(|n| n == "start: the Procfile's web: node server.js --port $PORT") && !web.notes.iter().any(|n| n.starts_with("start is set")), "{:?}", web.notes);
+    let worker = plan(&tree(&files), &Overrides { process: Some("worker".into()), ..Default::default() }).unwrap();
+    assert_eq!(worker.start.as_deref(), Some("node jobs.js"));
+    // The service's own start wins, and a tree's Dockerfile keeps its CMD.
+    let set = plan(&tree(&files), &Overrides { process: Some("web".into()), start: Some("node other.js".into()), ..Default::default() }).unwrap();
+    assert_eq!(set.start.as_deref(), Some("node other.js"));
+    let docker = plan(&tree(&[("Dockerfile", "FROM node:22\nCMD [\"node\", \"x.js\"]\n"), ("Procfile", "web: node y.js\nrelease: migrate\n")]), &Overrides { process: Some("web".into()), ..Default::default() }).unwrap();
+    assert_eq!((docker.start, docker.release), (None, None));
+}

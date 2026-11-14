@@ -857,6 +857,12 @@ impl Apps {
         };
         let mut overrides = build_cfg.overrides();
         overrides.build_env = build_env.iter().map(|(k, _)| k.clone()).collect();
+        // A Procfile's command for what this service runs (a cron's command is its own).
+        overrides.process = match run.kind {
+            RunType::Web => Some("web".into()),
+            RunType::Worker => Some("worker".into()),
+            RunType::Cron => None,
+        };
         let ctx = context.clone();
         let plan = tokio::task::spawn_blocking(move || apps_build::plan(&apps_build::DirTree::new(ctx), &overrides)).await?.map_err(|e| anyhow::anyhow!("{e}"))?;
         for n in &plan.notes {
@@ -892,6 +898,10 @@ impl Apps {
         };
         if run.port.is_none() {
             run.port = Some(plan.port);
+        }
+        // Heroku's release phase: the Procfile's `release:`, when the service has no pre-deploy.
+        if run.pre_deploy.is_none() {
+            run.pre_deploy = plan.release.clone();
         }
         // On a builder shared by services, the build reads a copy with its cache mounts
         // namespaced, outside the tree (so no `COPY . .` puts it in the image), next to the

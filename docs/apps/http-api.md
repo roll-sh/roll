@@ -372,6 +372,10 @@ type Plan = {
   /** Datastores the root's manifests have client libraries for ("pg in package.json"): New
    *  service offers to make and link them. Absent when none. */
   uses?: ("postgres" | "redis")[];
+  /** The Procfile's `release:` (Heroku's release phase): the deployment's pre-deploy command when
+   *  the service sets none. Absent without one, and for a tree's own Dockerfile. A Procfile's `web:`
+   *  (`worker:` for a worker) is `start` when the service names none. */
+  release?: string;
 };
 
 /** Wired on a node today: postgres (DATABASE_URL) and redis (REDIS_URL, REDIS_REST_URL/TOKEN). */

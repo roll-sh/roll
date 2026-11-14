@@ -321,6 +321,7 @@ impl Build {
             start: self.start.clone(),
             spa: self.spa,
             build_env: Vec::new(),
+            process: None,
         }
     }
 }
