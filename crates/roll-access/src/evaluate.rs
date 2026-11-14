@@ -728,6 +728,10 @@ struct Asked<'a> {
 
 /// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.
 async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req: Asked<'_>) -> Result<String, Box<Response>> {
+    // A completion never asks a person, nor waits on (or uses up) an approval an agent's call opened.
+    if ctx.mcp.as_ref().is_some_and(|m| m.quiet) {
+        return Err(Box::new(deny(StatusCode::FORBIDDEN, "would_ask", "this would ask a person, and a completion never does".into(), json!({}))));
+    }
     let Asked { headers, path, body, request_hash, args, environment, scope_path, scope_index, product: about } = req;
     let access = &ctx.access;
     let mut existing = headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
@@ -736,9 +740,6 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
     if existing.is_none() {
         let (a, g, h) = (access.clone(), ctx.grant.id.clone(), request_hash.clone());
         existing = blocking(move || a.store.open_approval(&g, &h)).await.map_err(|e| Box::new(e.into_response()))?.map(|a| a.id);
-    }
-    if existing.is_none() && ctx.mcp.as_ref().is_some_and(|m| m.quiet) {
-        return Err(Box::new(deny(StatusCode::FORBIDDEN, "would_ask", "this would ask a person, and a completion never does".into(), json!({}))));
     }
     let approval = match existing {
         Some(id) => {

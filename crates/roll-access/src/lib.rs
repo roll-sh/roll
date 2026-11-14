@@ -679,6 +679,10 @@ impl Access {
 impl roll_auth::Grants for Access {
     fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
         let g = self.store.get(id).ok()?;
+        // Stopped for being idle (the token policy), as the evaluator answers its requests.
+        if self.policy_now().idle(&g, code_sql::now_ms()) {
+            return None;
+        }
         g.live(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.effective_rules(code_sql::now_ms())), ask_otherwise: g.ask_otherwise })
     }
 }

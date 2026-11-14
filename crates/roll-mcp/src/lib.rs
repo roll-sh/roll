@@ -105,14 +105,19 @@ pub fn routes(api: Router, config: Config, sets: Vec<Arc<dyn ToolSet>>) -> Route
 /// `tools/list` and `prompts/list` would answer it (the token page shows it). Who may ask is the
 /// gate's: the token is read through the gated router with the caller's own credentials first,
 /// so only someone who may see it learns what it reaches.
-async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::Path<String>, headers: HeaderMap) -> Response {
-    let mut req = Request::builder().method("GET").uri(format!("/v1/access/tokens/{}", url::form_urlencoded::byte_serialize(id.as_bytes()).collect::<String>()));
-    for name in ["authorization", "cookie", "x-roll-user"] {
+async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::Path<String>, ext: Extensions, headers: HeaderMap) -> Response {
+    let segment: String = percent_encoding::utf8_percent_encode(&id, percent_encoding::NON_ALPHANUMERIC).collect();
+    let mut req = Request::builder().method("GET").uri(format!("/v1/access/tokens/{segment}"));
+    for name in ["authorization", "cookie", "x-roll-user", "x-forwarded-for"] {
         if let Some(v) = headers.get(name) {
             req = req.header(name, v);
         }
     }
-    let Ok(req) = req.body(Body::empty()) else { return http_error(StatusCode::BAD_REQUEST, "bad token id") };
+    let Ok(mut req) = req.body(Body::empty()) else { return http_error(StatusCode::BAD_REQUEST, "bad token id") };
+    // From the caller's address, so a token limited to some addresses is read as it would be.
+    if let Some(c) = ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>() {
+        req.extensions_mut().insert(*c);
+    }
     let seen = match m.api.clone().oneshot(req).await {
         Ok(r) => r,
         Err(e) => match e {},
@@ -120,7 +125,9 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
     if !seen.status().is_success() {
         return seen;
     }
-    let Some(grant) = m.config.access.as_ref().and_then(|a| roll_auth::Grants::grant(a.as_ref(), &id)) else {
+    let access = m.config.access.clone();
+    let looked = tokio::task::spawn_blocking(move || access.as_ref().and_then(|a| roll_auth::Grants::grant(a.as_ref(), &id))).await.ok().flatten();
+    let Some(grant) = looked else {
         return Json(json!({ "tools": [], "prompts": [], "live": false })).into_response();
     };
     let ctx = Ctx {
