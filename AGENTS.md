@@ -282,7 +282,11 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     second resource inside one request). Don't build a second permission system.
   - Every route rolld serves needs a row in `roll-access/src/catalog.rs` (one action on one
     product, how to find its resource, which answer fields are credentials) or a reason to stay the
-    operator's; `rolld/tests/auth.rs` fails otherwise. A new product adds its name to
+    operator's; `rolld/tests/auth.rs` fails otherwise. A route a prefix row decides (no row of its
+    own) takes the prefix's action by method whatever it answers, so it's either given its own row
+    (a GET that answers a credential is reveal) or listed in `roll-access/src/prefix-reviewed.txt`
+    once looked at, as `METHOD route` (per method: a route with its own `GET` row can gain a `PUT`
+    a prefix decides); the same test fails otherwise. A new product adds its name to
     `scope::PRODUCTS`, its rows, and a resolver in `rolld/src/access.rs` when its ids aren't in the
     path (or take names).
   - Grant secrets carry a checksum (`roll_access::checksum_ok`); a leaked one is revoked, never
@@ -351,6 +355,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     Anything that touches a second environment (a reference, an import, a base, a promote's
     source) checks the caller through `Caller::allows`; checks, sandboxes and previews resolve
     untrusted (`Secrets::untrusted`, `"untrusted": true`): never a protected environment.
+  - Tokens are roll-access's: a project's token is a grant with one secrets rule made through
+    `POST /v1/access/tokens`, and identities' logins get `workload` grants (`Workloads`). Never
+    add a token store to secrets; it asks the caller's `Grant` (`GrantGrants`).
   - Signed-in people manage their own projects' secrets (`OwnProjects`; others' projects 404). A
     canvas proves nothing about who owns what's on it: anything acting on a resource through a
     project asks `roll_workspace::Workspace::trusts` (secrets' `members`, `counts_for_repo`, roll

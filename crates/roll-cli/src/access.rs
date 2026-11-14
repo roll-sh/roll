@@ -16,10 +16,25 @@ pub enum Token {
     ///   roll token create migrate --product postgres --resource prj_ab… --allow read,write --ask delete
     Create(Box<Create>),
     /// List tokens and OAuth connections, newest first.
+    ///   roll token list --product secrets --resource prj_x4k9…   (the ones made for it)
+    ///   roll token list --workloads                               (workloads' tokens for minutes)
     #[command(alias = "ls")]
-    List,
+    List {
+        /// Only tokens with a rule on this product by name.
+        #[arg(long)]
+        product: Option<String>,
+        /// With --product: only those whose rule names this resource (an id or project).
+        #[arg(long, requires = "product")]
+        resource: Option<String>,
+        /// Workload tokens instead (a CI job's, for minutes; the latest 500).
+        #[arg(long, conflicts_with_all = ["product", "resource"])]
+        workloads: bool,
+    },
     /// Show a token's rules, expiry and last use.
     Show { id: String },
+    /// What an agent connected with a token is offered over MCP: its tools (those that change
+    /// things marked), prompts, and what the list costs an agent's context.
+    Tools { id: String },
     /// Revoke a token or connection: every request with it fails from now on.
     Revoke { id: String },
     /// A new secret for a token, with the same rules; the old one stops working at once.
@@ -203,6 +218,9 @@ pub enum Mcp {
     },
     /// Every request made with a token and every MCP tool call, newest first.
     Audit {
+        /// csv or jsonl: the matching events as that, for a spreadsheet or a log tool.
+        #[arg(long)]
+        format: Option<String>,
         /// Only this token (tok_…).
         #[arg(long)]
         token: Option<String>,
@@ -377,15 +395,30 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
             println!("\n{}\n", s(&made["token"]));
             eprintln!("Copy it now: it isn't shown again. Use it as ROLL_TOKEN, or as Authorization: Bearer for the API and MCP.");
         }
-        Token::List => {
-            let list = api.get("/v1/access/tokens").await?;
+        Token::List { product, resource, workloads } => {
+            let mut query: Vec<String> = Vec::new();
+            if workloads {
+                query.push("kind=workload".into());
+            }
+            if let Some(p) = &product {
+                query.push(format!("product={}", urlencoding::encode(p)));
+            }
+            if let Some(r) = &resource {
+                query.push(format!("resource={}", urlencoding::encode(r)));
+            }
+            let path = if query.is_empty() { "/v1/access/tokens".to_string() } else { format!("/v1/access/tokens?{}", query.join("&")) };
+            let list = api.get(&path).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&list)?);
                 return Ok(());
             }
             let list = list.as_array().cloned().unwrap_or_default();
             if list.is_empty() {
-                println!("no tokens yet: roll token create <name> --preset read-only");
+                if path.contains('?') {
+                    println!("none");
+                } else {
+                    println!("no tokens yet: roll token create <name> --preset read-only");
+                }
             }
             for g in &list {
                 print_grant(g);
@@ -405,6 +438,24 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 println!("{}", serde_json::to_string_pretty(&g)?);
             } else {
                 println!("revoked {} ({})", s(&g["id"]), s(&g["name"]));
+            }
+        }
+        Token::Tools { id } => {
+            let seen = api.get(&format!("/v1/access/tokens/{}/tools", urlencoding::encode(&id))).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&seen)?);
+                return Ok(());
+            }
+            let tools = seen["tools"].as_array().cloned().unwrap_or_default();
+            let changes = tools.iter().filter(|t| t["read_only"] != true).count();
+            println!("{} tools ({changes} that change things), ~{} tokens of an agent's context", tools.len(), seen["context_tokens"].as_u64().unwrap_or(0));
+            for t in &tools {
+                let mark = if t["destructive"] == true { "!" } else if t["read_only"] == true { " " } else { "*" };
+                println!("  {mark} {}", s(&t["name"]));
+            }
+            let prompts: Vec<String> = seen["prompts"].as_array().into_iter().flatten().map(|p| s(&p["name"])).collect();
+            if !prompts.is_empty() {
+                println!("prompts: {}", prompts.join(", "));
             }
         }
         Token::Tighten { id, days, apply } => {
@@ -681,13 +732,17 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
                 println!("approvals are also posted to {} in {}; decided there by {}", s(&v["chat"]["channel"]), s(&v["chat"]["install"]), who.join(", "));
             }
         }
-        Mcp::Audit { token, product, decision, resource, action, limit } => {
+        Mcp::Audit { format, token, product, decision, resource, action, limit } => {
             let mut q = url::form_urlencoded::Serializer::new(String::new());
             q.append_pair("limit", &limit.to_string());
-            for (k, v) in [("grant", token), ("product", product), ("decision", decision), ("resource", resource), ("action", action)] {
+            for (k, v) in [("grant", token), ("product", product), ("decision", decision), ("resource", resource), ("action", action), ("format", format.clone())] {
                 if let Some(v) = v {
                     q.append_pair(k, &v);
                 }
+            }
+            if format.is_some() {
+                print!("{}", api.get_text(&format!("/v1/access/audit?{}", q.finish())).await?);
+                return Ok(());
             }
             let log = api.get(&format!("/v1/access/audit?{}", q.finish())).await?;
             if json_out {

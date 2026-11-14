@@ -313,7 +313,7 @@ pub enum Secrets {
     /// Change requests: list, approve, reject, apply, close.
     #[command(subcommand)]
     Requests(Requests),
-    /// Scoped tokens for CI and services: list, create, revoke.
+    /// Tokens for CI and services on this project (roll-access's `rlt_…`): list, create, revoke.
     #[command(subcommand)]
     Tokens(Tokens),
     /// Where a key is set, in every project you can read (`STRIPE_*` for a prefix). Never values.
@@ -1490,14 +1490,18 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             {
                 eprintln!("note: {server} is this machine's own address; pass --url with one the cluster reaches");
             }
-            let mut body = json!({ "name": format!("k8s-{name}"), "actions": ["read", "reveal"], "environments": [c.at.env] });
+            // A roll-access token with one rule: read and reveal this environment (and folder).
+            let mut rule = json!({ "product": "secrets", "resources": [{ "project": c.project }], "environments": [c.at.env], "actions": { "read": "allow", "reveal": "allow" } });
             if c.at.path != "/" {
-                body["paths"] = json!([c.at.path]);
+                rule["paths"] = json!([c.at.path]);
             }
+            let mut body = json!({ "name": format!("k8s-{name}"), "rules": [rule] });
             if let Some(d) = ttl_days {
-                body["ttl_days"] = json!(d);
+                anyhow::ensure!(d > 0, "--ttl-days is positive");
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+                body["expires_at"] = json!(now + d * 86_400_000);
             }
-            let token = c.call(Method::POST, &format!("{}/tokens", c.base()), Some(body)).await?;
+            let token = c.call(Method::POST, "/v1/access/tokens", Some(body)).await?;
             let mut query = "dynamic=false&strict=1".to_string();
             if c.at.path != "/" {
                 query.push_str(&format!("&path={}", enc(&c.at.path)));
@@ -1523,7 +1527,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 q(&store),
                 q(&c.at.env),
             );
-            eprintln!("Made token {} for {}:{}; it's only in the output above. Apply it with: | kubectl apply -f -", s(&token["id"]), c.at.env, c.at.path);
+            eprintln!("Made token {} for {}:{}; it's only in the output above. Apply it with: | kubectl apply -f -", s(&token["grant"]["id"]), c.at.env, c.at.path);
         }
         Secrets::Reach { key } => {
             let mut url = format!("{}/reach?{}", c.env(&c.at.env), c.q());
@@ -2021,41 +2025,49 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Deleted {name}");
             }
         },
+        // A project's tokens are roll-access's (docs/permissions.md): one rule on this project's
+        // secrets, listed by what they're for, revoked one at a time.
         Secrets::Tokens(t) => match t {
             Tokens::Ls => {
-                let v = c.call(Method::GET, &format!("{}/tokens", c.base()), None).await?;
+                let v = c.call(Method::GET, &format!("/v1/access/tokens?product=secrets&resource={}", enc(&c.project)), None).await?;
                 if json_out {
                     return print(&v);
                 }
                 for t in v.as_array().into_iter().flatten() {
                     let list = |x: &Value| x.as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_else(|| "all".into());
-                    println!("{}  {:<20} envs {}  paths {}  {}  used {}", s(&t["id"]), s(&t["name"]), list(&t["environments"]), list(&t["paths"]), list(&t["actions"]), t["last_used_at"].as_i64().map(ago).unwrap_or_else(|| "never".into()));
+                    let rule = t["rules"].as_array().and_then(|r| r.iter().find(|r| r["product"] == "secrets")).cloned().unwrap_or_default();
+                    let actions = rule["actions"].as_object().map(|a| a.iter().map(|(k, v)| if v == "ask" { format!("{k}?") } else { k.clone() }).collect::<Vec<_>>().join(",")).unwrap_or_default();
+                    let state = if t["revoked_at"].is_null() { t["last_used_at"].as_i64().map(|at| format!("used {}", ago(at))).unwrap_or_else(|| "never used".into()) } else { "revoked".into() };
+                    println!("{}  {:<20} envs {}  paths {}  {}  {}", s(&t["id"]), s(&t["name"]), list(&rule["environments"]), list(&rule["paths"]), actions, state);
                 }
             }
             Tokens::Create { name, envs, paths, actions, ttl_days, allow_ips } => {
                 let actions = if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
-                let mut body = json!({ "name": name, "actions": actions });
+                let mut rule = json!({ "product": "secrets", "resources": [{ "project": c.project }], "actions": actions.iter().map(|a| (a.clone(), json!("allow"))).collect::<serde_json::Map<_, _>>() });
                 if !envs.is_empty() {
-                    body["environments"] = json!(envs);
+                    rule["environments"] = json!(envs);
                 }
                 if !paths.is_empty() {
-                    body["paths"] = json!(paths);
+                    rule["paths"] = json!(paths);
                 }
+                let mut body = json!({ "name": name, "rules": [rule] });
                 if let Some(d) = ttl_days {
-                    body["ttl_days"] = json!(d);
+                    anyhow::ensure!(d > 0, "--ttl-days is positive");
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+                    body["expires_at"] = json!(now + d * 86_400_000);
                 }
                 if !allow_ips.is_empty() {
-                    body["allowed_ips"] = json!(allow_ips);
+                    body["ip_allow"] = json!(allow_ips);
                 }
-                let v = c.call(Method::POST, &format!("{}/tokens", c.base()), Some(body)).await?;
+                let v = c.call(Method::POST, "/v1/access/tokens", Some(body)).await?;
                 if json_out {
                     return print(&v);
                 }
                 println!("{}", s(&v["token"]));
-                eprintln!("Created {} ({}). This is the only time it's shown: use it as ROLL_TOKEN.", s(&v["name"]), s(&v["id"]));
+                eprintln!("Created {} ({}). This is the only time it's shown: use it as ROLL_TOKEN.", s(&v["grant"]["name"]), s(&v["grant"]["id"]));
             }
             Tokens::Revoke { id } => {
-                c.call(Method::DELETE, &format!("{}/tokens/{}", c.base(), enc(&id)), None).await?;
+                c.call(Method::DELETE, &format!("/v1/access/tokens/{}", enc(&id)), None).await?;
                 println!("Revoked {id}");
             }
         },

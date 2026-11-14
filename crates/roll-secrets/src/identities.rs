@@ -1,16 +1,17 @@
 //! Workload identities (docs/secrets.md, "Workload identities"): a CI job or a cluster logs in
-//! with its own short-lived OpenID Connect token and gets a short-lived scoped token, so no
-//! long-lived `rlst_` token sits in a CI system's settings.
+//! with its own short-lived OpenID Connect token and gets a short-lived roll token, so no
+//! long-lived token sits in a CI system's settings.
 //!
 //! An identity names an issuer, an audience, a subject pattern and other claims a token must
 //! carry, and the scope of the token it gets (environments, folders, actions; at most what its
 //! creator has) for 5 to 60 minutes. `POST /v1/secrets/login` checks a token against one
-//! identity and mints the token. The minted tokens are ordinary `rlst_` rows, looked up on every
-//! request; deleting the identity revokes them.
+//! identity, then roll-access mints a `workload` grant with that scope ([`crate::Workloads`]).
+//! `identity_logins` remembers which grant each login got: its requests are the identity's in the
+//! audit log, and deleting the identity revokes them.
 
 use crate::access::{Action, Caller, Scope};
 use crate::oidc::{Jwt, wildcard};
-use crate::{Error, Result, Secrets, audit, from_json, json, names, tokens};
+use crate::{Error, Result, Secrets, audit, from_json, json, names};
 use code_sql::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -34,6 +35,15 @@ CREATE TABLE IF NOT EXISTS identities (
     last_subject TEXT
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS identities_project ON identities (project_id);
+-- The workload tokens identities' logins got (roll-access grants): named in the audit log as
+-- their identity, revoked with it, dropped a day after they end.
+CREATE TABLE IF NOT EXISTS identity_logins (
+    grant_id TEXT PRIMARY KEY,
+    identity TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS identity_logins_identity ON identity_logins (identity);
 ";
 
 /// Issuers every tenant of theirs shares (every GitHub repo's Actions sign with GitHub's): an
@@ -209,10 +219,10 @@ impl Secrets {
         if !(TTL_MIN..=TTL_MAX).contains(&ttl) {
             return Err(bad(format!("ttl_minutes is {TTL_MIN}–{TTL_MAX}")));
         }
-        let (environments, paths, actions) = tokens::scope(project, n.environments, n.paths, n.actions, caller)?;
+        let (environments, paths, actions) = crate::caller::scope(project, n.environments, n.paths, n.actions, caller)?;
         self.project(project)?;
         let now = self.db.now_ms()?;
-        let i = Identity { id: names::new_id("idn", 12), name, issuer, audience, subject, claims: n.claims, environments, paths, actions, ttl_minutes: ttl, created_at: now, created_by: caller.principal.clone(), last_used_at: None, last_subject: None, allowed_ips: tokens::allowed(n.allowed_ips)?, pinned_keys };
+        let i = Identity { id: names::new_id("idn", 12), name, issuer, audience, subject, claims: n.claims, environments, paths, actions, ttl_minutes: ttl, created_at: now, created_by: caller.principal.clone(), last_used_at: None, last_subject: None, allowed_ips: crate::caller::allowed(n.allowed_ips)?, pinned_keys };
         self.db.write(|c| {
             let count: i64 = c.query_row("SELECT COUNT(*) FROM identities WHERE project_id = ?", [project], |r| r.get(0))?;
             if count >= IDENTITIES_MAX {
@@ -247,14 +257,24 @@ impl Secrets {
         let n = crate::oidc::pinned_keys(jwks).map_err(bad)?;
         self.project(project)?;
         let now = self.db.now_ms()?;
-        self.db.write(|c| {
+        let (identity, live) = self.db.write(|c| {
             let name: Option<String> = c.query_row("SELECT name FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?;
             let name = name.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
             c.execute("UPDATE identities SET jwks = ?, created_by = ? WHERE id = ?", params![jwks, caller.principal, id])?;
-            let revoked = c.execute("UPDATE tokens SET revoked_at = ? WHERE identity = ? AND revoked_at IS NULL", params![now, id])?;
+            let live: Vec<String> = c.query("SELECT grant_id FROM identity_logins WHERE identity = ? AND expires_at > ?", params![id, now], |r| r.get(0))?;
+            let revoked = live.len();
             audit::record(c, project, caller, "identity.keys", None, None, &[], &format!("identity {name} now pins {n} key{} ({revoked} live token{} revoked)", if n == 1 { "" } else { "s" }, if revoked == 1 { "" } else { "s" }), now)?;
-            Ok::<_, Error>(c.query_row(&format!("SELECT {COLUMNS} FROM identities WHERE id = ?"), [id], identity_row)?.0)
-        })
+            Ok::<_, Error>((c.query_row(&format!("SELECT {COLUMNS} FROM identities WHERE id = ?"), [id], identity_row)?.0, live))
+        })?;
+        // What it gave out under the old keys ends (outside the transaction: roll-access's store).
+        if let Some(w) = &self.workloads {
+            for g in &live {
+                if let Err(e) = w.revoke(g) {
+                    tracing::warn!(identity = %id, grant = %g, "revoking a re-keyed identity's token failed: {e}");
+                }
+            }
+        }
+        Ok(identity)
     }
 
     /// Delete an identity and revoke the tokens it gave out.
@@ -262,13 +282,24 @@ impl Secrets {
         caller.need(Action::Admin, &Scope::project(project))?;
         self.project(project)?;
         let now = self.db.now_ms()?;
-        self.db.write(|c| {
+        let live: Vec<String> = self.db.write(|c| {
             let name: Option<String> = c.query_row("SELECT name FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?;
             let name = name.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
             c.execute("DELETE FROM identities WHERE id = ?", [id])?;
-            let n = c.execute("UPDATE tokens SET revoked_at = ? WHERE identity = ? AND revoked_at IS NULL", params![now, id])?;
-            audit::record(c, project, caller, "identity.delete", None, None, &[], &format!("deleted identity {name} ({n} live token{} revoked)", if n == 1 { "" } else { "s" }), now)
-        })
+            let live: Vec<String> = c.query("SELECT grant_id FROM identity_logins WHERE identity = ? AND expires_at > ?", params![id, now], |r| r.get(0))?;
+            let n = live.len();
+            audit::record(c, project, caller, "identity.delete", None, None, &[], &format!("deleted identity {name} ({n} live token{} revoked)", if n == 1 { "" } else { "s" }), now)?;
+            Ok::<_, Error>(live)
+        })?;
+        // What it gave out ends with it (outside the transaction: roll-access's own store).
+        if let Some(w) = &self.workloads {
+            for g in &live {
+                if let Err(e) = w.revoke(g) {
+                    tracing::warn!(identity = %id, grant = %g, "revoking a deleted identity's token failed: {e}");
+                }
+            }
+        }
+        Ok(())
     }
 
     /// `POST /v1/secrets/login` (public): an OIDC token for `identity` in, a scoped token out.
@@ -285,7 +316,7 @@ impl Secrets {
             return Err(denied());
         }
         if let Some(list) = &i.allowed_ips
-            && !tokens::ip_allowed(list, ip.as_deref())
+            && !crate::caller::ip_allowed(list, ip.as_deref())
         {
             return Err(Error::Forbidden(format!("identity {} doesn't log in from this address", i.name)));
         }
@@ -300,29 +331,45 @@ impl Secrets {
             return Err(Error::Forbidden(format!("the identity token's {k} doesn't match identity {}", i.name)));
         }
         self.project(&project)?;
-        let expires_at = now + i.ttl_minutes * 60_000;
-        let principal = format!("identity:{}", i.id);
-        let (t, secret) = tokens::new_token(i.name.clone(), i.environments.clone(), i.paths.clone(), i.actions.clone(), Some(expires_at), i.allowed_ips.clone(), now, &principal);
-        let caller = Caller { principal, grants: std::sync::Arc::new(crate::access::Everything), ip, runtime: false };
-        self.db.write(|c| {
-            // Deleted meanwhile, or its keys replaced (and so its maker changed): no token. A login
-            // verified against the old keys mustn't get one after the replacement revoked theirs.
+        let workloads = self.workloads.clone().ok_or_else(|| Error::NotFound("workload identities aren't on this server".into()))?;
+        // A roll-access workload token: the identity's scope, its addresses, owned by whoever made
+        // the identity (roll-access refuses one whose owner can't sign in any more).
+        let rule = crate::access::rule(&project, i.environments.clone(), i.paths.clone(), &i.actions);
+        let owner = crate::access::is_person(&i.created_by).then_some(i.created_by.as_str());
+        let m = workloads.mint(&i.name, rule, i.allowed_ips.clone(), i.ttl_minutes as u32, owner)?;
+        let caller = Caller { principal: format!("identity:{}", i.id), grants: std::sync::Arc::new(crate::access::Everything), ip, runtime: false };
+        let kept = self.db.write(|c| {
+            // Deleted meanwhile, or its keys replaced (and so its maker changed): the token goes
+            // too. A login verified against the old keys mustn't keep one after the replacement
+            // revoked theirs.
             let changed = c.execute(
                 "UPDATE identities SET last_used_at = ?, last_subject = ? WHERE id = ? AND COALESCE(jwks, '') = ? AND created_by = ?",
                 params![now, sub, i.id, jwks.clone().unwrap_or_default(), i.created_by],
             )?;
             if changed == 0 {
-                return Err(denied());
+                return Ok(false);
             }
-            tokens::insert(c, &project, &t, &secret, Some(&i.id))?;
-            audit::record(c, &project, &caller, "identity.login", None, None, &[], &format!("{sub} logged in as {} for {} min", i.name, i.ttl_minutes), now)
+            c.execute("INSERT INTO identity_logins (grant_id, identity, project_id, expires_at) VALUES (?, ?, ?, ?)", params![m.id, i.id, project, m.expires_at])?;
+            audit::record(c, &project, &caller, "identity.login", None, None, &[], &format!("{sub} logged in as {} for {} min (token {})", i.name, i.ttl_minutes, m.id), now)?;
+            Ok::<_, Error>(true)
         })?;
-        Ok(Login { token: secret, expires_at, project, identity: i.id })
+        if !kept {
+            let _ = workloads.revoke(&m.id);
+            return Err(denied());
+        }
+        Ok(Login { token: m.secret, expires_at: m.expires_at, project, identity: i.id })
     }
 
-    /// The sweeper: drop identities' tokens a day after they ended.
-    pub(crate) fn sweep_identity_tokens(&self) -> Result<usize> {
-        let old = self.db.now_ms()? - 86_400_000;
-        Ok(self.db.write(|c| c.execute("DELETE FROM tokens WHERE identity IS NOT NULL AND expires_at < ?", [old]))?)
+    /// The identity a workload token came from, when it did: requests made with it are the
+    /// identity's in the audit log.
+    pub(crate) fn login_of(&self, grant: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT identity FROM identity_logins WHERE grant_id = ?", [grant], |r| r.get(0)).optional())?)
     }
+
+    /// The sweeper: forget logins a day after they ended.
+    pub(crate) fn sweep_identity_logins(&self) -> Result<usize> {
+        let old = self.db.now_ms()? - 86_400_000;
+        Ok(self.db.write(|c| c.execute("DELETE FROM identity_logins WHERE expires_at < ?", [old]))?)
+    }
+
 }

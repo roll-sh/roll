@@ -36,13 +36,13 @@ export function Audit({ grant }: { grant?: string }) {
     return () => clearInterval(t);
   }, [load]);
 
-  const download = async () => {
+  const download = async (format: "csv" | "jsonl") => {
     try {
-      const blob = await accessApi.auditExport({ ...filter, limit: 1000 });
+      const blob = await accessApi.auditExport({ ...filter, limit: 1000 }, format);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "roll-audit.jsonl";
+      a.download = `roll-audit.${format}`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
@@ -77,8 +77,11 @@ export function Audit({ grant }: { grant?: string }) {
             <option value="mcp">MCP tool calls</option>
             <option value="api">API requests</option>
           </select>
-          <button onClick={() => void download()} className={`${btn} ml-auto`} title="The newest 1,000 matching events, one JSON object per line">
-            Export
+          <button onClick={() => void download("csv")} className={`${btn} ml-auto`} title="The newest 1,000 matching events, a row each, for a spreadsheet">
+            Export CSV
+          </button>
+          <button onClick={() => void download("jsonl")} className={btn} title="The newest 1,000 matching events, one JSON object per line, for a log tool">
+            JSON lines
           </button>
         </div>
         <ErrorNote error={error} />
