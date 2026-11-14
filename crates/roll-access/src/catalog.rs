@@ -1168,6 +1168,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps", "apps", R, Tgt::Product),
     row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant),
     row("POST", "/v1/apps/import", "apps", R, Tgt::AnyGrant),
+    // A project as a roll.toml: variables by name, never a value.
+    row("POST", "/v1/apps/projects/{project}/export", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/services", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/variables/values", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
     // A job is a command run with the environment's variables: its output can be them.
