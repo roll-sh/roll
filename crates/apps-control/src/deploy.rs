@@ -1155,6 +1155,11 @@ impl Apps {
     /// A service this node just got: clear what an earlier process left, load its
     /// environments' active deployments, resume its queued deploys.
     pub async fn resume_service(self: &Arc<Self>, service: &str) {
+        // Lost again before this ran (a lease that changed hands twice): what runs is the next
+        // owner's now, on a runtime the nodes share.
+        if !self.owns(service) {
+            return;
+        }
         let known: Vec<String> = self.lives().iter().filter(|l| l.service == service).flat_map(|l| l.instances().into_iter().map(|i| i.name.clone())).collect();
         // The live deployments' instances still running (the previous owner died, they didn't)
         // stay, for `EnvLive::adopt` to keep; the rest (jobs, older deployments') go.
@@ -1199,7 +1204,11 @@ impl Apps {
             }
             if let Err(err) = loaded {
                 warn!(service, env = %e.name, error = %err, "apps: loading an environment failed");
-                // Nothing will keep what the previous owner ran of it: it goes, as before.
+                // Nothing will keep what the previous owner ran of it: it goes, as before; unless
+                // the service moved on meanwhile (the next owner keeps it).
+                if !self.owns(service) {
+                    return;
+                }
                 if let Some(a) = &e.active {
                     let prefix = crate::live::instance_prefix(service, &e.name, a);
                     for name in self.deps.runtime.list(Some(service)).await {

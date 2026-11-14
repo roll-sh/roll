@@ -276,8 +276,9 @@ every deployment is immutable with instant rollback.
   goes to the environment's log.
 - **A request that finds its instance gone** (killed or out of memory, before roll noticed:
   nothing listens on its port, or a kept-alive connection to it broke and the instance is gone:
-  the runtime says it isn't running, or, since a runtime learns of a kill a moment late, the
-  instance doesn't answer when asked; one that answers closed the connection itself, a 502) goes, if it's a GET, HEAD or OPTIONS with no body (by its headers and the body
+  the runtime says it isn't running, or, since a runtime learns of a kill a moment late, nothing
+  accepts a fresh connection to it; one that accepts is alive, slow or closing the connection
+  itself, and gets a 502, nothing counted against it) goes, if it's a GET, HEAD or OPTIONS with no body (by its headers and the body
   itself: a safe request, which RFC 9110 lets be repeated, as browsers do when a reused connection
   closes), once more to a fresh instance (Fly's proxy retries the same way), the instance counted as
   crashed and the environment's log saying so (and why, when no fresh one starts); a request
@@ -713,7 +714,7 @@ The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`,
   past every one seen, and never one this process made (a request that loads the environment
   mid-deploy once removed the deploy's own instance being health-checked). Anything else of the service's (older deployments, jobs, one that doesn't
   answer) is removed, and so is all of it if the environment can't be loaded (tried three times,
-  a second apart at most). On a runtime the nodes share (Fargate), a node giving a service up (a
+  a second apart at most), unless the service moved on meanwhile. On a runtime the nodes share (Fargate), a node giving a service up (a
   handoff, or fenced) lets its instances go untouched (`EnvLive::let_go`; `Runtime::release`
   forgets the tasks and stops following their logs, which the next owner reads from its
   adoption on; stops and removes it had already spawned, a drain or a scale-in, don't run), and
@@ -1407,15 +1408,18 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   (repository credentials; tested against the fake AWS): the fleet role needs
   `CreateSecret`/`PutSecretValue`/`DeleteSecret` there and the execution role `GetSecretValue`;
   the secret is deleted (without recovery) when the login is removed, its registry changed, or
-  the service deleted (`Runtime::drop_registry_login`); instances made after that, and stopped
-  ones starting again, go without it. A value over several lines (a PEM key) can't go in an
+  the service deleted (`Runtime::registry_login_changed`); instances made after that, and stopped
+  ones starting again, go without it. A new login reaches the next start, not only the next
+  deploy. A value over several lines (a PEM key) can't go in an
   environment file (one line each), so a deployment's such values are one Secrets Manager secret
-  (`roll-apps/vars/<service>-<deployment>`, JSON) the task definition names per variable
+  (`roll-apps/vars/<stack>/<service>-<deployment>`, JSON, under the fleet's ECS cluster name so
+  another fleet in the account never sweeps it) the task definition names per variable
   (`valueFrom <arn>:<NAME>::`). It's made once and kept while the deployment may run (live,
   pending, ready, or ended in the last day), so its ARN and the task definition stay the same
   across cron runs and scale-outs; the ten-minute sweep deletes the rest after an hour, and the
   service's deletion all of them. A secret is written only when its value changed (every write
-  is a new version). The fleet role needs `CreateSecret`/`PutSecretValue`/`GetSecretValue`/
+  is a new version), and asked for at every start of a task definition naming one (never
+  remembered: another node may have deleted it, and it's made again under a new ARN). The fleet role needs `CreateSecret`/`PutSecretValue`/`GetSecretValue`/
   `DeleteSecret`/`ListSecrets` under `roll-apps/vars/` and `roll-apps/registry/`, the
   execution role `GetSecretValue`; `fargate.rs::a_multi_line_value_reaches_the_task_through_its_
   deployments_secret`). Still missing on the fleet: private networking (Cloud Map), volumes

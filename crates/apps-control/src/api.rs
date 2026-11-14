@@ -33,6 +33,7 @@ impl IntoResponse for Error {
             Error::Conflict(_) => StatusCode::CONFLICT,
             Error::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Error::Forbidden(_) => StatusCode::FORBIDDEN,
+            Error::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Error::Db(_) | Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status == StatusCode::INTERNAL_SERVER_ERROR {

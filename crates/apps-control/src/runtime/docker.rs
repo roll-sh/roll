@@ -150,10 +150,17 @@ impl Docker {
         // Made by an earlier process of this node: ask docker. An instance in a sandbox
         // publishes nothing itself; its port is the sandbox's.
         let (id, mut port, cpu) = self.inspect_known(name).await?;
+        let mut sure = true;
         if port.is_none() {
-            port = self.inspect_known(&sandbox_name(name)).await.ok().and_then(|(_, p, _)| p);
+            match self.inspect_known(&sandbox_name(name)).await {
+                Ok((_, p, _)) => port = p,
+                // No sandbox (a worker, or networks of its own) is an answer; a failed look isn't.
+                Err(e) => sure = e.to_string().to_ascii_lowercase().contains("no such"),
+            }
         }
-        self.known.lock().containers.insert(name.to_string(), (id.clone(), port, cpu));
+        if sure {
+            self.known.lock().containers.insert(name.to_string(), (id.clone(), port, cpu));
+        }
         Ok((id, port, cpu))
     }
 

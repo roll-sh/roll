@@ -720,11 +720,17 @@ async fn a_private_image_pulls_with_its_registry_secret() {
     for op in ["RegisterTaskDefinition", "RunTask"] {
         assert!(!w.fake.calls(op).iter().any(|c| c.to_string().contains("ghp-registry-s3cr3t")), "the password is in {op}");
     }
+    // A new login: the next start pulls with it (not only the next deploy's).
+    assert_eq!(call(&w.api, "PUT", &format!("/v1/apps/services/{id}/registry"), Some(json!({"username": "ci", "password": "ghp-rotated-s3cr3t"}))).await.0, StatusCode::OK);
+    let live = w.apps.live(&id, "production");
+    live.sleep().await;
+    live.tick().await;
+    let stored = w.fake.aws.lock().secrets.get(&format!("roll-apps/registry/{short}")).cloned().unwrap_or_default();
+    assert!(stored.contains("ghp-rotated-s3cr3t"), "the secret holds the new login");
     // The login removed: its secret goes and isn't written back by the next start, which runs
     // a task definition without it (the old one names a secret that's gone).
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}/registry"), None).await.0, StatusCode::OK);
     assert!(!w.fake.aws.lock().secrets.contains_key(&format!("roll-apps/registry/{short}")), "the login's secret is deleted");
-    let live = w.apps.live(&id, "production");
     live.sleep().await;
     live.tick().await;
     let runs = w.fake.calls("RunTask");
@@ -848,7 +854,8 @@ async fn a_multi_line_value_reaches_the_task_through_its_deployments_secret() {
     let dep = svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string();
     assert_eq!(settled(&w, &id, &dep).await["status"], "active");
     let base = format!("/v1/apps/services/{id}/environments/production");
-    for n in 1..=2 {
+    // A run: how many tasks have seen the values so far.
+    let run = || async {
         assert_eq!(call(&w.api, "POST", &format!("{base}/runs"), None).await.0, StatusCode::ACCEPTED);
         for _ in 0..500 {
             if call(&w.api, "GET", &format!("{base}/runs"), None).await.1[0]["status"] != "running" {
@@ -856,24 +863,38 @@ async fn a_multi_line_value_reaches_the_task_through_its_deployments_secret() {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let envs: Vec<BTreeMap<String, String>> = w.fake.aws.lock().envs.values().cloned().collect();
-        assert_eq!(envs.iter().filter(|e| e.get("SIGNING_KEY").map(String::as_str) == Some(pem) && e.get("MODE").map(String::as_str) == Some("live")).count(), n, "{envs:?}");
-    }
-    let vars = |op: &str| w.fake.calls(op).iter().filter(|c| c.to_string().contains("roll-apps/vars/")).count();
-    assert_eq!((vars("CreateSecret"), vars("PutSecretValue"), w.fake.calls("RegisterTaskDefinition").len()), (1, 0, 1), "made once, one task definition");
+        w.fake.aws.lock().envs.values().filter(|e| e.get("SIGNING_KEY").map(String::as_str) == Some(pem) && e.get("MODE").map(String::as_str) == Some("live")).count()
+    };
+    assert_eq!((run().await, run().await), (1, 2));
+    let defs = || w.fake.calls("RegisterTaskDefinition").len();
+    assert_eq!((w.fake.calls("PutSecretValue").len(), defs()), (0, 1), "no new version, one task definition");
     for op in ["RegisterTaskDefinition", "RunTask"] {
         assert!(!w.fake.calls(op).iter().any(|c| c.to_string().contains("MIIEvQIBADANBg")), "the value is in {op}");
     }
     let short = id.trim_start_matches("svc_");
-    let name = format!("roll-apps/vars/{short}-{}", dep.trim_start_matches("dep_"));
-    // The sweep keeps it while the deployment may run, or was made in the last hour.
-    w.fake.aws.lock().made.insert(name.clone(), 1_000_000_000.0);
-    w.apps.deps.runtime.sweep(&[dep.clone()].into_iter().collect()).await;
+    let name = format!("roll-apps/vars/roll-cloud/{short}-{}", dep.trim_start_matches("dep_"));
+    assert!(w.fake.aws.lock().secrets.contains_key(&name), "under the fleet's stack");
+    // The sweep keeps it while the store says the deployment may run, or it was made in the
+    // last hour; never another fleet's (another stack in the account).
+    let in_use: std::collections::HashSet<String> = w.apps.db(|s| s.deployments_in_use(i64::MAX)).await.unwrap().into_iter().collect();
+    assert!(in_use.contains(&dep), "{in_use:?}");
+    let other = format!("roll-apps/vars/other-stack/{short}-elsewhere");
+    {
+        let mut a = w.fake.aws.lock();
+        a.made.insert(name.clone(), 1_000_000_000.0);
+        a.secrets.insert(other.clone(), "{}".into());
+        a.made.insert(other.clone(), 1_000_000_000.0);
+    }
+    w.apps.deps.runtime.sweep(&in_use).await;
     assert!(w.fake.aws.lock().secrets.contains_key(&name));
     w.apps.deps.runtime.sweep(&Default::default()).await;
     assert!(!w.fake.aws.lock().secrets.contains_key(&name), "swept");
+    assert!(w.fake.aws.lock().secrets.contains_key(&other), "another fleet's is never swept");
+    // Deleted under this node (another node's sweep): the next run makes it again and runs.
+    assert_eq!(run().await, 3);
+    assert_eq!(defs(), 2, "a task definition naming the new secret");
     // Another deployment's goes with the service.
-    w.fake.aws.lock().secrets.insert(format!("roll-apps/vars/{short}-older"), "{}".into());
+    w.fake.aws.lock().secrets.insert(format!("roll-apps/vars/roll-cloud/{short}-older"), "{}".into());
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
-    assert!(!w.fake.aws.lock().secrets.keys().any(|k| k.starts_with(&format!("roll-apps/vars/{short}-"))), "it goes with the service");
+    assert!(!w.fake.aws.lock().secrets.keys().any(|k| k.starts_with(&format!("roll-apps/vars/roll-cloud/{short}-"))), "it goes with the service");
 }

@@ -165,13 +165,14 @@ pub trait Runtime: Send + Sync {
     async fn adopt(&self, _spec: &InstanceSpec, _log: LogSink) -> Option<Adopted> {
         None
     }
-    /// Forget a service's registry login wherever the runtime keeps a copy (Fargate: its Secrets
-    /// Manager secret): its login was removed, or the service deleted.
-    async fn drop_registry_login(&self, _service: &str) {}
+    /// A service's registry login changed (`login`), or went (None: removed, its registry
+    /// changed, or the service deleted), wherever the runtime keeps a copy (Fargate: its Secrets
+    /// Manager secret, and the instances made with it).
+    async fn registry_login_changed(&self, _service: &str, _login: Option<&RegistryLogin>) {}
     /// Everything the runtime keeps for a service beyond its instances (its registry login, its
     /// deployments' values), the service being deleted.
     async fn forget_service(&self, service: &str) {
-        self.drop_registry_login(service).await;
+        self.registry_login_changed(service, None).await;
     }
     /// Clean up what a node that died left behind outside its instances (Fargate: environment
     /// files no task will read), and what's kept for deployments outside `in_use` (the ids of

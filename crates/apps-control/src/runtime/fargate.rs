@@ -113,12 +113,19 @@ fn registry_secret_name(service: &str) -> String {
     format!("roll-apps/registry/{}", short(service))
 }
 
-fn vars_secret_name(service: &str, deployment: &str) -> String {
-    format!("{VARS_PREFIX}{}-{}", short(service), deployment.strip_prefix("dep_").unwrap_or(deployment))
+/// `<VARS_PREFIX><stack>/<service>-<deployment>`: under the fleet's own stack, so another
+/// fleet's sweep in the same account and region never lists it.
+fn vars_secret_name(stack: &str, service: &str, deployment: &str) -> String {
+    format!("{VARS_PREFIX}{stack}/{}-{}", short(service), deployment.strip_prefix("dep_").unwrap_or(deployment))
 }
 
 /// Where deployments' multi-line values are kept.
 const VARS_PREFIX: &str = "roll-apps/vars/";
+
+/// The ECS cluster's name as a secret name's segment (its last path segment, if an ARN).
+fn stack_of(cluster: &str) -> String {
+    cluster.rsplit('/').next().unwrap_or(cluster).chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).collect()
+}
 
 fn short(service: &str) -> &str {
     service.strip_prefix("svc_").unwrap_or(service)
@@ -202,11 +209,9 @@ pub struct Fargate {
     /// Tasks `list` found that no instance here started (an earlier process's): `remove` stops
     /// them.
     found: Mutex<HashMap<String, Vec<String>>>,
-    /// The secrets written here, by name: a hash of the value and the ARN. A value written once
-    /// isn't written again (each write is a new version, and every start would write).
-    written: Mutex<HashMap<String, (u64, String)>>,
-    /// Tasks given to another node ([`Runtime::release`]): their logs are no longer followed.
-    released: Mutex<std::collections::HashSet<String>>,
+    /// Tasks given to another node ([`Runtime::release`]) and when: their logs are no longer
+    /// followed (kept an hour, for a follow that's between looks).
+    released: Mutex<HashMap<String, Instant>>,
 }
 
 impl Fargate {
@@ -224,7 +229,6 @@ impl Fargate {
             defs: tokio::sync::Mutex::default(),
             instances: Mutex::default(),
             found: Mutex::default(),
-            written: Mutex::default(),
             released: Mutex::default(),
         }))
     }
@@ -234,22 +238,13 @@ impl Fargate {
     /// deletes it after), so its ARN, and the task definition naming it, stay the same.
     async fn vars_secret(&self, spec: &InstanceSpec, multi: &[(String, String)]) -> anyhow::Result<String> {
         let value = serde_json::Value::Object(multi.iter().map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone()))).collect()).to_string();
-        self.put_secret(&vars_secret_name(&spec.service, &spec.deployment), &value, "roll apps: a deployment's values over several lines", &spec.service).await
+        self.put_secret(&vars_secret_name(&self.stack(), &spec.service, &spec.deployment), &value, "roll apps: a deployment's values over several lines", &spec.service).await
     }
 
-    /// `name` holding `value`, made, or written only when it holds something else: its ARN.
+    /// `name` holding `value`, made, or written only when it holds something else (each write
+    /// is a new version): its ARN. Asked every time, never remembered: another node may have
+    /// deleted it (the sweep, a removed login), and a task naming a deleted ARN never starts.
     async fn put_secret(&self, name: &str, value: &str, description: &str, service: &str) -> anyhow::Result<String> {
-        let hash = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            value.hash(&mut h);
-            h.finish()
-        };
-        if let Some((h, arn)) = self.written.lock().get(name).cloned()
-            && h == hash
-        {
-            return Ok(arn);
-        }
         let err = |what: &str, e: String| anyhow::anyhow!("{what} {name}: {e}");
         let made = self
             .secrets
@@ -274,12 +269,10 @@ impl Fargate {
             }
             Err(e) => return Err(err("storing", aws_sdk_secretsmanager::error::DisplayErrorContext(e).to_string())),
         };
-        self.written.lock().insert(name.to_string(), (hash, arn.clone()));
         Ok(arn)
     }
 
     async fn delete_secret(&self, name: &str) {
-        self.written.lock().remove(name);
         match self.secrets.delete_secret().secret_id(name).force_delete_without_recovery(true).send().await {
             Ok(_) => {}
             Err(e) if e.as_service_error().is_some_and(|s| s.is_resource_not_found_exception()) => {}
@@ -293,6 +286,10 @@ impl Fargate {
     async fn registry_secret(&self, service: &str, login: &RegistryLogin) -> anyhow::Result<String> {
         let value = serde_json::json!({ "username": login.username, "password": login.password }).to_string();
         self.put_secret(&registry_secret_name(service), &value, "roll apps: a service's private registry login", service).await
+    }
+
+    fn stack(&self) -> String {
+        stack_of(&self.cfg.cluster)
     }
 
     /// The task definition for `spec`: found or registered once, then reused.
@@ -508,7 +505,7 @@ impl Fargate {
                     break;
                 }
             }
-            if last_look || self.released.lock().remove(&arn) {
+            if last_look || self.released.lock().remove(&arn).is_some() {
                 break;
             }
             match self.describe(&arn).await {
@@ -581,7 +578,10 @@ impl Runtime for Fargate {
             let i = m.get(name).with_context(|| format!("{name} wasn't created"))?;
             (i.spec.clone(), i.task_def.clone(), i.task.clone())
         };
-        let task_def = match task_def.is_empty() {
+        // One naming a secret is checked at each start: the secret may have been deleted since
+        // (by another node's sweep, or a login removed there) and is made again, under a new ARN.
+        let names_secret = spec.registry.is_some() || !multi_line(&spec.vars).is_empty();
+        let task_def = match task_def.is_empty() || names_secret {
             true => {
                 let d = self.task_def(&spec).await?;
                 if let Some(i) = self.instances.lock().get_mut(name) {
@@ -773,7 +773,9 @@ impl Runtime for Fargate {
     async fn release(&self, name: &str) {
         self.found.lock().remove(name);
         if let Some(arn) = self.instances.lock().remove(name).and_then(|i| i.task).map(|t| t.arn) {
-            self.released.lock().insert(arn);
+            let mut r = self.released.lock();
+            r.retain(|_, at| at.elapsed() < Duration::from_secs(3600));
+            r.insert(arn, Instant::now());
         }
     }
 
@@ -781,19 +783,22 @@ impl Runtime for Fargate {
         true
     }
 
-    async fn drop_registry_login(&self, service: &str) {
-        self.delete_secret(&registry_secret_name(service)).await;
-        // Its instances made with it (stopped ones start again) get a task definition without.
-        for i in self.instances.lock().values_mut().filter(|i| i.spec.service == service && i.spec.registry.is_some()) {
-            i.spec.registry = None;
+    async fn registry_login_changed(&self, service: &str, login: Option<&RegistryLogin>) {
+        if login.is_none() {
+            self.delete_secret(&registry_secret_name(service)).await;
+        }
+        // Its instances (stopped ones start again) get a task definition with the new login, or
+        // without one; the secret is written at their next start.
+        for i in self.instances.lock().values_mut().filter(|i| i.spec.service == service && (i.spec.registry.is_some() || login.is_some())) {
+            i.spec.registry = login.cloned();
             i.task_def.clear();
         }
     }
 
     /// Its registry login and every deployment's multi-line values.
     async fn forget_service(&self, service: &str) {
-        self.drop_registry_login(service).await;
-        let prefix = format!("{VARS_PREFIX}{}-", short(service));
+        self.registry_login_changed(service, None).await;
+        let prefix = format!("{VARS_PREFIX}{}/{}-", self.stack(), short(service));
         let filter = aws_sdk_secretsmanager::types::Filter::builder().key(aws_sdk_secretsmanager::types::FilterNameStringType::Name).values(&prefix).build();
         let mut pages = self.secrets.list_secrets().filters(filter).into_paginator().send();
         let mut names = Vec::new();
@@ -824,14 +829,15 @@ impl Runtime for Fargate {
         }
         // Deployments' multi-line values, once nothing will run the deployment: neither in use
         // (the store says) nor made here in the last hour (a deploy that began after the look).
-        let filter = aws_sdk_secretsmanager::types::Filter::builder().key(aws_sdk_secretsmanager::types::FilterNameStringType::Name).values(VARS_PREFIX).build();
+        let prefix = format!("{VARS_PREFIX}{}/", self.stack());
+        let filter = aws_sdk_secretsmanager::types::Filter::builder().key(aws_sdk_secretsmanager::types::FilterNameStringType::Name).values(&prefix).build();
         let mut pages = self.secrets.list_secrets().filters(filter).into_paginator().send();
         let hour_ago = chrono::Utc::now().timestamp() - 3600;
         let mut done = Vec::new();
         while let Some(Ok(page)) = pages.next().await {
             for s in page.secret_list() {
                 let (Some(name), Some(made)) = (s.name(), s.created_date()) else { continue };
-                let Some((_, dep)) = name.strip_prefix(VARS_PREFIX).and_then(|r| r.rsplit_once('-')) else { continue };
+                let Some((_, dep)) = name.strip_prefix(prefix.as_str()).and_then(|r| r.rsplit_once('-')) else { continue };
                 if made.secs() < hour_ago && !in_use.contains(&format!("dep_{dep}")) {
                     done.push(name.to_string());
                 }

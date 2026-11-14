@@ -74,6 +74,9 @@ pub enum Error {
     /// Allowed into the route, but not to what it would show (another product's rule).
     #[error("{0}")]
     Forbidden(String),
+    /// For a moment only (the service is moving between nodes): a 503, worth a retry.
+    #[error("{0}")]
+    Unavailable(String),
     #[error("apps database: {0}")]
     Db(#[from] code_sql::Error),
     #[error("{0}")]
@@ -545,24 +548,27 @@ impl Apps {
             None => registry_host(image).map(str::to_string).unwrap_or_else(|| "https://index.docker.io/v1/".into()),
         };
         let sid = service.to_string();
+        let login = crate::runtime::RegistryLogin { server: server.clone(), username: username.clone(), password: password.clone() };
         self.db(move |s| s.set_registry(&sid, &server, &username, &password)).await?;
+        // Wakes and new instances pull with it from now on, not at the next deploy.
+        self.registry_changed(service, Some(&login)).await;
         self.service(service).await
     }
 
     pub async fn delete_registry(self: &Arc<Self>, service: &str) -> Result<Service> {
         let sid = service.to_string();
         self.db(move |s| s.delete_registry(&sid)).await?;
-        self.forget_registry(service).await;
+        self.registry_changed(service, None).await;
         self.service(service).await
     }
 
-    /// A service's registry login is gone (removed, or its registry changed): wherever the
-    /// runtime keeps a copy, and from what its environments make instances of.
-    async fn forget_registry(&self, service: &str) {
+    /// A service's registry login changed (None: removed, or its registry changed): wherever
+    /// the runtime keeps a copy, and in what its environments make instances of.
+    async fn registry_changed(&self, service: &str, login: Option<&crate::runtime::RegistryLogin>) {
         for l in self.lives().into_iter().filter(|l| l.service == service) {
-            l.forget_registry();
+            l.set_registry(login);
         }
-        self.deps.runtime.drop_registry_login(service).await;
+        self.deps.runtime.registry_login_changed(service, login).await;
     }
 
     pub fn url(&self, slug: &str) -> String {
@@ -640,7 +646,7 @@ impl Apps {
         })
         .await?;
         if forget_login {
-            self.forget_registry(id).await;
+            self.registry_changed(id, None).await;
         }
         self.service(id).await
     }
@@ -1236,17 +1242,17 @@ impl Apps {
         // Only an environment that exists gets live state.
         let (sid, e) = (service.to_string(), env.to_string());
         let row = self.db(move |s| s.environment(&sid, &e)).await?;
+        // Adopting keeps what runs on a runtime the nodes share: only the service's owner does
+        // (a request that reached this node as the service moved away mustn't take what the
+        // next owner kept, nor leave live state behind here).
+        if self.deps.runtime.shares_instances() && !self.owns(service) {
+            return Err(Error::Unavailable("the service is moving to another node; try again in a moment".into()));
+        }
         let live = self.live(service, env);
         let Some(active) = row.active.clone() else { return Ok(live) };
         let dep = self.db(move |s| s.deployment(&active)).await?;
         let sid = service.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
-        // Adopting keeps what runs on a runtime the nodes share: only the service's owner does
-        // (a request that reached this node as the service moved away mustn't take what the
-        // next owner kept).
-        if self.deps.runtime.shares_instances() && !self.owns(service) {
-            return Err(Error::Conflict(format!("{service} is moving to another node; try again")));
-        }
         let tpl = self.template(&svc, &row, &dep).await?;
         live.adopt(Arc::new(tpl)).await;
         Ok(live)

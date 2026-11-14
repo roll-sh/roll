@@ -540,7 +540,7 @@ impl EnvLive {
 
     /// Whether something answers HTTP at `addr` (`path`: a 2xx or 3xx there; none: any answer,
     /// since a published port accepts connections before the app listens).
-    pub(crate) async fn answers(&self, addr: SocketAddr, path: Option<&str>, h2c: bool) -> bool {
+    async fn answers(&self, addr: SocketAddr, path: Option<&str>, h2c: bool) -> bool {
         let uri = format!("http://{addr}{}", path.unwrap_or("/"));
         let version = if h2c { axum::http::Version::HTTP_2 } else { axum::http::Version::HTTP_11 };
         let Ok(req) = axum::http::Request::get(uri).version(version).header("user-agent", "roll-apps-health").body(axum::body::Body::empty()) else { return false };
@@ -1223,6 +1223,8 @@ impl EnvLive {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 if released.load(Ordering::SeqCst) {
+                    // The next owner's to stop: this node only forgets it.
+                    runtime.release(&i.name).await;
                     return;
                 }
                 let grace = until.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
@@ -1313,7 +1315,10 @@ impl EnvLive {
         let prefix = instance_prefix(&self.service, &self.env, &tpl.deployment);
         let here: Vec<String> = self.insts.lock().iter().map(|i| i.name.clone()).collect();
         let mut kept = 0;
-        for name in self.runtime.list(Some(&self.service)).await {
+        let listed = self.runtime.list(Some(&self.service)).await;
+        // Only names that still exist need remembering.
+        self.mine.lock().retain(|n| listed.contains(n));
+        for name in listed {
             let Some(n) = name.strip_prefix(&prefix).and_then(|n| n.parse::<u64>().ok()) else { continue };
             // New names after every one seen, kept or not (the old owner may still be removing it).
             self.seq.fetch_max(n + 1, Ordering::SeqCst);
@@ -1453,11 +1458,11 @@ impl EnvLive {
         *self.template.lock() = None;
     }
 
-    /// The service's registry login was removed: instances made from now on go without it.
-    pub fn forget_registry(&self) {
+    /// The service's registry login changed (None: it went): instances made from now on use it.
+    pub fn set_registry(&self, login: Option<&crate::runtime::RegistryLogin>) {
         let strip = |t: &Arc<Template>| {
             let mut t = (**t).clone();
-            t.spec.registry = None;
+            t.spec.registry = login.cloned();
             Arc::new(t)
         };
         let mut tpl = self.template.lock();

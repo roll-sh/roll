@@ -3,7 +3,7 @@
 //! an instance.
 
 use crate::live::WakeError;
-use crate::{Apps, lease_key};
+use crate::{Apps, Error, lease_key};
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{HeaderName, HeaderValue, StatusCode, Uri, header};
@@ -822,6 +822,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     }
     let live = match apps.load_live(service, env).await {
         Ok(l) => l,
+        Err(Error::Unavailable(_)) => return retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Starting up", "The service is waking up. Try again in a moment.")),
         Err(e) => return page(StatusCode::NOT_FOUND, "Not deployed", &e.to_string()),
     };
     // In maintenance: roll's page, nothing woken. A deployment's own URL still answers (a fix
@@ -975,10 +976,11 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // instance isn't running any more (it died, perhaps with the request read: a safe request
     // may be repeated, RFC 9110 9.2.2, as browsers do when a reused connection closes). Never
     // for a request with a body. The runtime can learn of a kill a moment after the connection
-    // breaks, so an instance it still thinks runs is asked too: one that doesn't answer is gone,
-    // one that does closed the connection itself (a 502).
+    // breaks, so an instance it still thinks runs is tried on a fresh connection: one nothing
+    // accepts is gone; one that accepts is alive (slow, or it closed the connection itself: a
+    // 502, never sent again, nothing counted against it).
     let gone = match &sent {
-        Err(e) if replay.is_some() && again.is_some() => e.is_connect() || !apps.deps.runtime.running(&lease.inst.name).await || !live.answers(lease.addr, None, lease.h2c).await,
+        Err(e) if replay.is_some() && again.is_some() => e.is_connect() || !apps.deps.runtime.running(&lease.inst.name).await || !accepts(lease.addr).await,
         _ => false,
     };
     let sent = match (sent, replay, again) {
@@ -1153,6 +1155,12 @@ impl Access {
         });
         self.log.line(line.to_string());
     }
+}
+
+/// Whether anything accepts a connection at `addr` within a second (the kernel's answer, not
+/// the app's: a busy app still accepts).
+async fn accepts(addr: std::net::SocketAddr) -> bool {
+    matches!(tokio::time::timeout(std::time::Duration::from_secs(1), tokio::net::TcpStream::connect(addr)).await, Ok(Ok(_)))
 }
 
 #[cfg(test)]
