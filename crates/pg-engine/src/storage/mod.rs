@@ -137,6 +137,9 @@ pub struct StoreOptions {
     /// (`txn::spill`), so a transaction of any size runs in bounded memory. The default
     /// is 64 MB, or `ROLL_TXN_SPILL_BYTES` (tests set it tiny to spill all the time).
     pub txn_spill_bytes: usize,
+    /// The file format the store's files are written in (`sst::FORMAT`; tests write format 1,
+    /// as builds before format 2 did, to test reading and upgrading such a store).
+    pub format: u32,
 }
 
 thread_local! {
@@ -175,6 +178,7 @@ impl Default for StoreOptions {
             cache: BlockCache::new(256 << 20),
             background: true,
             txn_spill_bytes: default_spill_bytes(),
+            format: sst::FORMAT,
         }
     }
 }
@@ -224,6 +228,11 @@ impl Memtable {
 
 #[derive(Default, Serialize, Deserialize, Clone)]
 struct Manifest {
+    /// The newest file format among its files may be (`sst::FORMAT`; none: 1, a manifest of
+    /// a build before format 2). A build refuses a manifest of a format past its own; one
+    /// before format 2 ignores the field and refuses the files (their footer).
+    #[serde(default)]
+    format: u32,
     next_id: u64,
     /// Every commit <= this is in SSTs.
     flushed_ts: u64,
@@ -479,6 +488,14 @@ impl Store {
             },
             Err(e) => return Err(e.into()),
         };
+        if manifest.format > sst::FORMAT {
+            return Err(internal(format!(
+                "the store in {} is of storage format {}, newer than this build reads ({})",
+                dir.display(),
+                manifest.format,
+                sst::FORMAT
+            )));
+        }
         // Leftovers from an interrupted flush or compaction, and spilled writes of
         // transactions a crash ended.
         let _ = durable::remove_dir_all(&dir.join(SPILL_DIR));
@@ -561,12 +578,15 @@ impl Store {
             .map(|g| Frozen::Mem(Arc::new(g)))
             .collect();
         let wal = WalWriter::create(dir, replay_seq, opts.sync)?;
+        // (From its next write on: the files this build writes are of its format.)
+        let format = manifest.format.max(opts.format);
         let store = Arc::new(Store {
             dir: dir.to_path_buf(),
             opts,
             view: crate::published::Published::new(Arc::new(View { mem, imm, l0, l1, rdels: Arc::default() })),
             commit: Padded(Mutex::new(CommitState { wal })),
             manifest: Mutex::new(Manifest {
+                format,
                 next_id,
                 last_ts,
                 ..manifest
@@ -627,6 +647,13 @@ impl Store {
     }
 
     /// Compression policy for fresh runs that may become store files unchanged.
+    /// A writer of one of the store's files (of `StoreOptions::format`), compressed as its
+    /// files are when `compress`.
+    fn sst_writer(&self, id: u64, compress: bool) -> Result<SstWriter> {
+        let codec = if compress && self.opts.compress { sst::Codec::Zstd } else { sst::Codec::None };
+        SstWriter::create_with(&self.dir, id, codec, self.opts.format >= 2)
+    }
+
     pub(crate) fn compress(&self) -> bool {
         self.opts.compress
     }
@@ -1487,7 +1514,7 @@ impl Store {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // (Uncompressed: the commit waits for this file, and compaction, in the background,
         // compresses it when it moves to L1.)
-        let mut w = SstWriter::create(&self.dir, id, false)?;
+        let mut w = self.sst_writer(id, false)?;
         w.expect_keys(keys + extra.len());
         let mut key = Vec::new();
         let mut markers: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
@@ -1851,7 +1878,7 @@ impl Store {
                 }
             };
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let mut w = SstWriter::create(&self.dir, id, self.opts.compress)?;
+            let mut w = self.sst_writer(id, true)?;
             let mut discarded = self.discard.filter();
             for e in mem.map.iter() {
                 if !discarded.drops(user_key(e.key())) {
@@ -2099,11 +2126,7 @@ impl Store {
                 outputs.push(w.finish()?);
             }
             if writer.is_none() {
-                writer = Some(SstWriter::create(
-                    &self.dir,
-                    self.next_id.fetch_add(1, Ordering::Relaxed),
-                    self.opts.compress,
-                )?);
+                writer = Some(self.sst_writer(self.next_id.fetch_add(1, Ordering::Relaxed), true)?);
             }
             writer.as_mut().unwrap().add(k, v)?;
             if first_version || part.is_empty() {
@@ -4263,6 +4286,99 @@ mod tests {
         let got: std::collections::BTreeMap<_, _> =
             scan_all(&s, s.visible_ts()).into_iter().collect();
         assert_eq!(got, expect);
+    }
+
+    /// The formats of the view's files: (L0, L1) as counts of (format 1, format 2).
+    fn file_formats(s: &Store) -> ((usize, usize), (usize, usize)) {
+        let v = s.view();
+        let count = |fs: &[Arc<SstReader>]| {
+            let two = fs.iter().filter(|f| f.format() == sst::FORMAT).count();
+            (fs.len() - two, two)
+        };
+        (count(&v.l0), count(&v.l1))
+    }
+
+    /// A store whose files are format 1 (written as a build before format 2 wrote them)
+    /// reads the same at every snapshot once this build opens it, beside the format 2 files it
+    /// writes: L0 of format 2 over L1 of format 1, then compaction's outputs of format 2 next to
+    /// the format 1 files it didn't merge; and across a reopen. A manifest of a format past this
+    /// build's is refused, naming both.
+    #[test]
+    fn format_1_files_read_beside_format_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut expect = std::collections::BTreeMap::new();
+        // (Compactions only when asked; L1 files of 4 kB, so the "z" range has its own.)
+        let opts = || StoreOptions { background: false, target_file_bytes: 4 << 10, ..opts() };
+        let v1 = || StoreOptions { format: 1, ..opts() };
+        let mut snaps = Vec::new();
+        {
+            let s = Store::open(dir.path(), v1()).unwrap();
+            for i in 0..3000 {
+                let k = format!("a{:05}", i % 1100);
+                let v = format!("v{i}");
+                put(&s, &k, Some(&v));
+                expect.insert(k, v);
+                if i % 5 == 0 {
+                    let d = format!("a{:05}", (i * 7) % 1100);
+                    put(&s, &d, None);
+                    expect.remove(&d);
+                }
+            }
+            // (Keys of another range, compacted alone: L1 files no later write meets.)
+            for i in 0..3000 {
+                let k = format!("z{i:04}");
+                put(&s, &k, Some("far"));
+                expect.insert(k, "far".into());
+            }
+            s.flush_all().unwrap();
+            s.compact().unwrap();
+            snaps.push((s.visible_ts(), expect.clone()));
+            s.close().unwrap();
+        }
+        let s = Store::open(dir.path(), opts()).unwrap();
+        let ((l0_1, l0_2), (l1_1, l1_2)) = file_formats(&s);
+        assert!(l0_2 == 0 && l1_2 == 0 && l1_1 > 0, "{l0_1} {l1_1}");
+        let check = |s: &Store, snaps: &[(u64, std::collections::BTreeMap<String, String>)], what: &str| {
+            for (ts, want) in snaps {
+                let got: std::collections::BTreeMap<_, _> = scan_all(s, *ts).into_iter().collect();
+                assert_eq!(&got, want, "{what} at {ts}");
+                for (k, v) in want.iter().step_by(13) {
+                    assert_eq!(s.get(k.as_bytes(), *ts).unwrap().as_deref(), Some(v.as_bytes()), "{what}: {k} at {ts}");
+                }
+            }
+        };
+        check(&s, &snaps, "format 1 files");
+        // L0 of format 2 over L1 of format 1 (no compaction yet).
+        for i in 0..600 {
+            let k = format!("a{:05}", (i * 3) % 1100);
+            put(&s, &k, Some(&format!("w{i}")));
+            expect.insert(k, format!("w{i}"));
+        }
+        s.flush_all().unwrap();
+        snaps.push((s.visible_ts(), expect.clone()));
+        let ((_, l0_2), (_, l1_2)) = file_formats(&s);
+        assert!(l0_2 > 0 && l1_2 == 0, "{l0_2} {l1_2}");
+        check(&s, &snaps, "format 2 over format 1");
+        // Compaction: its outputs are format 2, the "z" range's files (no key of L0's in them)
+        // stay format 1.
+        s.compact().unwrap();
+        let ((l0_1, l0_2), (l1_1, l1_2)) = file_formats(&s);
+        assert!(l0_1 + l0_2 == 0 && l1_1 > 0 && l1_2 > 0, "{l0_1} {l0_2} {l1_1} {l1_2}");
+        check(&s, &snaps[1..], "mixed L1");
+        s.close().unwrap();
+        drop(s);
+        let s = Store::open(dir.path(), opts()).unwrap();
+        check(&s, &snaps[1..], "mixed L1, reopened");
+        s.close().unwrap();
+        drop(s);
+        // A manifest of a newer format: refused.
+        let m = dir.path().join("MANIFEST");
+        let mut j: serde_json::Value = serde_json::from_slice(&std::fs::read(&m).unwrap()).unwrap();
+        assert_eq!(j["format"], sst::FORMAT);
+        j["format"] = (sst::FORMAT + 1).into();
+        std::fs::write(&m, serde_json::to_vec(&j).unwrap()).unwrap();
+        let e = Store::open(dir.path(), opts()).err().unwrap();
+        assert!(e.message.contains(&format!("of storage format {}, newer than this build reads ({})", sst::FORMAT + 1, sst::FORMAT)), "{}", e.message);
     }
 
     #[test]
