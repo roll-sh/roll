@@ -3,7 +3,10 @@
 Elasticsearch-compatible search clusters that cost nothing while idle, wake in milliseconds,
 branch instantly and keep their data on object storage. Clients speak the Elasticsearch REST API
 (or OpenSearch's): the official clients, searchkick, Laravel Scout and Spring Data work by
-changing the URL.
+changing the URL. Semantic and hybrid search work as on Elasticsearch 9: `semantic_text` fields
+embed through the model provider you configure (`_inference`: OpenAI or any compatible server,
+Cohere, Anthropic; the key sealed in the cluster), and `rrf`/`linear` retrievers mix them with
+lexical search.
 
 Design: [architecture.md](architecture.md). Cross-crate interfaces: [contracts.md](contracts.md).
 On AWS search runs on the roll cloud fleet with every other product (docs/cloud/README.md).
@@ -63,6 +66,15 @@ roll search docs get app books 1 | delete app books 1
 roll search keys create app worker --expires-in 30d   # a data-only API key, shown once (--access admin for all)
 roll search keys list app | revoke app <id>
 roll search index show app books | mapping … | delete-by-query … | delete app books
+```
+
+Semantic search (or the dashboard's Inference tab):
+
+```sh
+roll search request app PUT /_inference/text_embedding/emb '{"service":"openai","service_settings":{"api_key":"<key>","model_id":"text-embedding-3-small"}}'
+roll search request app PUT /articles '{"mappings":{"properties":{"body":{"type":"semantic_text","inference_id":"emb"}}}}'
+roll search request app POST '/articles/_doc?refresh=true' '{"body":"Passwords can be reset from the sign-in page."}'
+roll search request app POST /articles/_search '{"query":{"semantic":{"field":"body","query":"forgot my password"}}}'
 ```
 
 A cluster's name is its identity: the Basic auth user, the host label under `--search-domain`,
@@ -205,7 +217,7 @@ Measured on the tree merged with `main` (2026-11-12), on ai-server (a shared 18-
 | differential suite against Elasticsearch 9.5.5 (seed 1, 60 random workloads) | 2,325 of 2,333 steps equal (99.7%); the 8 others are 2 known differences (soft-delete tombstones in phrase-suggester and term statistics), none new or open; 69 replayed fixtures equal |
 | client matrix (unmodified official clients in Docker) | **11 of 11**: Python, JavaScript, Java, Go, Ruby and PHP clients, the OpenSearch Python and JavaScript clients, django-elasticsearch-dsl, Laravel Scout, and searchkick's own suite (540 runs, 0 failures) |
 | x-pack REST fixtures (`search-es/tests/xpack_fixtures.rs`) | 1,097 of 1,097 steps equal Elasticsearch |
-| inference API (`_inference`, against a private Elasticsearch 9.5.5 and a mock of the services) | OpenAI flows, 42 error and update cases and region policies answer the same; `platinum/inference` 22 of 23 (was 1); `inference` suite (the test plugin's services, no Elasticsearch baseline) 117 of 305; `semantic_text` through a mock as a writer with only index privileges |
+| inference API (`_inference`, against a private Elasticsearch 9.5.5 and a mock of the services) | OpenAI flows, 42 error and update cases and region policies answer the same; `platinum/inference` 22 of 23 (was 1); `inference` suite (the test plugin's services, no Elasticsearch baseline) 161 of 305; `semantic_text` through a mock as a writer with only index privileges |
 
 The failures on the merged tree, all fixed: rolld tests that collided on search's default port;
 two tests that depended on timing; three behaviours the uncommitted round-6 work had broken (SQL
