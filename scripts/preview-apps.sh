@@ -165,6 +165,27 @@ NOTES=$(curl -sS -b "$JAR" -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/__
 case "$NOTES" in "["*) ;; *) echo "the page's notes should come from roll previews: $NOTES"; exit 1;; esac
 api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"public"}' >/dev/null
 BRANCH=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='redis'][0]")
+
+say "promote the preview's build to production (the sheet's Promote: roll apps' promote, its image, no build)"
+# Production first runs main (its own deploy from the repo).
+for _ in $(seq 1 600); do
+  [ "$(api GET "/v1/apps/services/$SVC/environments/production" | jq_ "(d.get('latest') or {}).get('status','')")" = active ] && break
+  sleep 1
+done
+PROD_HOST=$(api GET "/v1/apps/services/$SVC/environments/production" | jq_ "d.get('url') or ''" | sed -E 's#^https?://##; s#/.*##; s#:.*##')
+PROD_BEFORE=$(curl -sS -H "Host: $PROD_HOST" "http://127.0.0.1:${PORTS}080/" --max-time 120)
+[ "$PROD_BEFORE" = main ] || { echo "production should serve main before the promote: $PROD_BEFORE"; exit 1; }
+PROMOTE=$(api POST "/v1/apps/services/$SVC/environments/production/promote" "{\"from\":\"$ENV\"}")
+PROMOTED=$(echo "$PROMOTE" | jq_ "d.get('trigger')")
+[ "$PROMOTED" = promote ] || { echo "the promote should be a deploy of its own: $PROMOTE"; exit 1; }
+T5=$(now_ms)
+for _ in $(seq 1 300); do
+  [ "$(api GET "/v1/apps/services/$SVC/environments/production" | jq_ "(d.get('latest') or {}).get('status','')")" = active ] && break
+  sleep 1
+done
+T6=$(now_ms)
+PROD_AFTER=$(curl -sS -H "Host: $PROD_HOST" "http://127.0.0.1:${PORTS}080/" --max-time 120)
+[ "$PROD_AFTER" = "preview of change 1" ] || { echo "production should serve the preview's build after the promote: $PROD_AFTER"; exit 1; }
 say "land"
 api POST "/v1/code/changes/$CHG/land" '{}' >/dev/null
 for _ in $(seq 1 120); do N=$(api GET "/v1/previews?project=$PRJ" | jq_ "len(d)"); [ "$N" = 0 ] && break; sleep 0.5; done
@@ -181,5 +202,6 @@ cat <<EOF
 | Body / the Redis host the service saw / the preview's Redis branch | $BODY / $WHERE / $BRANCH |
 | Variables on the environment | $VARS |
 | A preview's own variable on roll apps | $UNSET |
+| Promoted to production (the preview's image, no build): production serves / took | $PROD_AFTER / $((T6 - T5)) ms |
 | After landing: previews left / the environment | $N / HTTP $GONE |
 EOF
