@@ -86,6 +86,36 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
 
+## GitHub Actions
+
+`sdk/github-action` puts an environment into a job, as Doppler's and Infisical's actions do:
+
+```yaml
+permissions:
+  id-token: write
+steps:
+  - uses: roll-sh/roll/sdk/github-action@main
+    with:
+      api-url: https://api.roll.example
+      identity: idn_…          # a workload identity for this repo (roll secrets identities add ci --github owner/repo --for-env staging)
+      environment: staging
+  - run: make test            # DATABASE_URL and the rest are in the environment
+```
+
+- The job logs in with its own OIDC token (audience: the API's URL), so no token sits in the
+  repository's settings; `token` takes a roll token instead.
+- Every line of every value, the OIDC token and the roll token are masked (`::add-mask::`) before
+  anything else is printed. Values are exported to `GITHUB_ENV` (or, with `export: false`, the
+  step's outputs) inside a random heredoc delimiter no value contains, so a multi-line value
+  (a PEM key) arrives whole and can't add variables of its own. A key that doesn't resolve fails
+  the step, naming it.
+- No dependencies: Node's own `fetch`, nothing to bundle or audit.
+- **`scan: true`** guards a repository on GitHub the way roll code guards the ones it hosts: the
+  lines a pull request adds (`git diff base...HEAD`; check out with `fetch-depth: 0`) are cut into
+  candidates as `roll secrets scan` cuts them and checked with `POST …/leaks` (fingerprints; only
+  values the token may reveal), and each stored value found fails the check with an annotation on
+  its file and line naming the key and environment, never the value.
+
 ## Where it runs
 
 roll secrets is always on, like workspace projects: it is not a product in `ROLL_PRODUCTS`.
