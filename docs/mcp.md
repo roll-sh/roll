@@ -413,23 +413,20 @@ waits on a sibling PR reaching main is last.
 
 1. **The twelfth review** of what's new since the eleventh: what an agent sees on the token page,
    the audit CSV, open registration's bounds, completions named in the audit log (in progress).
-2. **A person's own token's page shows only their reach:** a test that `GET
-   /v1/access/tokens/{id}/tools` for a non-admin person's token lists only what their account
-   reaches, as `tools/list` would for them (#25).
-3. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+2. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
    lands after #20, #25 and #30): kept merged both ways; secrets' tenth-review fixes are in #30
    (an admin's token reaches operator projects, project-wide metadata needs a rule over the whole
    project). The canvas check costs nothing measurable (`gate_latency`, release, pinned, A/B
    twice: a token's one-resource request 83–115 µs p50 with it, 105–116 µs without).
-4. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+3. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions.
-5. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
+4. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
-Done lately: `roll token list --product/--resource` and `--workloads`; a workload token makes no
+Done lately: a person's own token's page tested to show only their reach; `roll token list --product/--resource` and `--workloads`; a workload token makes no
 tokens; the ninth review's findings (people's mail in roll's words only: names as words, an
 approval's mail without its resource, a leak's without where, one approval mail per token per ten
 minutes and 20 a person an hour; workload tokens capped per owner and a person's listed before the
