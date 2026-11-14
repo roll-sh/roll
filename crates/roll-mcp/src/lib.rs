@@ -662,13 +662,22 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
     ext.insert(McpCall { tool, args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation, client: ctx.client.clone(), quiet });
     let started = std::time::Instant::now();
     // The gate decides (and audits) every call a grant makes; the MCP layer refuses nothing itself.
-    let (result, route) = if let Some(t) = tools::all().iter().find(|t| t.name == name) {
+    let (mut result, route) = if let Some(t) = tools::all().iter().find(|t| t.name == name) {
         (run(ctx, t, &args, ext).await, format!("{} {}", t.method, t.path))
     } else {
         let set = ctx.m.sets.iter().find(|s| s.tools().iter().any(|t| t["name"] == name))?;
         let headers = forward_headers(&ctx.headers, &args);
         (set.call(ctx.m.api.clone(), headers, ext, name.to_string(), args.clone()).await, "tool".to_string())
     };
+    // Whoever made the result (a fronted set builds its own: roll code's reviews and files),
+    // what's hidden in its text stays visible.
+    if let Some(content) = result["content"].as_array_mut() {
+        for c in content.iter_mut().filter(|c| c["type"] == "text") {
+            if let Some(t) = c["text"].as_str() {
+                c["text"] = Value::String(visible(t));
+            }
+        }
+    }
     // The operator's calls don't pass the evaluator: the audit row is written here.
     if let (Principal::Operator, Some(access)) = (&ctx.principal, &ctx.m.config.access) {
         let status = result["structuredContent"]["http_status"].as_u64().unwrap_or(if result["isError"] == true { 400 } else { 200 }) as u16;
