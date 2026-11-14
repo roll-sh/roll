@@ -18,6 +18,13 @@ pub const MAX_LINE: usize = 1000;
 pub const MAX_MESSAGE: usize = 1 << 20;
 pub const MAX_RECIPIENTS: usize = 50;
 const IDLE: Duration = Duration::from_secs(60);
+/// How long a connection may take to sign in, and how long one may last at all: a slot is never
+/// held for good, signed in or not.
+const SIGN_IN: Duration = Duration::from_secs(15);
+const SESSION: Duration = Duration::from_secs(300);
+/// Connections at once: in all, and from one address (one container can't take every slot).
+const SLOTS: usize = 256;
+const PER_ADDRESS: usize = 8;
 
 /// A caught message.
 #[derive(Clone, Debug, PartialEq)]
@@ -79,9 +86,14 @@ impl Mailbox for Store {
 
 /// Serve SMTP on `listener` until it fails (each connection a task of its own).
 pub async fn serve(listener: tokio::net::TcpListener, mailbox: Arc<dyn Mailbox>) {
-    let slots = Arc::new(tokio::sync::Semaphore::new(64));
+    let slots = Arc::new(tokio::sync::Semaphore::new(SLOTS));
+    let open: Arc<std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, usize>>> = Default::default();
     loop {
-        let Ok((sock, _)) = listener.accept().await else { continue };
+        let Ok((sock, peer)) = listener.accept().await else { continue };
+        let Some(held) = Held::take(&open, peer.ip()) else {
+            drop(sock);
+            continue;
+        };
         let Ok(permit) = slots.clone().try_acquire_owned() else {
             drop(sock);
             continue;
@@ -89,9 +101,36 @@ pub async fn serve(listener: tokio::net::TcpListener, mailbox: Arc<dyn Mailbox>)
         let mailbox = mailbox.clone();
         tokio::spawn(async move {
             let (r, w) = sock.into_split();
-            let _ = session(r, w, &*mailbox).await;
-            drop(permit);
+            let _ = tokio::time::timeout(SESSION, session(r, w, &*mailbox)).await;
+            drop((permit, held));
         });
+    }
+}
+
+/// One of an address's [`PER_ADDRESS`] connections, given back when dropped.
+struct Held(Arc<std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, usize>>>, std::net::IpAddr);
+
+impl Held {
+    fn take(open: &Arc<std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, usize>>>, ip: std::net::IpAddr) -> Option<Held> {
+        let mut m = open.lock().unwrap_or_else(|p| p.into_inner());
+        let n = m.entry(ip).or_insert(0);
+        if *n >= PER_ADDRESS {
+            return None;
+        }
+        *n += 1;
+        Some(Held(open.clone(), ip))
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let mut m = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(n) = m.get_mut(&self.1) {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(&self.1);
+            }
+        }
     }
 }
 
@@ -101,11 +140,11 @@ enum Line {
     Closed,
 }
 
-async fn read_line<R: AsyncRead + Unpin>(r: &mut BufReader<R>, max: usize) -> std::io::Result<Line> {
+async fn read_line<R: AsyncRead + Unpin>(r: &mut BufReader<R>, max: usize, wait: Duration) -> std::io::Result<Line> {
     let mut buf = Vec::new();
     let mut over = false;
     loop {
-        let chunk = tokio::time::timeout(IDLE, r.fill_buf()).await.map_err(|_| std::io::ErrorKind::TimedOut)??;
+        let chunk = tokio::time::timeout(wait, r.fill_buf()).await.map_err(|_| std::io::ErrorKind::TimedOut)??;
         if chunk.is_empty() {
             return Ok(match (over, buf.is_empty()) {
                 (true, _) => Line::TooLong,
@@ -139,16 +178,22 @@ async fn read_line<R: AsyncRead + Unpin>(r: &mut BufReader<R>, max: usize) -> st
     }
 }
 
-/// An address out of `FROM:<a@b>` / `TO:<a@b>` (bounded, no spaces or brackets inside).
+/// An address out of `FROM:<a@b>` / `TO:<a@b>` (bounded, no spaces, brackets or control
+/// characters inside: it's shown to people, in a terminal too).
 fn address(arg: &str, prefix: &str) -> Option<String> {
     let rest = arg.get(..prefix.len()).filter(|p| p.eq_ignore_ascii_case(prefix)).map(|_| arg[prefix.len()..].trim_start())?;
     let inner = rest.strip_prefix('<')?.split('>').next()?;
-    (inner.len() <= 254 && !inner.contains([' ', '<', '\r', '\n'])).then(|| inner.to_string())
+    (inner.len() <= 254 && !inner.chars().any(|c| c == ' ' || c == '<' || c.is_control())).then(|| inner.to_string())
 }
 
 fn decode(b64: &str) -> Option<String> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok()?;
     String::from_utf8(bytes).ok()
+}
+
+/// How long the next line may take: a minute once signed in, else what's left of [`SIGN_IN`].
+fn wait(preview: &Option<String>, started: std::time::Instant) -> Duration {
+    if preview.is_some() { IDLE } else { SIGN_IN.saturating_sub(started.elapsed()) }
 }
 
 /// One SMTP conversation.
@@ -160,11 +205,12 @@ pub async fn session<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(r: R, mut w: W
         w.flush().await
     };
     say(&mut w, "220 roll previews mail catcher (nothing is relayed)").await?;
+    let started = std::time::Instant::now();
     let mut preview: Option<String> = None;
     let mut from: Option<String> = None;
     let mut to: Vec<String> = Vec::new();
     loop {
-        let line = match read_line(&mut r, MAX_LINE).await? {
+        let line = match read_line(&mut r, MAX_LINE, wait(&preview, started)).await? {
             Line::Closed => return Ok(()),
             Line::TooLong => {
                 say(&mut w, "500 line too long").await?;
@@ -184,7 +230,7 @@ pub async fn session<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(r: R, mut w: W
                             Some(i) => i.to_string(),
                             None => {
                                 say(&mut w, "334 ").await?;
-                                match read_line(&mut r, MAX_LINE).await? {
+                                match read_line(&mut r, MAX_LINE, wait(&preview, started)).await? {
                                     Line::Text(t) => t,
                                     _ => return Ok(()),
                                 }
@@ -202,14 +248,14 @@ pub async fn session<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(r: R, mut w: W
                             Some(i) => decode(i),
                             None => {
                                 say(&mut w, "334 VXNlcm5hbWU6").await?;
-                                match read_line(&mut r, MAX_LINE).await? {
+                                match read_line(&mut r, MAX_LINE, wait(&preview, started)).await? {
                                     Line::Text(t) => decode(&t),
                                     _ => return Ok(()),
                                 }
                             }
                         };
                         say(&mut w, "334 UGFzc3dvcmQ6").await?;
-                        let pass = match read_line(&mut r, MAX_LINE).await? {
+                        let pass = match read_line(&mut r, MAX_LINE, wait(&preview, started)).await? {
                             Line::Text(t) => decode(&t),
                             _ => return Ok(()),
                         };
@@ -259,7 +305,7 @@ pub async fn session<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(r: R, mut w: W
                 let mut raw: Vec<u8> = Vec::new();
                 let mut over = false;
                 loop {
-                    let line = match read_line(&mut r, MAX_LINE).await? {
+                    let line = match read_line(&mut r, MAX_LINE, wait(&preview, started)).await? {
                         Line::Closed => return Ok(()),
                         Line::TooLong => {
                             over = true;

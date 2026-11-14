@@ -78,7 +78,8 @@ pub struct Settings {
     /// A command run once when the preview is deleted, before its services, secrets environment
     /// and branches go (Heroku's `pr-predestroy`): what its code made outside roll (a test-mode
     /// webhook, an OAuth redirect URI, a DNS record) cleaned up with the preview's own variables.
-    /// Only at a head the preview ran; a failure is logged and the deletion goes on.
+    /// Only at a head the preview ran; a failure is logged and the deletion goes on. A crash
+    /// during it runs it again: it should be safe to repeat.
     pub teardown: Option<Seed>,
     /// Column masks for NoSQL branches: `"nosql:<ref>"` → `{"keyspace.table.column": "mask_inner(1, 1)"}`
     /// (Cassandra 5's mask functions). Merged onto what the branch inherits from its parent,

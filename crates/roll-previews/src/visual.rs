@@ -47,12 +47,37 @@ const DIFF_MAX: (u32, u32) = (2048, 8192);
 /// own picture, and it's made on request, so callers queue rather than add up.
 static DIFFING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The last few diffs made, by what they were made of: a link in a pull request comment is
+/// fetched again and again (and by anyone who has it), and it's the same picture each time.
+static DIFFS: std::sync::Mutex<Vec<([u8; 32], Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
+const DIFFS_KEPT: usize = 8;
+
 /// What changed, as a picture (Percy's and Chromatic's diff view): `after` faded to a third
 /// where it's the same as `before`, and every pixel that differs (or that only one of them has)
 /// marked in a solid red, up to [`DIFF_MAX`]. `None` when either isn't a PNG it can read.
 pub fn diff(before: &[u8], after: &[u8]) -> Option<Vec<u8>> {
-    const MARK: [u8; 4] = [235, 52, 82, 255];
+    use sha2::Digest as _;
+    let key: [u8; 32] = sha2::Sha256::new().chain_update((before.len() as u64).to_be_bytes()).chain_update(before).chain_update(after).finalize().into();
+    let kept = || DIFFS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(k, _)| *k == key).map(|(_, png)| png.clone());
+    if let Some(png) = kept() {
+        return Some(png);
+    }
     let _one = DIFFING.lock().unwrap_or_else(|e| e.into_inner());
+    // Made while this one waited its turn.
+    if let Some(png) = kept() {
+        return Some(png);
+    }
+    let png = draw(before, after)?;
+    let mut diffs = DIFFS.lock().unwrap_or_else(|e| e.into_inner());
+    if diffs.len() >= DIFFS_KEPT {
+        diffs.remove(0);
+    }
+    diffs.push((key, png.clone()));
+    Some(png)
+}
+
+fn draw(before: &[u8], after: &[u8]) -> Option<Vec<u8>> {
+    const MARK: [u8; 4] = [235, 52, 82, 255];
     let (a, b) = (decode(before)?, decode(after)?);
     let (w, h) = (a.width().max(b.width()).min(DIFF_MAX.0), a.height().max(b.height()).min(DIFF_MAX.1));
     let out = RgbaImage::from_fn(w, h, |x, y| {

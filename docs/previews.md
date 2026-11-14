@@ -189,9 +189,10 @@ state. A pass of the reconciler:
    removed, like Heroku's `pr-predestroy`: what the preview's code made outside roll with its
    own keys (a payment provider's test webhook, an OAuth redirect URI, a DNS record) is cleaned
    up while everything it needs is still there. It runs only at a head the preview ran (a
-   fork's push nobody approved never runs it; the approved head before it does), never twice
-   when a removal is retried, and a failure is logged (rolld's log and the activity) without
-   keeping the preview.
+   fork's push nobody approved never runs it; the approved head before it does), not again
+   when a removal after it is retried (a crash during the job itself runs it again, so make it
+   safe to repeat), and a failure is logged (rolld's log and the activity) without keeping the
+   preview.
 
 The reconciler runs every 15 s, and right away when roll code emits a `change` or `landed`
 event (the broadcast is only a nudge, so a dropped event costs at most one interval). In a
@@ -1151,6 +1152,14 @@ Ranked by what a person notices first. Done so far:
 - a look at the sheet from screenshots of a live preview with today's checks (desktop and phone):
   the data branch rows kept their names whole and their notes in word groups;
 - caught mail bounded by bytes (10 MiB a preview) as well as count;
+- an eighth review (of this branch, #28) and its fixes: search masks through arrays of objects,
+  literal dotted keys and unindexed fields, failing on a version conflict; `connect` only for a
+  branch masked with today's rules; a screenshot run's output bounded (a page's code could have
+  made rolld read gigabytes); the mail catcher's slots time-boxed (15 s to sign in, 5 minutes a
+  connection, 8 per address); no control characters in a caught mail's addresses or in what
+  `roll preview mail` prints; an author's own token can't accept their visual change; an ANN
+  search can't be ordered by a masked vector; the diff link's pictures kept, not redrawn per
+  fetch;
 - a `teardown` job when a preview goes (Heroku's `pr-predestroy`): once, before its services
   and branches, only at a head it ran (a fork's unapproved push never), checked live (it saw
   the branch's URL, its failure didn't keep the preview);
@@ -1246,14 +1255,23 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A teardown's failure where people look**: the preview's activity goes with it, so today a
+1. **The page's checks out of the page's reach** (from the eighth review): speed, Core Web
+   Vitals, accessibility, SEO and links are read by scripts in the page's own JavaScript world,
+   so its code can replace `JSON.stringify` or `window.axe` and report what it likes (a slow page
+   passing `roll/speed`). Their size is bounded now; run them in an isolated world
+   (`Page.createIsolatedWorld`, the same DOM, its own globals) so the numbers are the browser's.
+2. **A teardown's failure where people look**: the preview's activity goes with it, so today a
    failing `teardown` is only in rolld's log. The change (its page and the pull request comment)
    should say the preview went with its teardown failing, the exit code and the output's tail,
-   so whoever owns the webhook it didn't remove finds out.
-2. **Replies on a page's notes** (Vercel Comments' threads): a note is one comment today; a
+   so whoever owns the webhook it didn't remove finds out. It needs roll code's side: a gone
+   preview clears the change's `preview` (`report_environment(change, None)`), so the change
+   has nowhere to keep it; the `preview` event that clearing emits could carry it first.
+3. **Replies on a page's notes** (Vercel Comments' threads): a note is one comment today; a
    reply from the page or the sheet joins it, and the note's author hears of it through roll's
-   notifications, resolved as one thread.
-3. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
+   notifications, resolved as one thread. roll code's threads have replies, resolving and the
+   GitHub mirror already, but a thread sits on a file's lines (`ThreadInput.path`/`line`); a
+   note would be a thread on a page, which roll code's reviews would have to allow first.
+4. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
    a preview reaches real people, but its code can still call any API (a payment provider's
    sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
    (today), `"roll"` (only roll's own products and the preview's branches) or a list of hosts;
@@ -1263,19 +1281,19 @@ Ranked by what a person notices first. Done so far:
    host whose firewall roll mustn't touch) or an internal network with a forwarding sidecar for
    every product port (an image of its own, and roll code's runner changed); on the cloud fleet
    it's security groups, with the cloud thread.
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+6. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+7. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-7. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+8. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1288,12 +1306,12 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-8. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+9. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
    Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
    minutes even with the parent's history reporting `end` past it, where pg-control's own test
    (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
    old; the live script will check it once this is understood.
-9. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+10. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

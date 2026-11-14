@@ -87,8 +87,8 @@ const SHOT_JS: &str = include_str!("shot.js");
 const AXE_JS: &str = include_str!("../vendor/axe-core/axe.min.js");
 
 /// `docker` with `input` on its stdin, written while its output is read.
-async fn docker_with_input(args: &[&str], input: &'static [u8]) -> anyhow::Result<String> {
-    use tokio::io::AsyncWriteExt;
+async fn docker_with_input(args: &[&str], input: &'static [u8], max: usize) -> anyhow::Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut child = tokio::process::Command::new("docker")
         .args(args)
         .stdin(std::process::Stdio::piped())
@@ -100,10 +100,20 @@ async fn docker_with_input(args: &[&str], input: &'static [u8]) -> anyhow::Resul
     let feed = tokio::spawn(async move {
         let _ = stdin.write_all(input).await;
     });
-    let out = child.wait_with_output().await?;
+    // What the container writes is read up to `max` (its page's code runs in there): never more.
+    let (mut stdout, mut stderr) = (child.stdout.take().ok_or_else(|| anyhow::anyhow!("docker's stdout"))?, child.stderr.take().ok_or_else(|| anyhow::anyhow!("docker's stderr"))?);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let (mut stdout, mut stderr) = ((&mut stdout).take(max as u64 + 1), (&mut stderr).take(64 << 10));
+    let (read, _) = tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err));
+    read?;
+    if out.len() > max {
+        let _ = child.kill().await;
+        anyhow::bail!("docker {}: over {max} bytes of output", args.first().unwrap_or(&""));
+    }
+    let status = child.wait().await?;
     let _ = feed.await;
-    anyhow::ensure!(out.status.success(), "docker {}: {}", args.first().unwrap_or(&""), String::from_utf8_lossy(&out.stderr).trim());
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    anyhow::ensure!(status.success(), "docker {}: {}", args.first().unwrap_or(&""), String::from_utf8_lossy(&err).trim());
+    Ok(String::from_utf8_lossy(&out).trim().to_string())
 }
 
 impl Default for RuntimeConfig {
@@ -662,6 +672,11 @@ fn feedback_script(target: &str) -> Response {
 
 /// The biggest screenshot kept (a 1280×800 PNG of an ordinary page is 10–200 KiB).
 pub const SCREENSHOT_MAX: usize = 2 << 20;
+/// A screenshot run's report lines (speed, checks and words of the first page; then the other
+/// pages'), each at most this, and everything it writes: every PNG it can take, in base64, and
+/// those lines.
+const SHOT_REPORT_MAX: usize = 4 << 20;
+const SHOT_OUTPUT_MAX: usize = (crate::settings::MAX_PAGES + 2) * SCREENSHOT_MAX * 4 / 3 + 2 * SHOT_REPORT_MAX + (64 << 10);
 
 /// The header automation sends a project's bypass secret in (docs/previews.md, "Safety").
 pub const BYPASS_HEADER: &str = "x-roll-preview-bypass";
@@ -957,16 +972,25 @@ impl Runtime {
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         // Each other page is taken and checked too (accessibility, links up to 20 s, SEO, words).
         let within = Duration::from_secs(90 + 30 * pages.len() as u64);
-        let out = match tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes())).await {
-            Ok(r) => r?,
+        let out = match tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)).await {
+            Ok(Ok(out)) => out,
+            // Its container outlives a docker CLI that gave up on it (too much output).
+            Ok(Err(e)) => {
+                code_preview::docker::remove(&shot).await;
+                return Err(e);
+            }
             Err(_) => {
                 code_preview::docker::remove(&shot).await;
                 anyhow::bail!("the screenshot took over {} s", within.as_secs());
             }
         };
         let mut lines = out.split('\n');
-        let (b64, speed, phone) = (lines.next().unwrap_or(""), lines.next().unwrap_or(""), lines.next().unwrap_or(""));
-        let said = lines.next().unwrap_or("");
+        // The report lines are the page's to forge: one too long to be ours reads as nothing.
+        fn report(l: Option<&str>) -> &str {
+            l.filter(|l| l.len() <= SHOT_REPORT_MAX).unwrap_or("")
+        }
+        let (b64, speed, phone) = (lines.next().unwrap_or(""), report(lines.next()), lines.next().unwrap_or(""));
+        let said = report(lines.next());
         let b64e = base64::engine::general_purpose::STANDARD;
         let png = b64e.decode(b64.trim()).map_err(|e| anyhow::anyhow!("the screenshot isn't a PNG: {e}"))?;
         anyhow::ensure!(png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX, "the screenshot isn't a PNG of at most {SCREENSHOT_MAX} bytes");

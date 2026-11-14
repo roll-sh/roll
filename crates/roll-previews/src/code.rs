@@ -406,7 +406,7 @@ impl PreviewBackend for Backend {
     async fn accept_visual(&self, change: &code_control::model::Change, by: &str, head: &str) -> anyhow::Result<()> {
         let engine = self.engine.get().and_then(Weak::upgrade).ok_or_else(|| anyhow::anyhow!("previews aren't running"))?;
         let row = engine.store.row_by_change(&change.id)?.ok_or_else(|| anyhow::anyhow!("the change has no preview"))?;
-        engine.accept_visual(&row.id, by, true, Some(head), None).await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
+        engine.accept_visual(&row.id, by, None, true, Some(head), None).await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     async fn delete(&self, repo: &RepoRow, change: &code_control::model::Change) -> anyhow::Result<()> {
