@@ -406,6 +406,12 @@ logged and read again on the next converge; it never fails the preview.
       and the parent's endpoint refuses it.
   - NoSQL: column masks (Cassandra 5's mask functions) added to the branch's read policy, on top
     of what it inherits.
+  - Search: `"search:<cluster>"` → `{"index.field": rule}` (a nested field's path too:
+    `users.address.city`), the rule `redact` (`[masked]`), `remove` or `email`
+    (`user-<document id>@example.invalid`). The branch's documents are rewritten with
+    `_update_by_query` (a Painless script) before any service is pointed at it; the parent's
+    segments are shared, so the rewrites are the branch's own and the parent keeps its values
+    (live: the branch reads `[masked]`, the parent `parent`).
   - Other products: a `seed` anonymises the rows instead.
 - **Queues branch without what moves messages in.** Shovels and federation upstreams (and the
   `federation-upstream*` keys of policies) aren't copied, so a branch can't pull production
@@ -731,7 +737,7 @@ type Settings = {
   env_for: Record<string, Record<string, string>>; // branch glob → variables, over env, under a preview's own ({})
   seed: Job | null;                   // once on fresh data
   release: Job | null;                // at each new head, before services deploy (migrations)
-  masking: Record<string, Record<string, string>>; // "postgres:<ref>" → {"schema.table.column": "email"}, "nosql:<ref>" → {"ks.table.column": "mask_default()"}
+  masking: Record<string, Record<string, string>>; // "postgres:<ref>" → {"schema.table.column": "email"}, "nosql:<ref>" → {"ks.table.column": "mask_default()"}, "search:<ref>" → {"index.field": "redact" | "remove" | "email"}
 };
 ```
 
@@ -901,7 +907,8 @@ Ranked by what a person notices first. Done so far:
 - roll apps end to end;
 - previews spread across a cluster's nodes, a lease each (tested);
 - roll apps' `pv-…` environments private, their 401 page linked through roll;
-- NoSQL column masks per preview;
+- NoSQL column masks per preview, and search field masks (`search:<cluster>`, rewritten in the
+  branch only);
 - copy-on-write stream branches (shared chunks, refcounted deletes) and Postgres `schema` mode;
 - a monthly budget per project, `roll preview open`, and following logs in the dashboard;
 - a second adversarial review and its fixes (and a stream branch's cut that waits for aborting

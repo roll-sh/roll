@@ -161,6 +161,10 @@ pub struct Budget {
 
 pub const MAX_HIDE: usize = 20;
 
+/// How a search branch's field is masked: `redact` (`[masked]`), `remove` (the field goes) or
+/// `email` (`user-<document id>@example.invalid`, so it still looks like one and stays unique).
+pub const SEARCH_MASKS: [&str; 3] = ["redact", "remove", "email"];
+
 /// Whether `s` may go into the screenshot's stylesheet as a selector: it can't end its rule.
 pub fn selector_ok(s: &str) -> bool {
     !s.trim().is_empty() && s.len() <= 200 && !s.contains(['{', '}', '<', ';', '\\']) && !s.contains("/*") && s.chars().all(|c| !c.is_control())
@@ -321,12 +325,23 @@ impl Settings {
             }
         }
         for (key, cols) in &self.masking {
-            let postgres = key.strip_prefix("postgres:").is_some_and(|r| !r.is_empty());
-            if !postgres && !key.strip_prefix("nosql:").is_some_and(|r| !r.is_empty()) {
-                return bad(format!("masking: {key:?} isn't \"postgres:<ref>\" or \"nosql:<ref>\" (only those branches can mask columns)"));
+            let of = |k: &str| key.strip_prefix(k).is_some_and(|r| !r.is_empty());
+            let (postgres, search) = (of("postgres:"), of("search:"));
+            if !postgres && !search && !of("nosql:") {
+                return bad(format!("masking: {key:?} isn't \"postgres:<ref>\", \"nosql:<ref>\" or \"search:<ref>\" (only those branches can mask)"));
             }
             if cols.len() > 200 {
                 return bad(format!("masking: {key}: at most 200 columns"));
+            }
+            if search {
+                // `index.field` (a nested field's path: `users.address.city`) → a search rule.
+                for (field, rule) in cols {
+                    let ok = field.len() <= 200 && field.split('.').count() >= 2 && !field.split('.').any(str::is_empty) && !field.contains(['*', ',', '/', ' ', '\\']);
+                    if !ok || !SEARCH_MASKS.contains(&rule.as_str()) {
+                        return bad(format!("masking: {key}: {field:?} → {rule:?} isn't \"index.field\" → one of {}", SEARCH_MASKS.join(", ")));
+                    }
+                }
+                continue;
             }
             for (col, f) in cols {
                 if col.split('.').count() != 3 || col.split('.').any(str::is_empty) || col.len() > 200 || f.trim().is_empty() || f.len() > 200 {
@@ -431,6 +446,10 @@ mod tests {
         // Structure-only where a kind can't do it: refused, never a silent full copy.
         assert!(Settings::default().patched(&json!({ "resources": { "bucket:b": "schema" } })).is_err());
         assert!(Settings::default().patched(&json!({ "github": { "hide": ["time", ".clock, #ad"] } })).is_ok());
+        assert!(Settings::default().patched(&json!({ "masking": { "search:catalog": { "users.email": "email", "users.address.city": "redact" } } })).is_ok());
+        for bad in [json!({ "users": "redact" }), json!({ "users.email": "hash" }), json!({ "*.email": "redact" })] {
+            assert!(Settings::default().patched(&json!({ "masking": { "search:catalog": bad } })).is_err(), "{bad}");
+        }
         assert!(Settings::default().patched(&json!({ "github": { "hide": ["a} body {display:none"] } })).is_err());
         assert!(Settings::default().patched(&json!({ "github": { "pages": ["/pricing", "admin:/", "admin:/users"] } })).is_ok());
         assert_eq!(page_entry("admin:/users"), Some((Some("admin"), "/users")));

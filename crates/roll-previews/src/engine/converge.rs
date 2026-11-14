@@ -708,7 +708,8 @@ impl Engine {
         let kind = Kind::parse(kind)?;
         let digest = mask_digest_of(s.masking.get(key));
         if let Some(cols) = s.masking.get(key).filter(|c| !c.is_empty()) {
-            b.mask(parent, branch, cols).await.map_err(|e| anyhow::anyhow!("masking {key}: {e:#}"))?;
+            let kept = self.store.resources(id)?.into_iter().find(|x| x.kind == kind && x.parent == parent).and_then(|x| x.kept);
+            b.mask(parent, branch, kept.as_deref(), cols).await.map_err(|e| anyhow::anyhow!("masking {key}: {e:#}"))?;
             self.store.log(id, &format!("masked {} column(s) of {key}", cols.len()))?;
         }
         self.store.set_mask_digest(id, kind, parent, &digest)?;

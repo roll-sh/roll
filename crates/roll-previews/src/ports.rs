@@ -66,8 +66,10 @@ pub trait Brancher: Send + Sync {
     }
 
     /// Mask columns of a branch (its parent stays as it is): NoSQL adds them to the branch's read
-    /// policy, Postgres rewrites them in the branch (`crate::mask`). Products that can't, refuse.
-    async fn mask(&self, _parent: &str, _branch: &str, _columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+    /// policy, Postgres rewrites them in the branch (`crate::mask`), search rewrites the fields in
+    /// the branch's documents. `kept` is what branching kept (a search branch's credentials).
+    /// Products that can't, refuse.
+    async fn mask(&self, _parent: &str, _branch: &str, _kept: Option<&str>, _columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
         anyhow::bail!("this product's branches can't mask columns")
     }
 

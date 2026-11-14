@@ -134,7 +134,7 @@ impl Brancher for FakeData {
         }
         Ok(Branched::plain(id))
     }
-    async fn mask(&self, _parent: &str, branch: &str, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+    async fn mask(&self, _parent: &str, branch: &str, _kept: Option<&str>, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
         self.masks.lock().push((branch.to_string(), columns.clone()));
         Ok(())
     }

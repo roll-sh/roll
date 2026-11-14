@@ -113,7 +113,7 @@ impl Brancher for Postgres {
     /// Rewrite the masked columns in the branch, in one transaction, then `VACUUM FULL` those
     /// tables so the rows as they were leave the branch's files (`roll_previews::mask`). Run again
     /// it's harmless: masked values stay masked.
-    async fn mask(&self, parent: &str, branch: &str, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+    async fn mask(&self, parent: &str, branch: &str, _kept: Option<&str>, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
         let mut salt = [0u8; 16];
         getrandom::fill(&mut salt).map_err(|e| anyhow::anyhow!("randomness: {e}"))?;
         let salt: String = salt.iter().map(|b| format!("{b:02x}")).collect();
@@ -310,7 +310,7 @@ impl Brancher for Nosql {
     }
 
     /// Merge masks onto the branch's own policy (inherited from its parent at branching).
-    async fn mask(&self, _parent: &str, branch: &str, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+    async fn mask(&self, _parent: &str, branch: &str, _kept: Option<&str>, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
         let d = self.0.get(&format!("/v1/nosql/databases/{}", seg(branch))).await?;
         let mut policy = d["masking"].as_object().cloned().unwrap_or_default();
         for (col, f) in columns {
@@ -690,6 +690,16 @@ impl Brancher for Tasks {
 
 // ── Search: a zero-copy branch of an Elasticsearch-compatible cluster (roll search) ──
 
+/// Masks one field (`params.path`, nested names) of a document: `redact`, `remove` or `email`.
+const SEARCH_MASK_SCRIPT: &str = "def m = ctx._source; def p = params.path; \
+for (int i = 0; i < p.length - 1; i++) { if (!(m instanceof Map) || !m.containsKey(p[i])) { return; } m = m.get(p[i]); } \
+def k = p[p.length - 1]; if (!(m instanceof Map) || !m.containsKey(k)) { return; } \
+if (params.rule == 'remove') { m.remove(k); } else if (params.rule == 'email') { m.put(k, 'user-' + ctx._id + '@example.invalid'); } else { m.put(k, '[masked]'); }";
+
+fn percent_decode(s: &str) -> String {
+    urlencoding::decode(s).map(|c| c.into_owned()).unwrap_or_else(|_| s.to_string())
+}
+
 pub struct Search(pub Api);
 
 impl Search {
@@ -755,6 +765,41 @@ impl Brancher for Search {
     async fn connect(&self, _parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>> {
         let kept: Value = kept.and_then(|k| serde_json::from_str(k).ok()).ok_or_else(|| anyhow::anyhow!("the search branch {branch} has no credentials: reset it"))?;
         Ok(kept.as_object().into_iter().flatten().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect())
+    }
+
+    /// Rewrite the masked fields in the branch's documents (`_update_by_query`, Painless): the
+    /// parent's segments are shared, so the branch's rewritten documents are its own and the
+    /// parent keeps its values. Run again it's harmless: masked values stay masked.
+    async fn mask(&self, _parent: &str, branch: &str, kept: Option<&str>, fields: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+        let vars = self.connect("", branch, kept).await?;
+        let url = vars.iter().find(|(k, _)| k == "ELASTICSEARCH_URL").map(|(_, v)| v.clone()).ok_or_else(|| anyhow::anyhow!("the search branch {branch} has no URL"))?;
+        let mut u = reqwest::Url::parse(&url)?;
+        let (user, pass) = (percent_decode(u.username()), u.password().map(percent_decode));
+        let _ = u.set_username("");
+        let _ = u.set_password(None);
+        let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(300)).build()?;
+        for (spec, rule) in fields {
+            let Some((index, path)) = spec.split_once('.') else { anyhow::bail!("{spec:?} isn't index.field") };
+            let target = u.join(&format!("{}/_update_by_query?conflicts=proceed&refresh=true", seg(index)))?;
+            let body = json!({
+                "query": { "exists": { "field": path } },
+                "script": { "lang": "painless", "source": SEARCH_MASK_SCRIPT, "params": { "path": path.split('.').collect::<Vec<_>>(), "rule": rule } },
+            });
+            let mut req = http.post(target).json(&body);
+            if !user.is_empty() {
+                req = req.basic_auth(&user, pass.as_deref());
+            }
+            let res = req.send().await?;
+            let status = res.status();
+            let v: Value = res.json().await.unwrap_or(Value::Null);
+            // An index the branch doesn't have holds nothing to mask.
+            if status.as_u16() == 404 {
+                continue;
+            }
+            let failures = v["failures"].as_array().map_or(0, Vec::len);
+            anyhow::ensure!(status.is_success() && failures == 0, "masking {spec}: {status} {}", v.to_string().chars().take(300).collect::<String>());
+        }
+        Ok(())
     }
 
     async fn usage(&self, _parent: &str, branch: &str) -> anyhow::Result<Usage> {
