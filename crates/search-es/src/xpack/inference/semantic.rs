@@ -218,22 +218,6 @@ fn walk<'a>(o: &'a ObjectMapper, prefix: &str, out: &mut Vec<(String, &'a FieldM
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::obj;
-
-    #[test]
-    fn model_settings_follow_minimal_service_settings() {
-        let dense = obj! { "task_type" => "text_embedding", "dimensions" => 4, "similarity" => "cosine", "element_type" => "float" };
-        assert_eq!(ModelSettings::parse(&dense).unwrap().to_value(), dense);
-        let e = ModelSettings::parse(&obj! { "task_type" => "text_embedding", "dimensions" => 4 }).unwrap_err();
-        assert_eq!(e.reason(), "required [similarity] field is missing for task_type [TEXT_EMBEDDING]");
-        let e = ModelSettings::parse(&obj! { "task_type" => "sparse_embedding", "dimensions" => 4 }).unwrap_err();
-        assert_eq!(e.reason(), "[dimensions] is not allowed for task_type [SPARSE_EMBEDDING]");
-    }
-}
-
 /// Whether a root key of a document holds inference results (`_inference_fields`, or one
 /// field's as a dotted key `_inference_fields.<field>`).
 pub fn is_inference_key(k: &str) -> bool {
@@ -600,4 +584,20 @@ pub fn drop_stale(mapping: &Mapping, old: &[u8], new: &[u8]) -> Option<bytes::By
         new.shift_remove("_inference_fields");
     }
     changed.then(|| bytes::Bytes::from(Value::Obj(new).to_json()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::obj;
+
+    #[test]
+    fn model_settings_follow_minimal_service_settings() {
+        let dense = obj! { "task_type" => "text_embedding", "dimensions" => 4, "similarity" => "cosine", "element_type" => "float" };
+        assert_eq!(ModelSettings::parse(&dense).unwrap().to_value(), dense);
+        let e = ModelSettings::parse(&obj! { "task_type" => "text_embedding", "dimensions" => 4 }).unwrap_err();
+        assert_eq!(e.reason(), "required [similarity] field is missing for task_type [TEXT_EMBEDDING]");
+        let e = ModelSettings::parse(&obj! { "task_type" => "sparse_embedding", "dimensions" => 4 }).unwrap_err();
+        assert_eq!(e.reason(), "[dimensions] is not allowed for task_type [SPARSE_EMBEDDING]");
+    }
 }

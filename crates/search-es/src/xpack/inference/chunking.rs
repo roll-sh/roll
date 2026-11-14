@@ -173,29 +173,6 @@ impl Chunking {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn parse(v: Value) -> EsResult<Chunking> {
-        Chunking::from_request(Some(&v))
-    }
-
-    #[test]
-    fn defaults_and_strategies() {
-        assert_eq!(Chunking::from_request(None).unwrap(), OLD_DEFAULT);
-        assert_eq!(parse(obj! {}).unwrap(), DEFAULT);
-        assert_eq!(parse(obj! { "strategy" => "word", "max_chunk_size" => 20, "overlap" => 2 }).unwrap(), Chunking::Word { max_chunk_size: 20, overlap: 2 });
-        assert_eq!(parse(obj! { "strategy" => "none" }).unwrap().to_value(), obj! { "strategy" => "none" });
-        let e = parse(obj! { "strategy" => "sentence", "max_chunk_size" => 5 }).unwrap_err();
-        assert_eq!(e.reason(), "Validation Failed: 1: [chunking_settings] Invalid value [5.0]. [max_chunk_size] must be greater than or equal to [20.0];");
-        let e = parse(obj! { "strategy" => "word", "max_chunk_size" => 20, "overlap" => 11 }).unwrap_err();
-        assert_eq!(e.reason(), "Validation Failed: 1: [chunking_settings] Invalid value [11.0]. [overlap] must be less than or equal to [10.0];");
-        assert_eq!(parse(obj! { "strategy" => "bogus" }).unwrap_err().reason(), "Invalid chunkingStrategy bogus");
-        assert_eq!(parse(obj! { "max_chunk_size" => 5 }).unwrap_err().reason(), "Can't generate Chunker without ChunkingStrategy provided");
-    }
-}
-
 /// A chunk of a text: offsets in UTF-16 code units, as Java's `String` counts them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Span {
@@ -403,6 +380,29 @@ impl Chunking {
 pub fn substring(text: &str, span: Span) -> String {
     let units: Vec<u16> = text.encode_utf16().collect();
     String::from_utf16_lossy(&units[span.start.min(units.len())..span.end.min(units.len())])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(v: Value) -> EsResult<Chunking> {
+        Chunking::from_request(Some(&v))
+    }
+
+    #[test]
+    fn defaults_and_strategies() {
+        assert_eq!(Chunking::from_request(None).unwrap(), OLD_DEFAULT);
+        assert_eq!(parse(obj! {}).unwrap(), DEFAULT);
+        assert_eq!(parse(obj! { "strategy" => "word", "max_chunk_size" => 20, "overlap" => 2 }).unwrap(), Chunking::Word { max_chunk_size: 20, overlap: 2 });
+        assert_eq!(parse(obj! { "strategy" => "none" }).unwrap().to_value(), obj! { "strategy" => "none" });
+        let e = parse(obj! { "strategy" => "sentence", "max_chunk_size" => 5 }).unwrap_err();
+        assert_eq!(e.reason(), "Validation Failed: 1: [chunking_settings] Invalid value [5.0]. [max_chunk_size] must be greater than or equal to [20.0];");
+        let e = parse(obj! { "strategy" => "word", "max_chunk_size" => 20, "overlap" => 11 }).unwrap_err();
+        assert_eq!(e.reason(), "Validation Failed: 1: [chunking_settings] Invalid value [11.0]. [overlap] must be less than or equal to [10.0];");
+        assert_eq!(parse(obj! { "strategy" => "bogus" }).unwrap_err().reason(), "Invalid chunkingStrategy bogus");
+        assert_eq!(parse(obj! { "max_chunk_size" => 5 }).unwrap_err().reason(), "Can't generate Chunker without ChunkingStrategy provided");
+    }
 }
 
 #[cfg(test)]
