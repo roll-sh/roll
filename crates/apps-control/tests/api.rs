@@ -1423,6 +1423,14 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     let d2: Value = serde_json::from_slice(&w.api.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
     let d2 = settled(&w, &id, "production", d2["id"].as_str().unwrap()).await;
     assert_ne!(d2["image"], d["image"]);
+    // Live in the store a moment before it serves: until then the old site answers, and the new
+    // chunk isn't one of its.
+    for _ in 0..250 {
+        if site(&chunk(&d2["image"])).await.unwrap().status() == StatusCode::OK {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     for (path, want) in [(chunk(&d["image"]), StatusCode::OK), (chunk(&d2["image"]), StatusCode::OK), ("/assets/chunk-0123abcdz9.js".to_string(), StatusCode::NOT_FOUND)] {
         let r = site(&path).await.unwrap();
         assert_eq!(r.status(), want, "{path}");
