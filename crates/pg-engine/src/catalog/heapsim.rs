@@ -728,6 +728,16 @@ pub struct Bistate {
     extended: usize,
 }
 
+impl Bistate {
+    /// RelationAddBlocks's extension for a bulk insert needing a page: as far as it has
+    /// extended so far (at least one page, at most MAX_EXTEND_BY), counted.
+    pub fn extend(&mut self) -> usize {
+        let by = self.extended.clamp(1, MAX_EXTEND_BY);
+        self.extended += by;
+        by
+    }
+}
+
 /// How rows are being inserted.
 #[derive(Debug)]
 pub struct InsertMode {
@@ -1047,6 +1057,11 @@ impl Heap {
     /// The free space of the last page (PageGetHeapFreeSpace; 0 without pages).
     pub fn last_page_free(&self) -> usize {
         self.pages.last().map_or(0, Page::heap_free)
+    }
+
+    /// The last page's line pointers.
+    pub fn last_page_items(&self) -> u16 {
+        self.pages.last().map_or(0, |p| p.lps.len() as u16)
     }
 
     /// The pages at the end a bulk extension added and nothing used yet (all zeroes).

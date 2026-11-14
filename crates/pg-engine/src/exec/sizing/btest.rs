@@ -299,26 +299,30 @@ impl BtEst {
         l.tids -= right.tids;
         l.keys -= right.keys;
         // (The right page's low key: after the left's, before the next leaf's.)
-        let right_at = if cut > lo {
-            l.max = cut - 1;
-            (cut, 0)
-        } else {
-            let next = self.leaves.range((std::ops::Bound::Excluded(at), std::ops::Bound::Unbounded)).next().map(|(k, _)| *k);
-            let hi = match next {
-                Some((k, s)) if k == lo => s,
-                _ => u64::MAX,
-            };
-            if hi - at.1 < 2 {
-                // (No order left between them: the page counted, the leaf kept whole.)
-                Self::add(&mut l, key, need, new_key);
-                l.used = l.used.min(room);
-                self.leaves.insert(at, l);
-                self.stuck += 1;
-                self.note_blocks();
-                return;
-            }
-            (lo, at.1 + (hi - at.1) / 2)
-        };
+        let next = self.leaves.range((std::ops::Bound::Excluded(at), std::ops::Bound::Unbounded)).next().map(|(k, _)| *k);
+        let below_next = |k: (u128, u64)| next.is_none_or(|n| k < n);
+        let mut right_at = if cut > lo { (cut, 0) } else { (lo, at.1 + (u64::MAX - at.1) / 2) };
+        if !below_next(right_at) {
+            // (Between the left's place and the next leaf's, in the order among one key's.)
+            let n = next.expect("a next leaf");
+            right_at = if n.0 == at.0 { (lo, at.1 + (n.1 - at.1) / 2) } else { (n.0, n.1 / 2) };
+        }
+        if !(right_at > at && below_next(right_at)) {
+            // (No order left between them: the page counted, the leaf kept whole.)
+            l.used += right.used;
+            l.tuples += right.tuples;
+            l.tids += right.tids;
+            l.keys += right.keys;
+            Self::add(&mut l, key, need, new_key);
+            l.used = l.used.min(room);
+            self.leaves.insert(at, l);
+            self.stuck += 1;
+            self.note_blocks();
+            return;
+        }
+        if right_at.0 > lo {
+            l.max = right_at.0 - 1;
+        }
         let into_right = append || key >= right_at.0 && (right_at.0 > lo || l.tuples <= right.tuples);
         if into_right {
             Self::add(&mut right, key, need, new_key);

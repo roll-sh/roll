@@ -232,55 +232,110 @@ impl BrinRanges {
 /// A table too big to model (`untracked`): its heap's size as Postgres's file would have
 /// it, estimated by putting every row version written after the last one (into the space a
 /// VACUUM found free first). What the planner's current page count, VACUUM's and ANALYZE's
-/// relpages and pg_relation_size read for it.
+/// relpages and pg_relation_size read for it. Each version put at the end of the file gets
+/// the TID it has in PostgreSQL's (`add`), its ctid and its place in a scan's heap order.
 #[derive(Clone, Copy, Default)]
 struct EstHeap {
     pages: u32,
-    /// Free bytes in the last page.
+    /// The page being filled, its free bytes and its line pointers.
+    fill: u32,
     room: usize,
+    items: u16,
     /// Free bytes in the pages before it.
     reusable: usize,
-    /// Bytes of the pages a bulk extension added at the end and nothing used yet: filled
-    /// before the file grows (the free space map has them), as new pages, not as space a
-    /// VACUUM freed.
-    fresh: usize,
+    /// The pages a bulk extension added at the end and nothing used yet: filled before the
+    /// file grows (the free space map has them), as new pages, not as space a VACUUM freed.
+    fresh: u32,
+    order: EstOrder,
+    /// Versions placed (`placed`): what a scan that found the order checks is unchanged.
+    writes: u64,
+}
+
+/// Whether the rows of a table too big to model are stored in its heap order
+/// (`EstHeap::order`).
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum EstOrder {
+    /// As stored (by key) is as in its heap: every version went in at the end, in key order.
+    InOrder,
+    /// Not known to be: a version went in out of key order (an update's new one at the
+    /// end), each with its TID stored. A scan in heap order sorts them by it.
+    #[default]
+    Stamped,
+    /// Some version's place isn't known (space a VACUUM freed, a rewrite): rows come as
+    /// stored.
+    Unplaced,
 }
 
 impl EstHeap {
     fn from_heap(h: &Heap) -> EstHeap {
-        let fresh = h.trailing_fresh() as usize;
+        let fresh = h.trailing_fresh();
+        let pages = h.nblocks();
+        let order = if h.unstamped {
+            EstOrder::Unplaced
+        } else if h.in_key_order() {
+            EstOrder::InOrder
+        } else {
+            EstOrder::Stamped
+        };
         EstHeap {
-            pages: h.nblocks(),
+            pages,
+            fill: pages.saturating_sub(fresh + 1),
             room: if fresh > 0 { 0 } else { h.last_page_free() },
+            items: if fresh > 0 { 0 } else { h.last_page_items() },
             reusable: 0,
-            fresh: fresh * (heapsim::BLCKSZ - heapsim::PAGE_HEADER),
+            fresh,
+            order,
+            writes: 0,
         }
     }
 
     /// A tuple of `len` bytes written (RelationGetBufferForTuple keeps a page's fillfactor
-    /// free for updates; a new page takes any tuple).
-    /// True: it went in space a VACUUM found free (where an update's new version can stay
-    /// on its old one's page).
-    fn add(&mut self, len: usize, fillfactor: usize) -> bool {
+    /// free for updates; a new page takes any tuple): its TID, or None when it went in space
+    /// a VACUUM found free (where an update's new version can stay on its old one's page),
+    /// which this doesn't place.
+    fn add(&mut self, len: usize, fillfactor: usize) -> Option<Tid> {
+        self.add_in(len, fillfactor, None)
+    }
+
+    /// `add` for a bulk insert (`bi`: its state): a new page past the fresh ones extends
+    /// the file as far as the bulk insert has extended it so far (RelationAddBlocks), the
+    /// pages past the first fresh.
+    fn add_in(&mut self, len: usize, fillfactor: usize, bi: Option<&mut heapsim::Bistate>) -> Option<Tid> {
         let need = heapsim::maxalign(len) + heapsim::ITEM_ID;
         if self.reusable >= need {
             self.reusable -= need;
-            return true;
+            self.order = EstOrder::Unplaced;
+            return None;
         }
         let reserve = heapsim::BLCKSZ * (100 - fillfactor.min(100)) / 100;
-        if self.fresh > 0 && need + reserve > self.room {
-            // (The next fresh page.)
-            let page = heapsim::BLCKSZ - heapsim::PAGE_HEADER;
-            self.fresh = self.fresh.saturating_sub(page);
-            self.room = page - need;
-            return false;
-        }
-        if self.pages == 0 || need + reserve > self.room {
-            self.pages += 1;
+        if self.pages == 0 || need + reserve > self.room || self.items as usize >= relsize::MAX_HEAP_TUPLES {
+            if self.fresh > 0 {
+                // (The next fresh page.)
+                self.fill = self.pages - self.fresh;
+                self.fresh -= 1;
+            } else {
+                let by = bi.map_or(1, |b| b.extend()) as u32;
+                self.fill = self.pages;
+                self.pages += by;
+                self.fresh = by - 1;
+            }
             self.room = heapsim::BLCKSZ - heapsim::PAGE_HEADER;
+            self.items = 0;
         }
         self.room = self.room.saturating_sub(need);
-        false
+        self.items += 1;
+        Some((self.fill, self.items))
+    }
+
+    /// A version went in at `tid` (None: not placed), with a key past every other's
+    /// (`appended`) or not.
+    fn placed(&mut self, tid: Option<Tid>, appended: bool) {
+        self.writes += 1;
+        if tid.is_none() {
+            self.order = EstOrder::Unplaced;
+        } else if !appended && self.order == EstOrder::InOrder {
+            self.order = EstOrder::Stamped;
+        }
     }
 }
 
@@ -2032,19 +2087,24 @@ fn may_toast(v: &Value) -> bool {
 /// SELECT copying them, `dml::StoredInsert`): its heap estimate grows by the tuple's length
 /// `len` (its `row_len`, by `storage::row::stored_tuple_len`), as `inserted_with` grows it
 /// for a row short enough to keep its values in line. False: the table is modelled, or the
-/// row long (nothing done: the row goes in decoded).
-pub fn inserted_stored(t: &Table, len: usize, ctx: &ExecCtx) -> bool {
+/// row long (nothing done: the row goes in decoded). Some: the row's TID as the estimate
+/// places it (`EstHeap::add`), when it does.
+pub fn inserted_stored(t: &Table, len: usize, ctx: &ExecCtx) -> Option<Option<Tid>> {
     if len > TOAST_THRESHOLD {
-        return false;
+        return None;
     }
     let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
     if !rf.untracked.contains(&t.oid) {
-        return false;
+        return None;
     }
-    if let Some(e) = rf.estimated.get_mut(&t.oid) {
-        e.add(len, heap_fillfactor(t));
-    }
-    true
+    let txn = ctx.txn.borrow().id;
+    let RelFiles { estimated, bulk, .. } = &mut *rf;
+    let bi = bulk.get_mut(&(t.oid, txn)).and_then(|b| b.mode.bistate.as_mut());
+    Some(estimated.get_mut(&t.oid).and_then(|e| {
+        let tid = e.add_in(len, heap_fillfactor(t), bi);
+        e.placed(tid, t.has_rowid());
+        tid
+    }))
 }
 
 fn untracked_write(
@@ -2055,7 +2115,7 @@ fn untracked_write(
     vals: Option<&[Option<Vec<Value>>]>,
     ctx: &ExecCtx,
     len: Option<usize>,
-) -> Result<()> {
+) -> Result<Option<Tid>> {
     let (len, exts) = layout_len(t, row, ctx, &HashSet::new(), len);
     let changed = |c: usize| old.is_none_or(|o| !same(o.get(c), row.get(c)));
     if t.toast != 0
@@ -2067,17 +2127,28 @@ fn untracked_write(
     // index of an insert, of an update all but where it stays on its page (heap_update's
     // HOT: space a VACUUM freed, no indexed column changed).
     let entries = est_entries(t, indexes, row, old, vals, ctx)?;
+    let txn = ctx.txn.borrow().id;
     let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
-    let reused = rf.estimated.get_mut(&t.oid).is_some_and(|e| e.add(len, heap_fillfactor(t)));
+    let RelFiles { estimated, bulk, est_btrees, .. } = &mut *rf;
+    let mut tid = None;
+    let mut reused = false;
+    if let Some(e) = estimated.get_mut(&t.oid) {
+        // (A bulk load's, COPY's, extends the file as its model did: `add_in`.)
+        let bi = bulk.get_mut(&(t.oid, txn)).and_then(|b| b.mode.bistate.as_mut());
+        tid = e.add_in(len, heap_fillfactor(t), bi);
+        reused = tid.is_none();
+        // (A new row of a table keyed by row ids has a key past every other's.)
+        e.placed(tid, old.is_none() && t.has_rowid());
+    }
     let hot = reused && old.is_some() && entries.iter().all(|e| e.3);
     if !hot {
         for (ix, key, size, dup) in entries {
-            if let Some(b) = rf.est_btrees.get_mut(&ix) {
+            if let Some(b) = est_btrees.get_mut(&ix) {
                 b.insert(key, size, dup);
             }
         }
     }
-    Ok(())
+    Ok(tid)
 }
 
 /// The btree entries a version of `row` of a table too big to model gets in those of
@@ -2259,8 +2330,9 @@ pub fn inserted_with(
     };
     note_compression_len(t, row, Some(key), ctx, Some(tuple));
     if !ensure(t, indexes, ctx)? {
-        untracked_write(t, indexes, row, None, vals, ctx, Some(tuple))?;
-        return Ok(None);
+        // (Its TID as the estimate places it, stored with the row: its ctid and its place
+        // in heap order.)
+        return untracked_write(t, indexes, row, None, vals, ctx, Some(tuple));
     }
     let (len, exts) = layout_len(t, row, ctx, &HashSet::new(), Some(tuple));
     if !exts.is_empty() {
@@ -2444,8 +2516,7 @@ pub fn updated(
     };
     note_compression_len(t, new, Some(new_key), ctx, Some(tuple));
     if !ensure(t, indexes, ctx)? {
-        untracked_write(t, indexes, new, Some(old), None, ctx, Some(tuple))?;
-        return Ok(None);
+        return Ok(untracked_write(t, indexes, new, Some(old), None, ctx, Some(tuple))?.map(|tid| (tid, false)));
     }
     let db = &ctx.sess.db;
     // Out-of-line values the new version keeps as they are (none without a TOAST relation).
@@ -4327,6 +4398,8 @@ pub fn rewritten(t: &Table, order: Option<&[Vec<u8>]>, ctx: &ExecCtx) -> Result<
             let (_, v) = r?;
             est.add(layout(t, &decode_table_row(t, &v)?, ctx, &HashSet::new()).0, ff);
         }
+        // (The rows keep the TIDs they had: not their places now.)
+        est.order = EstOrder::Unplaced;
         ctx.sess.db.relfiles.of(t.oid).write().estimated.insert(t.oid, est);
         return Ok(());
     }
@@ -5165,6 +5238,28 @@ pub fn heap_scan_splits(t: &Table, tids_read: bool, ctx: &ExecCtx) -> bool {
 /// pages prunes nothing (`heap_scan_splits`).
 pub fn heap_unprunable(t: &Table, ctx: &ExecCtx) -> bool {
     ctx.sess.db.relfiles.of(t.oid).read().heaps.get(&t.oid).is_some_and(|h| !h.any_prunable())
+}
+
+/// Whether the rows of table `t`, too big to model, are stored in its heap order
+/// (`EstOrder`), with the versions placed so far (`estimated_order_found`'s check); None: it
+/// is modelled.
+pub fn estimated_order(t: &Table, ctx: &ExecCtx) -> Option<(EstOrder, u64)> {
+    if !is_estimated(t.oid, &ctx.sess.db) {
+        return None;
+    }
+    ctx.sess.db.relfiles.of(t.oid).read().estimated.get(&t.oid).map(|e| (e.order, e.writes))
+}
+
+/// A scan in heap order of table `t` (too big to model), begun after `writes` versions were
+/// placed, found its rows in it as stored (`EstOrder::InOrder`), or one without its TID
+/// (`EstOrder::Unplaced`): kept unless a version was placed since.
+pub fn estimated_order_found(t: &Table, order: EstOrder, writes: u64, db: &Database) {
+    if let Some(e) = db.relfiles.of(t.oid).write().estimated.get_mut(&t.oid)
+        && e.order == EstOrder::Stamped
+        && e.writes == writes
+    {
+        e.order = order;
+    }
 }
 
 /// Whether `t`'s heap and every btree index of it are modelled already: what `ensure` finds
