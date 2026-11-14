@@ -215,7 +215,10 @@ impl Apps {
                 Some(b) => *b,
                 None => {
                     let (sid, en) = key.clone();
-                    let b = !sid.is_empty() && self.db(move |s| s.environment(&sid, &en)).await.is_ok_and(|r| r.ephemeral);
+                    // One already deleted (a closed pull request's last failed deploy) is still a
+                    // preview: by its name, as roll previews makes them.
+                    let named = en.starts_with("pv-");
+                    let b = !sid.is_empty() && self.db(move |s| s.environment(&sid, &en)).await.map_or(named, |r| r.ephemeral);
                     ephemeral.insert(key, b);
                     b
                 }

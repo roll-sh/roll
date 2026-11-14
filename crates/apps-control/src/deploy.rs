@@ -1871,20 +1871,14 @@ impl Apps {
                 return Err(err);
             }
         };
-        let (this, id, sid) = (self.clone(), run.id.clone(), service.to_string());
+        let (this, id, sid, run_dep) = (self.clone(), run.id.clone(), service.to_string(), run.deployment.clone());
         let cancel = CancellationToken::new();
         self.cancels.lock().insert(id.clone(), cancel.clone());
         tokio::spawn(async move {
             // Its output stays in the environment's log (drains read it there); its container's
-            // name, kept, is what picks its own lines out.
-            let (t2, i2) = (this.clone(), id.clone());
-            let made = move |name: &str| {
-                let name = name.to_string();
-                tokio::spawn(async move {
-                    let _ = t2.db(move |s| s.set_run_instance(&i2, &name)).await;
-                });
-            };
-            let (status, code) = match live.run_to_exit(None, &[], timeout, None, cancel, made).await {
+            // name, its own id in it, is what picks its own lines out.
+            let name = crate::live::run_name(&sid, &live.env, &run_dep, &id);
+            let (status, code) = match live.run_to_exit(None, &[], timeout, None, cancel, Some(name)).await {
                 Ok(x) if x.canceled => (RunStatus::Canceled, None),
                 Ok(x) if x.timed_out => (RunStatus::TimedOut, None),
                 Ok(x) if x.code == Some(0) => (RunStatus::Succeeded, Some(0)),

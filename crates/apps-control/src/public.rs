@@ -813,7 +813,8 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // site's rewrite (a header only roll sets) was let in by the site, by the project's own rule.
     let rewritten = req.headers().contains_key(VIA_SITE);
     if !rewritten && let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
-        return by("private", turned_away);
+        // The access link's own redirect is a way in, not a refusal.
+        return if turned_away.status() == StatusCode::UNAUTHORIZED { by("private", turned_away) } else { turned_away };
     }
     // roll previews' feedback button: its script from the preview's own host, and a page load
     // (a browser's document, else a GET asking for HTML) gets the tag.

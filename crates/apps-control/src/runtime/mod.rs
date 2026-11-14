@@ -201,6 +201,9 @@ pub trait Runtime: Send + Sync {
     async fn list(&self, service: Option<&str>) -> Vec<String>;
     /// Make the project's private network if it's missing.
     async fn ensure_network(&self, name: &str, service: &str) -> anyhow::Result<()>;
+    /// A project environment's network nothing uses any more (its last service there went):
+    /// best effort, left if anything is still attached.
+    async fn remove_network(&self, _name: &str) {}
     /// Remove a volume (an environment's teardown).
     async fn remove_volume(&self, name: &str);
     /// The files under `dir` in `image`, as a tar stream (a static site's, to serve without an

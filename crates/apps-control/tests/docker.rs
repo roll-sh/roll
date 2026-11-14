@@ -662,6 +662,10 @@ async fn a_restart_keeps_the_running_container() {
     assert_eq!(paused().await.unwrap(), "false");
     assert_eq!(started(name.clone()).await, before, "thawed, not started again");
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    // Its project's network went with its last service there (one a project made per
+    // environment would otherwise pile up until Docker has no address pool left).
+    let net = apps_control::network_name(&w.project, "production");
+    assert!(apps_control::runtime::docker::docker(&["network", "inspect", &net]).await.is_err(), "{net} is left");
 }
 
 /// An app bound to loopback in its container (a framework's dev default) fails its deploy at once

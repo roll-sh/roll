@@ -669,6 +669,12 @@ impl Runtime for Docker {
         let _ = docker(&["volume", "rm", "-f", name]).await;
     }
 
+    async fn remove_network(&self, name: &str) {
+        if name.starts_with(super::PREFIX) {
+            let _ = docker(&["network", "rm", name]).await;
+        }
+    }
+
     async fn read_volume(&self, name: &str) -> anyhow::Result<super::VolumeStream> {
         anyhow::ensure!(name.starts_with(super::PREFIX), "{name} isn't a roll apps volume");
         let mount = format!("{name}:/data:ro");

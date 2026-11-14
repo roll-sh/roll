@@ -82,7 +82,7 @@ impl Apps {
                     async move {
                         let Ok(_slot) = slots.acquire_owned().await else { return (RunStatus::Failed, None) };
                         let vars = [("ROLL_TASK_INDEX".to_string(), n.to_string()), ("ROLL_TASK_COUNT".to_string(), tasks.to_string())];
-                        let ran = live.run_to_exit(Some(&cmd), &vars, Duration::from_secs(timeout), Some(log.clone()), cancel, |_| {}).await;
+                        let ran = live.run_to_exit(Some(&cmd), &vars, Duration::from_secs(timeout), Some(log.clone()), cancel, None).await;
                         let outcome = match ran {
                             Ok(e) if e.canceled => (RunStatus::Canceled, None),
                             Ok(e) if e.timed_out => (RunStatus::TimedOut, None),

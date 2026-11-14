@@ -1009,12 +1009,11 @@ async fn cancel_run(State(apps): S, Path((id, env, run)): Path<(String, String, 
     ok(apps.cancel_run(&id, &env, &run).await?)
 }
 
-/// A cron run's output: its container's lines in the environment's log; `follow` streams them
-/// until the run ends.
-async fn run_logs(State(apps): S, Path((id, env, run)): Path<(String, String, String)>, Query(q): Query<LogQuery>, ext: Extensions) -> R {
+/// A cron run's output: its container's lines in the environment's log (read as that log is:
+/// they're there for anyone who reads it); `follow` streams them until the run ends.
+async fn run_logs(State(apps): S, Path((id, env, run)): Path<(String, String, String)>, Query(q): Query<LogQuery>) -> R {
     let r = apps.cron_run(&id, &env, &run).await?;
-    apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
-    let Some(instance) = r.instance.clone() else { return ok(Vec::<LogLine>::new()) };
+    let instance = crate::live::run_name(&id, &env, &r.deployment, &r.id);
     let (tx, rx) = tokio::sync::watch::channel(r.status != crate::model::RunStatus::Running);
     if r.status == crate::model::RunStatus::Running {
         let (apps2, id2, env2, run2) = (apps.clone(), id.clone(), env.clone(), run.clone());

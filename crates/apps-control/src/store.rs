@@ -533,7 +533,6 @@ fn run_row(r: &code_sql::Row<'_>) -> code_sql::Result<CronRun> {
         exit_code: r.get::<_, Option<i64>>(3)?.map(|c| c as i32),
         started_at: r.get(4)?,
         finished_at: r.get(5)?,
-        instance: r.get(6)?,
     })
 }
 
@@ -708,6 +707,15 @@ impl Store {
     }
 
     // ── environments ──
+
+    /// Whether another service of `project` (not `except`) has an environment named `env`.
+    pub fn env_in_use(&self, project: &str, env: &str, except: &str) -> Result<bool> {
+        Ok(self
+            .db
+            .query_row("SELECT 1 FROM environments e JOIN services s ON s.id = e.service WHERE s.project = ? AND e.name = ? AND e.service <> ? LIMIT 1", [project, env, except], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
 
     pub fn environments(&self, service: &str) -> Result<Vec<EnvRow>> {
         Ok(self.db.query(&format!("SELECT {ENV_COLS} FROM environments WHERE service = ? ORDER BY created_at, name"), [service], env_row)?)
@@ -1527,11 +1535,22 @@ impl Store {
     }
 
     /// A domain's DNS state; the first time it's `active` is kept (the claim no longer expires).
+    /// A domain going live is its `domain.active` event, in the same transaction (once, however
+    /// many checks race).
     pub fn set_domain_status(&self, host: &str, status: DomainStatus, error: Option<&str>) -> Result<()> {
         let now = self.now()?;
         let verified = (status == DomainStatus::Active).then_some(now);
-        self.db.execute("UPDATE domains SET status = ?, error = ?, verified_at = COALESCE(verified_at, ?) WHERE hostname = ?", params![status.as_str(), error, verified, host])?;
-        Ok(())
+        Ok(self.db.write(|c| {
+            let was: Option<(String, String, String)> = c.query_row("SELECT service, env, status FROM domains WHERE hostname = ?", [host], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            c.execute("UPDATE domains SET status = ?, error = ?, verified_at = COALESCE(verified_at, ?) WHERE hostname = ?", params![status.as_str(), error, verified, host])?;
+            if let Some((svc, env, before)) = was
+                && status == DomainStatus::Active
+                && before != DomainStatus::Active.as_str()
+            {
+                insert_event(c, now, "domain.active", &svc, &env, None, &serde_json::json!({ "hostname": host }))?;
+            }
+            Ok::<_, code_sql::Error>(())
+        })?)
     }
 
     /// A custom domain's certificate state. False if there's no such custom domain.
@@ -1597,7 +1616,7 @@ impl Store {
 
     pub fn runs(&self, service: &str, env: &str, limit: usize) -> Result<Vec<CronRun>> {
         Ok(self.db.query(
-            "SELECT id, deployment, status, exit_code, started_at, finished_at, instance FROM runs WHERE service = ? AND env = ? ORDER BY started_at DESC, id DESC LIMIT ?",
+            "SELECT id, deployment, status, exit_code, started_at, finished_at FROM runs WHERE service = ? AND env = ? ORDER BY started_at DESC, id DESC LIMIT ?",
             params![service, env, limit as i64],
             run_row,
         )?)
@@ -1605,14 +1624,9 @@ impl Store {
 
     pub fn run(&self, service: &str, env: &str, id: &str) -> Result<CronRun> {
         self.db
-            .query_row("SELECT id, deployment, status, exit_code, started_at, finished_at, instance FROM runs WHERE service = ? AND env = ? AND id = ?", params![service, env, id], run_row)
+            .query_row("SELECT id, deployment, status, exit_code, started_at, finished_at FROM runs WHERE service = ? AND env = ? AND id = ?", params![service, env, id], run_row)
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("no run {id}")))
-    }
-
-    pub fn set_run_instance(&self, id: &str, instance: &str) -> Result<()> {
-        self.db.execute("UPDATE runs SET instance = ? WHERE id = ?", params![instance, id])?;
-        Ok(())
     }
 
     /// A run, `running`, or `skipped` when one is still going (any of them, not just the newest:
@@ -1633,7 +1647,7 @@ impl Store {
                 "INSERT INTO runs (id, service, env, deployment, status, exit_code, started_at, finished_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)",
                 params![id, service, env, deployment, status.as_str(), now, finished],
             )?;
-            Ok(CronRun { id: id.clone(), deployment: deployment.into(), status, exit_code: None, started_at: now, finished_at: finished, instance: None })
+            Ok(CronRun { id: id.clone(), deployment: deployment.into(), status, exit_code: None, started_at: now, finished_at: finished })
         })
     }
 

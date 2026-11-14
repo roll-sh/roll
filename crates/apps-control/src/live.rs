@@ -21,6 +21,12 @@ use std::time::{Duration, Instant};
 
 /// The names of a deployment's instances in an environment, but their number:
 /// `roll-apps-<service>-<env>-<deployment, 6>-`.
+/// A cron run's container: its own id in its name, so its lines in the environment's log are its
+/// alone (a counter would start again with the next process).
+pub fn run_name(service: &str, env: &str, deployment: &str, run: &str) -> String {
+    format!("{}run-{}", instance_prefix(service, env, deployment), run.strip_prefix("run_").unwrap_or(run))
+}
+
 pub fn instance_prefix(service: &str, env: &str, deployment: &str) -> String {
     let short = deployment.strip_prefix("dep_").unwrap_or(deployment);
     let svc = service.strip_prefix("svc_").unwrap_or(service);
@@ -522,11 +528,16 @@ impl EnvLive {
 
     /// A cron run's or a job's container: `…-run<n>`, never one of the service's instances (a
     /// takeover never keeps it as one).
-    async fn make_run(&self, tpl: &Template) -> anyhow::Result<Arc<Inst>> {
+    async fn make_run(&self, tpl: &Template, name: Option<String>) -> anyhow::Result<Arc<Inst>> {
         anyhow::ensure!(!self.closed.load(Ordering::SeqCst), "this environment was torn down");
-        let n = self.seq.fetch_add(1, Ordering::SeqCst);
         let mut spec = tpl.spec.clone();
-        spec.name = format!("{}run{n}", instance_prefix(&self.service, &self.env, &tpl.deployment));
+        spec.name = match name {
+            Some(n) => n,
+            None => {
+                let n = self.seq.fetch_add(1, Ordering::SeqCst);
+                format!("{}run{n}", instance_prefix(&self.service, &self.env, &tpl.deployment))
+            }
+        };
         self.runtime.create(&spec).await?;
         Ok(Inst::new(spec.name, tpl.deployment.clone()))
     }
@@ -630,7 +641,8 @@ impl EnvLive {
     /// Why `name` may not answer, from where it listens: (what to tell, whether it never can).
     async fn port_hint(&self, name: &str, run: &Run) -> Option<(String, bool)> {
         let port = run.port.unwrap_or(8080);
-        let at = self.runtime.listeners(name).await?;
+        // Docker's embedded DNS listens in every user-defined network: never the app's.
+        let at: Vec<SocketAddr> = self.runtime.listeners(name).await?.into_iter().filter(|a| a.ip() != std::net::IpAddr::from([127, 0, 0, 11])).collect();
         if at.is_empty() || at.iter().any(|a| a.port() == port && !a.ip().is_loopback()) {
             return None;
         }
@@ -1977,7 +1989,7 @@ impl EnvLive {
 
     /// One cron run: a fresh instance of the active deployment, to its exit or `timeout`.
     pub async fn run_once(self: &Arc<Self>, timeout: Duration) -> anyhow::Result<(String, Option<i32>, bool)> {
-        let e = self.run_to_exit(None, &[], timeout, None, tokio_util::sync::CancellationToken::new(), |_| {}).await?;
+        let e = self.run_to_exit(None, &[], timeout, None, tokio_util::sync::CancellationToken::new(), None).await?;
         Ok((e.deployment, e.code, e.timed_out))
     }
 
@@ -1992,7 +2004,7 @@ impl EnvLive {
         timeout: Duration,
         log: Option<LogSink>,
         cancel: tokio_util::sync::CancellationToken,
-        made: impl FnOnce(&str),
+        name: Option<String>,
     ) -> anyhow::Result<Exit> {
         let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
         anyhow::ensure!(command.is_some() || tpl.spec.volume.is_none() || !self.held.load(Ordering::SeqCst), "its volume is being restored");
@@ -2003,8 +2015,7 @@ impl EnvLive {
             tpl.spec.aliases.clear();
         }
         tpl.spec.vars.extend(vars.iter().cloned());
-        let inst = self.make_run(&tpl).await?;
-        made(&inst.name);
+        let inst = self.make_run(&tpl, name).await?;
         let log = log.unwrap_or_else(|| self.log.instance(&inst.name, &inst.deployment));
         let began = Instant::now();
         let ran = async {

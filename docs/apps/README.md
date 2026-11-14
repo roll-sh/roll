@@ -412,7 +412,8 @@ every deployment is immutable with instant rollback.
   instance of the active deployment that runs to its exit, with a timeout (default 1 h) and its
   output as a log; a run that is still going when the next is due is skipped (Railway's rule).
   Each run is read on its own (`…/runs/{run}`), its output is its own (`…/runs/{run}/logs`: its
-  container's lines, which stay in the environment's log for drains; reveal, as a job's), a hung
+  container's lines, named by the run's id, which stay in the environment's log for drains, so
+  read as that log is), a hung
   one is canceled (`…/runs/{run}/cancel`), and a run a dead node left `running` fails with its
   `cron.failed` when the service is taken over, instead of holding every later run back; `roll
   apps runs [--now | --logs RUN [--follow] | --cancel RUN]`, and the dashboard's Scheduled runs

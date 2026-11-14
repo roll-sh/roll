@@ -159,7 +159,7 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
               <>
                 {found.lines.length ? `${at(found.lines[0].t)} to ${at(found.lines[found.lines.length - 1].t)}` : `Nothing before ${at(found.before ?? Date.now())}`}
                 {found.lines.length > 0 && (
-                  <button type="button" className="text-accent hover:underline" disabled={searching} onClick={() => void read({ before: found.lines[0].t })}>
+                  <button type="button" className="text-accent hover:underline" disabled={searching} onClick={() => void read({ before: found.lines[0].t + 1 })}>
                     Earlier
                   </button>
                 )}

@@ -667,6 +667,8 @@ impl Apps {
     pub async fn delete_service(self: &Arc<Self>, id: &str) -> Result<()> {
         let sid = id.to_string();
         let envs = self.db(move |s| s.environments(&sid)).await?;
+        let sid = id.to_string();
+        let project = self.db(move |s| s.service(&sid)).await?.project;
         for e in &envs {
             self.teardown_live(id, &e.name).await;
         }
@@ -705,6 +707,10 @@ impl Apps {
         let domains = self.db(move |s| s.custom_domains_of(&sid, None)).await?;
         let sid = id.to_string();
         self.db(move |s| s.delete_service(&sid)).await?;
+        // Its environments' networks, where no other service of the project has that environment.
+        for e in &envs {
+            self.drop_network_if_unused(&project, &e.name, id).await;
+        }
         self.release_domains(&domains).await;
         if let Some(ws) = self.deps.workspace.clone() {
             let sid = id.to_string();
@@ -1169,8 +1175,20 @@ impl Apps {
         self.teardown_live(service, env).await;
         self.set_access_cache(service, env, None);
         self.deps.runtime.remove_volume(&volume_name(service, env)).await;
+        let sid = service.to_string();
+        if let Ok(svc) = self.db(move |s| s.service(&sid)).await {
+            self.drop_network_if_unused(&svc.project, env, service).await;
+        }
         self.logs.forget(&format!("env:{service}/{env}"));
         Ok(())
+    }
+
+    /// The project environment's network, once `leaving` was its last service there.
+    async fn drop_network_if_unused(self: &Arc<Self>, project: &str, env: &str, leaving: &str) {
+        let (p, e, l) = (project.to_string(), env.to_string(), leaving.to_string());
+        if let Ok(false) = self.db(move |s| s.env_in_use(&p, &e, &l)).await {
+            self.deps.runtime.remove_network(&network_name(project, env)).await;
+        }
     }
 
     /// A private environment's gate (none: public), cached on its owner.
@@ -1807,13 +1825,10 @@ impl Apps {
             };
             (DomainStatus::Pending, Some(crate::model::domain_diagnosis(&h, &target, &challenge, &d.token, &seen, shared)))
         };
-        let became_active = status == DomainStatus::Active && d.status != DomainStatus::Active;
+
         let (hh, err) = (h.clone(), error.clone());
         self.db(move |s| s.set_domain_status(&hh, status, err.as_deref())).await?;
-        if became_active {
-            let (sid, e, data) = (service.to_string(), env.to_string(), json!({ "hostname": h }));
-            let _ = self.db(move |s| s.add_event("domain.active", &sid, &e, None, &data)).await;
-        }
+
         if let Some((tls, tls_error)) = self.refresh_tls(&h).await {
             (d.tls, d.tls_error) = (tls, tls_error);
         }
