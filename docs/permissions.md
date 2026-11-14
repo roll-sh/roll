@@ -78,6 +78,7 @@ type Grant = {
   kind: "token" | "oauth";
   rules: Rule[];         // at least one; nothing else is allowed
   expires_at: number | null; // unix ms; the builder defaults to 30 days
+  // every answer to a token that expires carries Roll-Token-Expiration (RFC 3339, as GitHub's header); the CLI warns a week ahead
   not_before?: number | null; // unix ms: it works only from then on (Cloudflare's TTL start); before, 401 not_yet_valid saying when
   ip_allow: string[];    // CIDRs; empty: any address
   created_by: string;    // "operator", or the grant that made it ("tok_…")

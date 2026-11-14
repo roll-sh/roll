@@ -647,6 +647,13 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     if let Some((rate, remaining, reset)) = limit {
         limit_headers(resp.headers_mut(), rate, remaining, reset);
     }
+    // When the token stops working, on every answer (GitHub's `GitHub-Authentication-Token-
+    // Expiration`): a CLI or an agent can warn before it does.
+    if let Some(when) = ctx.grant.expires_at.and_then(chrono::DateTime::from_timestamp_millis)
+        && let Ok(v) = HeaderValue::from_str(&when.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    {
+        resp.headers_mut().insert("roll-token-expiration", v);
+    }
     if !decided_before {
         let decision = if approval_used.is_some() { "ask" } else { "allow" };
         ctx.about = None;

@@ -193,6 +193,12 @@ impl Daemon {
     }
 
     /// A request with any body, and (a signed hop from another node) a `Forwarded` extension.
+    /// A GET's answer headers.
+    async fn head_of(&self, token: &str, path: &str) -> axum::http::HeaderMap {
+        let req = Request::builder().method(Method::GET).uri(path).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
+        self.router.clone().oneshot(req).await.unwrap().headers().clone()
+    }
+
     async fn raw(&self, token: &str, method: Method, path: &str, body: Body, headers: &[(&str, &str)], hop: Option<roll_cluster::Forwarded>) -> (StatusCode, Value) {
         let mut req = Request::builder().method(method).uri(path).header("content-type", "application/json");
         if !token.is_empty() {
@@ -555,6 +561,9 @@ async fn a_token_never_makes_a_stronger_one() {
     let id = made["grant"]["id"].as_str().or(made["id"].as_str()).unwrap().to_string();
     assert_eq!(d.call(OPERATOR, Method::PATCH, &format!("/v1/access/tokens/{id}"), Some(json!({ "not_before": null }))).await.0, StatusCode::OK);
     assert_eq!(d.call(&early, Method::GET, "/v1/projects", None).await.0, StatusCode::OK, "started");
+    // Every answer says when it stops (GitHub's GitHub-Authentication-Token-Expiration).
+    let h = d.head_of(&early, "/v1/projects").await;
+    assert!(h.get("roll-token-expiration").and_then(|v| v.to_str().ok()).is_some_and(|v| v.ends_with('Z') && v.contains('T')), "{h:?}");
     let backwards = json!({ "name": "backwards", "rules": read, "not_before": code_sql::now_ms() + 86_400_000, "expires_at": code_sql::now_ms() + 3_600_000 });
     assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(backwards)).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(make(json!([{ "product": "postgres", "resources": "*", "actions": { "write": "allow" } }]), Some(end)).await.0, StatusCode::FORBIDDEN);
