@@ -256,7 +256,8 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    progress). Landed: `analysis-phonetic` (every encoder, Commons Codec's algorithms ported:
    identical codes to Java on 150,000 geonames names), `analysis-stempel` (Polish: Lucene's
    Egothor stemmer and table, identical on 121,000 words) and `analysis-ukrainian` (the Morfologik
-   dictionary Elasticsearch ships, read in place; identical token streams on 21,000 lines), and
+   dictionary Elasticsearch ships, read in place; identical token streams on 21,000 lines; the three
+   add 7.9 MB to the release binary, nothing to an idle resident set, 4 MiB once all are used), and
    the CJK plugins `analysis-kuromoji` (Japanese), `analysis-nori` (Korean) and
    `analysis-smartcn` (Chinese): Lucene's Viterbi search over IPADIC and mecab-ko-dic (search,
    normal and extended modes, decompounding, user dictionaries, n-best) and smartcn's HMM ported
@@ -277,7 +278,8 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `icu_collation_keyword` field on ICU4X's collator (orderings identical to ICU4J in 10
    configurations over 20,000 words; key bytes differ above primary strength), `icu_transform`
    from rules, the built-in normalization, case, `Remove` and `Null` IDs, and the
-   `icu_analyzer`; ICU's data (3.4 MB) is read in place, nothing of it decoded at startup. Left: ICU's data-driven
+   `icu_analyzer`; ICU's data (3.4 MB) is read in place: the release binary grows 5.3 MB, an idle
+   `search-dev`'s resident set is unchanged (26 MiB) and using every ICU component adds 2.6 MiB. Left: ICU's data-driven
    transforms (`Any-Latin`, `Hiragana-Katakana`, `Han-Latin`, `Latin-ASCII`: ICU's
    transliteration rule data and its rule features beyond plain conversions), custom collation
    `rules` and `rule_files` for the tokenizer (both need ICU's rule compilers); then smartcn's

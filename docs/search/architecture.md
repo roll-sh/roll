@@ -150,7 +150,13 @@ never paged in, and none of it is decoded onto the heap at startup.
 | ICU4J 77.1's normalization data (`nfc`, `nfkc`, `nfkc_cf`, `nfkc_scf`, `uts46` `.nrm`) and Lucene's `utr30.nrm` (`icu/data/`) | `icu_normalizer`, `icu_folding`, `icu_analyzer`, the CJK engine's NFKC | 321 KB | Unicode-3.0; Apache-2.0 |
 | ICU4J 77.1's root word break rules (`word.brk`) and Lucene's `Default.brk` | `icu_tokenizer` | 46 KB | Unicode-3.0; Apache-2.0 |
 | ICU4J 77.1's dictionaries `thaidict`, `laodict`, `khmerdict`, `burmesedict`, `cjdict` | `icu_tokenizer` (Thai, Lao, Khmer, Burmese, Chinese and Japanese runs; Korean runs use `cjdict` too) | 3.0 MB | Unicode-3.0 |
-| ICU4X 2.3's compiled collation data (`icu_collator_data`) | `icu_collation`, `icu_collation_keyword` | compiled in | Unicode-3.0 |
+| ICU4X 2.3's compiled collation data (`icu_collator_data`) | `icu_collation`, `icu_collation_keyword` | compiled in (1.9 MB with the ported code) | Unicode-3.0 |
+
+Measured on release `search-dev` builds (2026-11-14): `analysis-phonetic`, `-stempel` and
+`-ukrainian` add 7.9 MB to the binary and `analysis-icu` 5.3 MB; an idle node's resident set is
+the same with and without them (25.9 to 26.7 MiB across builds); the first use of every
+phonetic encoder, the `polish` and the `ukrainian` analyzers adds 4.1 MiB (mostly the
+Beider-Morse rules, parsed once per name type), and of every ICU component 2.6 MiB.
 
 The code that reads them ports Apache Commons Codec (Apache-2.0), Lucene's Egothor stemmer
 (Apache-2.0), Morfologik 2.1.1 (BSD) and ICU4J 77.1's `Normalizer2Impl`, `RuleBasedBreakIterator`,
