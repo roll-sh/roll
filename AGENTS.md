@@ -339,6 +339,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     surfaces the same, and the sealed box test vector from the TypeScript one opening in the others.
     The Terraform provider is `sdk/terraform-provider-roll` (`TF_ACC=1 go test ./...` drives it
     against a fake rolld).
+    The GitHub Action is `sdk/github-action` (no dependencies; every value masked before anything
+    is printed).
   - Values are encrypted with the project's data key, sealed by `ROLL_SECRET_KEY`, and bound to
     their row (project, secret, version) as associated data. A value never goes in a log, a
     `Debug`, an error, an audit row, a change's or request's diff, or a command line: `Value`
