@@ -1,4 +1,4 @@
-import { KeySquare, Plus, RotateCw } from "lucide-react";
+import { Check, KeySquare, Plus, RotateCw, Signature } from "lucide-react";
 import { useState } from "react";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, ErrorNote, errorText, field, ghost, primary, Section, useLoad } from "./ui";
@@ -15,7 +15,16 @@ export function TransitKeys() {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
   const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name);
+  // The newest version's public key (PEM), for a service that checks `…/sign`'s signatures.
+  const copyPublic = (key: string) =>
+    run(`public:${key}`, async () => {
+      const all = await api.transitPublicKeys(key);
+      await navigator.clipboard?.writeText(all[all.length - 1]?.pem ?? "");
+      setCopied(key);
+      setTimeout(() => setCopied((c) => (c === key ? null : c)), 1500);
+    });
 
   const run = async (what: string, f: () => Promise<unknown>) => {
     setBusy(what);
@@ -43,7 +52,7 @@ export function TransitKeys() {
     >
       <p className="mb-2 text-[11.5px] text-muted">
         Encryption as a service: apps send data to <span className="font-mono">POST /v1/secrets/projects/{project.id}/transit/NAME/encrypt</span> and keep the ciphertext; decrypting is a reveal, audited.
-        The key never leaves roll. Rotate to start a new version; older ciphertexts keep opening until you retire them.
+        The key never leaves roll. It also signs (<span className="font-mono">…/sign</span>, Ed25519: services check with its public key) and makes HMACs for lookups over encrypted fields (<span className="font-mono">…/hmac</span>). Rotate to start a new version; older ciphertexts keep opening until you retire them.
       </p>
       <ErrorNote error={error ?? list.error} onDismiss={error ? () => setError(null) : undefined} className="mb-2" />
       {adding && (
@@ -82,6 +91,9 @@ export function TransitKeys() {
                 <span className="ml-auto text-[11px] text-subtle">
                   made {ago(k.created_at)} · <ActorMark who={k.created_by} />
                 </span>
+                <button className={ghost} disabled={!!busy} onClick={() => void copyPublic(k.name)} aria-label={`Copy ${k.name}'s public key`} title="Copy the public key (PEM) that checks this key's signatures">
+                  {copied === k.name ? <Check className="size-3.5 text-ok" /> : <Signature className="size-3.5" />}
+                </button>
                 <button className={ghost} disabled={!!busy} onClick={() => void run(k.name, () => api.rotateTransitKey(k.name))} aria-label={`Rotate ${k.name}`} title="Rotate: new encryptions use a new version">
                   <RotateCw className={`size-3.5 ${busy === k.name ? "motion-safe:animate-spin" : ""}`} />
                 </button>

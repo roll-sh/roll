@@ -1034,6 +1034,22 @@ async fn an_encryption_key_encrypts_for_apps_and_never_leaves_roll() {
     let dk = api.ok(Method::POST, "/transit/cards/datakey", Some(json!({}))).await;
     assert_eq!(base64::engine::general_purpose::STANDARD.decode(dk["plaintext"].as_str().unwrap()).unwrap().len(), 32);
     assert_eq!(api.call(Method::POST, "/transit/cards/decrypt", Some(json!({ "ciphertext": dk["ciphertext"] }))).await.1["plaintext"], dk["plaintext"]);
+    // Signatures: by the newest version, checked here or by anyone with the public key.
+    let sig = api.ok(Method::POST, "/transit/cards/sign", Some(json!({ "input": b64(b"invoice 7") }))).await["signature"].as_str().unwrap().to_string();
+    assert!(sig.starts_with("roll:v2:"), "{sig}");
+    let check = |input: &[u8], sig: &str| api.ok(Method::POST, "/transit/cards/verify", Some(json!({ "items": [{ "input": b64(input), "signature": sig }] })));
+    assert_eq!(check(b"invoice 7", &sig).await["items"][0]["valid"], true);
+    assert_eq!(check(b"invoice 8", &sig).await["items"][0]["valid"], false);
+    let public = api.ok(Method::GET, "/transit/cards/public", None).await;
+    let raw = base64::engine::general_purpose::STANDARD.decode(public[1]["public_key"].as_str().unwrap()).unwrap();
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&sig["roll:v2:".len()..]).unwrap();
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, raw).verify(b"invoice 7", &bytes).expect("a stock Ed25519 check passes");
+    // HMACs: stable for one input (a blind index), checked only by writers.
+    let mac = |input: &[u8]| api.ok(Method::POST, "/transit/cards/hmac", Some(json!({ "input": b64(input) })));
+    let m = mac(b"ada@example.com").await["hmac"].clone();
+    assert_eq!(mac(b"ada@example.com").await["hmac"], m);
+    assert_ne!(mac(b"bob@example.com").await["hmac"], m);
+    assert_eq!(api.ok(Method::POST, "/transit/cards/hmac/verify", Some(json!({ "input": b64(b"ada@example.com"), "hmac": m }))).await["valid"], true);
     // A backup carries the key: restored into another project, it still opens what it encrypted.
     let secret = [9u8; 32];
     let b = api.ok(Method::POST, "/backup", Some(json!({ "recipient": roll_secrets::crypto::public_key(&secret) }))).await;
@@ -1044,6 +1060,7 @@ async fn an_encryption_key_encrypts_for_apps_and_never_leaves_roll() {
     api.ok(Method::POST, &to("/restore"), Some(archive)).await;
     let back = api.call(Method::POST, &to("/transit/cards/decrypt"), Some(json!({ "ciphertext": ct2, "context": "order:42" }))).await;
     assert_eq!(back.1["plaintext"], b64(b"4111 1111 1111 1111"), "{back:?}");
+    assert_eq!(api.ok(Method::POST, &to("/transit/cards/sign"), Some(json!({ "input": b64(b"invoice 7") }))).await["signature"], sig.as_str(), "and signs as it did");
     // Deleting makes everything unreadable for good: only with the name repeated.
     assert_eq!(api.call(Method::DELETE, "/transit/cards", None).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(api.call(Method::DELETE, "/transit/cards?confirm=cards", None).await.0, StatusCode::NO_CONTENT);

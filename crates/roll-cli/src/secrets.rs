@@ -518,6 +518,14 @@ pub enum TransitCmd {
         #[arg(long)]
         context: Option<String>,
     },
+    /// Sign stdin (any bytes) with the key's newest version (Ed25519); prints the signature.
+    Sign { name: String },
+    /// Check a signature of stdin; fails when it doesn't match.
+    Verify { name: String, signature: String },
+    /// HMAC-SHA256 of stdin; the same input always gives the same HMAC (a blind index).
+    Hmac { name: String },
+    /// The key's public signing keys, one per version (PEM; --json: raw, PEM and JWK).
+    Public { name: String },
     /// Delete a key for good (what it encrypted can't be decrypted again).
     Rm {
         name: String,
@@ -1231,6 +1239,27 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 let v = c.call(Method::POST, &format!("{}/transit/{}/decrypt", c.base(), enc(&name)), Some(json!({ "ciphertext": ct.trim(), "context": context }))).await?;
                 let plain = base64::engine::general_purpose::STANDARD.decode(s(&v["plaintext"])).context("the plaintext isn't base64")?;
                 std::io::stdout().write_all(&plain)?;
+            }
+            TransitCmd::Sign { name } => println!("{}", transit_stdin(&c, &name, "sign", "signature").await?),
+            TransitCmd::Hmac { name } => println!("{}", transit_stdin(&c, &name, "hmac", "hmac").await?),
+            TransitCmd::Verify { name, signature } => {
+                use base64::Engine;
+                let mut input = Vec::new();
+                std::io::stdin().read_to_end(&mut input).context("reading stdin")?;
+                let v = c.call(Method::POST, &format!("{}/transit/{}/verify", c.base(), enc(&name)), Some(json!({ "input": base64::engine::general_purpose::STANDARD.encode(&input), "signature": signature }))).await?;
+                if v["valid"] != true {
+                    bail!("the signature doesn't match");
+                }
+                eprintln!("the signature matches");
+            }
+            TransitCmd::Public { name } => {
+                let v = c.call(Method::GET, &format!("{}/transit/{}/public", c.base(), enc(&name)), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for k in v.as_array().into_iter().flatten() {
+                    println!("# {name} v{}\n{}", k["version"], s(&k["pem"]).trim_end());
+                }
             }
             TransitCmd::Rm { name, confirm } => {
                 c.call(Method::DELETE, &format!("{}/transit/{}?confirm={}", c.base(), enc(&name), enc(&confirm)), None).await?;
@@ -2536,4 +2565,14 @@ async fn stop(child: &mut tokio::process::Child) {
         }
     }
     let _ = child.kill().await;
+}
+
+/// Sign or HMAC stdin's bytes with a transit key; the answer's `field`.
+async fn transit_stdin(c: &Client<'_>, name: &str, route: &str, field: &str) -> anyhow::Result<String> {
+    use base64::Engine;
+    use std::io::Read;
+    let mut input = Vec::new();
+    std::io::stdin().read_to_end(&mut input).context("reading stdin")?;
+    let v = c.call(Method::POST, &format!("{}/transit/{}/{route}", c.base(), enc(name)), Some(json!({ "input": base64::engine::general_purpose::STANDARD.encode(&input) }))).await?;
+    Ok(s(&v[field]).to_string())
 }

@@ -94,6 +94,11 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/transit/{{name}}/decrypt"), post(transit_decrypt).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
         .route(&format!("{P}/transit/{{name}}/rewrap"), post(transit_rewrap).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
         .route(&format!("{P}/transit/{{name}}/datakey"), post(transit_datakey))
+        .route(&format!("{P}/transit/{{name}}/sign"), post(transit_sign).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/verify"), post(transit_verify).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/hmac"), post(transit_hmac).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/hmac/verify"), post(transit_hmac_verify).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/public"), get(transit_public))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
@@ -941,6 +946,34 @@ async fn transit_rewrap(State(s): S, Who(c): Who, Path((project, name)): Path<(S
     let (items, many) = body::<OneOrMany<crate::transit::Cipher>>(&b)?.split();
     let out = blocking(s, move |s| s.transit_rewrap(&project, &name, items, &c)).await?;
     Ok(ok(shaped("ciphertext", out.into_iter().map(serde_json::Value::String).collect(), many)))
+}
+
+async fn transit_sign(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Input>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_sign(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("signature", out.into_iter().map(serde_json::Value::String).collect(), many)))
+}
+
+async fn transit_verify(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Signed>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_verify(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("valid", out.into_iter().map(serde_json::Value::Bool).collect(), many)))
+}
+
+async fn transit_hmac(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Input>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_hmac(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("hmac", out.into_iter().map(serde_json::Value::String).collect(), many)))
+}
+
+async fn transit_hmac_verify(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Signed>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_hmac_verify(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("valid", out.into_iter().map(serde_json::Value::Bool).collect(), many)))
+}
+
+async fn transit_public(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.transit_public(&project, &name, &c)).await?))
 }
 
 #[derive(Deserialize, Default)]

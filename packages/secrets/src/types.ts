@@ -245,6 +245,8 @@ export type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "exp
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
 /** An encryption key (encryption as a service): its versions, never its material. */
+/** A transit key version's public signing key (Ed25519): raw base64, PEM (SPKI) and a JWK. */
+export type TransitPublicKey = { version: number; public_key: string; pem: string; jwk: { kty: "OKP"; crv: "Ed25519"; x: string; kid: string; alg: "EdDSA"; use: "sig" } };
 export type TransitKey = { id: string; name: string; latest_version: number; min_decrypt_version: number; versions: { version: number; created_at: number }[]; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };

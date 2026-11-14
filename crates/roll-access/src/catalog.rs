@@ -1000,6 +1000,11 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/transit/{name}/rewrap", "secrets", W, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/transit/{name}/decrypt", "secrets", REVEAL, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/transit/{name}/datakey", "secrets", REVEAL, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/sign", "secrets", W, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/verify", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/hmac", "secrets", W, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/transit/{name}/hmac/verify", "secrets", W, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/transit/{name}/public", "secrets", R, one(&["project"], "project")),
     // A backup seals every environment's values to a key the caller chooses; a restore loads a
     // whole project. Both are admin in secrets too.
     row("POST", "/v1/secrets/projects/{project}/backup", "secrets", ADMIN, one(&["project"], "project")),

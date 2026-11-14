@@ -81,6 +81,11 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    const keys = generateKeyPair();
    const env = secrets.open(await secrets.resolve("production", { consumer: "app:web", sealTo: keys.publicKey }), keys.secretKey);
    const stop = secrets.watch("staging", { onChange: (v) => reconfigure(v.values) });
+
+   // An encryption key (below, "Encryption keys"): the key stays in roll.
+   const cards = secrets.transit("cards");
+   const ct = await cards.encrypt(cardNumber, `order:${id}`);
+   const index = await cards.hmac(email); // a lookup column over encrypted emails
    ```
 8. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
@@ -575,6 +580,16 @@ numbers, tokens, notes) in its own database without holding a key.
   `…/rewrap` (`write`) re-encrypts under the newest without the plaintext leaving roll, and
   `PATCH …/transit/{name} {min_decrypt_version}` retires older versions. `DELETE …/transit/{name}?confirm=<name>`
   deletes a key for good: what it encrypted can't be decrypted again.
+- Every key also signs and computes HMACs, each with its own key derived from the version's
+  bytes (HKDF-SHA256, one label per use). `…/sign {input (base64)}` (`write`) answers
+  `{signature}`: `roll:v<version>:<base64url>`, Ed25519 over the input exactly as given, so a
+  service holding only the public key checks it with any Ed25519 library (webhooks, tokens an app
+  issues). `…/verify {input, signature}` (`read`) answers `{valid}`; `GET …/public` (`read`) is
+  every version's public key as raw base64, PEM (SPKI) and a JWK (`kid` `<name>:v<version>`).
+  `…/hmac {input}` (`write`) answers `{hmac}`, HMAC-SHA256, stable for one input: a lookup column
+  over encrypted fields (a blind index). `…/hmac/verify {input, hmac}` answers `{valid}` and is
+  `write`, not `read`: it answers guesses about the input. All take batches, as encrypt does;
+  retired versions (`min_decrypt_version`) no longer verify.
 - A failed decrypt or rewrap is audited too (probing contexts leaves a trace). A backup carries every
   key's versions, in the archive sealed to its taker's key, so a restore (here or on another server)
   still opens what they encrypted; ciphertexts are bound to their context, not to the key's id.
@@ -610,6 +625,7 @@ roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
 roll secrets transit ls | add NAME | rotate NAME | encrypt NAME [--context C] | decrypt NAME [--context C] | rm NAME --confirm NAME
+roll secrets transit sign NAME | verify NAME SIGNATURE | hmac NAME | public NAME   # stdin is the input
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -1455,6 +1471,11 @@ isn't in the workspace is 404.
 | `POST /transit/{name}/rewrap` | `{ciphertext, context?}` or `{items: […]}` | `{ciphertext}` or `{items}` (`write`) |
 | `POST /transit/{name}/decrypt` | `{ciphertext, context?}` or `{items: […]}` | `{plaintext}` or `{items}` (`reveal`, audited) |
 | `POST /transit/{name}/datakey` | `{context?}` | `{plaintext, ciphertext}` (`reveal`, audited) |
+| `POST /transit/{name}/sign` | `{input}` or `{items: […]}` | `{signature}` or `{items}` (`write`; Ed25519) |
+| `POST /transit/{name}/verify` | `{input, signature}` or `{items: […]}` | `{valid}` or `{items}` (`read`) |
+| `POST /transit/{name}/hmac` | `{input}` or `{items: […]}` | `{hmac}` or `{items}` (`write`; HMAC-SHA256) |
+| `POST /transit/{name}/hmac/verify` | `{input, hmac}` or `{items: […]}` | `{valid}` or `{items}` (`write`: it answers guesses) |
+| `GET /transit/{name}/public` | | `TransitPublicKey[]`: `{version, public_key (base64), pem, jwk}` for every version (`read`) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
 

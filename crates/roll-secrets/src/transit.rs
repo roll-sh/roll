@@ -10,6 +10,12 @@
 //!   `context` bound in (a row's id, say): the same ciphertext under another context won't open.
 //! - `datakey` hands out a fresh data key and its ciphertext, for encrypting large data locally.
 //! - Encrypting and rewrapping are `write`; decrypting and data keys are `reveal`, and audited.
+//! - Every version also signs (Ed25519) and computes HMAC-SHA256, each with its own key derived
+//!   from the version's bytes (HKDF-SHA256, one label per use), so no use's output says anything
+//!   about another's key. A signature is `roll:v<version>:<base64url>` over the input as given (no
+//!   framing), so anyone with the public key (`…/public`: raw, PEM, JWK) verifies it with a stock
+//!   Ed25519 library. Signing and HMAC are `write`; checking a signature is `read` (a public
+//!   key's job); checking an HMAC is `write`, since it answers guesses about the input.
 
 use crate::access::{Action, Caller, Scope};
 use crate::crypto::{open_with, seal_with};
@@ -140,6 +146,76 @@ impl Opened {
         let (v, raw) = parse(ct)?;
         open_with(self.version(v)?, &data_aad(context), &raw).map_err(|_| Error::BadRequest("the ciphertext doesn't open under this key and context".into()))
     }
+
+    fn sign(&self, input: &[u8]) -> Result<String> {
+        let (v, key) = self.latest();
+        Ok(format!("roll:v{v}:{}", URL_SAFE_NO_PAD.encode(signer(key)?.sign(input).as_ref())))
+    }
+
+    /// Whether `sig` is this key's signature of `input`. A malformed or retired one is an error.
+    fn verify(&self, input: &[u8], sig: &str) -> Result<bool> {
+        let (v, raw) = parse(sig)?;
+        let public = ring::signature::KeyPair::public_key(&signer(self.version(v)?)?).as_ref().to_vec();
+        Ok(ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public).verify(input, &raw).is_ok())
+    }
+
+    fn hmac(&self, input: &[u8]) -> String {
+        let (v, key) = self.latest();
+        format!("roll:v{v}:{}", URL_SAFE_NO_PAD.encode(ring::hmac::sign(&mac_key(key), input).as_ref()))
+    }
+
+    fn hmac_verify(&self, input: &[u8], mac: &str) -> Result<bool> {
+        let (v, raw) = parse(mac)?;
+        Ok(ring::hmac::verify(&mac_key(self.version(v)?), input, &raw).is_ok())
+    }
+}
+
+/// A use's own key, derived from a version's bytes.
+fn derive(key: &[u8; 32], label: &str) -> zeroize::Zeroizing<[u8; 32]> {
+    let mut out = zeroize::Zeroizing::new([0u8; 32]);
+    hkdf::Hkdf::<sha2::Sha256>::new(None, key).expand(label.as_bytes(), out.as_mut()).expect("32 bytes is a valid HKDF-SHA256 length");
+    out
+}
+
+fn signer(key: &[u8; 32]) -> Result<ring::signature::Ed25519KeyPair> {
+    ring::signature::Ed25519KeyPair::from_seed_unchecked(derive(key, "roll-transit:v1:ed25519").as_ref()).map_err(|_| Error::Internal("a signing key didn't derive".into()))
+}
+
+fn mac_key(key: &[u8; 32]) -> ring::hmac::Key {
+    ring::hmac::Key::new(ring::hmac::HMAC_SHA256, derive(key, "roll-transit:v1:hmac-sha256").as_ref())
+}
+
+/// One input to sign or HMAC (base64).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Input {
+    pub input: String,
+}
+
+/// An input and the signature (or HMAC) to check against it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Signed {
+    pub input: String,
+    #[serde(alias = "hmac")]
+    pub signature: String,
+}
+
+/// A version's public signing key, as raw base64, SPKI PEM and a JWK (`kid`: `<name>:v<version>`).
+#[derive(Debug, Serialize)]
+pub struct PublicKey {
+    pub version: u32,
+    pub public_key: String,
+    pub pem: String,
+    pub jwk: Json,
+}
+
+fn decode_input(i: &str) -> Result<Vec<u8>> {
+    let raw = base64::engine::general_purpose::STANDARD.decode(i).map_err(|_| Error::BadRequest("input is base64".into()))?;
+    if raw.len() > ITEM_MAX {
+        return Err(Error::BadRequest(format!("an input is {} KiB at most", ITEM_MAX / 1024)));
+    }
+    Ok(raw)
 }
 
 impl Secrets {
@@ -323,6 +399,59 @@ impl Secrets {
         let ciphertext = key.encrypt(data.as_ref(), context.as_deref());
         self.audit_now(project, caller, "transit.datakey", None, None, &[], &format!("made a data key with {name}"));
         Ok(json!({ "plaintext": base64::engine::general_purpose::STANDARD.encode(data.as_ref()), "ciphertext": ciphertext }))
+    }
+}
+
+impl Secrets {
+    pub fn transit_sign(&self, project: &str, name: &str, items: Vec<Input>, caller: &Caller) -> Result<Vec<String>> {
+        caller.need(Action::Write, &Scope::project(project))?;
+        batch_limits(items.iter().map(|i| i.input.len()))?;
+        let key = self.transit_open(project, name)?;
+        items.iter().map(|i| key.sign(&decode_input(&i.input)?)).collect()
+    }
+
+    pub fn transit_verify(&self, project: &str, name: &str, items: Vec<Signed>, caller: &Caller) -> Result<Vec<bool>> {
+        caller.need(Action::Read, &Scope::project(project))?;
+        batch_limits(items.iter().map(|i| i.input.len() + i.signature.len()))?;
+        let key = self.transit_open(project, name)?;
+        items.iter().map(|i| key.verify(&decode_input(&i.input)?, &i.signature)).collect()
+    }
+
+    pub fn transit_hmac(&self, project: &str, name: &str, items: Vec<Input>, caller: &Caller) -> Result<Vec<String>> {
+        caller.need(Action::Write, &Scope::project(project))?;
+        batch_limits(items.iter().map(|i| i.input.len()))?;
+        let key = self.transit_open(project, name)?;
+        items.iter().map(|i| Ok(key.hmac(&decode_input(&i.input)?))).collect()
+    }
+
+    pub fn transit_hmac_verify(&self, project: &str, name: &str, items: Vec<Signed>, caller: &Caller) -> Result<Vec<bool>> {
+        caller.need(Action::Write, &Scope::project(project))?;
+        batch_limits(items.iter().map(|i| i.input.len() + i.signature.len()))?;
+        let key = self.transit_open(project, name)?;
+        items.iter().map(|i| key.hmac_verify(&decode_input(&i.input)?, &i.signature)).collect()
+    }
+
+    /// Every version's public signing key, retired ones too (old signatures may still need
+    /// checking elsewhere).
+    pub fn transit_public(&self, project: &str, name: &str, caller: &Caller) -> Result<Vec<PublicKey>> {
+        caller.need(Action::Read, &Scope::project(project))?;
+        let key = self.transit_open(project, name)?;
+        key.versions
+            .iter()
+            .map(|(v, k)| {
+                let raw = ring::signature::KeyPair::public_key(&signer(k)?).as_ref().to_vec();
+                // SPKI for Ed25519 (RFC 8410): a fixed 12-byte header, then the key.
+                let mut der = vec![0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+                der.extend_from_slice(&raw);
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+                Ok(PublicKey {
+                    version: *v,
+                    public_key: base64::engine::general_purpose::STANDARD.encode(&raw),
+                    pem: format!("-----BEGIN PUBLIC KEY-----\n{b64}\n-----END PUBLIC KEY-----\n"),
+                    jwk: json!({ "kty": "OKP", "crv": "Ed25519", "x": URL_SAFE_NO_PAD.encode(&raw), "kid": format!("{name}:v{v}"), "alg": "EdDSA", "use": "sig" }),
+                })
+            })
+            .collect()
     }
 }
 
