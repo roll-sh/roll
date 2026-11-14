@@ -820,6 +820,31 @@ pub static COUNTED_KEYWORD: &[ParamDef] = &[META, INDEX];
 
 pub static VERSION: &[ParamDef] = &[META];
 
+/// The analysis-icu plugin's `icu_collation_keyword` (`ICUCollationKeywordFieldMapper.Builder`
+/// parameters, in its order).
+pub static ICU_COLLATION_KEYWORD: &[ParamDef] = &[
+    INDEX,
+    DOC_VALUES,
+    STORE,
+    KEYWORD_INDEX_OPTIONS,
+    p("norms", Bool, FALSE, TrueToFalse),
+    p("rules", Str, Dv::Null, Fixed).nullable(),
+    p("language", Str, Dv::Null, Fixed).nullable(),
+    p("country", Str, Dv::Null, Fixed).nullable(),
+    p("variant", Str, Dv::Null, Fixed).nullable(),
+    p("strength", Str, Dv::Null, Fixed).nullable(),
+    p("decomposition", Str, Dv::Null, Fixed).nullable(),
+    p("alternate", Str, Dv::Null, Fixed).nullable(),
+    p("case_level", Bool, FALSE, Fixed),
+    p("case_first", Str, Dv::Null, Fixed).nullable(),
+    p("numeric", Bool, FALSE, Fixed),
+    p("variable_top", Str, Dv::Null, Fixed).nullable(),
+    p("hiragana_quaternary_mode", Bool, FALSE, Fixed).nullable(),
+    p("ignore_above", Int { min: 0, max: INT_MAX, msg: Some("[ignore_above] must be positive, got [{v}]") }, Dv::Int(INT_MAX), Updatable),
+    p("null_value", Str, Dv::Null, Fixed).nullable(),
+    META,
+];
+
 macro_rules! def {
     ($name:expr, $params:expr, $family:expr) => {
         TypeDef { name: $name, params: $params, fields_at: usize::MAX, multi_fields: true, in_multi_field: true, validate: None, family: $family }
@@ -849,6 +874,7 @@ pub static TYPES: &[TypeDef] = &[
     def!("geo_shape", GEO_SHAPE, Family::Geo),
     def!("half_float", HALF_FLOAT, Family::Numeric).with_validate(validate_number),
     TypeDef { multi_fields: false, ..def!("histogram", HISTOGRAM, Family::Other) },
+    def!("icu_collation_keyword", ICU_COLLATION_KEYWORD, Family::Keyword).with_validate(validate_icu_collation),
     def!("integer", INTEGER, Family::Numeric).with_validate(validate_number),
     def!("integer_range", RANGE, Family::Range).with_validate(validate_range),
     def!("ip", IP, Family::Ip).with_validate(validate_scripted),
@@ -1115,6 +1141,30 @@ fn validate_date(f: &FieldMapper, ctx: &MappingCtx) -> Result<(), EsError> {
     validate_scripted(f, ctx)?;
     precludes(f, ctx, "script", &["null_value", "ignore_malformed"])?;
     Ok(())
+}
+
+/// An `icu_collation_keyword`'s collator settings.
+pub fn icu_collation_params(f: &FieldMapper) -> search_analysis::CollationParams {
+    let s = |k: &str| f.raw(k).and_then(Value::as_str).map(str::to_string);
+    let b = |k: &str| f.raw(k).and_then(Value::as_bool);
+    search_analysis::CollationParams {
+        rules: s("rules"),
+        language: s("language"),
+        country: s("country"),
+        variant: s("variant"),
+        strength: s("strength"),
+        decomposition: s("decomposition"),
+        alternate: s("alternate"),
+        case_level: b("case_level"),
+        case_first: s("case_first"),
+        numeric: b("numeric"),
+        variable_top: s("variable_top"),
+    }
+}
+
+/// The collator builds (`ICUCollationKeywordFieldMapper.Builder.buildCollator`).
+fn validate_icu_collation(f: &FieldMapper, _ctx: &MappingCtx) -> Result<(), EsError> {
+    search_analysis::Collation::new(&icu_collation_params(f)).map(|_| ()).map_err(EsError::illegal_argument)
 }
 
 fn validate_keyword(f: &FieldMapper, ctx: &MappingCtx) -> Result<(), EsError> {

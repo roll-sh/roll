@@ -26,15 +26,14 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
 - Of the 3808 tests that pass on Elasticsearch 9.5.5 (and run here), roll passes **3808** (100%); every x-pack clients test passes.
   <!-- test-search: roll >= 3810 -->
 - Elasticsearch's module, plugin and x-pack YAML suites outside `test/free` (67 suites, 6,349 tests;
-  [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 5,222, **5,061 of
-  the 5,541** that pass on Elasticsearch 9.5.5 (91%), each run like its suite's own test cluster (a
+  [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 5,235, **5,074 of
+  the 5,541** that pass on Elasticsearch 9.5.5 (92%), each run like its suite's own test cluster (a
   full run of every suite at `1dce30b61` plus the dot-prefix warnings, 2026-11-14; `lang-mustache`,
-  `rank-eval`, `ilm`, `eql`, `slm`, `searchable-snapshots` and `snapshot-repo-test-kit` rerun since,
-  and the `analysis-phonetic`, `-stempel`, `-ukrainian`, `-kuromoji`, `-nori` and `-smartcn`
-  plugins added). 44 suites pass every test Elasticsearch passes. What's left, largest first: x-pack
-  `platinum` (1,065 of 1,412; machine learning is most of it), plugins roll doesn't ship (the
-  `analysis-icu` analyzers, `mapper-annotated-text`, `-murmur3`
-  and `-size`, `ingest-attachment`, `ingest-otel`, `prometheus`), `apm-data`'s templates and
+  `rank-eval`, `ilm`, `eql`, `slm`, `searchable-snapshots` and `snapshot-repo-test-kit` rerun since, and the `analysis-phonetic`, `-stempel`, `-ukrainian`,
+  `-kuromoji`, `-nori`, `-smartcn` and `-icu` plugins added). 45 suites pass every test
+  Elasticsearch passes. What's left, largest first: x-pack
+  `platinum` (1,065 of 1,412; machine learning is most of it), plugins roll doesn't ship
+  (`mapper-annotated-text`, `-murmur3` and `-size`, `ingest-attachment`, `ingest-otel`, `prometheus`), `apm-data`'s templates and
   pipelines (1 of 26), cross-cluster replication (none),
   `mapper-unsigned-long` (33 of 34: a `terms` aggregation across `long` and `unsigned_long`
   indices), `logsdb` (225 of 234: `_ignored_source` binary entries, the `@timestamp` doc values
@@ -268,7 +267,7 @@ the discovery/store plugins.
 | `wildcard` | `x-pack/plugin/wildcard` | plain | 9 | 9 | 9 | 9 | 0 |
 | `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 1065 | 1065 | 347 |
 | `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 549 | 549 | 0 |
-| `analysis-icu` | `plugins/analysis-icu` | plugins | 13 | 13 | 0 | 0 | 13 |
+| `analysis-icu` | `plugins/analysis-icu` | plugins | 13 | 13 | 13 | 13 | 0 |
 | `analysis-kuromoji` | `plugins/analysis-kuromoji` | plugins | 7 | 7 | 7 | 7 | 0 |
 | `analysis-nori` | `plugins/analysis-nori` | plugins | 6 | 6 | 6 | 6 | 0 |
 | `analysis-phonetic` | `plugins/analysis-phonetic` | plugins | 5 | 5 | 5 | 5 | 0 |
@@ -278,7 +277,7 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | **6,349** | **5,541** | **5,222** | **5,061** | **480** |
+| **total** | | | **6,349** | **5,541** | **5,235** | **5,074** | **467** |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
@@ -331,6 +330,7 @@ the discovery/store plugins.
 <!-- test-search: analysis-kuromoji >= 7 -->
 <!-- test-search: analysis-nori >= 6 -->
 <!-- test-search: analysis-smartcn >= 3 -->
+<!-- test-search: analysis-icu >= 13 -->
 
 `platinum` by directory (roll / Elasticsearch passes): `ml` 349/618, `analytics` 113/114, `spatial`
 92/105, `security` 100/101, `rollup` 52/52, `exponential_histogram` 44/44, `vector-tile` 34/34,
@@ -345,7 +345,7 @@ the discovery/store plugins.
 `vectordb_document` 0/1, `voting_only_node` 1/1.
 
 Largest gaps by suite (from the roll reports, `target/search-yaml/extended/roll-<suite>.json`):
-not implemented at all: the plugin analyzers and mappers (`analysis-icu`, `annotated_text`,
+not implemented at all: the plugin mappers (`annotated_text`,
 `murmur3`, `_size`),
 CCR, Fleet APIs, the `normalize_for_stream` processor (`ingest-otel`),
 `attachment`, reindex management, Prometheus ingest; roll lists no `lang-expression`,

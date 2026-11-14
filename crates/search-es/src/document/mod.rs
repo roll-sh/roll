@@ -817,7 +817,8 @@ impl<'m, 'p> Walker<'m, 'p> {
     fn dotted_into_leaf(&mut self, f: &FieldMapper, full: &str, key: &str) -> Option<EsError> {
         let (nl, nc) = self.p.name_location();
         let cause = match f.ty {
-            "keyword" | "text" | "match_only_text" | "wildcard" | "constant_keyword" | "version" | "ip" | "search_as_you_type" => {
+            "keyword" | "text" | "match_only_text" | "wildcard" | "constant_keyword" | "version" | "ip" | "search_as_you_type"
+            | "icu_collation_keyword" => {
                 EsError::illegal_state(format!("Can't get text on a START_OBJECT at {nl}:{nc}"))
             }
             "boolean" => EsError::illegal_state(format!("Can't get boolean value on a START_OBJECT at {nl}:{nc}")),

@@ -259,6 +259,10 @@ memmap2 = "0.9"
 hashbrown = "0.16"
 unicode-segmentation = "1"
 unicode-normalization = "0.1"
+icu_collator = "2.3"
+icu_collections = "2.3"
+icu_locale_core = "2.3"
+icu_properties = { version = "2.3", features = ["alloc", "unstable"] }
 regex-syntax = "0.8"
 search-analysis = { path = "crates/search-analysis" }
 search-codec = { path = "crates/search-codec" }

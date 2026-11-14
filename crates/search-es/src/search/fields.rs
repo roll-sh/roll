@@ -151,9 +151,11 @@ fn parse_value(f: &FieldInfo, v: &Value, format: Option<&str>) -> Result<Option<
             if f.ignore_above.is_some_and(|m| crate::document::exceeds_ignore_above(&s, m)) {
                 return Err(v.clone());
             }
+            // `icu_collation_keyword` fetches the value from `_source` as is (its normalizer
+            // only makes the collation keys it indexes).
             Value::Str(match &f.normalizer {
-                Some(n) => n.normalize(&s),
-                None => s,
+                Some(n) if f.ty != "icu_collation_keyword" => n.normalize(&s),
+                _ => s,
             })
         }
         Kind::ConstantKeyword => Value::Str(f.constant_value.clone().unwrap_or_else(|| text(v))),

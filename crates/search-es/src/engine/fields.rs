@@ -110,7 +110,8 @@ impl Kind {
             "text" | "annotated_text" => Kind::Text,
             "match_only_text" | "pattern_text" => Kind::MatchOnlyText,
             "search_as_you_type" => Kind::SearchAsYouType,
-            "keyword" => Kind::Keyword,
+            // The analysis-icu plugin's collation keys: keyword terms normalized by a collator.
+            "keyword" | "icu_collation_keyword" => Kind::Keyword,
             "constant_keyword" => Kind::ConstantKeyword,
             "wildcard" => Kind::Wildcard,
             "version" => Kind::Version,
@@ -926,6 +927,10 @@ impl FieldTable {
                     }
                 } else if b("split_queries_on_whitespace", false) {
                     info.whitespace_analyzer = self.analysis.analyzer("whitespace");
+                }
+                if info.ty == "icu_collation_keyword" {
+                    let params = crate::mapping::types::icu_collation_params(f);
+                    info.normalizer = Some(search_analysis::Collation::normalizer(path, &params).map_err(EsError::illegal_argument)?);
                 }
                 info.ignore_above = ignore_above();
                 if let Some(tv) = term_vector(f, ctx) {

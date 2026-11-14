@@ -1,0 +1,2068 @@
+{
+  "description": "analysis-icu: the ICU tokenizer across scripts (dictionary segmentation, emoji, widths), icu_normalizer names, modes, unicode_set_filter and char filter offsets, icu_folding, icu_transform ids, rules and errors, the icu_analyzer, icu_collation by search, and icu_collation_keyword's mapping, sort, queries and errors",
+  "steps": [
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "icu_tokenizer",
+        "text": "สวัสดีครับ ประเทศไทย ການທ່ອງທ່ຽວ ព្រះរាជាណាចក្រកម្ពុជា မြန်မာနိုင်ငံ"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "สวัสดี",
+            "start_offset": 0,
+            "end_offset": 6,
+            "type": "<ALPHANUM>",
+            "position": 0
+          },
+          {
+            "token": "ครับ",
+            "start_offset": 6,
+            "end_offset": 10,
+            "type": "<ALPHANUM>",
+            "position": 1
+          },
+          {
+            "token": "ประเทศไทย",
+            "start_offset": 11,
+            "end_offset": 20,
+            "type": "<ALPHANUM>",
+            "position": 2
+          },
+          {
+            "token": "ການ",
+            "start_offset": 21,
+            "end_offset": 24,
+            "type": "<ALPHANUM>",
+            "position": 3
+          },
+          {
+            "token": "ທ່ອງທ່ຽວ",
+            "start_offset": 24,
+            "end_offset": 32,
+            "type": "<ALPHANUM>",
+            "position": 4
+          },
+          {
+            "token": "ព្រះរាជាណាចក្រ",
+            "start_offset": 33,
+            "end_offset": 47,
+            "type": "<ALPHANUM>",
+            "position": 5
+          },
+          {
+            "token": "កម្ពុជា",
+            "start_offset": 47,
+            "end_offset": 54,
+            "type": "<ALPHANUM>",
+            "position": 6
+          },
+          {
+            "token": "မြန်မာနိုင်ငံ",
+            "start_offset": 55,
+            "end_offset": 68,
+            "type": "<ALPHANUM>",
+            "position": 7
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "icu_tokenizer",
+        "text": "我购买了道具和服装。東京都に住んでいます。カタカナ 한국어 텍스트입니다 ｶﾀｶﾅ ＡＢＣ１２３"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "我",
+            "start_offset": 0,
+            "end_offset": 1,
+            "type": "<IDEOGRAPHIC>",
+            "position": 0
+          },
+          {
+            "token": "购买",
+            "start_offset": 1,
+            "end_offset": 3,
+            "type": "<IDEOGRAPHIC>",
+            "position": 1
+          },
+          {
+            "token": "了",
+            "start_offset": 3,
+            "end_offset": 4,
+            "type": "<IDEOGRAPHIC>",
+            "position": 2
+          },
+          {
+            "token": "道具",
+            "start_offset": 4,
+            "end_offset": 6,
+            "type": "<IDEOGRAPHIC>",
+            "position": 3
+          },
+          {
+            "token": "和",
+            "start_offset": 6,
+            "end_offset": 7,
+            "type": "<IDEOGRAPHIC>",
+            "position": 4
+          },
+          {
+            "token": "服装",
+            "start_offset": 7,
+            "end_offset": 9,
+            "type": "<IDEOGRAPHIC>",
+            "position": 5
+          },
+          {
+            "token": "東京",
+            "start_offset": 10,
+            "end_offset": 12,
+            "type": "<IDEOGRAPHIC>",
+            "position": 6
+          },
+          {
+            "token": "都",
+            "start_offset": 12,
+            "end_offset": 13,
+            "type": "<IDEOGRAPHIC>",
+            "position": 7
+          },
+          {
+            "token": "に",
+            "start_offset": 13,
+            "end_offset": 14,
+            "type": "<IDEOGRAPHIC>",
+            "position": 8
+          },
+          {
+            "token": "住",
+            "start_offset": 14,
+            "end_offset": 15,
+            "type": "<IDEOGRAPHIC>",
+            "position": 9
+          },
+          {
+            "token": "んで",
+            "start_offset": 15,
+            "end_offset": 17,
+            "type": "<IDEOGRAPHIC>",
+            "position": 10
+          },
+          {
+            "token": "い",
+            "start_offset": 17,
+            "end_offset": 18,
+            "type": "<IDEOGRAPHIC>",
+            "position": 11
+          },
+          {
+            "token": "ます",
+            "start_offset": 18,
+            "end_offset": 20,
+            "type": "<IDEOGRAPHIC>",
+            "position": 12
+          },
+          {
+            "token": "カタカナ",
+            "start_offset": 21,
+            "end_offset": 25,
+            "type": "<IDEOGRAPHIC>",
+            "position": 13
+          },
+          {
+            "token": "한국어",
+            "start_offset": 26,
+            "end_offset": 29,
+            "type": "<HANGUL>",
+            "position": 14
+          },
+          {
+            "token": "텍스트입니다",
+            "start_offset": 30,
+            "end_offset": 36,
+            "type": "<HANGUL>",
+            "position": 15
+          },
+          {
+            "token": "ｶﾀｶﾅ",
+            "start_offset": 37,
+            "end_offset": 41,
+            "type": "<IDEOGRAPHIC>",
+            "position": 16
+          },
+          {
+            "token": "ＡＢＣ１２３",
+            "start_offset": 42,
+            "end_offset": 48,
+            "type": "<NUM>",
+            "position": 17
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "icu_tokenizer",
+        "text": "I ❤️ 🇺🇸 #️⃣ 1️⃣ ©️ 👩‍❤️‍👨 3.14 1,000 U.S.A. e-mail user@example.com",
+        "explain": false
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "I",
+            "start_offset": 0,
+            "end_offset": 1,
+            "type": "<ALPHANUM>",
+            "position": 0
+          },
+          {
+            "token": "❤️",
+            "start_offset": 2,
+            "end_offset": 4,
+            "type": "<EMOJI>",
+            "position": 1
+          },
+          {
+            "token": "🇺🇸",
+            "start_offset": 5,
+            "end_offset": 9,
+            "type": "<EMOJI>",
+            "position": 2
+          },
+          {
+            "token": "#️⃣",
+            "start_offset": 10,
+            "end_offset": 13,
+            "type": "<EMOJI>",
+            "position": 3
+          },
+          {
+            "token": "1️⃣",
+            "start_offset": 14,
+            "end_offset": 17,
+            "type": "<EMOJI>",
+            "position": 4
+          },
+          {
+            "token": "©️",
+            "start_offset": 18,
+            "end_offset": 20,
+            "type": "<EMOJI>",
+            "position": 5
+          },
+          {
+            "token": "👩‍❤️‍👨",
+            "start_offset": 21,
+            "end_offset": 29,
+            "type": "<EMOJI>",
+            "position": 6
+          },
+          {
+            "token": "3.14",
+            "start_offset": 30,
+            "end_offset": 34,
+            "type": "<NUM>",
+            "position": 7
+          },
+          {
+            "token": "1,000",
+            "start_offset": 35,
+            "end_offset": 40,
+            "type": "<NUM>",
+            "position": 8
+          },
+          {
+            "token": "U.S.A",
+            "start_offset": 41,
+            "end_offset": 46,
+            "type": "<ALPHANUM>",
+            "position": 9
+          },
+          {
+            "token": "e",
+            "start_offset": 48,
+            "end_offset": 49,
+            "type": "<ALPHANUM>",
+            "position": 10
+          },
+          {
+            "token": "mail",
+            "start_offset": 50,
+            "end_offset": 54,
+            "type": "<ALPHANUM>",
+            "position": 11
+          },
+          {
+            "token": "user",
+            "start_offset": 55,
+            "end_offset": 59,
+            "type": "<ALPHANUM>",
+            "position": 12
+          },
+          {
+            "token": "example.com",
+            "start_offset": 60,
+            "end_offset": 71,
+            "type": "<ALPHANUM>",
+            "position": 13
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "standard",
+        "filter": [
+          "icu_normalizer"
+        ],
+        "text": "Ⅻ ﬁ Straße ＡＢＣ Å ǅ"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "xii",
+            "start_offset": 0,
+            "end_offset": 1,
+            "type": "<ALPHANUM>",
+            "position": 0
+          },
+          {
+            "token": "fi",
+            "start_offset": 2,
+            "end_offset": 3,
+            "type": "<ALPHANUM>",
+            "position": 1
+          },
+          {
+            "token": "strasse",
+            "start_offset": 4,
+            "end_offset": 10,
+            "type": "<ALPHANUM>",
+            "position": 2
+          },
+          {
+            "token": "abc",
+            "start_offset": 11,
+            "end_offset": 14,
+            "type": "<ALPHANUM>",
+            "position": 3
+          },
+          {
+            "token": "å",
+            "start_offset": 15,
+            "end_offset": 16,
+            "type": "<ALPHANUM>",
+            "position": 4
+          },
+          {
+            "token": "dž",
+            "start_offset": 17,
+            "end_offset": 18,
+            "type": "<ALPHANUM>",
+            "position": 5
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "standard",
+        "filter": [
+          {
+            "type": "icu_normalizer",
+            "name": "nfc"
+          }
+        ],
+        "text": "Å é ﬁ"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "Å",
+            "start_offset": 0,
+            "end_offset": 2,
+            "type": "<ALPHANUM>",
+            "position": 0
+          },
+          {
+            "token": "é",
+            "start_offset": 3,
+            "end_offset": 5,
+            "type": "<ALPHANUM>",
+            "position": 1
+          },
+          {
+            "token": "ﬁ",
+            "start_offset": 6,
+            "end_offset": 7,
+            "type": "<ALPHANUM>",
+            "position": 2
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "standard",
+        "filter": [
+          {
+            "type": "icu_normalizer",
+            "name": "nfkc"
+          }
+        ],
+        "text": "ﬁ Ⅻ ①"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "fi",
+            "start_offset": 0,
+            "end_offset": 1,
+            "type": "<ALPHANUM>",
+            "position": 0
+          },
+          {
+            "token": "XII",
+            "start_offset": 2,
+            "end_offset": 3,
+            "type": "<ALPHANUM>",
+            "position": 1
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "standard",
+        "filter": [
+          {
+            "type": "icu_normalizer",
+            "name": "uts46"
+          }
+        ],
+        "text": "Straße ß ⅻ"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "straße",
+            "start_offset": 0,
+            "end_offset": 6,
+            "type": "<ALPHANUM>",
+            "position": 0
+          },
+          {
+            "token": "ß",
+            "start_offset": 7,
+            "end_offset": 8,
+            "type": "<ALPHANUM>",
+            "position": 1
+          },
+          {
+            "token": "xii",
+            "start_offset": 9,
+            "end_offset": 10,
+            "type": "<ALPHANUM>",
+            "position": 2
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "keyword",
+        "char_filter": [
+          {
+            "type": "icu_normalizer",
+            "name": "nfc",
+            "mode": "decompose"
+          }
+        ],
+        "text": "Åström café"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "Åström café",
+            "start_offset": 0,
+            "end_offset": 11,
+            "type": "word",
+            "position": 0
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "standard",
+        "char_filter": [
+          "icu_normalizer"
+        ],
+        "text": "ﬁnancial Ⅻ ＡＢＣ Straße ǅungla"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "financial",
+            "start_offset": 0,
+            "end_offset": 8,
+            "type": "<ALPHANUM>",
+            "position": 0
+          },
+          {
+            "token": "xii",
+            "start_offset": 9,
+            "end_offset": 10,
+            "type": "<ALPHANUM>",
+            "position": 1
+          },
+          {
+            "token": "abc",
+            "start_offset": 11,
+            "end_offset": 14,
+            "type": "<ALPHANUM>",
+            "position": 2
+          },
+          {
+            "token": "strasse",
+            "start_offset": 15,
+            "end_offset": 21,
+            "type": "<ALPHANUM>",
+            "position": 3
+          },
+          {
+            "token": "džungla",
+            "start_offset": 22,
+            "end_offset": 28,
+            "type": "<ALPHANUM>",
+            "position": 4
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "standard",
+        "filter": [
+          "icu_folding"
+        ],
+        "text": "Résumé ŁÓDŹ Æsir ﬁ ℌ ① ٣"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "resume",
+            "start_offset": 0,
+            "end_offset": 6,
+            "type": "<ALPHANUM>",
+            "position": 0
+          },
+          {
+            "token": "lodz",
+            "start_offset": 7,
+            "end_offset": 11,
+            "type": "<ALPHANUM>",
+            "position": 1
+          },
+          {
+            "token": "aesir",
+            "start_offset": 12,
+            "end_offset": 16,
+            "type": "<ALPHANUM>",
+            "position": 2
+          },
+          {
+            "token": "fi",
+            "start_offset": 17,
+            "end_offset": 18,
+            "type": "<ALPHANUM>",
+            "position": 3
+          },
+          {
+            "token": "h",
+            "start_offset": 19,
+            "end_offset": 20,
+            "type": "<ALPHANUM>",
+            "position": 4
+          },
+          {
+            "token": "3",
+            "start_offset": 23,
+            "end_offset": 24,
+            "type": "<NUM>",
+            "position": 5
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "standard",
+        "filter": [
+          {
+            "type": "icu_folding",
+            "unicode_set_filter": "[^åäöÅÄÖ]"
+          }
+        ],
+        "text": "Åström Ärger Göteborg Ḃ"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "Åström",
+            "start_offset": 0,
+            "end_offset": 6,
+            "type": "<ALPHANUM>",
+            "position": 0
+          },
+          {
+            "token": "Ärger",
+            "start_offset": 7,
+            "end_offset": 12,
+            "type": "<ALPHANUM>",
+            "position": 1
+          },
+          {
+            "token": "göteborg",
+            "start_offset": 13,
+            "end_offset": 21,
+            "type": "<ALPHANUM>",
+            "position": 2
+          },
+          {
+            "token": "b",
+            "start_offset": 22,
+            "end_offset": 23,
+            "type": "<ALPHANUM>",
+            "position": 3
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "standard",
+        "filter": [
+          {
+            "type": "icu_normalizer",
+            "name": "foo"
+          }
+        ],
+        "text": "x"
+      },
+      "status": 500,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "missing_resource_exception",
+              "reason": "could not locate data"
+            }
+          ],
+          "type": "missing_resource_exception",
+          "reason": "could not locate data"
+        },
+        "status": 500
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "standard",
+        "filter": [
+          {
+            "type": "icu_normalizer",
+            "unicode_set_filter": "[a-"
+          }
+        ],
+        "text": "x"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Error: Missing ']' at \"[a-|\""
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Error: Missing ']' at \"[a-|\""
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "standard",
+        "filter": [
+          {
+            "type": "icu_transform",
+            "id": "Null"
+          }
+        ],
+        "text": "Abc"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "Abc",
+            "start_offset": 0,
+            "end_offset": 3,
+            "type": "<ALPHANUM>",
+            "position": 0
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "keyword",
+        "filter": [
+          {
+            "type": "icu_transform",
+            "id": "NFD; [:Nonspacing Mark:] Remove; NFC"
+          }
+        ],
+        "text": "Crème brûlée"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "Creme brulee",
+            "start_offset": 0,
+            "end_offset": 12,
+            "type": "word",
+            "position": 0
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "keyword",
+        "filter": [
+          {
+            "type": "icu_transform",
+            "id": "Any-Upper"
+          }
+        ],
+        "text": "straße"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "STRASSE",
+            "start_offset": 0,
+            "end_offset": 6,
+            "type": "word",
+            "position": 0
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "keyword",
+        "filter": [
+          {
+            "type": "icu_transform",
+            "id": "Lower",
+            "dir": "reverse"
+          }
+        ],
+        "text": "Hello"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "HELLO",
+            "start_offset": 0,
+            "end_offset": 5,
+            "type": "word",
+            "position": 0
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "keyword",
+        "filter": [
+          {
+            "type": "icu_transform",
+            "id": "Foo-Bar"
+          }
+        ],
+        "text": "x"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Illegal ID Foo-Bar"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Illegal ID Foo-Bar"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "keyword",
+        "filter": [
+          {
+            "type": "icu_transform",
+            "id": "Null",
+            "ruleset": "a > b;"
+          }
+        ],
+        "text": "x"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "icu_transform filter [__anonymous__icu_transform] must not specify both [id] and [ruleset]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "icu_transform filter [__anonymous__icu_transform] must not specify both [id] and [ruleset]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "keyword",
+        "filter": [
+          {
+            "type": "icu_transform",
+            "ruleset": "a > x; ab > y;"
+          }
+        ],
+        "text": "ab"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "icu_transform filter [__anonymous__icu_transform] has invalid ruleset: Rule {a > x;} masks {ab > y;}"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "icu_transform filter [__anonymous__icu_transform] has invalid ruleset: Rule {a > x;} masks {ab > y;}",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Rule {a > x;} masks {ab > y;}"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "keyword",
+        "filter": [
+          {
+            "type": "icu_transform",
+            "ruleset": "$vowel = [aeiou]; $vowel } x > 'X' ; ^ k > K ; b <> p ; ::Upper ;"
+          }
+        ],
+        "text": "kax kbx"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "KXX KPX",
+            "start_offset": 0,
+            "end_offset": 7,
+            "type": "word",
+            "position": 0
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "keyword",
+        "filter": [
+          {
+            "type": "icu_transform",
+            "ruleset": "b <> p ;",
+            "dir": "reverse"
+          }
+        ],
+        "text": "pbp"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "bbb",
+            "start_offset": 0,
+            "end_offset": 3,
+            "type": "word",
+            "position": 0
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "keyword",
+        "filter": [
+          {
+            "type": "icu_transform",
+            "ruleset": ":: [a-c] ; a > z ; \\u0062 > y ; d > w ;"
+          }
+        ],
+        "text": "abcd"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "zycd",
+            "start_offset": 0,
+            "end_offset": 4,
+            "type": "word",
+            "position": 0
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "tokenizer": "keyword",
+        "filter": [
+          {
+            "type": "icu_transform",
+            "ruleset": "ab > x | b ; b > c ;"
+          }
+        ],
+        "text": "abb"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "xcc",
+            "start_offset": 0,
+            "end_offset": 3,
+            "type": "word",
+            "position": 0
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /_analyze",
+      "body": {
+        "analyzer": "icu_analyzer",
+        "text": "Ⅻ ﬁnancial Résumé สวัสดีครับ"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "xii",
+            "start_offset": 0,
+            "end_offset": 1,
+            "type": "<ALPHANUM>",
+            "position": 0
+          },
+          {
+            "token": "financial",
+            "start_offset": 2,
+            "end_offset": 10,
+            "type": "<ALPHANUM>",
+            "position": 1
+          },
+          {
+            "token": "resume",
+            "start_offset": 11,
+            "end_offset": 17,
+            "type": "<ALPHANUM>",
+            "position": 2
+          },
+          {
+            "token": "สวัสดี",
+            "start_offset": 18,
+            "end_offset": 24,
+            "type": "<ALPHANUM>",
+            "position": 3
+          },
+          {
+            "token": "ครับ",
+            "start_offset": 24,
+            "end_offset": 28,
+            "type": "<ALPHANUM>",
+            "position": 4
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-icu",
+      "body": {
+        "settings": {
+          "analysis": {
+            "analyzer": {
+              "coll": {
+                "tokenizer": "keyword",
+                "filter": [
+                  "coll_de"
+                ]
+              },
+              "ia": {
+                "type": "icu_analyzer",
+                "method": "nfc",
+                "mode": "decompose"
+              }
+            },
+            "filter": {
+              "coll_de": {
+                "type": "icu_collation",
+                "language": "de",
+                "strength": "primary"
+              }
+            }
+          }
+        },
+        "mappings": {
+          "properties": {
+            "t": {
+              "type": "text",
+              "analyzer": "coll"
+            },
+            "c": {
+              "type": "icu_collation_keyword",
+              "language": "en",
+              "strength": "secondary",
+              "ignore_above": 10,
+              "null_value": "zzz"
+            },
+            "n": {
+              "type": "icu_collation_keyword",
+              "numeric": true,
+              "case_first": "upper"
+            },
+            "d": {
+              "type": "icu_collation_keyword",
+              "language": "de",
+              "country": "DE",
+              "variant": "@collation=phonebook",
+              "fields": {
+                "raw": {
+                  "type": "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-icu"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-icu/_mapping/field/c,n,d?include_defaults=true",
+      "status": 200,
+      "response": {
+        "esm-icu": {
+          "mappings": {
+            "c": {
+              "full_name": "c",
+              "mapping": {
+                "c": {
+                  "type": "icu_collation_keyword",
+                  "index": true,
+                  "doc_values": true,
+                  "store": false,
+                  "index_options": "docs",
+                  "norms": false,
+                  "rules": null,
+                  "language": "en",
+                  "country": null,
+                  "variant": null,
+                  "strength": "secondary",
+                  "decomposition": null,
+                  "alternate": null,
+                  "case_level": false,
+                  "case_first": null,
+                  "numeric": false,
+                  "variable_top": null,
+                  "hiragana_quaternary_mode": false,
+                  "ignore_above": 10,
+                  "null_value": "zzz",
+                  "meta": {}
+                }
+              }
+            },
+            "d": {
+              "full_name": "d",
+              "mapping": {
+                "d": {
+                  "type": "icu_collation_keyword",
+                  "index": true,
+                  "doc_values": true,
+                  "store": false,
+                  "index_options": "docs",
+                  "norms": false,
+                  "rules": null,
+                  "language": "de",
+                  "country": "DE",
+                  "variant": "@collation=phonebook",
+                  "strength": null,
+                  "decomposition": null,
+                  "alternate": null,
+                  "case_level": false,
+                  "case_first": null,
+                  "numeric": false,
+                  "variable_top": null,
+                  "hiragana_quaternary_mode": false,
+                  "ignore_above": 2147483647,
+                  "null_value": null,
+                  "meta": {},
+                  "fields": {
+                    "raw": {
+                      "type": "keyword",
+                      "index": true,
+                      "doc_values": true,
+                      "store": false,
+                      "null_value": null,
+                      "eager_global_ordinals": false,
+                      "ignore_above": 2147483647,
+                      "index_options": "docs",
+                      "norms": false,
+                      "similarity": null,
+                      "normalizer": null,
+                      "normalizer_skip_store_original_value": false,
+                      "split_queries_on_whitespace": false,
+                      "script": null,
+                      "on_script_error": "fail",
+                      "meta": {},
+                      "time_series_dimension": false
+                    }
+                  }
+                }
+              }
+            },
+            "n": {
+              "full_name": "n",
+              "mapping": {
+                "n": {
+                  "type": "icu_collation_keyword",
+                  "index": true,
+                  "doc_values": true,
+                  "store": false,
+                  "index_options": "docs",
+                  "norms": false,
+                  "rules": null,
+                  "language": null,
+                  "country": null,
+                  "variant": null,
+                  "strength": null,
+                  "decomposition": null,
+                  "alternate": null,
+                  "case_level": false,
+                  "case_first": "upper",
+                  "numeric": true,
+                  "variable_top": null,
+                  "hiragana_quaternary_mode": false,
+                  "ignore_above": 2147483647,
+                  "null_value": null,
+                  "meta": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-icu/_bulk?refresh=true",
+      "raw": "{\"index\": {\"_id\": \"1\"}}\n{\"t\": \"Gr\\u00f6\\u00dfe\", \"c\": \"R\\u00e9sum\\u00e9\", \"n\": \"a10\", \"d\": \"M\\u00fcller\"}\n{\"index\": {\"_id\": \"2\"}}\n{\"t\": \"GROSSE\", \"c\": \"resume\", \"n\": \"a9\", \"d\": \"Mueller\"}\n{\"index\": {\"_id\": \"3\"}}\n{\"t\": \"gr\\u00f6sse\", \"c\": \"R\\u00e8sum\\u00e9 longer text\", \"n\": \"A9\", \"d\": \"Mahler\"}\n{\"index\": {\"_id\": \"4\"}}\n{\"c\": null, \"n\": \"b1\", \"d\": \"Mylius\"}\n",
+      "headers": {
+        "content-type": "application/x-ndjson"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "errors": false,
+        "took": 0,
+        "items": [
+          {
+            "index": {
+              "_index": "esm-icu",
+              "_id": "1",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 0,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "esm-icu",
+              "_id": "2",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 1,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "esm-icu",
+              "_id": "3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 2,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "esm-icu",
+              "_id": "4",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 3,
+              "_primary_term": 1,
+              "status": 201
+            }
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-icu/_search",
+      "body": {
+        "query": {
+          "match": {
+            "t": "grosse"
+          }
+        },
+        "sort": [
+          "_id"
+        ]
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-icu",
+              "node": "xk24ktl-SaSz1Mrxnszmjg",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-icu/_search",
+      "body": {
+        "query": {
+          "term": {
+            "c": "Resume"
+          }
+        },
+        "sort": [
+          "_id"
+        ]
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-icu",
+              "node": "xk24ktl-SaSz1Mrxnszmjg",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-icu/_search",
+      "body": {
+        "query": {
+          "term": {
+            "c": "résumé"
+          }
+        },
+        "sort": [
+          "_id"
+        ]
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-icu",
+              "node": "xk24ktl-SaSz1Mrxnszmjg",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-icu/_search",
+      "body": {
+        "query": {
+          "term": {
+            "c": "zzz"
+          }
+        },
+        "sort": [
+          "_id"
+        ]
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-icu",
+              "node": "xk24ktl-SaSz1Mrxnszmjg",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-icu/_search",
+      "body": {
+        "sort": [
+          {
+            "n": "asc"
+          },
+          "_id"
+        ],
+        "_source": false,
+        "fields": [
+          "n"
+        ]
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-icu",
+              "node": "xk24ktl-SaSz1Mrxnszmjg",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-icu/_search",
+      "body": {
+        "sort": [
+          {
+            "d": "asc"
+          }
+        ],
+        "_source": false,
+        "fields": [
+          "d"
+        ]
+      },
+      "mask": [
+        "sort",
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 6,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 4,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "esm-icu",
+              "_id": "3",
+              "_score": null,
+              "_ignored": [
+                "c"
+              ],
+              "fields": {
+                "d": [
+                  "Mahler"
+                ]
+              },
+              "sort": [
+                "↕乐♩倐倎瀤\u0000\u0000"
+              ]
+            },
+            {
+              "_index": "esm-icu",
+              "_id": "2",
+              "_score": null,
+              "fields": {
+                "d": [
+                  "Mueller"
+                ]
+              },
+              "sort": [
+                "↩䳐⠦㓐ࡘݰ᐀\u0001"
+              ]
+            },
+            {
+              "_index": "esm-icu",
+              "_id": "1",
+              "_score": null,
+              "fields": {
+                "d": [
+                  "Müller"
+                ]
+              },
+              "sort": [
+                "↩䳐⠦㓐ਢᠠι尉\u0000\u0001"
+              ]
+            },
+            {
+              "_index": "esm-icu",
+              "_id": "4",
+              "_score": null,
+              "fields": {
+                "d": [
+                  "Mylius"
+                ]
+              },
+              "sort": [
+                "↭偎橩瀐倎瀤\u0000\u0000"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-icu/_search",
+      "body": {
+        "query": {
+          "range": {
+            "d": {
+              "gte": "Mueller",
+              "lte": "Mz"
+            }
+          }
+        },
+        "sort": [
+          "_id"
+        ],
+        "_source": false
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-icu",
+              "node": "xk24ktl-SaSz1Mrxnszmjg",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-icu/_search",
+      "body": {
+        "query": {
+          "exists": {
+            "field": "c"
+          }
+        },
+        "sort": [
+          "_id"
+        ],
+        "_source": false
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-icu",
+              "node": "xk24ktl-SaSz1Mrxnszmjg",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-icu/_search",
+      "body": {
+        "query": {
+          "prefix": {
+            "d": "M"
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "query_shard_exception",
+              "reason": "failed to create query: [prefix] queries are not supported on [icu_collation_keyword] fields.",
+              "index_uuid": "SAPGYqh5TX6IAuBvXwpQUA",
+              "index": "esm-icu"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-icu",
+              "node": "xk24ktl-SaSz1Mrxnszmjg",
+              "reason": {
+                "type": "query_shard_exception",
+                "reason": "failed to create query: [prefix] queries are not supported on [icu_collation_keyword] fields.",
+                "index_uuid": "SAPGYqh5TX6IAuBvXwpQUA",
+                "index": "esm-icu",
+                "caused_by": {
+                  "type": "unsupported_operation_exception",
+                  "reason": "[prefix] queries are not supported on [icu_collation_keyword] fields."
+                }
+              }
+            }
+          ]
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-icu/_search",
+      "body": {
+        "query": {
+          "wildcard": {
+            "d": "M*"
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "query_shard_exception",
+              "reason": "failed to create query: [wildcard] queries are not supported on [icu_collation_keyword] fields.",
+              "index_uuid": "SAPGYqh5TX6IAuBvXwpQUA",
+              "index": "esm-icu"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-icu",
+              "node": "xk24ktl-SaSz1Mrxnszmjg",
+              "reason": {
+                "type": "query_shard_exception",
+                "reason": "failed to create query: [wildcard] queries are not supported on [icu_collation_keyword] fields.",
+                "index_uuid": "SAPGYqh5TX6IAuBvXwpQUA",
+                "index": "esm-icu",
+                "caused_by": {
+                  "type": "unsupported_operation_exception",
+                  "reason": "[wildcard] queries are not supported on [icu_collation_keyword] fields."
+                }
+              }
+            }
+          ]
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-icu/_analyze",
+      "body": {
+        "analyzer": "ia",
+        "text": "Ⅻ é"
+      },
+      "status": 200,
+      "response": {
+        "tokens": [
+          {
+            "token": "xii",
+            "start_offset": 0,
+            "end_offset": 1,
+            "type": "<ALPHANUM>",
+            "position": 0
+          },
+          {
+            "token": "e",
+            "start_offset": 2,
+            "end_offset": 4,
+            "type": "<ALPHANUM>",
+            "position": 1
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-icu2",
+      "body": {
+        "mappings": {
+          "properties": {
+            "c": {
+              "type": "icu_collation_keyword",
+              "strength": "bogus"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "mapper_parsing_exception",
+              "reason": "Failed to parse mapping: Invalid strength: bogus"
+            }
+          ],
+          "type": "mapper_parsing_exception",
+          "reason": "Failed to parse mapping: Invalid strength: bogus",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Invalid strength: bogus"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-icu3",
+      "body": {
+        "settings": {
+          "analysis": {
+            "analyzer": {
+              "x": {
+                "type": "icu_analyzer",
+                "mode": "other"
+              }
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Unknown mode [other] in analyzer [x], expected one of [compose, decompose]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Unknown mode [other] in analyzer [x], expected one of [compose, decompose]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "DELETE /esm-icu",
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    }
+  ]
+}

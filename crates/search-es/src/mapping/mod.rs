@@ -41,8 +41,8 @@ pub const BUILT_IN_ANALYZERS: &[&str] = &[
     "whitespace",
     // The analysis-kuromoji, analysis-nori and analysis-smartcn plugins'.
     "kuromoji", "kuromoji_completion", "nori", "smartcn",
-    // The analysis-stempel and analysis-ukrainian plugins'.
-    "polish", "ukrainian",
+    // The analysis-stempel, analysis-ukrainian and analysis-icu plugins'.
+    "polish", "ukrainian", "icu_analyzer",
 ];
 
 /// Settings and analysis names a mapping is parsed against.

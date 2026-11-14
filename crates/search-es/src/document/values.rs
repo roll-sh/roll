@@ -638,7 +638,7 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
                 None => return Err(EsError::illegal_argument(format!("'{s}' is not an IP string literal.")).into()),
             }
         }
-        "keyword" | "wildcard" | "version" => {
+        "keyword" | "wildcard" | "version" | "icu_collation_keyword" => {
             let s = text_of(w.p)?;
             // `version` has no `ignore_above`; a wildcard past it is left out like a keyword.
             if f.ty != "version"

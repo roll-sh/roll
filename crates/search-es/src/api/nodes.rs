@@ -927,6 +927,7 @@ impl Plugin {
 /// `GET _nodes/plugins` (`_cat/plugins` sorts them by name).
 pub(crate) const PLUGINS: &[Plugin] = &[
     Plugin { name: "analysis-phonetic", description: "The Phonetic Analysis plugin integrates phonetic token filter analysis with elasticsearch.", classname: "org.elasticsearch.plugin.analysis.phonetic.AnalysisPhoneticPlugin" },
+    Plugin { name: "analysis-icu", description: "The ICU Analysis plugin integrates the Lucene ICU module into Elasticsearch, adding ICU-related analysis components.", classname: "org.elasticsearch.plugin.analysis.icu.AnalysisICUPlugin" },
     Plugin { name: "analysis-kuromoji", description: "The Japanese (kuromoji) Analysis plugin integrates Lucene kuromoji analysis module into elasticsearch.", classname: "org.elasticsearch.plugin.analysis.kuromoji.AnalysisKuromojiPlugin" },
     Plugin { name: "analysis-ukrainian", description: "The Ukrainian Analysis plugin integrates the Lucene UkrainianMorfologikAnalyzer into elasticsearch.", classname: "org.elasticsearch.plugin.analysis.ukrainian.AnalysisUkrainianPlugin" },
     Plugin { name: "analysis-smartcn", description: "Smart Chinese Analysis plugin integrates Lucene Smart Chinese analysis module into elasticsearch.", classname: "org.elasticsearch.plugin.analysis.smartcn.AnalysisSmartChinesePlugin" },

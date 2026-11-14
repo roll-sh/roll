@@ -495,6 +495,7 @@ pub(crate) fn char_filter_provider(ty: &str) -> Option<Provider<CharFilterBuilde
             },
             true,
         ),
+        "icu_normalizer" => crate::icu::char_filter_provider(ty),
         _ => crate::cjk::char_filter_provider(ty),
     }
 }

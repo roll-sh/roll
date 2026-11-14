@@ -34,6 +34,7 @@ mod component;
 mod dfa;
 mod error;
 mod filter;
+mod icu;
 pub mod jregex;
 mod kuromoji;
 mod lregexp;
@@ -61,6 +62,7 @@ pub use analyze::{AnalyzeLimits, AnalyzeRequest, NameOrDefinition};
 pub use analyzer::{Analyzer, CharFilteredText, Explain, ExplainToken, Normalizer, ShingleInfo, TokenList};
 pub use component::AnalysisMode;
 pub use error::{AnalysisError, is_java_exception};
+pub use icu::collation::{Collation, CollationParams, encode_binary};
 pub use token::Token;
 pub use tokenizer::thai::{ThaiDictionary, set_thai_dictionary};
 
