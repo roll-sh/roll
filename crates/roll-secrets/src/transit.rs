@@ -572,6 +572,11 @@ impl Secrets {
         let now = self.db.now_ms()?;
         let mut warnings = vec![];
         for k in keys {
+            // As if made here: a name a rule can list as written.
+            if check_name(&k.name).is_err() {
+                warnings.push(format!("encryption key {:?}: not a name roll takes, left out", k.name));
+                continue;
+            }
             let id = names::new_id("tk", 16);
             let mut stored = vec![];
             for (v, key, at) in &k.versions {
