@@ -19,7 +19,7 @@ import {
 } from "@/lib/apps-api";
 import { workspace, useWorkspace } from "@/lib/workspace-store";
 import { AppShell } from "../app-shell";
-import { btn, Connecting, EmptyPanel, ErrorNote, input, Offline, primary } from "../ui";
+import { btn, Connecting, EmptyPanel, input, Offline, primary } from "../ui";
 import { Deployments } from "./deployments";
 import { DomainsTab } from "./domains";
 import { JobsTab } from "./jobs";
@@ -28,7 +28,7 @@ import { anyPending, POLL_BUSY_MS, POLL_IDLE_MS, POLL_STREAMED_MS, useDeployMark
 import { RuntimeLogs } from "./logs";
 import { MetricsTab } from "./metrics";
 import { SettingsTab } from "./settings";
-import { clock, StateBadge, SureButton, until, useRunner, type Runner } from "./shared";
+import { clock, RunnerError, StateBadge, SureButton, until, useRunner, type Runner } from "./shared";
 import { UsageTab } from "./usage";
 import { VariablesTab } from "./variables";
 
@@ -504,7 +504,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         />
       )}
 
-      <ErrorNote error={runner.error} />
+      <RunnerError runner={runner} />
       {env && <Conditions service={service} env={env} runner={runner} go={go} />}
       {env?.crash_loop && (
         <div role="alert" className="rise mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-danger/40 bg-danger/[0.06] px-4 py-3 text-[13px]">

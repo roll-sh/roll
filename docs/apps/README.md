@@ -1675,9 +1675,13 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (a second product review of the experience, a product review of what one engineer can close here now, bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **Errors where the click was**: one runner's error shows above the tabs, off-screen on Settings
-   (several screens tall): a failed Save, Test, domain or firewall action is invisible. Show it
-   beside its control, or sticky.
+1. **A handoff mid-deploy**: `cluster.rs::a_joining_node_takes_services_with_no_request_failing`
+   fails about 1 in 16 under load. Seen: ten 503s in a row for one service during the join, and
+   (48 parallel runs) a service's first deploy failing at creation with its instance "exited on
+   its own". Likely: the lease moves while the old owner's deploy is preparing, and the new
+   owner's takeover sweep removes that not-yet-live deployment's instance (only the live
+   deployment's prefix is spared). Find it (record each failed answer's page), then spare a
+   pending deployment's instances on takeover or let the old owner finish first.
 2. **"Needs a redeploy" everywhere**: its banner with Redeploy is only on Variables; Settings' save
    bar says changes apply with the next deploy and offers none. The banner above the tabs, and
    "Save and redeploy".

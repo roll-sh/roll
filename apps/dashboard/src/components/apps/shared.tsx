@@ -1,4 +1,4 @@
-import { ArrowDown, Pause, Play, Search } from "lucide-react";
+import { ArrowDown, Pause, Play, Search, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { deployStatus, instanceStateLabel, instanceTone, type AccessLine, type DeployStatus, type InstanceState, type LogLine, type Tone } from "@/lib/apps-api";
 import { useMarkState } from "../mark-state";
@@ -39,6 +39,8 @@ export function useRunner(after: () => unknown) {
   const { play } = useMarkState();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // What failed (the action's key: "firewall", "restart:<instance>"), for the toast to name.
+  const [failed, setFailed] = useState<string | null>(null);
   const run = async <T,>(key: string, fn: () => Promise<T>): Promise<T | undefined> => {
     setBusy(key);
     setError(null);
@@ -47,6 +49,7 @@ export function useRunner(after: () => unknown) {
       await after();
       return out;
     } catch (e) {
+      setFailed(key.split(":")[0]);
       setError(message(e));
       play([["error", 1600]]);
       return undefined;
@@ -54,9 +57,30 @@ export function useRunner(after: () => unknown) {
       setBusy(null);
     }
   };
-  return { busy, error, setError, run };
+  return { busy, error, failed, setError, run };
 }
 export type Runner = ReturnType<typeof useRunner>;
+
+/**
+ * A runner's error where it can be seen whatever was clicked: fixed to the bottom of the window
+ * (Settings is screens tall: a note above the tabs is off-screen), naming what failed, until
+ * dismissed or the next action.
+ */
+export function RunnerError({ runner }: { runner: Runner }) {
+  if (!runner.error) return null;
+  return (
+    <div role="alert" className="rise fixed inset-x-4 bottom-4 z-50 mx-auto flex max-w-xl items-start gap-3 rounded-xl border border-danger/40 bg-panel px-4 py-3 text-[13px]">
+      <i className="mt-1.5 size-1.5 shrink-0 rounded-full bg-danger" />
+      <p className="min-w-0 flex-1 text-fg">
+        {runner.failed && <span className="text-muted">{runner.failed.replaceAll("-", " ")} didn't work: </span>}
+        {runner.error}
+      </p>
+      <button type="button" className="text-muted hover:text-fg" aria-label="Dismiss" onClick={() => runner.setError(null)}>
+        <X className="size-3.5" strokeWidth={1.5} />
+      </button>
+    </div>
+  );
+}
 
 /** Unix ms as the time of day (and the date when it isn't today). */
 export function clock(t: number, withDate = false) {
