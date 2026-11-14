@@ -509,30 +509,27 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **The approval flow live, with accounts and mail** (`users-live/`, a rolld on :7480 built from
-   #25 with accounts and a mail outbox): a person's token past the policy waits, admins get the
-   mail, an admin approves from the CLI, the person gets theirs, and the token works.
-2. **`debug_failing_service` reads apps' new signals**: an environment's `attention` (crash loop,
+1. **`debug_failing_service` reads apps' new signals**: an environment's `attention` (crash loop,
    capped, maintenance, a failed deploy with `error_detail`) and `apps_activity` with `all`.
-3. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25), and compare each product's routes with its tools
    (an everyday route with no tool is a gap: apps' were found this way).
-4. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+3. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
    lands after #20, #25 and #30): kept merged both ways (secrets' head of 2026-11-14 merged: a
    forgotten project's credentials revoked first and retried by the sweeper, with the integration's
    `identity_logins` kept in what's forgotten). The canvas check costs nothing measurable
    (`gate_latency`, release, pinned, A/B twice: 83–115 µs p50 with it, 105–116 µs without).
-5. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
+4. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
    `.index("name")` on the per-key routes and `Scope.key` in their own check (`GrantGrants` sets
    `id` since #30's fix). The tools and the builder's key picker are in; check both live once the
    rows land (a token on `prj_x/one-key` signs with it and is refused another key and the
    project's environments).
-6. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+5. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-7. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Considered and left out: a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset, or search-then-call meta-tools (see Toolsets: clients handle long lists or have a picker, and meta-tools would hide each tool's hints); a connection narrowed to one project (Supabase's `project_ref`): their
@@ -540,7 +537,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: a person's pending token leads an admin's checkup ("Needs attention": approve or deny),
+Done lately: the approval of people's tokens checked live with accounts and mail (`users-live/approval.sh`: waits, 401 `pending_approval`, the admin mailed, approved from the CLI, the person mailed, then 200); a person's pending token leads an admin's checkup ("Needs attention": approve or deny),
 and stays out of the person's own (#25); admins are mailed when a person's token waits for them (who
 asked, what it may do, the link to decide; `Sessions::admins`, accounts' list) (#25); `roll token
 list --pending` and `roll token approve|deny <id>` (#25); people's tokens past the policy wait for
