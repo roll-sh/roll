@@ -564,8 +564,10 @@ cloud trusts roll's token for one project the way it trusts GitHub Actions' toke
 - **The issuer** is `<rolld's public URL>/v1/secrets/oidc` (`ROLL_CODE_PUBLIC_URL`; the clouds must
   reach it over HTTPS). Its discovery document and keys (`…/.well-known/openid-configuration`,
   `…/jwks`) are public. Tokens are RS256 (Azure takes nothing else), live five minutes, and carry
-  `sub = roll-secrets:<project>` (and `project`). The signing key (RSA 2048) is made once, sealed with
-  the deployment key, and shared by every node; every published key verifies.
+  `sub = roll-secrets:<project>` (and `project`). The signing key (RSA 2048) is made at startup,
+  sealed with the deployment key, and shared by every node; every published key verifies, and the
+  public routes read only public halves. After a deployment-key rotation it's resealed like
+  projects' keys (health's `resealed` counts it).
 - **GCP**: a workload identity pool provider for roll's issuer whose attribute condition pins
   `assertion.sub == "roll-secrets:<project>"`, and a service account that lets that principal
   impersonate it (`roles/iam.workloadIdentityUser`). Register it with `POST …/cloud-accounts {name,
@@ -578,9 +580,12 @@ cloud trusts roll's token for one project the way it trusts GitHub Actions' toke
   lease: client credentials with roll's token as the assertion.
 - **The trust must name this project.** Registering an account (admin) first exchanges a token for a
   made-up project: one the cloud takes is refused, naming the condition to add, so no tenant can
-  register (and use) another customer's account that trusts roll. Then this project's token must work.
-- A key links to an account's `access_token` in `dynamic` mode. A token can't be ended early or
-  extended: a lease that ends leaves it valid until it expires, an hour at most; resolve again for a
+  register (and use) another customer's account that trusts roll. Only a definite refusal
+  (`invalid_grant`, `PERMISSION_DENIED`, `AADSTS70021`…) passes; a timeout or an outage fails the
+  registration. Then this project's token must work.
+- A key links to an account's `access_token` in `dynamic` mode, with a lease of 55 minutes at most
+  (so it ends before its token; a longer one is refused when it's linked). A token can't be ended
+  early or extended: a lease that ends leaves it valid until it expires, an hour at most; resolve again for a
   new one. An account a key links to can't be deleted. `roll secrets clouds ls` prints the issuer and
   subject to trust; `roll secrets clouds add-gcp` / `add-azure` register one.
 

@@ -135,12 +135,17 @@ const ISSUER_URL: &str = "https://roll.example/v1/secrets/oidc";
 struct FakeClouds {
     pinned: Mutex<Option<String>>,
     seen: Mutex<Vec<String>>,
+    /// Answer every exchange with an outage.
+    down: std::sync::atomic::AtomicBool,
 }
 
 impl FakeClouds {
     fn trust(&self, jwt: &Secret, audience: &str) -> Result<u32, String> {
         use base64::Engine;
         let claims: Value = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(jwt.expose().split('.').nth(1).unwrap()).unwrap()).unwrap();
+        if self.down.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("503 Service Unavailable".into());
+        }
         let mut seen = self.seen.lock().unwrap();
         seen.push(jwt.expose().to_string());
         if claims["aud"] != audience || self.pinned.lock().unwrap().as_deref().is_some_and(|p| claims["sub"] != p) {
@@ -223,6 +228,7 @@ struct Api {
     fake: Arc<Fake>,
     sync: Arc<FakeSync>,
     clouds: Arc<FakeClouds>,
+    ws: Arc<roll_workspace::Workspace>,
     project: String,
     _dir: tempfile::TempDir,
 }
@@ -245,8 +251,8 @@ impl Api {
         let clouds = Arc::new(FakeClouds::default());
         let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: None, people: Some(people.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }) };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
-        let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets.clone()));
-        let mut api = Api { sent, people, router, secrets, db, fake, sync, clouds, project: String::new(), _dir: dir };
+        let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone()));
+        let mut api = Api { sent, people, router, secrets, db, fake, sync, clouds, ws: ws.clone(), project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -1047,6 +1053,11 @@ async fn a_cloud_account_trusts_one_projects_token() {
     let doc = api.ok(Method::GET, "/v1/secrets/oidc/.well-known/openid-configuration", None).await;
     assert_eq!((doc["issuer"].as_str(), doc["jwks_uri"].as_str()), (Some(ISSUER_URL), Some(format!("{ISSUER_URL}/jwks").as_str())));
     let gcp = json!({ "name": "analytics", "cloud": "gcp", "audience": "//iam.googleapis.com/projects/1234/locations/global/workloadIdentityPools/roll/providers/roll", "service_account": "reports@shop-prod.iam.gserviceaccount.com" });
+    // An outage proves nothing about the trust: the account isn't taken until the cloud answers.
+    api.clouds.down.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (s, e) = api.call(Method::POST, "/cloud-accounts", Some(gcp.clone())).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("couldn't tell"), "{e}");
+    api.clouds.down.store(false, std::sync::atomic::Ordering::Relaxed);
     // A pool that takes any of roll's projects (another customer's, say) is refused.
     let (s, e) = api.call(Method::POST, "/cloud-accounts", Some(gcp.clone())).await;
     assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains(&format!("roll-secrets:{}", api.project)), "{e}");
@@ -1072,8 +1083,37 @@ async fn a_cloud_account_trusts_one_projects_token() {
     public.verify(&ring::signature::RSA_PKCS1_2048_8192_SHA256, format!("{}.{}", parts[0], parts[1]).as_bytes(), &b64(parts[2])).expect("roll's signature");
     assert_eq!((claims["iss"].as_str(), claims["sub"].clone(), header["alg"].as_str()), (Some(ISSUER_URL), json!(format!("roll-secrets:{}", api.project)), Some("RS256")));
     assert_eq!(claims["exp"].as_i64().unwrap() - claims["iat"].as_i64().unwrap(), 300);
-    // An account a key links to stays.
+    // An account a key links to stays, and a lease can't outlive its token.
     assert_eq!(api.call(Method::DELETE, &format!("/cloud-accounts/{}", g["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
+    let (s, _) = api.call(Method::PUT, "/environments/production/secrets/LONG_TOKEN", Some(json!({ "link": { "kind": "gcp", "ref": g["id"], "field": "access_token", "mode": "dynamic", "options": { "ttl_minutes": 120 } } }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // The deployment key rotates: the issuer's key is resealed with the new one (health says when
+    // the previous key can go), and keeps signing once the previous key is gone.
+    let reopen = |current: &str, previous: Option<&str>| {
+        let opts = Options { keyring: Ok(Keyring::new(current, previous).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: api.clouds.clone() }) };
+        Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap()
+    };
+    let (old, new) = ("k".repeat(32), "n".repeat(32));
+    let rotated = reopen(&new, Some(&old));
+    let p = api.project.clone();
+    // Any request reseals its project's key; health reseals the issuer's.
+    let s = tokio::task::spawn_blocking(move || {
+        rotated.cloud_accounts(&p, &roll_secrets::Caller::operator()).unwrap();
+        rotated.health().unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(s["resealed"], "all", "{s}");
+    let after = Arc::new(reopen(&new, None));
+    let (a, acct) = (after.clone(), g["id"].as_str().unwrap().to_string());
+    let jwks = tokio::task::spawn_blocking(move || a.oidc_jwks().unwrap()).await.unwrap();
+    assert_eq!(jwks["keys"].as_array().unwrap().len(), 1, "the same key, still published");
+    let a = after.clone();
+    tokio::task::spawn_blocking(move || a.links().get("gcp").unwrap().issue(&acct, "token", &serde_json::from_value(json!({ "kind": "gcp", "ref": "x", "field": "access_token", "mode": "dynamic" })).unwrap(), "after", Some(15)).map(|_| ()))
+        .await
+        .unwrap()
+        .expect("signing with the resealed key");
 }
 
 #[tokio::test]

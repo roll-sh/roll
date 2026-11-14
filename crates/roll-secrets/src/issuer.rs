@@ -53,31 +53,59 @@ pub(crate) struct Issuer {
     pub url: String,
 }
 
-/// The newest signing key, made if there's none: (kid, PKCS#8 DER).
+/// Make the signing key if there's none (at startup: the public keys are there before the first
+/// token, and no anonymous request ever makes one). Two nodes may make one each: both are
+/// published, and the newest signs.
+pub(crate) fn ensure_key(db: &Db, keys: &Keyring) -> Result<()> {
+    if db.read(|c| c.query_row("SELECT COUNT(*) FROM oidc_keys", (), |r| r.get::<_, i64>(0)))? > 0 {
+        return Ok(());
+    }
+    use rsa::pkcs8::EncodePrivateKey;
+    use rsa::traits::PublicKeyParts;
+    let key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).map_err(|e| Error::Internal(format!("making the issuer's key: {e}")))?;
+    let der = key.to_pkcs8_der().map_err(|e| Error::Internal(format!("encoding the issuer's key: {e}")))?;
+    let kid = names::new_id("k", 16);
+    let (dek, sealed_dek) = keys.new_dek(&dek_owner(&kid));
+    let private = dek.seal(&aad(&kid), &Value::new(b64(der.as_bytes())));
+    let (n, e) = (b64(&key.n().to_bytes_be()), b64(&key.e().to_bytes_be()));
+    let now = db.now_ms()?;
+    db.write(|c| c.execute("INSERT INTO oidc_keys (kid, sealed_dek, private, n, e, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![kid, sealed_dek, private, n, e, now]))?;
+    Ok(())
+}
+
+/// The newest signing key: (kid, PKCS#8 DER). Its data key is resealed with the current
+/// deployment key when it was sealed with a previous one, as projects' are.
 fn signing_key(db: &Db, keys: &Keyring) -> Result<(String, zeroize::Zeroizing<Vec<u8>>)> {
+    ensure_key(db, keys)?;
     type Row = (String, String, Vec<u8>);
-    let newest = |db: &Db| -> Result<Option<Row>> { Ok(db.read(|c| c.query("SELECT kid, sealed_dek, private FROM oidc_keys ORDER BY created_at DESC, kid LIMIT 1", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?.into_iter().next()) };
-    let (kid, sealed_dek, private) = match newest(db)? {
-        Some(row) => row,
-        None => {
-            use rsa::pkcs8::EncodePrivateKey;
-            use rsa::traits::PublicKeyParts;
-            let key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).map_err(|e| Error::Internal(format!("making the issuer's key: {e}")))?;
-            let der = key.to_pkcs8_der().map_err(|e| Error::Internal(format!("encoding the issuer's key: {e}")))?;
-            let kid = names::new_id("k", 16);
-            let (dek, sealed_dek) = keys.new_dek(&dek_owner(&kid));
-            let private = dek.seal(&aad(&kid), &Value::new(b64(der.as_bytes())));
-            let (n, e) = (b64(&key.n().to_bytes_be()), b64(&key.e().to_bytes_be()));
-            let now = db.now_ms()?;
-            db.write(|c| c.execute("INSERT INTO oidc_keys (kid, sealed_dek, private, n, e, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![kid, sealed_dek, private, n, e, now]))?;
-            // Two nodes may have made one at once: every published key verifies, and all sign
-            // with the same (the newest by time, then id).
-            newest(db)?.ok_or_else(|| Error::Internal("the issuer's key vanished".into()))?
-        }
-    };
-    let (dek, _) = keys.open_dek(&dek_owner(&kid), &sealed_dek)?;
+    let (kid, sealed_dek, private): Row = db
+        .read(|c| c.query("SELECT kid, sealed_dek, private FROM oidc_keys ORDER BY created_at DESC, kid LIMIT 1", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::Internal("the issuer's key vanished".into()))?;
+    let (dek, resealed) = keys.open_dek(&dek_owner(&kid), &sealed_dek)?;
+    if let Some(new) = resealed {
+        db.write(|c| c.execute("UPDATE oidc_keys SET sealed_dek = ? WHERE kid = ? AND sealed_dek = ?", [new.as_str(), kid.as_str(), sealed_dek.as_str()]))?;
+    }
     let der = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(dek.open(&aad(&kid), &private)?.expose()).map_err(|_| Error::Internal("the issuer's key is damaged".into()))?;
     Ok((kid, zeroize::Zeroizing::new(der)))
+}
+
+/// Reseal every signing key's data key with the current deployment key; how many still need the
+/// previous one (health's `resealed`).
+pub(crate) fn reseal(db: &Db, keys: &Keyring) -> Result<usize> {
+    let rows: Vec<(String, String)> = db.read(|c| c.query("SELECT kid, sealed_dek FROM oidc_keys", (), |r| Ok((r.get(0)?, r.get(1)?))))?;
+    let mut old = 0;
+    for (kid, sealed) in rows {
+        match keys.open_dek(&dek_owner(&kid), &sealed) {
+            Ok((_, Some(new))) => {
+                db.write(|c| c.execute("UPDATE oidc_keys SET sealed_dek = ? WHERE kid = ? AND sealed_dek = ?", [new.as_str(), kid.as_str(), sealed.as_str()]))?;
+            }
+            Ok((_, None)) => {}
+            Err(_) => old += 1,
+        }
+    }
+    Ok(old)
 }
 
 impl Issuer {
@@ -107,9 +135,8 @@ impl Issuer {
         })
     }
 
-    /// Every key, so a token from any node verifies.
-    pub(crate) fn jwks(&self, db: &Db, keys: &Keyring) -> Result<Json> {
-        signing_key(db, keys)?;
+    /// Every key's public half, so a token from any node verifies (nothing private is read).
+    pub(crate) fn jwks(&self, db: &Db) -> Result<Json> {
         let rows: Vec<(String, String, String)> = db.read(|c| c.query("SELECT kid, n, e FROM oidc_keys ORDER BY created_at DESC, kid", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
         Ok(json!({ "keys": rows.into_iter().map(|(kid, n, e)| json!({ "kty": "RSA", "use": "sig", "alg": "RS256", "kid": kid, "n": n, "e": e })).collect::<Vec<_>>() }))
     }

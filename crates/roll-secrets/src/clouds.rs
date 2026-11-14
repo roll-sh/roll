@@ -205,6 +205,20 @@ impl LinkProvider for Provider {
     fn renew(&self, _: &str, _: &Json, _: i64) -> Result<()> {
         Err(Error::BadRequest("a cloud's token can't be extended: resolve again for a new one".into()))
     }
+
+    /// A lease no longer than the token it holds (an hour, the clouds' default cap).
+    fn check(&self, link: &Link) -> Result<()> {
+        if link.ttl_minutes() > 55 {
+            return Err(Error::BadRequest(format!("a {} token lives an hour at most: ttl_minutes is 55 at most, so the lease ends before its token", self.kind)));
+        }
+        Ok(())
+    }
+}
+
+/// Whether a cloud's answer is a definite "no" to roll's token (the trust didn't take it), not a
+/// failure to answer: only those prove a made-up project is refused.
+fn denied(why: &str) -> bool {
+    ["invalid_grant", "unauthorized_client", "PERMISSION_DENIED", "AADSTS70021", "AADSTS700213", "AADSTS700212"].iter().any(|m| why.contains(m))
 }
 
 impl Secrets {
@@ -216,7 +230,7 @@ impl Secrets {
 
     pub fn oidc_jwks(&self) -> Result<Json> {
         let c = self.clouds.as_ref().ok_or_else(|| Error::NotFound("roll's issuer isn't on this server".into()))?;
-        crate::issuer::Issuer { url: c.issuer.clone() }.jwks(&self.db, self.keys()?)
+        crate::issuer::Issuer { url: c.issuer.clone() }.jwks(&self.db)
     }
 
     pub fn cloud_accounts(&self, project: &str, caller: &Caller) -> Result<Vec<CloudAccount>> {
@@ -246,11 +260,18 @@ impl Secrets {
         let keys = self.keys()?;
         let decoy = format!("prj_probe_{}", names::new_id("p", 12));
         let sub = crate::issuer::subject(project);
-        if exchange(&clouds, &self.db, keys, &decoy, &n.account, 900).is_ok() {
-            return Err(Error::BadRequest(format!(
-                "{}'s trust takes any of roll's projects: pin the subject to {sub} (GCP: the provider's attribute condition assertion.sub == \"{sub}\"; Azure: the federated credential's subject), so roll acts for this project and nobody else's",
-                n.account.label()
-            )));
+        match exchange(&clouds, &self.db, keys, &decoy, &n.account, 900) {
+            Ok(_) => {
+                return Err(Error::BadRequest(format!(
+                    "{}'s trust takes any of roll's projects: pin the subject to {sub} (GCP: the provider's attribute condition assertion.sub == \"{sub}\"; Azure: the federated credential's subject), so roll acts for this project and nobody else's",
+                    n.account.label()
+                )));
+            }
+            // A timeout or an outage proves nothing: only a definite refusal does.
+            Err(why) if !denied(&why) => {
+                return Err(Error::BadRequest(format!("couldn't tell whether {} refuses other projects' tokens ({why}): try again", n.account.label())));
+            }
+            Err(_) => {}
         }
         exchange(&clouds, &self.db, keys, project, &n.account, 900)
             .map_err(|why| Error::BadRequest(format!("{} didn't give roll a token: {why} (its trust names issuer {} and subject {sub})", n.account.label(), clouds.issuer)))?;

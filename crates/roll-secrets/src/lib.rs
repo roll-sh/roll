@@ -402,6 +402,8 @@ impl Secrets {
             links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), deliver: deliver.clone() }));
         }
         if let (Some(c), Ok(keys)) = (&opts.clouds, &opts.keyring) {
+            // The issuer's key exists before anyone asks for its public half.
+            issuer::ensure_key(&db, keys)?;
             for kind in [clouds::GCP, clouds::AZURE] {
                 links.register(Arc::new(clouds::Provider { kind, db: db.clone(), keys: keys.clone(), clouds: c.clone() }));
             }
@@ -459,7 +461,10 @@ impl Secrets {
             Ok(keys) => {
                 let rows = self.db.read(|c| c.query("SELECT project_id, dek FROM projects", (), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
                 let old = rows.iter().filter(|(p, d)| keys.open_dek(p, d).map(|(_, r)| r.is_some()).unwrap_or(true)).count();
-                if old == 0 { serde_json::json!("all") } else { serde_json::json!(rows.len() - old) }
+                // The issuer's signing key is sealed with the deployment key too: resealed here, and
+                // the previous key isn't "done with" while one still needs it.
+                let issuer_old = if self.clouds.is_some() { issuer::reseal(&self.db, keys)? } else { 0 };
+                if old == 0 && issuer_old == 0 { serde_json::json!("all") } else { serde_json::json!(rows.len() - old) }
             }
             Err(_) => serde_json::Value::Null,
         };
