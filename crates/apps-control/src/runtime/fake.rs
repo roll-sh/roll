@@ -484,4 +484,8 @@ impl Builder for Fake {
     }
 
     async fn remove_image(&self, _image: &str) {}
+
+    fn shares_caches(&self) -> bool {
+        true
+    }
 }

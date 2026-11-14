@@ -959,6 +959,9 @@ impl Builder for DockerBuilder {
         if !job.env.is_empty() && !job.own_dockerfile {
             cmd.arg("--build-arg").arg(format!("ROLL_BUILD_ENV={}", job.env_hash));
         }
+        if let Some(v) = &job.layers {
+            cmd.env(apps_build::LAYERS_ARG, v).arg("--build-arg").arg(apps_build::LAYERS_ARG);
+        }
         if job.no_cache {
             cmd.args(["--no-cache", "--pull"]);
         }
@@ -990,6 +993,10 @@ impl Builder for DockerBuilder {
         // The tag is the deployment's own (`roll-apps-<service>:<deployment>`), never moved.
         docker(&["image", "inspect", "-f", "{{.Id}}", &job.tag]).await?;
         Ok(job.tag.clone())
+    }
+
+    fn shares_caches(&self) -> bool {
+        true
     }
 
     async fn remove_image(&self, image: &str) {

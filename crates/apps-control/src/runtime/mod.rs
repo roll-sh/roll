@@ -211,7 +211,8 @@ pub struct BuildJob {
     pub deployment: String,
     /// The build context (the source tree, with the Dockerfile written in).
     pub context: PathBuf,
-    /// The Dockerfile, relative to the context.
+    /// The Dockerfile: relative to the context, or a path outside it (a copy with its cache
+    /// mounts namespaced, [`Builder::shares_caches`]).
     pub dockerfile: String,
     /// The image to make: `roll-apps-<service>:<deployment>`.
     pub tag: String,
@@ -229,6 +230,9 @@ pub struct BuildJob {
     pub own_dockerfile: bool,
     /// Use no cached layer and pull base images again (`--no-cache --pull`).
     pub no_cache: bool,
+    /// [`apps_build::LAYERS_ARG`]'s value on a builder that shares caches: a secret per service
+    /// that keeps its `RUN` steps' cached layers its own. Never in argv or a log.
+    pub layers: Option<String>,
 }
 
 impl std::fmt::Debug for BuildJob {
@@ -289,6 +293,11 @@ pub trait Builder: Send + Sync {
     async fn build(&self, job: &BuildJob, log: &LogSink, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String>;
     /// Remove an image no deployment needs any more.
     async fn remove_image(&self, image: &str);
+    /// Whether its builds share one BuildKit, cache mounts and all (one node's Docker): then
+    /// each service's mounts are namespaced (`apps_build::isolate_caches`).
+    fn shares_caches(&self) -> bool {
+        false
+    }
 }
 
 /// A free TCP port on loopback (to publish an instance's port on).
@@ -319,6 +328,7 @@ mod tests {
             env_hash: String::new(),
             own_dockerfile: true,
             no_cache: false,
+            layers: None,
         };
         assert_eq!(build_args(&job), ["NPM_TOKEN", "A"]);
         job.own_dockerfile = false;

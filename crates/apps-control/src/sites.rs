@@ -29,6 +29,18 @@ pub struct Site {
     pub rules: crate::site_rules::SiteRules,
     /// Its files gzipped once asked for (a site never changes), and how many bytes those hold.
     pub gzipped: parking_lot::Mutex<(usize, HashMap<String, bytes::Bytes>)>,
+    /// When a request last read it (unix seconds): a site nobody asks for leaves memory.
+    pub used: std::sync::atomic::AtomicU64,
+}
+
+/// How long a site nobody asks for stays loaded (its index and gzipped copies).
+const IDLE: u64 = 15 * 60;
+
+/// Files being gzipped at once on this node, for every site: past it a file goes out as it is.
+static GZIPPING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+fn now_s() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 /// The biggest file gzipped as it's asked for, and how much of a site's gzipped copies are kept.
@@ -64,12 +76,26 @@ pub fn compressible(ctype: &str) -> bool {
 }
 
 impl Site {
-    /// A file's bytes, gzipped (level 6), kept for the next asker while the site's copies stay
-    /// under [`GZIP_KEPT`].
-    pub async fn gzip(self: &std::sync::Arc<Self>, name: &str) -> std::io::Result<bytes::Bytes> {
-        if let Some(b) = self.gzipped.lock().1.get(name) {
-            return Ok(b.clone());
+    /// A file gzipped (level 6) and kept for the next asker, if it is already, or if the site's
+    /// copies are under [`GZIP_KEPT`] and the node isn't gzipping too much else: None sends it as
+    /// it is. A file is gzipped at most once (but by two requests racing), so asking costs nothing
+    /// once a site's budget is spent.
+    pub fn gzipped(&self, name: &str) -> Option<bytes::Bytes> {
+        self.gzipped.lock().1.get(name).cloned()
+    }
+
+    pub async fn gzip(self: &std::sync::Arc<Self>, name: &str) -> Option<bytes::Bytes> {
+        if let Some(b) = self.gzipped(name) {
+            return Some(b);
         }
+        if self.gzipped.lock().0 >= GZIP_KEPT {
+            return None;
+        }
+        let _permit = GZIPPING.try_acquire().ok()?;
+        self.compress(name).await.ok()
+    }
+
+    async fn compress(self: &std::sync::Arc<Self>, name: &str) -> std::io::Result<bytes::Bytes> {
         let &(off, len) = self.files.get(name).ok_or_else(|| std::io::Error::other("no such file"))?;
         let tar = self.tar.clone();
         let gz = tokio::task::spawn_blocking(move || {
@@ -86,7 +112,7 @@ impl Site {
         .map_err(std::io::Error::other)??;
         let gz = bytes::Bytes::from(gz);
         let mut c = self.gzipped.lock();
-        if c.0 + gz.len() <= GZIP_KEPT {
+        if c.0 + gz.len() <= GZIP_KEPT && !c.1.contains_key(name) {
             c.0 += gz.len();
             c.1.insert(name.to_string(), gz.clone());
         }
@@ -218,9 +244,13 @@ impl Apps {
     /// A site's files, read once per node (fetched from object storage when this node didn't
     /// build it).
     pub(crate) async fn site(self: &Arc<Self>, key: &str) -> Result<Arc<Site>> {
+        let now = now_s();
         if let Some(s) = self.sites.lock().get(key) {
+            s.used.store(now, std::sync::atomic::Ordering::Relaxed);
             return Ok(s.clone());
         }
+        // Loading another: those nobody asked for a while go (a request still reading one keeps it).
+        self.sites.lock().retain(|_, s| now.saturating_sub(s.used.load(std::sync::atomic::Ordering::Relaxed)) < IDLE);
         let path = self.site_path(key);
         if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
             let Some(o) = &self.deps.objects else { return Err(Error::NotFound("this site's files aren't on this node".into())) };
@@ -239,7 +269,7 @@ impl Apps {
         .await
         .map_err(|e| Error::Internal(e.to_string()))?
         .map_err(|e| Error::Internal(e.to_string()))?;
-        let site = Arc::new(Site { tar: path, files, rules, gzipped: Default::default() });
+        let site = Arc::new(Site { tar: path, files, rules, gzipped: Default::default(), used: now.into() });
         self.sites.lock().insert(key.to_string(), site.clone());
         Ok(site)
     }
@@ -342,7 +372,7 @@ mod tests {
         assert_eq!(names, ["assets/app.js", "index.html"]);
         let (off, len) = files["assets/app.js"];
         assert_eq!(&bytes[off as usize..(off + len) as usize], b"go()");
-        let site = Site { tar: PathBuf::new(), files, rules: Default::default(), gzipped: Default::default() };
+        let site = Site { tar: PathBuf::new(), files, rules: Default::default(), gzipped: Default::default(), used: 0.into() };
         assert_eq!(resolve(&site, "/", false), Some(("index.html", 200)));
         assert_eq!(resolve(&site, "/settings/profile", true), Some(("index.html", 200)), "a page path in a single-page app");
         assert_eq!(resolve(&site, "/settings/profile", false), None);

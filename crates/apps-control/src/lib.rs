@@ -920,9 +920,12 @@ impl Apps {
         let copied = match (&variables_from, existed) {
             (Some(f), false) => {
                 let (sid, f) = (service.to_string(), f.clone());
+                // Not the sealed ones (Railway's): deploying the copy would read them, and that
+                // can take less than deploying where they are.
                 Some(self.db(move |s| {
                     s.environment(&sid, &f)?;
-                    Ok((s.variables(&sid, &f)?, s.sealed_variables(&sid, &f)?))
+                    let sealed = s.sealed_variables(&sid, &f)?;
+                    Ok(s.variables(&sid, &f)?.into_iter().filter(|(k, _)| !sealed.contains(k)).collect::<BTreeMap<_, _>>())
                 })
                 .await?)
             }
@@ -967,10 +970,9 @@ impl Apps {
             return Err(Error::BadRequest("follow_tag is for an image service whose image has a tag (not a digest)".into()));
         }
         self.ensure_environment(&svc, env, branch.as_ref().map(|b| b.as_deref()), ephemeral, &pname).await?;
-        // A sealed one stays sealed in the copy.
-        if let Some((vars, sealed)) = copied.filter(|(v, _)| !v.is_empty()) {
+        if let Some(vars) = copied.filter(|v| !v.is_empty()) {
             let (sid, e) = (service.to_string(), env.to_string());
-            self.db(move |s| s.change_variables(&sid, &e, &vars, &[], &sealed)).await?;
+            self.db(move |s| s.change_variables(&sid, &e, &vars, &[], &BTreeSet::new())).await?;
         }
         // Its own size and scale: each field replaces the service's, null goes back to it.
         if let Some(patch) = o.get("run") {

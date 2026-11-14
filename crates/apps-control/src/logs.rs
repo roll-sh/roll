@@ -83,7 +83,7 @@ impl LogHub {
     }
 
     pub fn sink(self: &Arc<Self>, key: impl Into<String>, stream: Stream) -> LogSink {
-        LogSink { hub: self.clone(), key: Arc::from(key.into()), stream, instance: None, deployment: None }
+        LogSink { hub: self.clone(), key: Arc::from(key.into()), stream, instance: None, deployment: None, redact: None }
     }
 
     fn push(&self, key: &str, line: LogLine) {
@@ -292,6 +292,8 @@ pub struct LogSink {
     stream: Stream,
     instance: Option<Arc<str>>,
     deployment: Option<Arc<str>>,
+    /// Never written: a secret the lines may hold (a build's cache namespace), shown as `…`.
+    redact: Option<Arc<str>>,
 }
 
 impl LogSink {
@@ -307,8 +309,16 @@ impl LogSink {
         LogSink { deployment: Some(deployment.into()), ..self.clone() }
     }
 
+    /// The same sink, with `secret` taken out of every line it writes.
+    pub fn redacting(&self, secret: &str) -> LogSink {
+        LogSink { redact: (!secret.is_empty()).then(|| secret.into()), ..self.clone() }
+    }
+
     pub fn line(&self, text: impl AsRef<str>) {
         let mut text = text.as_ref().trim_end_matches(['\r', '\n']).to_string();
+        if let Some(r) = &self.redact {
+            text = text.replace(&**r, "…");
+        }
         if text.len() > LINE_MAX {
             let mut cut = LINE_MAX;
             while !text.is_char_boundary(cut) {

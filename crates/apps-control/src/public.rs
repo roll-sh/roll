@@ -261,40 +261,61 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
     // Compressed as Render's and Vercel's static sites are: the build's own `.br` or `.gz` of the
     // file, else gzipped here (once: a site never changes), for text-like files the client takes
     // it for. Each encoding has its ETag.
-    let accepts = |enc: &str| {
-        req.accept_encoding.as_deref().unwrap_or("").split(',').any(|p| {
-            let mut it = p.split(';');
-            let name = it.next().unwrap_or("").trim();
-            let q0 = it.any(|a| a.trim().strip_prefix("q=").is_some_and(|q| q.trim().parse::<f32>().is_ok_and(|q| q <= 0.0)));
-            (name.eq_ignore_ascii_case(enc) || name == "*") && !q0
+    let compress = crate::sites::compressible(ctype);
+    let size = site.files[name].1;
+    let pre = |ext: &str| site.files.get(&format!("{name}.{ext}")).copied();
+    let (qbr, qgz) = (accept_q(req.accept_encoding.as_deref(), "br"), accept_q(req.accept_encoding.as_deref(), "gzip"));
+    // Gzipped here: what this file would be, if the node gets to it (never for a HEAD's sake).
+    let on_the_fly = compress && qgz > 0.0 && pre("gz").is_none() && (crate::sites::GZIP_MIN..=crate::sites::GZIP_MAX).contains(&size);
+    let encoding = match () {
+        _ if !compress => None,
+        _ if pre("br").is_some() && qbr > 0.0 && qbr >= qgz => Some("br"),
+        _ if pre("gz").is_some() && qgz > 0.0 => Some("gzip"),
+        _ if pre("br").is_some() && qbr > 0.0 => Some("br"),
+        _ if on_the_fly && (!head || site.gzipped(name).is_some()) => Some("gzip"),
+        _ => None,
+    };
+    let etag_of = |encoding: Option<&str>| {
+        format!("\"{}-{}{}\"", &key[..key.len().min(16)], site.files[name].0, match encoding {
+            Some("br") => "-br",
+            Some(_) => "-gz",
+            None => "",
         })
     };
-    let compress = crate::sites::compressible(ctype);
-    let pre = |ext: &str| site.files.get_key_value(&format!("{name}.{ext}")).map(|(k, v)| (k.as_str(), *v));
-    let (encoding, file, gz): (Option<&'static str>, (u64, u64), Option<bytes::Bytes>) = match () {
-        _ if compress && accepts("br") && pre("br").is_some() => (Some("br"), pre("br").expect("there").1, None),
-        _ if compress && accepts("gzip") && pre("gz").is_some() => (Some("gzip"), pre("gz").expect("there").1, None),
-        _ if compress && accepts("gzip") && (crate::sites::GZIP_MIN..=crate::sites::GZIP_MAX).contains(&site.files[name].1) => match site.gzip(name).await {
-            Ok(b) => (Some("gzip"), site.files[name], Some(b)),
-            Err(_) => (None, site.files[name], None),
-        },
-        _ => (None, site.files[name], None),
+    let cache = match () {
+        _ if ctype.starts_with("text/html") => "no-cache",
+        // Its name changes whenever its bytes do.
+        _ if status == 200 && crate::sites::fingerprinted(name) => "public, max-age=31536000, immutable",
+        _ => "public, max-age=300",
+    };
+    let etag = etag_of(encoding);
+    if status == 200 && req.if_none_match.as_deref().is_some_and(|v| v.split(',').any(|t| t.trim() == etag)) {
+        done(304, 0);
+        let mut r = StatusCode::NOT_MODIFIED.into_response();
+        let h = r.headers_mut();
+        h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("ascii"));
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+        if compress {
+            h.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+        }
+        return r;
+    }
+    // The bytes: the build's own compressed file, ours, or the file (when ours can't be had now).
+    let gz = match encoding {
+        Some("gzip") if pre("gz").is_none() => site.gzip(name).await,
+        _ => None,
+    };
+    let encoding = if encoding == Some("gzip") && pre("gz").is_none() && gz.is_none() { None } else { encoding };
+    let etag = etag_of(encoding);
+    let file = match encoding {
+        Some("br") => pre("br").expect("chosen"),
+        Some(_) if gz.is_none() => pre("gz").expect("chosen"),
+        _ => site.files[name],
     };
     let (mut offset, mut len) = match &gz {
         Some(b) => (file.0, b.len() as u64),
         None => file,
     };
-    let etag = format!("\"{}-{}{}\"", &key[..key.len().min(16)], site.files[name].0, match encoding {
-        Some("br") => "-br",
-        Some(_) => "-gz",
-        None => "",
-    });
-    if status == 200 && req.if_none_match.as_deref().is_some_and(|v| v.split(',').any(|t| t.trim() == etag)) {
-        done(304, 0);
-        let mut r = StatusCode::NOT_MODIFIED.into_response();
-        r.headers_mut().insert(header::ETAG, HeaderValue::from_str(&etag).expect("ascii"));
-        return r;
-    }
     // One byte range of the file as it is (a video's seek, a download resumed); several, or one
     // that doesn't parse, get the whole file, as RFC 9110 allows. `If-Range` keeps it to this
     // version of the file.
@@ -362,12 +383,6 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
         h.insert(header::CONTENT_RANGE, HeaderValue::from_str(&cr).expect("ascii"));
     }
     h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("ascii"));
-    let cache = match () {
-        _ if ctype.starts_with("text/html") => "no-cache",
-        // Its name changes whenever its bytes do.
-        _ if status / 100 == 2 && crate::sites::fingerprinted(name) => "public, max-age=31536000, immutable",
-        _ => "public, max-age=300",
-    };
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     h.insert(HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff"));
     // Its own `_headers` over roll's (each checked when the file was read).
@@ -382,7 +397,31 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
             }
         }
     }
+    // A site's own `Vary` never drops what the encoding varies on (a cache would hand gzip to
+    // a client that can't read it).
+    let varies = h.get_all(header::VARY).iter().any(|v| v.to_str().is_ok_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("accept-encoding") || t.trim() == "*")));
+    if compress && !varies {
+        h.append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    }
     r
+}
+
+/// How much `accept` (an `Accept-Encoding`) wants `coding`: its own q, else `*`'s, else none
+/// (RFC 9110: `*` stands only for codings it doesn't name).
+fn accept_q(accept: Option<&str>, coding: &str) -> f32 {
+    let mut star = 0.0;
+    for part in accept.unwrap_or("").split(',') {
+        let mut it = part.split(';');
+        let name = it.next().unwrap_or("").trim();
+        let q = it.find_map(|a| a.trim().split_once('=').filter(|(k, _)| k.trim().eq_ignore_ascii_case("q")).map(|(_, v)| v.trim().parse::<f32>().unwrap_or(0.0))).unwrap_or(1.0);
+        if name.eq_ignore_ascii_case(coding) {
+            return q;
+        }
+        if name == "*" {
+            star = q;
+        }
+    }
+    star
 }
 
 /// `Range: bytes=…` against a file of `len` bytes: the first and last byte, or `Err` when it
@@ -817,6 +856,17 @@ impl Access {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_encoding_is_taken_by_its_own_q_and_star_only_for_the_rest() {
+        use super::accept_q as q;
+        assert_eq!((q(Some("gzip, br"), "br"), q(Some("gzip, br"), "gzip")), (1.0, 1.0));
+        assert_eq!(q(Some("gzip;q=0, *"), "gzip"), 0.0, "named and refused: * doesn't bring it back");
+        assert_eq!(q(Some("gzip;q=0, *"), "br"), 1.0);
+        assert_eq!(q(Some("gzip;Q=0"), "gzip"), 0.0);
+        assert_eq!(q(Some("gzip;q=1, br;q=0.1"), "br"), 0.1);
+        assert_eq!((q(None, "gzip"), q(Some("identity"), "gzip")), (0.0, 0.0));
+    }
+
     #[test]
     fn one_byte_range_is_met_and_the_rest_is_the_whole_file() {
         use super::byte_range as r;

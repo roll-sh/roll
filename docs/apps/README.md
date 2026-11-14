@@ -571,7 +571,8 @@ every deployment is immutable with instant rollback.
   length. A new value keeps it sealed, removing it is the only way out. A reference that reads a
   sealed value (`${{ db.PASS }}`, its own or another service's) is sealed in its own listing, so a
   reference is no way round it. A rollback brings variables back sealed as they were (and keeps
-  what's sealed since), and `variables_from` copies them sealed. A shell into an instance, or a
+  what's sealed since), and `variables_from` leaves them out (as Railway's copies do: deploying the
+copy would read them, and that can take less than deploying where they are). A shell into an instance, or a
   job, runs with them as the app does, which is why those need admin and reveal.
 - What the next deploy changes (Railway's staged changes): `GET …/pending` names the
   environment's own variables added, removed or changed since its live deployment (from the
@@ -1244,15 +1245,25 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   `/opt/venv`; PHP serves `php -S` with `PHP_CLI_SERVER_WORKERS=4`.
 - Every generated start command takes `$PORT` (default 8080); only a tree's own Dockerfile sets
   another port, through its last `EXPOSE`.
-- BuildKit's cache mounts (`RUN --mount=type=cache`: npm's, pip's, Go's and Cargo's caches,
-  `.next/cache`) belong to the node's builder and are keyed by their id, the target path by
-  default, so on one Docker node every service's `/root/.npm` used to be one directory, and one
-  service's build could leave files another's read. Every cache mount, in the generated
-  Dockerfile and the tree's own, now has `id=<namespace>-<its id or target>`
-  (`apps_build::isolate_caches`), the namespace a secret per service made at its first build and
-  never logged (the build log shows the Dockerfile as generated). A Dockerfile can still name a
-  bare id, but only another bare id's owner shares it, never a service's own. CodeBuild builds
-  each run in a fresh VM and share nothing but the service's registry cache.
+- Builds on one node's Docker share one BuildKit, and two things in it were shared by every
+  service: cache mounts (`RUN --mount=type=cache`: npm's, pip's, Go's and Cargo's caches,
+  `.next/cache`), keyed by their id (the target path by default), and the layer cache, whose key
+  for a `RUN` step holds its command, parents and environment but not what its cache mounts
+  held. So one service's build could leave files another's read, or fill its own mount with bad
+  files and hand a step's output to another service whose step matched (a public repo's
+  generated Dockerfile is predictable). Now the build reads a copy of its Dockerfile (generated
+  or the tree's own, outside the tree so `COPY . .` never takes it, next to the Dockerfile's
+  own `.dockerignore`) in which every cache mount of a `RUN` ends `,id=<namespace>-<hash>`
+  (the last id wins) and every stage declares `ARG ROLL_LAYERS`, which the builder sets to a
+  value made from the same secret, so every `RUN` step's key is the service's own
+  (`apps_build::isolate_caches`: quotes, escapes, `# escape=`, continuations and heredocs as
+  BuildKit's parser reads them; checked against BuildKit). The namespace is made at the
+  service's first build, never shown (the build log has `…` where BuildKit would print it), and
+  the value only reaches the docker CLI's environment. A custom frontend (`# syntax=` other than
+  docker's) makes its own mounts and can name any id but a namespaced one. CodeBuild builds
+  each run in a fresh VM and share nothing but the service's registry cache, so they're left as
+  they are. What a node cached before this change is shared still: an operator upgrading a
+  node that built untrusted code prunes BuildKit's cache once (`docker builder prune`).
 - **Deploy without the cache** (Render's "Clear build cache & deploy"): `POST …/deploys
   {no_cache: true}`, `roll apps deploy --no-cache`, `roll up --no-cache` (`X-Roll-No-Cache: 1`),
   or Settings → Build. The build runs with `--no-cache --pull` (CodeBuild: without

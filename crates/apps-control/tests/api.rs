@@ -344,10 +344,10 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     assert!(log.as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap().contains("generated Dockerfile")), "the build log shows the Dockerfile");
     // Its cache mounts are its own (another service's build can't name them, and the log
     // doesn't), until a deploy without the cache starts them afresh.
-    let ns = |df: &str| df.split("--mount=id=").nth(1).and_then(|r| r.split('-').next()).map(str::to_string);
+    let ns = |df: &str| df.split(",id=").skip(1).find_map(|r| r.split_once('-').filter(|(n, _)| n.len() == 16).map(|(n, _)| n.to_string()));
     let (no_cache, df) = w.fake.built.lock().last().cloned().unwrap();
     let first_ns = ns(&df).unwrap_or_else(|| panic!("{df}"));
-    assert!(!no_cache && !log.to_string().contains(&first_ns), "{df}");
+    assert!(!no_cache && !log.to_string().contains(&first_ns) && df.contains("ARG ROLL_LAYERS"), "{df}");
     let base = format!("/v1/apps/services/{id}/environments/production/deploys");
     let (_, d) = call(&w.api, "POST", &base, Some(json!({"no_cache": true}))).await;
     settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
@@ -2623,5 +2623,6 @@ async fn reference_variables_are_filled_at_the_deploy() {
     let staging = db_vars.replace("production", "staging");
     let (st, _) = call(&w.api, "PUT", staging.trim_end_matches("/variables"), Some(json!({"variables_from": "production"}))).await;
     assert_eq!(st, StatusCode::OK);
-    assert!(call(&w.api, "GET", &format!("{staging}/values"), None).await.1.get("PASS").is_none());
+    let (_, listed) = call(&w.api, "GET", &staging, None).await;
+    assert!(!listed["vars"].as_array().unwrap().iter().any(|v| v["name"] == "PASS"), "a copy leaves sealed ones behind: {listed}");
 }

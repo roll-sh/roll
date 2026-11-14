@@ -23,8 +23,8 @@ const MAX_TARGET: usize = 4096;
 const SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
 const SPLAT: &percent_encoding::AsciiSet = &SEGMENT.remove(b'/');
 
-/// Headers a site may not set: the response's framing is roll's.
-const RESERVED: [&str; 8] = ["content-length", "transfer-encoding", "connection", "keep-alive", "upgrade", "te", "trailer", "proxy-connection"];
+/// Headers a site may not set: the response's framing (and how its body is encoded) is roll's.
+const RESERVED: [&str; 10] = ["content-length", "transfer-encoding", "connection", "keep-alive", "upgrade", "te", "trailer", "proxy-connection", "content-encoding", "content-range"];
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SiteRules {

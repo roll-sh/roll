@@ -258,7 +258,7 @@ type EnvironmentPut = {
   /** `bypass_sha256`: the SHA-256 (hex) of an automation's secret (CI's end-to-end tests): a
    *  request with `X-Roll-Preview-Bypass: <secret>` goes in with no cookie or redirect. */
   access?: { token: string; bypass_sha256?: string } | null;
-  /** Creating it: start with this environment's variables (ignored when it exists). */
+  /** Creating it: start with this environment's variables, except its sealed ones (ignored when it exists). */
   variables_from?: string;
   /** A push deploys only once its commit's checks pass (statuses other than roll apps' own):
    *  pending waits (up to an hour; `Environment.waiting_for_ci` names it), a failure skips it. */

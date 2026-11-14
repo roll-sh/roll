@@ -875,19 +875,12 @@ impl Apps {
         }
         let dockerfile = if plan.provider == apps_build::Provider::Dockerfile {
             let df = build_cfg.dockerfile.clone().unwrap_or_else(|| "Dockerfile".into());
-            let at = crate::model::in_tree(&context, "the Dockerfile", &df, false)?;
-            let text = tokio::fs::read_to_string(&at).await.map_err(|e| anyhow::anyhow!("reading {df}: {e}"))?;
-            let isolated = apps_build::isolate_caches(&text, &cache_ns);
-            if isolated != text {
-                tokio::fs::remove_file(&at).await?;
-                tokio::fs::write(&at, isolated).await?;
-            }
+            crate::model::in_tree(&context, "the Dockerfile", &df, false)?;
             df
         } else {
             let name = "Dockerfile.roll";
             anyhow::ensure!(std::fs::symlink_metadata(context.join(name)).is_err(), "the tree already has a {name}");
-            // The log shows it as generated; the namespace is the service's secret.
-            tokio::fs::write(context.join(name), apps_build::isolate_caches(&plan.dockerfile, &cache_ns)).await?;
+            tokio::fs::write(context.join(name), &plan.dockerfile).await?;
             if std::fs::symlink_metadata(context.join(".dockerignore")).is_err() {
                 tokio::fs::write(context.join(".dockerignore"), apps_build::DOCKERIGNORE).await?;
             }
@@ -900,6 +893,27 @@ impl Apps {
         if run.port.is_none() {
             run.port = Some(plan.port);
         }
+        // On a builder shared by services, the build reads a copy with its cache mounts
+        // namespaced, outside the tree (so no `COPY . .` puts it in the image), next to the
+        // Dockerfile's own `.dockerignore` if it has one; the namespace never reaches the log.
+        let (dockerfile, log, layers) = if self.deps.builder.shares_caches() {
+            let at = context.join(&dockerfile);
+            let isolated = apps_build::isolate_caches(&tokio::fs::read(&at).await?, &cache_ns);
+            let copy = dir.join("Dockerfile.isolated");
+            tokio::fs::write(&copy, isolated).await?;
+            let own_ignore = at.with_file_name(format!("{}.dockerignore", at.file_name().and_then(|n| n.to_str()).unwrap_or("Dockerfile")));
+            if std::fs::symlink_metadata(&own_ignore).is_ok_and(|m| m.is_file()) {
+                tokio::fs::copy(&own_ignore, dir.join("Dockerfile.isolated.dockerignore")).await?;
+            }
+            let layers = {
+                use sha2::{Digest, Sha256};
+                Sha256::digest(format!("layers:{cache_ns}")).iter().take(16).map(|b| format!("{b:02x}")).collect::<String>()
+            };
+            (copy.to_string_lossy().into_owned(), log.redacting(&cache_ns), Some(layers))
+        } else {
+            (dockerfile, log.clone(), None)
+        };
+        let log = &log;
         let plan_json = serde_json::to_value(&plan)?;
         let job = BuildJob {
             service: svc.id.clone(),
@@ -914,6 +928,7 @@ impl Apps {
             env: build_env,
             env_hash,
             no_cache,
+            layers,
         };
         log.line(format!("building with {}", self.deps.builder.name()));
         let image = self.deps.builder.build(&job, log, cancel).await?;
