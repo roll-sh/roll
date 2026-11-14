@@ -303,7 +303,10 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         Ok(None) => {
             let a = access.clone();
             return match blocking(move || a.store.not_yet(&token)).await {
-                Ok(Some(crate::store::NotYet::Pending)) => deny(StatusCode::UNAUTHORIZED, "pending_approval", "this token waits for an admin's approval".into(), json!({})),
+                // 403, not 401: the credential is good, it isn't allowed yet (GitHub answers a token
+                // its organization's SSO hasn't authorized so). A 401 sends an OAuth MCP client
+                // back through sign-in and consent for a connection that's only waiting.
+                Ok(Some(crate::store::NotYet::Pending)) => deny(StatusCode::FORBIDDEN, "pending_approval", "this token waits for an admin's approval".into(), json!({})),
                 Ok(Some(crate::store::NotYet::Starts(at))) => {
                     let when = chrono::DateTime::from_timestamp_millis(at).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)).unwrap_or_default();
                     deny(StatusCode::UNAUTHORIZED, "not_yet_valid", format!("this token works from {when}"), json!({ "not_before": at }))
