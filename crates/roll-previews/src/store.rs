@@ -1656,14 +1656,18 @@ impl Store {
         self.view(r)
     }
 
-    pub fn view(&self, r: Row) -> Result<Preview> {
-        let resources = self.resources(&r.id)?;
-        let services = self.services_with_time(&r.id)?;
+    /// What a preview costs (asleep a month, active an hour, this month so far), without the rest
+    /// of its view: what the budget adds up each pass.
+    pub fn cost(&self, r: &Row) -> Result<Cost> {
+        self.cost_of(r, &self.resources(&r.id)?, &self.services_with_time(&r.id)?)
+    }
+
+    fn cost_of(&self, r: &Row, resources: &[ResourceRow], services: &[(Service, i64)]) -> Result<Cost> {
         let mut cost = Cost::default();
         let now = self.now_ms()?;
         let month_start = month_start(now);
         let held_hours = (now - r.created_at.max(month_start)).max(0) as f64 / HOUR_MS;
-        for res in &resources {
+        for res in resources {
             cost.bytes += res.bytes;
             cost.sleeping_usd_month += res.usd_month;
             cost.active_usd_hour += res.usd_hour;
@@ -1671,11 +1675,18 @@ impl Store {
             // metered for compute.
             cost.month_to_date_usd += res.usd_month * held_hours / MONTH_HOURS + res.spent_usd;
         }
-        for (s, active_ms) in &services {
+        for (s, active_ms) in services {
             let gib = s.memory_mb as f64 / 1024.0;
             cost.active_usd_hour += gib * self.rates.usd_per_container_gib_hour;
             cost.month_to_date_usd += gib * self.rates.usd_per_container_gib_hour * (*active_ms as f64 / HOUR_MS);
         }
+        Ok(cost)
+    }
+
+    pub fn view(&self, r: Row) -> Result<Preview> {
+        let resources = self.resources(&r.id)?;
+        let services = self.services_with_time(&r.id)?;
+        let cost = self.cost_of(&r, &resources, &services)?;
         // With link access, the links roll hands out carry the token (once; then a cookie).
         let token = match self.access(&r.id)? {
             Some(Access { token: t, required: true, .. }) if !t.is_empty() => Some(t),

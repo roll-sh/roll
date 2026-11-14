@@ -275,7 +275,7 @@ impl Engine {
         let mut free = (s.max_previews as usize).saturating_sub(busy);
         // The month's budget: once spent, no new preview starts this month.
         let month = crate::store::month_start(self.store.now_ms()?);
-        let spent: f64 = self.store.spent(project_id, month)? + rows.iter().filter_map(|r| self.store.view(r.clone()).ok()).map(|p| p.cost.month_to_date_usd).sum::<f64>();
+        let spent: f64 = self.store.spent(project_id, month)? + rows.iter().filter_map(|r| self.store.cost(r).ok()).map(|c| c.month_to_date_usd).sum::<f64>();
         let over_budget = s.max_usd_month > 0.0 && spent >= s.max_usd_month;
         self.budget_alert(&project, &repos, s, spent, month).await;
         if over_budget {
