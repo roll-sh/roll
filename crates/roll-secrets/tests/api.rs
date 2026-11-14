@@ -627,6 +627,9 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     api.set("staging", "BROKEN", "${NOPE}").await;
     let (s, e) = api.call(Method::GET, "/environments/staging/values?dynamic=false&strict=1", None).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("unresolved")), "{e}");
+    // Dynamic keys asked for, and the read refused: what it issued is revoked, nothing outlives it.
+    let (s, _) = api.call(Method::GET, "/environments/staging/values?strict=1", None).await;
+    assert_eq!((s, api.fake.live_keys.lock().unwrap().len()), (StatusCode::CONFLICT, 3));
     api.ok(Method::DELETE, "/environments/staging/secrets/BROKEN", None).await;
 
     // An environment that goes takes its managed credentials with it.

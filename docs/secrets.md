@@ -1123,7 +1123,7 @@ spec:
 - `strict=1`: a key that doesn't resolve (a reference to a key that's gone, a live link whose
   resource doesn't answer) fails the whole read with 409 `unresolved`, naming the keys. ESO keeps
   the Secret it has and marks the ExternalSecret not synced, instead of writing an empty value
-  over a working one.
+  over a working one. Dynamic credentials such a read issued are revoked with it.
 - `urlquery` on the key: whoever may make an ExternalSecret can't add their own query
   (`staging/values?dynamic=true&x=`) to the store's URL.
 - Checked against ESO 2.15 on k3s 1.33: `dataFrom` and `data` from one store, and a change in roll

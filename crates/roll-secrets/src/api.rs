@@ -456,7 +456,17 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
         (v, Some(n))
     } else {
         let dynamic = flag(&q, "dynamic", true);
-        (blocking(s, move |s| s.values_for(&project, &env, &path_of(&q), resolve, None, dynamic, &c)).await?, None)
+        let read = blocking(s, move |s| {
+            let v = s.values_for(&project, &env, &path_of(&q), resolve, None, dynamic, &c)?;
+            if strict && !v.problems.is_empty() {
+                // Nothing is answered, so nothing this read issued may outlive it.
+                for lease in &v.leases {
+                    s.revoke_leases_where("id = ?", lease);
+                }
+            }
+            Ok::<_, Error>(v)
+        });
+        (read.await?, None)
     };
     if strict && !v.problems.is_empty() {
         let keys: Vec<&str> = v.problems.iter().map(|p| p.key.as_str()).collect();
