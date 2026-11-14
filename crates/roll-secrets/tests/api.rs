@@ -1333,16 +1333,19 @@ async fn reach_names_who_and_what_can_read_a_folder() {
     api.ok(Method::POST, "/tokens", Some(json!({ "name": "staging-ci", "environments": ["staging"], "actions": ["read", "reveal"] }))).await;
     api.ok(Method::PUT, "/environments/staging/imports?path=/", Some(json!([{ "environment": "production", "path": "/" }]))).await;
     api.req(Method::GET, "/environments/production/values", None, deploy["token"].as_str()).await;
-    // A read of staging reads production's key through the import: counted, and said so.
+    // A read of staging reads production's key through the import: counted, and said so; so is
+    // one of development, which imports staging (a chain).
+    api.ok(Method::PUT, "/environments/development/imports?path=/", Some(json!([{ "environment": "staging", "path": "/" }]))).await;
     api.values("staging", "/").await;
+    api.values("development", "/").await;
     let r = api.ok(Method::GET, "/environments/production/reach?path=/&key=STRIPE_KEY", None).await;
     let names = |k: &str| r[k].as_array().unwrap().iter().map(|h| h["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
     // The production token reaches it (with what it may do), staging's doesn't.
     assert_eq!(names("tokens"), ["deploy"]);
     assert_eq!(r["tokens"][0]["actions"], json!(["read", "reveal"]));
-    assert_eq!((r["untrusted"].as_bool(), r["imported_by"].clone()), (Some(true), json!(["staging:/"])));
+    assert_eq!((r["untrusted"].as_bool(), r["imported_by"].clone()), (Some(true), json!(["staging:/", "development:/"])));
     let readers: Vec<&str> = r["readers"].as_array().unwrap().iter().map(|x| x["actor"].as_str().unwrap()).collect();
-    assert!(readers.iter().any(|a| a.starts_with("token:")) && readers.contains(&"operator (through staging:/)"), "{readers:?}");
+    assert!(readers.iter().any(|a| a.starts_with("token:")) && readers.contains(&"operator (through staging:/)") && readers.contains(&"operator (through development:/)"), "{readers:?}");
     // It lists the project's credentials: a project admin's.
     let (s, _) = api.req(Method::GET, "/environments/production/reach", None, deploy["token"].as_str()).await;
     assert_eq!(s, StatusCode::FORBIDDEN);

@@ -1243,8 +1243,9 @@ credentials as the tokens list does. Names and metadata only, never a value:
   can read it, which is so unless the environment is protected.
 - **Where it goes by itself**: syncs of that folder (and that key), projects the folder is shared
   with, and this project's folders that import it.
-- **Where it goes by itself** also counts folders that import it in any project it's shared with,
-  and environments based on it (previews); syncs of this project's importing folders are listed.
+- **Where it goes by itself** also counts folders that import it in any project it's still shared
+  with, and environments based on it (previews), and theirs in turn (up to 8 steps, as reads
+  follow them); syncs of this project's importing folders are listed.
 - **Who did**: everyone who revealed, exported, resolved or synced it in the last 30 days, with
   how often and when last (the audit log), here or through those folders (`operator (through
   staging:/)`); another project's readers are named by the project, not their tokens. Reads through

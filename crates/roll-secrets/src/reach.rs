@@ -39,6 +39,9 @@ pub struct Reach {
     pub uncounted: &'static str,
 }
 
+/// How many steps away a reading folder is followed (an importer's importer is two).
+const SOURCE_DEPTH: usize = 8;
+
 /// What `readers` doesn't count.
 pub const UNCOUNTED: &str = "reads through a ${…} or roll:// reference in another key or file";
 
@@ -108,13 +111,39 @@ impl Secrets {
         type Source = (String, String, String);
         let (env, sources, reads) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            let mut sources: Vec<Source> = c.query(
-                "SELECT e.project_id, e.slug, i.path FROM imports i JOIN environments e ON e.id = i.env_id WHERE i.from_env_id = ? AND i.from_path = ? ORDER BY e.project_id, e.slug, i.path",
-                params![env.id, path],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?;
-            let derived: Vec<String> = c.query("SELECT slug FROM environments WHERE project_id = ? AND base_id = ? ORDER BY slug", params![project, env.id], |r| r.get(0))?;
-            sources.extend(derived.into_iter().map(|d| (project.to_string(), d, path.clone())));
+            // As reads resolve them: an importer's importers, an environment based on one, and so
+            // on, up to SOURCE_DEPTH steps. Another project's import counts only while the folder
+            // is still shared with it.
+            let mut sources: Vec<Source> = vec![];
+            let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::from([(env.id.clone(), path.clone())]);
+            let mut frontier = vec![(env.id.clone(), project.to_string(), path.clone())];
+            for _ in 0..SOURCE_DEPTH {
+                let mut next = vec![];
+                for (eid, eproject, at) in frontier {
+                    let importers: Vec<(String, String, String, String)> = c.query(
+                        "SELECT e.id, e.project_id, e.slug, i.path FROM imports i JOIN environments e ON e.id = i.env_id WHERE i.from_env_id = ? AND i.from_path = ? ORDER BY e.project_id, e.slug, i.path",
+                        params![eid, at],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )?;
+                    for (iid, ipid, islug, ipath) in importers {
+                        if ipid != eproject && !crate::exports::exported(c, &eid, &at, &ipid)? {
+                            continue;
+                        }
+                        if seen.insert((iid.clone(), ipath.clone())) {
+                            sources.push((ipid.clone(), islug, ipath.clone()));
+                            next.push((iid, ipid, ipath));
+                        }
+                    }
+                    let derived: Vec<(String, String)> = c.query("SELECT id, slug FROM environments WHERE project_id = ? AND base_id = ? ORDER BY slug", params![eproject, eid], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                    for (did, dslug) in derived {
+                        if seen.insert((did.clone(), at.clone())) {
+                            sources.push((eproject.clone(), dslug, at.clone()));
+                            next.push((did, eproject.clone(), at.clone()));
+                        }
+                    }
+                }
+                frontier = next;
+            }
             let mut reads: Vec<(Source, String, i64, String)> = vec![];
             for src in std::iter::once((project.to_string(), slug.to_string(), path.clone())).chain(sources.iter().cloned()) {
                 let rows: Vec<(String, i64, String)> = c.query(
