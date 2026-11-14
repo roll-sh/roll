@@ -56,6 +56,7 @@ pub enum Kind {
     Roles,
     Mappings,
     Groups,
+    Tenants,
 }
 
 impl Kind {
@@ -66,6 +67,7 @@ impl Kind {
             Kind::Roles => "opendistro_security.roles",
             Kind::Mappings => "opendistro_security.rolesmapping",
             Kind::Groups => "opendistro_security.actiongroups",
+            Kind::Tenants => "opendistro_security.tenants",
         }
     }
 
@@ -76,6 +78,7 @@ impl Kind {
             Kind::Roles => "role",
             Kind::Mappings => "rolesmapping",
             Kind::Groups => "actiongroup",
+            Kind::Tenants => "tenant",
         }
     }
 
@@ -86,6 +89,7 @@ impl Kind {
             Kind::Roles => "roles",
             Kind::Mappings => "rolesmapping",
             Kind::Groups => "actiongroups",
+            Kind::Tenants => "tenants",
         }
     }
 

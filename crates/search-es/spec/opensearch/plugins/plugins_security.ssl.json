@@ -1,0 +1,50 @@
+{
+  "plugins_security.ssl": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/security/access-control/api/",
+      "description": "The node's TLS certificates, and reloading them."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_security/api/ssl/certs",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/_plugins/_security/api/ssl/{cert_type}/reloadcerts",
+          "methods": [
+            "PUT"
+          ],
+          "parts": {
+            "cert_type": {
+              "type": "string",
+              "description": "transport or http"
+            }
+          }
+        },
+        {
+          "path": "/_opendistro/_security/api/ssl/certs",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/_opendistro/_security/api/ssl/{cert_type}/reloadcerts",
+          "methods": [
+            "PUT"
+          ],
+          "parts": {
+            "cert_type": {
+              "type": "string",
+              "description": "transport or http"
+            }
+          }
+        }
+      ]
+    },
+    "params": {}
+  }
+}

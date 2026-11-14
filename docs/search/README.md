@@ -250,8 +250,8 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    inside a rule query's organic, workflow-restricted API keys), ES|QL's last 5 (`TOP_SNIPPETS`,
    `CATEGORIZE`, approximation's columns, `LIMIT n BY`, `unsigned_long` past `i64::MAX`),
    file-based service tokens, ES|QL's `METRICS_INFO` and `TS_INFO` (security's last 4, under
-   field level security). In progress (`wip/search-compat`): OpenSearch Security's endpoints not built yet (`whoami`,
-   `permissionsinfo`, `tenants`, `securityconfig`, `audit`, `ssl`, cache flush). Then:
+   field level security), and OpenSearch Security's `whoami`, `permissionsinfo`, `tenants`,
+   `securityconfig`, `audit`, `ssl` and cache flush (`os_security_config.json`). Next:
    platinum's machine learning (278, a product decision: anomaly detection and
    trained models). `logsdb`'s last 9 are
    decisions (`_ignored_source` binary entries, `@timestamp` doc-values skipper); runtime fields'

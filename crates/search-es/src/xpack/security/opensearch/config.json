@@ -1441,5 +1441,19 @@
    "static": true,
    "type": "index"
   }
+ },
+ "tenants": {
+  "admin_tenant": {
+   "description": "Demo tenant for admin user",
+   "hidden": false,
+   "reserved": false,
+   "static": false
+  },
+  "global_tenant": {
+   "description": "Global tenant",
+   "hidden": false,
+   "reserved": true,
+   "static": true
+  }
  }
 }

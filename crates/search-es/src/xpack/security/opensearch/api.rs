@@ -1,6 +1,10 @@
 //! The Security plugin's REST API (`_plugins/_security/…`, and `_opendistro/_security/…`):
-//! `api/internalusers`, `api/roles`, `api/rolesmapping` and `api/actiongroups` (GET, PUT,
-//! DELETE, PATCH), `api/account`, `authinfo` and `health`.
+//! `api/internalusers`, `api/roles`, `api/rolesmapping`, `api/actiongroups` and `api/tenants`
+//! (GET, PUT, DELETE, PATCH), `api/account`, `api/permissionsinfo`, `api/securityconfig` (GET;
+//! changing it is refused, as `allow_securityconfig_modification` is off by default),
+//! `api/audit` (GET, PUT, PATCH: stored, roll writes no audit log), `api/ssl` and `whoami` (as a
+//! node without HTTP TLS answers: no certificates for anyone without an admin certificate),
+//! `api/cache` (DELETE: forgets verified passwords), `authinfo` and `health`.
 //!
 //! Answers are the plugin's: `{"status": "CREATED", "message": "'x' created."}`, validation
 //! errors as `{"status": "error", "reason": …}`, entries printed with their `reserved`, `static`
@@ -27,6 +31,13 @@ pub fn implemented(api: Api) -> bool {
             | Api::PluginsSecurityAccount
             | Api::PluginsSecurityAuthinfo
             | Api::PluginsSecurityHealth
+            | Api::PluginsSecurityTenants
+            | Api::PluginsSecurityPermissionsinfo
+            | Api::PluginsSecurityWhoami
+            | Api::PluginsSecuritySecurityconfig
+            | Api::PluginsSecurityAudit
+            | Api::PluginsSecuritySsl
+            | Api::PluginsSecurityCache
     )
 }
 
@@ -39,9 +50,30 @@ pub async fn dispatch(ctx: &Ctx<'_>) -> EsResult<Reply> {
         Api::PluginsSecurityAccount => return account(ctx).await,
         Api::PluginsSecurityAuthinfo => return Ok(authinfo(ctx)),
         Api::PluginsSecurityHealth => return Reply::ok(health()),
+        Api::PluginsSecurityTenants => Kind::Tenants,
+        Api::PluginsSecurityPermissionsinfo => return Ok(permissionsinfo(ctx)),
+        // `WhoAmIAction` reads the request's TLS certificate, which plain HTTP has none of.
+        Api::PluginsSecurityWhoami => return Ok(Reply::Raw(403, "text/plain; charset=UTF-8".into(), bytes::Bytes::from_static(b"No security data"))),
+        Api::PluginsSecuritySecurityconfig => {
+            return Ok(match access(ctx, None) {
+                Some(denied) => denied,
+                None if ctx.method == Method::Get => Reply::Body(200, obj! { "config" => settings("securityconfig") }),
+                None => message(403, "FORBIDDEN", "Access denied"),
+            });
+        }
+        Api::PluginsSecurityAudit => return audit(ctx).await,
+        // The certificates and their reload are the super admin's (an admin TLS certificate).
+        Api::PluginsSecuritySsl => return Ok(access(ctx, None).unwrap_or_else(|| message(403, "FORBIDDEN", "Access denied"))),
+        Api::PluginsSecurityCache => {
+            if let Some(denied) = access(ctx, None) {
+                return Ok(denied);
+            }
+            ctx.cluster.xpack.verified.lock().clear();
+            return Ok(message(200, "OK", "Cache flushed successfully."));
+        }
         other => return Err(EsError::not_implemented(other.name())),
     };
-    if let Some(denied) = access(ctx, kind) {
+    if let Some(denied) = access(ctx, Some(kind.endpoint())) {
         return Ok(denied);
     }
     let name = ctx.path_param("name").filter(|n| !n.is_empty()).map(str::to_string);
@@ -87,29 +119,34 @@ fn protected(v: &Value, name: &str) -> Option<Reply> {
 }
 
 /// The configuration API's access check (`RestApiAdminPrivilegesEvaluator`): the owner, a role
-/// of `roles_enabled`, or a role that grants `restapi:admin/<type>` explicitly
-/// (`hasExplicitClusterPrivilege`: a role whose cluster permissions are `*` doesn't count).
-fn access(ctx: &Ctx, kind: Kind) -> Option<Reply> {
+/// of `roles_enabled`, or a role that grants `restapi:admin/<endpoint>` explicitly
+/// (`hasExplicitClusterPrivilege`: a role whose cluster permissions are `*` doesn't count; the
+/// endpoints without such a permission (`None`) only open to the first two).
+fn access(ctx: &Ctx, endpoint: Option<&str>) -> Option<Reply> {
     let p = principal(ctx);
     if p.os().is_some_and(|id| id.owner) || p.roles.iter().any(|r| r == "all_access" || r == "security_rest_api_access") {
         return None;
     }
+    let refused = || {
+        message(
+            403,
+            "FORBIDDEN",
+            format!(
+                "No permission to access REST API: User {} with Security roles [{}] does not have any role privileged for admin access. No ssl info found in request.",
+                p.username,
+                p.roles.join(", ")
+            ),
+        )
+    };
+    let Some(endpoint) = endpoint else { return Some(refused()) };
     let st = ctx.state();
     let mut explicit = p.clone();
     explicit.roles.retain(|r| entry(&st, Kind::Roles, r).is_some_and(|role| !super::expand(&st, &strs(role.get("cluster_permissions"))).iter().any(|a| a == "*:*")));
     let eff = super::super::effective(&super::super::file_roles(ctx.cluster), &st, &explicit);
-    if eff.allows_cluster(&format!("restapi:admin/{}", kind.endpoint())) {
+    if eff.allows_cluster(&format!("restapi:admin/{endpoint}")) {
         return None;
     }
-    Some(message(
-        403,
-        "FORBIDDEN",
-        format!(
-            "No permission to access REST API: User {} with Security roles [{}] does not have any role privileged for admin access. No ssl info found in request.",
-            p.username,
-            p.roles.join(", ")
-        ),
-    ))
+    Some(refused())
 }
 
 /// The flags each type prints.
@@ -172,10 +209,14 @@ fn get(ctx: &Ctx, kind: Kind, name: Option<&str>) -> Reply {
             None => return not_found(kind, n),
         },
         None => {
-            for (n, v) in entries(&st, kind) {
-                if !flag(&v, "hidden") {
-                    out.insert(n, view(kind, &v));
-                }
+            let mut all: Vec<(String, Value)> = entries(&st, kind).into_iter().filter(|(_, v)| !flag(v, "hidden")).collect();
+            // Tenants list in the order of the plugin's `HashMap`.
+            if kind == Kind::Tenants {
+                let order = crate::mapping::java_hash_map_order(all.iter().map(|(n, _)| n.as_str()));
+                all = order.into_iter().map(|i| all[i].clone()).collect();
+            }
+            for (n, v) in all {
+                out.insert(n, view(kind, &v));
             }
         }
     }
@@ -189,6 +230,7 @@ enum Ty {
     Arr,
     Str,
     Obj,
+    Bool,
 }
 
 /// What a type's body may hold (`RequestContentValidator.ValidationContext`).
@@ -216,6 +258,7 @@ fn schema(kind: Kind) -> Schema {
             one_of: &["backend_roles", "hosts", "and_backend_roles", "users"],
         },
         Kind::Groups => Schema { keys: &[("allowed_actions", Ty::Arr), ("type", Ty::Str), ("description", Ty::Str)], mandatory: &["allowed_actions"], one_of: &[] },
+        Kind::Tenants => Schema { keys: &[("description", Ty::Str)], mandatory: &[], one_of: &[] },
     }
 }
 
@@ -263,6 +306,7 @@ fn validate(m: &Map, schema: &Schema, user: Option<&str>) -> Result<(), Reply> {
             Ty::Arr => (matches!(v, Value::Arr(_)), "Array expected"),
             Ty::Str => (matches!(v, Value::Str(_)), "String expected"),
             Ty::Obj => (matches!(v, Value::Obj(_)), "Object expected"),
+            Ty::Bool => (matches!(v, Value::Bool(_)), "Boolean expected"),
         };
         if !ok {
             wrong.push((k.clone(), Value::from(expected)));
@@ -288,6 +332,7 @@ fn class(kind: Kind) -> &'static str {
         Kind::Roles => "RoleV7",
         Kind::Mappings => "RoleMappingsV7",
         Kind::Groups => "ActionGroupsV7",
+        Kind::Tenants => "TenantV7",
     }
 }
 
@@ -374,6 +419,7 @@ fn normalize(kind: Kind, m: &Map) -> Value {
         Kind::Roles => &["cluster_permissions"],
         Kind::Mappings => &["and_backend_roles", "backend_roles", "hosts", "users"],
         Kind::Groups => &["allowed_actions"],
+        Kind::Tenants => &[],
     };
     for k in keys {
         out.insert((*k).into(), list(k));
@@ -408,7 +454,7 @@ fn normalize(kind: Kind, m: &Map) -> Value {
                 out.insert("type".into(), t.into());
             }
         }
-        Kind::Mappings => {}
+        Kind::Mappings | Kind::Tenants => {}
     }
     let mut out = Value::Obj(out);
     if let Value::Obj(o) = &mut out {
@@ -461,6 +507,7 @@ fn make(st: &crate::meta::ClusterState, kind: Kind, name: &str, m: &Map, existin
                 return Err(message(400, "BAD_REQUEST", format!("{name} cannot be an allowed_action of itself")));
             }
         }
+        Kind::Tenants => {}
         Kind::Roles => {
             // Only the plugin's super admin (a TLS admin certificate, which roll has none of)
             // may grant the REST API's own permissions.
@@ -617,15 +664,16 @@ async fn patch_entries(ctx: &Ctx<'_>, kind: Kind, name: Option<&str>) -> EsResul
 
 // ------------------------------------------------------------------------------ account, authinfo, health
 
-/// The tenants the plugin's defaults have (`tenants.yml`): the global one and `admin_tenant`.
-const TENANTS: &[&str] = &["global_tenant", "admin_tenant"];
-
-/// The tenants a user may use, `true` where it may write: the defaults its roles'
+/// The tenants a user may use, `true` where it may write: the tenants its roles'
 /// `tenant_permissions` name, then its private tenant.
 fn tenants(ctx: &Ctx, p: &crate::xpack::security::Principal) -> Value {
     let st = ctx.state();
     let mut out = Map::new();
-    for t in TENANTS {
+    let mut all: Vec<String> = entries(&st, Kind::Tenants).into_iter().filter(|(_, v)| !flag(v, "hidden")).map(|(n, _)| n).collect();
+    // The plugin's own order: the global tenant first.
+    all.sort_by_key(|t| (t != "global_tenant", t.clone()));
+    for t in &all {
+        let t = t.as_str();
         let mut access: Option<bool> = None;
         for r in p.roles.iter().filter_map(|r| entry(&st, Kind::Roles, r)) {
             for tp in r.get("tenant_permissions").and_then(Value::as_array).into_iter().flatten() {
@@ -637,7 +685,7 @@ fn tenants(ctx: &Ctx, p: &crate::xpack::security::Principal) -> Value {
             }
         }
         if let Some(w) = access {
-            out.insert((*t).into(), w.into());
+            out.insert(t.into(), w.into());
         }
     }
     out.insert(p.username.clone(), true.into());
@@ -723,4 +771,170 @@ async fn account(ctx: &Ctx<'_>) -> EsResult<Reply> {
         })
         .await?;
     Ok(message(200, "OK", format!("'{name}' updated.")))
+}
+
+// ------------------------------------------------------------------------------ permissionsinfo
+
+/// The REST API's endpoints (`Endpoint`), in the order the plugin prints them.
+const ENDPOINTS: &[&str] = &[
+    "AUDIT", "INTERNALUSERS", "ROLES", "ALLOWLIST", "TENANTS", "VALIDATE", "APITOKENS", "VIEW_VERSION", "ROLESMAPPING", "RESOURCE_SHARING", "NODESDN", "PERMISSIONSINFO",
+    "SSL", "ACTIONGROUPS", "RATELIMITERS", "CONFIG", "ACCOUNT", "CACHE", "SYSTEMINFO", "MIGRATE", "ROLLBACK_VERSION", "AUTHTOKEN",
+];
+
+const METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE", "CONNECT"];
+
+/// `PermissionsInfoAction`: whether the user may use the REST API, and the endpoints it may not
+/// (every method of every endpoint, when it may use none).
+fn permissionsinfo(ctx: &Ctx) -> Reply {
+    let p = principal(ctx);
+    let id = p.os().cloned().unwrap_or_default();
+    let api = access(ctx, None).is_none();
+    let mut disabled = Map::new();
+    if !api {
+        for e in ENDPOINTS {
+            disabled.insert((*e).into(), Value::Arr(METHODS.iter().map(|m| Value::from(*m)).collect()));
+        }
+    }
+    Reply::Body(200, obj! { "user" => super::user_string(&p, &id), "user_name" => p.username.clone(), "has_api_access" => api, "disabled_endpoints" => Value::Obj(disabled) })
+}
+
+// ------------------------------------------------------------------------------ securityconfig, audit
+
+/// The plugin's default configuration documents (`settings.json`): `securityconfig` (its demo
+/// `config.yml`), `audit` (`audit.yml`) and `audit_defaults` (`AuditConfig`'s own defaults, what
+/// a `PUT` starts from).
+fn settings(name: &str) -> Value {
+    static S: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let all = S.get_or_init(|| crate::json::parse(include_bytes!("settings.json")).ok().flatten().unwrap_or(Value::Null));
+    all.get(name).cloned().unwrap_or(Value::Null)
+}
+
+const AUDIT: &str = "opendistro_security.audit";
+
+/// `AuditCategory`.
+const CATEGORIES: &[&str] = &[
+    "BAD_HEADERS", "FAILED_LOGIN", "MISSING_PRIVILEGES", "GRANTED_PRIVILEGES", "OPENDISTRO_SECURITY_INDEX_ATTEMPT", "SSL_EXCEPTION", "AUTHENTICATED", "INDEX_EVENT",
+    "COMPLIANCE_DOC_READ", "COMPLIANCE_DOC_WRITE", "COMPLIANCE_EXTERNAL_CONFIG", "COMPLIANCE_INTERNAL_CONFIG_READ", "COMPLIANCE_INTERNAL_CONFIG_WRITE",
+    "CLUSTER_SETTINGS_CHANGED", "INDEX_SETTINGS_CHANGED", "RESOURCE_ACCESS_GRANTED", "RESOURCE_ACCESS_DENIED", "RESOURCE_SHARING_CHANGED",
+];
+
+#[derive(Clone, Copy)]
+enum Field {
+    Bool,
+    Strings,
+    Categories,
+    /// `read_watched_fields`: index pattern to field names.
+    Watched,
+}
+
+const AUDIT_FIELDS: &[(&str, Field)] = &[
+    ("disabled_categories", Field::Categories),
+    ("disabled_rest_categories", Field::Categories),
+    ("disabled_transport_categories", Field::Categories),
+    ("enable_rest", Field::Bool),
+    ("enable_transport", Field::Bool),
+    ("exclude_sensitive_headers", Field::Bool),
+    ("ignore_headers", Field::Strings),
+    ("ignore_requests", Field::Strings),
+    ("ignore_url_params", Field::Strings),
+    ("ignore_users", Field::Strings),
+    ("log_request_body", Field::Bool),
+    ("resolve_bulk_requests", Field::Bool),
+    ("resolve_indices", Field::Bool),
+];
+
+const COMPLIANCE_FIELDS: &[(&str, Field)] = &[
+    ("enabled", Field::Bool),
+    ("external_config", Field::Bool),
+    ("internal_config", Field::Bool),
+    ("read_ignore_users", Field::Strings),
+    ("read_metadata_only", Field::Bool),
+    ("read_watched_fields", Field::Watched),
+    ("write_ignore_users", Field::Strings),
+    ("write_log_diffs", Field::Bool),
+    ("write_metadata_only", Field::Bool),
+    ("write_watched_indices", Field::Strings),
+];
+
+const AUDIT_SCHEMA: Schema = Schema { keys: &[("enabled", Ty::Bool), ("audit", Ty::Obj), ("compliance", Ty::Obj)], mandatory: &[], one_of: &[] };
+
+/// An audit configuration from a validated body: `AuditConfig`'s defaults with the body's values
+/// (`None`: a section the config class can't read, which the plugin answers as unparsable).
+fn audit_config(m: &Map) -> Option<Value> {
+    let strings = |v: &Value| v.as_array().is_some_and(|a| a.iter().all(|e| matches!(e, Value::Str(_))));
+    let ok = |f: Field, v: &Value| match f {
+        Field::Bool => matches!(v, Value::Bool(_)),
+        Field::Strings => strings(v),
+        Field::Categories => strings(v) && v.as_array().into_iter().flatten().all(|c| c.as_str().is_some_and(|c| CATEGORIES.contains(&c))),
+        Field::Watched => v.as_object().is_some_and(|w| w.values().all(strings)),
+    };
+    let mut cfg = settings("audit_defaults");
+    if let Some(e) = m.get("enabled") {
+        cfg.as_object_mut()?.insert("enabled".into(), e.clone());
+    }
+    for (section, fields) in [("audit", AUDIT_FIELDS), ("compliance", COMPLIANCE_FIELDS)] {
+        let Some(given) = m.get(section).and_then(Value::as_object) else { continue };
+        let target = cfg.as_object_mut()?.get_mut(section)?.as_object_mut()?;
+        for (k, v) in given {
+            let (_, f) = fields.iter().find(|(n, _)| n == k)?;
+            if !ok(*f, v) {
+                return None;
+            }
+            target.insert(k.clone(), v.clone());
+        }
+    }
+    Some(cfg)
+}
+
+fn current_audit(st: &crate::meta::ClusterState) -> Value {
+    st.metadata.xpack.get(AUDIT, "config").cloned().unwrap_or_else(|| settings("audit"))
+}
+
+async fn audit(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    if let Some(denied) = access(ctx, None) {
+        return Ok(denied);
+    }
+    let st = ctx.state();
+    let cfg = match ctx.method {
+        Method::Get => return Ok(Reply::Body(200, obj! { "_readonly" => Value::Arr(Vec::new()), "config" => current_audit(&st) })),
+        Method::Put => {
+            let m = match body_object(ctx) {
+                Ok(m) => m,
+                Err(r) => return Ok(r),
+            };
+            if let Err(r) = validate(&m, &AUDIT_SCHEMA, None) {
+                return Ok(r);
+            }
+            match audit_config(&m) {
+                Some(c) => c,
+                None => return Ok(invalid("Could not parse content of request.", Vec::new())),
+            }
+        }
+        _ => {
+            let body = match crate::json::parse(&ctx.body) {
+                Ok(Some(v)) => v,
+                _ => return Ok(message(400, "BAD_REQUEST", "Wrong request body")),
+            };
+            let before = obj! { "config" => current_audit(&st) };
+            let mut doc = before.clone();
+            match patch::apply(&mut doc, &body) {
+                Ok(()) => {}
+                Err(patch::PatchError::Body) => return Ok(message(400, "BAD_REQUEST", "Wrong request body")),
+                Err(patch::PatchError::Missing(f)) => return Ok(message(400, "BAD_REQUEST", format!("Missing field \"{f}\""))),
+                Err(patch::PatchError::Invalid(m)) => return Ok(message(400, "BAD_REQUEST", m)),
+            }
+            if doc == before {
+                return Ok(message(200, "OK", "No updates required"));
+            }
+            let parsed = doc.get("config").and_then(Value::as_object).filter(|m| validate(m, &AUDIT_SCHEMA, None).is_ok()).and_then(audit_config);
+            match parsed {
+                Some(c) => c,
+                None => return Ok(invalid("Could not parse content of request.", Vec::new())),
+            }
+        }
+    };
+    let patched = ctx.method == Method::Patch;
+    let now = ctx.now_ms;
+    ctx.cluster.update(move |st| store::put(st, AUDIT, "config", cfg, now).map(|_| ())).await?;
+    Ok(if patched { message(200, "OK", "Resource updated.") } else { message(200, "OK", "'config' updated.") })
 }

@@ -305,7 +305,14 @@ pub fn action_of(api: &str) -> (Scope, String) {
         | "plugins_security.actiongroups"
         | "plugins_security.account"
         | "plugins_security.authinfo"
-        | "plugins_security.health" => Some((Any, "cluster:admin/opendistro_security/rest")),
+        | "plugins_security.health"
+        | "plugins_security.tenants"
+        | "plugins_security.permissionsinfo"
+        | "plugins_security.whoami"
+        | "plugins_security.securityconfig"
+        | "plugins_security.audit"
+        | "plugins_security.ssl"
+        | "plugins_security.cache" => Some((Any, "cluster:admin/opendistro_security/rest")),
         "create_pit" => Some((Index, "indices:data/read/point_in_time/create")),
         "delete_pit" | "delete_all_pits" => Some((Index, "indices:data/read/point_in_time/delete")),
         "get_all_pits" => Some((Index, "indices:data/read/point_in_time/readall")),

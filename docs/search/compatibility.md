@@ -150,16 +150,21 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   `os_search.json` its suggestion order, nested inner hit sources, t-digest 3.3 percentile
   ranks, significant terms background and `_msearch` header rules.
 - The Security plugin (`xpack::security::opensearch`, on roll's one security evaluator):
-  `_plugins/_security/api/internalusers`, `roles`, `rolesmapping` and `actiongroups` (GET, PUT,
-  DELETE, PATCH with JSON patches), `api/account` (GET, and PUT for one's own password),
-  `authinfo` and `health`, also under `_opendistro/_security`. Answers, validation (keys, types,
+  `_plugins/_security/api/internalusers`, `roles`, `rolesmapping`, `actiongroups` and `tenants`
+  (GET, PUT, DELETE, PATCH with JSON patches), `api/account` (GET, and PUT for one's own
+  password), `api/permissionsinfo`, `api/securityconfig` (GET; changes refused, as
+  `allow_securityconfig_modification` is off by default), `api/audit` (GET, PUT, PATCH, with
+  `AuditConfig`'s defaults under a PUT and its validation; stored, roll writes no audit log),
+  `api/ssl/certs` and `api/ssl/*/reloadcerts` (refused: the plugin's super admin only), `whoami`
+  (`No security data`: plain HTTP has no certificate), `api/cache` (DELETE forgets verified
+  passwords), `authinfo` and `health`, also under `_opendistro/_security` (but `whoami`). Answers, validation (keys, types,
   zxcvbn password strength with the plugin's defaults, Jackson's errors for bad nested
   entries), static and reserved entries (the distribution's 54 roles and 26 action groups;
   `admin` is the cluster's owner, `all_access` is mapped to its backend role; the demo users and
   their published passwords are left out), the REST API's access rule (`all_access`,
   `security_rest_api_access` or `restapi:admin/*`; roles granting `restapi:` permissions need the
-  plugin's super admin, which roll has none of) are pinned by `os_security_api.json` (87 steps)
-  and `os_security_auth.json` (46 steps). A user's roles are its `opendistro_security_roles` and
+  plugin's super admin, which roll has none of) are pinned by `os_security_api.json` (87 steps),
+  `os_security_config.json` (52 steps) and `os_security_auth.json` (46 steps). A user's roles are its `opendistro_security_roles` and
   the mappings naming it or its backend roles (wildcards, `and_backend_roles`); action groups
   expand to action patterns and `${user.name}`-style variables fill index patterns and DLS. The
   plugin's authorization: its 403 (`no permissions for [...] and User [...]`), the composite,
@@ -172,8 +177,8 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   filters without adding OpenSearch's +1.0 to scores; masked fields are unmapped for queries
   and aggregations (OpenSearch aggregates and matches their hashes); mappings by `hosts` never
   match (roll doesn't see the client's address); `hash`es given by clients are bcrypt (as the
-  plugin's) up to cost 14. Not yet: `tenants`, `nodesdn`, `allowlist`, `audit`, `securityconfig`,
-  `ssl`, `whoami`, `permissionsinfo` and the cache API.
+  plugin's) up to cost 14. Not yet: `nodesdn`, `allowlist`, API tokens and
+  multi-tenancy itself (tenants are stored and listed; no tenant indices).
 
 
 ## Extended suites (modules, plugins, x-pack)
