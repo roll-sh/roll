@@ -9,6 +9,7 @@ import { misfit } from "@/lib/secrets-required";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../agents/ui/menu";
 import { Segmented } from "../agents/ui/toggle-group";
 import { FolderCrumbs } from "./folders";
+import { FolderPolicyChip } from "./folder-policy";
 import { useSlashFocus } from "./grid";
 import { HistoryDrawer, type Drawer } from "./history";
 import { ImportDialog } from "./import-dialog";
@@ -204,6 +205,7 @@ export function EnvView({ env }: { env: Environment }) {
           {tab === "secrets" && (
             <>
               <FolderCrumbs path={path} onPath={(np) => go({ env: env.slug, path: np === "/" ? undefined : np })} />
+              <FolderPolicyChip env={env} path={path} />
               {childFolders.map((f) => (
                 <button key={f.path} onClick={() => go({ env: env.slug, path: f.path })} className="inline-flex h-6 items-center gap-1 rounded-md border border-line-2 px-1.5 text-[11.5px] text-muted transition-colors hover:border-line-3 hover:text-fg" title={`${f.secrets} secrets, ${f.folders} folders`}>
                   <Folder className="size-3" /> {f.name || folderName(f.path)}

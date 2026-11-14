@@ -506,13 +506,25 @@ pub enum Envs {
     },
     /// Put the standard environments in this order.
     Order { slugs: Vec<String> },
-    /// Writes need a change request with this many approvals.
+    /// Writes need a change request with this many approvals: to the whole environment, or with
+    /// --folder to that folder and the ones under it.
     Protect {
         slug: String,
         #[arg(long, default_value_t = 1)]
         approvals: i64,
+        /// Only this folder (a change policy of its own; the rest of the environment as before).
+        #[arg(long)]
+        folder: Option<String>,
+        /// Who may approve (repeatable; default anyone who may, other than the author).
+        #[arg(long = "approver")]
+        approvers: Vec<String>,
     },
-    Unprotect { slug: String },
+    Unprotect {
+        slug: String,
+        /// Only this folder's change policy.
+        #[arg(long)]
+        folder: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2349,8 +2361,24 @@ async fn envs(c: &Client<'_>, e: Envs, json_out: bool) -> anyhow::Result<()> {
             (None, None) => bail!("envs rm <slug> or --label key=value"),
         },
         Envs::Order { slugs } => c.call(Method::PUT, &format!("{base}/environments/order"), Some(json!({ "order": slugs }))).await?,
-        Envs::Protect { slug, approvals } => c.call(Method::PUT, &format!("{}/policy", c.env(&slug)), Some(json!({ "protected": true, "approvals": approvals }))).await?,
-        Envs::Unprotect { slug } => c.call(Method::PUT, &format!("{}/policy", c.env(&slug)), Some(json!({ "protected": false }))).await?,
+        Envs::Protect { slug, approvals, folder: Some(folder), approvers } => {
+            let p = c.call(Method::PUT, &format!("{}/folder-policies?path={}", c.env(&slug), enc(&folder)), Some(json!({ "approvals": approvals, "approvers": approvers }))).await?;
+            if !json_out {
+                println!("Changes to {} in {slug} need {} approval{}", s(&p["path"]), p["approvals"], if p["approvals"] == 1 { "" } else { "s" });
+                return Ok(());
+            }
+            p
+        }
+        Envs::Protect { slug, approvals, folder: None, approvers } => c.call(Method::PUT, &format!("{}/policy", c.env(&slug)), Some(json!({ "protected": true, "approvals": approvals, "approvers": approvers }))).await?,
+        Envs::Unprotect { slug, folder: Some(folder) } => {
+            c.call(Method::DELETE, &format!("{}/folder-policies?path={}", c.env(&slug), enc(&folder)), None).await?;
+            if !json_out {
+                println!("Changes to {folder} in {slug} no longer need approval");
+                return Ok(());
+            }
+            json!({ "deleted": [folder] })
+        }
+        Envs::Unprotect { slug, folder: None } => c.call(Method::PUT, &format!("{}/policy", c.env(&slug)), Some(json!({ "protected": false }))).await?,
     };
     if json_out {
         println!("{}", serde_json::to_string_pretty(&v)?);
