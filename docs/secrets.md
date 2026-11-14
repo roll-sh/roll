@@ -1586,6 +1586,9 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
+Then RabbitMQ outside roll (#39, merged up into #41 and #42; checked live against RabbitMQ 4) and
+OpenSearch clusters' fields named as their clients read them (#51).
+
 A sixth independent review (2026-11-14, of `roll://` references, check-and-set, OCSP, OpenSearch
 links and the grant fix) found no high-severity issue; it found an OCSP route an anonymous caller
 could make sign and cache per request, references whose leases were renewed at the wrong project,
@@ -1661,10 +1664,8 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **RabbitMQ outside roll** (on #39), as Vault's and Infisical's RabbitMQ engines: two users take
-   turns, or a user per lease with a template user's vhost permissions, through the management
-   HTTPS API and the same guards; passwords as RabbitMQ's salted SHA-256 hash, so the broker never
-   sees one.
+1. **A seventh independent review** of RabbitMQ outside roll and of the OpenSearch link names,
+   with the sixth review's fixes, and its fixes.
 2. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
 3. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47), a live check of
@@ -1730,7 +1731,7 @@ Open pull requests after this one:
   signature checked.
 - **#41, Redis outside roll** (after #39): two ACL users take turns (`#<sha256>` passwords), or a
   user per lease copying a template user's rules; the tenant's replies read by a bounded parser.
-- **#39, Postgres, MySQL and SQL Server outside roll** (after #20): two login roles take turns (rotation), or a
+- **#39, Postgres, MySQL, SQL Server, ClickHouse and RabbitMQ outside roll** (after #20): two login roles take turns (rotation), or a
   login per lease in a group role (dynamic), over verified TLS to a public address rolld resolved
   itself (Postgres gets a SCRAM verifier, never the password).
 
