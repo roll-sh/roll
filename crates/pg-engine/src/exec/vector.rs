@@ -851,6 +851,8 @@ pub struct AggPlan {
     pub key_types: Vec<DataType>,
     pub args: Vec<AggArg>,
     pub need: Vec<bool>,
+    /// Some column is needed (`need`): count(*) alone reads none.
+    pub reads: bool,
     pub probe: Option<usize>,
 }
 
@@ -922,7 +924,8 @@ impl AggPlan {
             need[c] = true;
         }
         let key_types = keys.iter().map(|c| types[*c].clone()).collect();
-        Some(AggPlan { filter, keys, key_types, args, need, probe })
+        let reads = need.contains(&true);
+        Some(AggPlan { filter, keys, key_types, args, need, reads, probe })
     }
 
     /// Whether row `r` of `b` misses the probe's table (its key NULL or not one of the

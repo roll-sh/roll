@@ -299,8 +299,7 @@ fn skip(data: &[u8], pos: &mut usize) -> Result<()> {
 }
 
 /// Rows `rows` of `batch` as columns into `out`: the columns `need` marks, decoded as
-/// `types` declares them, a column a row was stored without as `missing`'s value. With
-/// none marked the rows aren't read (`ext` stays empty).
+/// `types` declares them, a column a row was stored without as `missing`'s value.
 pub fn decode_cols(
     batch: &RowBatch,
     rows: std::ops::Range<usize>,
@@ -339,10 +338,6 @@ pub fn decode_cols(
     // each once while consecutive rows share it.)
     out.bufs.push(Bytes::new());
     let upto = need.iter().take(ncols).rposition(|b| *b).map_or(0, |c| c + 1);
-    // (No column needed, count(*)'s: nothing of the rows is read.)
-    if upto == 0 {
-        return Ok(());
-    }
     // (The batch's parts borrowed apart: the loop keeps them in registers.)
     let ColBatch { cols, bufs, ext: exts, own, .. } = out;
     let cols = &mut cols[..upto];

@@ -444,6 +444,38 @@ impl GroupsIter {
     }
 }
 
+/// Each slot's best row of a batch for a min / max (`max`) of column `col` into `best` (by
+/// slot and aggregate, `na` of them; this one `i`), by the row path's rule: a later row equal
+/// to the best replaces it. (Apart from `run_sums`: its loops are every aggregation's.)
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn best_rows(col: &crate::storage::cols::Col, max: bool, slots: &[u32], live: &[u32], na: usize, i: usize, best: &mut [u32]) {
+    use crate::storage::cols::ColData as D;
+    #[allow(clippy::too_many_arguments)]
+    fn pick<T: Copy>(v: &[T], cmp: impl Fn(T, T) -> Ordering, nulls: &[bool], max: bool, slots: &[u32], live: &[u32], na: usize, i: usize, best: &mut [u32]) {
+        for (&s, &r) in slots.iter().zip(live) {
+            let r = r as usize;
+            if nulls[r] {
+                continue;
+            }
+            let j = s as usize * na + i;
+            let take = best[j] == u32::MAX || {
+                let o = cmp(v[r], v[best[j] as usize]);
+                o == Ordering::Equal || (o == Ordering::Greater) == max
+            };
+            if take {
+                best[j] = r as u32;
+            }
+        }
+    }
+    match &col.data {
+        D::I32(v) | D::Date(v) => pick(v, |a, b| a.cmp(&b), &col.nulls, max, slots, live, na, i, best),
+        D::I64(v) => pick(v, |a, b| a.cmp(&b), &col.nulls, max, slots, live, na, i, best),
+        D::F64(v) => pick(v, crate::types::value::float_cmp, &col.nulls, max, slots, live, na, i, best),
+        _ => unreachable!("batch_run checked it"),
+    }
+}
+
 /// A bpchar key's value as its groups compare it.
 fn trimmed(v: Value) -> Value {
     match v {
@@ -1410,36 +1442,9 @@ impl<'a> Partials<'a> {
                 }
                 AggArg::Float(_) => {}
                 AggArg::Best(c, _) => {
-                    use crate::storage::cols::ColData as D;
                     let col = b.cols[*c].as_ref().expect("batch_run checked it");
                     let Partial::Best(st) = &self.spec.aggs[i].2 else { unreachable!("a min / max") };
-                    let best = &mut run.best;
-                    // (Each slot's best row of the batch, by the row path's rule: a later
-                    // row equal to the best replaces it.)
-                    macro_rules! pick {
-                        ($v:expr, $cmp:expr) => {
-                            for (&s, &r) in run.slots.iter().zip(live) {
-                                let r = r as usize;
-                                if col.nulls[r] {
-                                    continue;
-                                }
-                                let j = s as usize * na + i;
-                                let take = best[j] == u32::MAX || {
-                                    let o: Ordering = $cmp($v[r], $v[best[j] as usize]);
-                                    o == Ordering::Equal || (o == Ordering::Greater) == st.max
-                                };
-                                if take {
-                                    best[j] = r as u32;
-                                }
-                            }
-                        };
-                    }
-                    match &col.data {
-                        D::I32(v) | D::Date(v) => pick!(v, |a: i32, b: i32| a.cmp(&b)),
-                        D::I64(v) => pick!(v, |a: i64, b: i64| a.cmp(&b)),
-                        D::F64(v) => pick!(v, crate::types::value::float_cmp),
-                        _ => unreachable!("batch_run checked it"),
-                    }
+                    best_rows(col, st.max, &run.slots, live, na, i, &mut run.best);
                 }
                 AggArg::Num(_) => {
                     let l = lanes.arg(i);
