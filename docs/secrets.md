@@ -219,6 +219,14 @@ Every write is a **change**: an atomic batch of operations on one environment, w
 author and a time. Every change gets the next number in its project (`seq`). Each operation makes a
 new version of its secret, and a delete makes a tombstone version, so history is complete.
 
+- **Check-and-set**, as Vault KV's `cas`: a set or delete may carry `if_version` (`PUT
+  …/secrets/{key} {…, if_version}`, `DELETE …/secrets/{key}?if_version=`, each op of a batch), the
+  version the writer read; `0` means the key must not exist yet. It's checked in the same
+  transaction as the change: if the key moved, the whole change is refused (409 `stale`, naming
+  the key and its version now) and nothing is written. The dashboard's editor sends the version it
+  showed, so two people editing one key can't overwrite each other unseen (the second sees the
+  error and the new version). `if_seq` on a batch is the same for the whole environment (`roll
+  secrets edit` uses it).
 - **History** of an environment is its changes, newest first. A change's detail lists each key with
   what happened (`added`, `changed`, `deleted`, `comment`, `tags`, `link`), its old and new
   fingerprints, and never a value. Values of old versions can be revealed one at a time.
@@ -1360,8 +1368,8 @@ isn't in the workspace is 404.
 | `PUT /environments/{env}/exports?path=` | `{project}[]` | `Export[]` (admin) |
 | `GET /environments/{env}/secrets?path=` | | `Secret[]` (own, imported, inherited; no values) |
 | `GET /environments/{env}/secrets/{key}?path=&type=` | | `Secret` |
-| `PUT /environments/{env}/secrets/{key}?path=` | `SetSecret` | `Written` |
-| `DELETE /environments/{env}/secrets/{key}?path=&type=` | | `Written` |
+| `PUT /environments/{env}/secrets/{key}?path=` | `SetSecret` | `Written`; 409 `stale` when `if_version` isn't the key's version |
+| `DELETE /environments/{env}/secrets/{key}?path=&type=&if_version=` | | `Written`; 409 `stale` when `if_version` isn't the key's version |
 | `GET /environments/{env}/secrets/{key}/value?path=&resolve=` | | `{value, problems}` |
 | `GET /environments/{env}/secrets/{key}/versions?path=&type=` | | `Version[]` newest first |
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
@@ -1456,10 +1464,10 @@ type Secret = {
   source: { kind: "own" } | { kind: "import"; environment: string; path: string } | { kind: "base"; environment: string };
   overridden: boolean; // a personal value of the caller replaces it
 };
-type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: "shared" | "personal"; link?: Link | null; message?: string };
+type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: "shared" | "personal"; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number };
 type Op =
-  | { op: "set"; key: string; value?: string; comment?: string; tags?: string[]; type?: "shared" | "personal"; link?: Link | null }
-  | { op: "delete"; key: string; type?: "shared" | "personal" };
+  | { op: "set"; key: string; value?: string; comment?: string; tags?: string[]; type?: "shared" | "personal"; link?: Link | null; if_version?: number }
+  | { op: "delete"; key: string; type?: "shared" | "personal"; if_version?: number };
 type Batch = { path?: string; message?: string; ops: Op[]; if_seq?: number };
 type Written = { change: Change | null; secret: Secret | null; warnings: string[] };
 type Applied = { change: Change | null; items: Item[]; warnings: string[]; request?: Request }; // change: null when nothing changed; request: opened instead (promote into a protected environment)

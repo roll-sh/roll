@@ -36,6 +36,10 @@ pub enum Op {
         /// When the value stops working outside roll (ms); `null` clears it, absent keeps it.
         #[serde(default, deserialize_with = "some")]
         expires_at: Option<Option<i64>>,
+        /// Check-and-set: apply only if the key is still at this version (0: only if it doesn't
+        /// exist yet); else the whole change is refused as `stale`.
+        #[serde(default)]
+        if_version: Option<i64>,
     },
     Delete {
         key: String,
@@ -43,6 +47,8 @@ pub enum Op {
         kind: Option<SecretType>,
         #[serde(default)]
         path: Option<String>,
+        #[serde(default)]
+        if_version: Option<i64>,
     },
 }
 
@@ -158,7 +164,7 @@ pub(crate) fn items(path: &str, ops: &[Op], caller: &Caller) -> Result<Vec<Item>
     let mut out = Vec::with_capacity(ops.len());
     for op in ops {
         let item = match op {
-            Op::Set { key, value, comment, tags, kind, link, path: p, expires_at } => {
+            Op::Set { key, value, comment, tags, kind, link, path: p, expires_at, .. } => {
                 names::key(key)?;
                 if let Some(Some(t)) = expires_at
                     && !(0..=names::MAX_TIME).contains(t)
@@ -185,7 +191,7 @@ pub(crate) fn items(path: &str, ops: &[Op], caller: &Caller) -> Result<Vec<Item>
                     action: ItemAction::Set { value: value.clone().map(Value::new), comment: comment.clone(), tags: tags.clone(), link: link.clone(), link_state: None, expires_at: *expires_at },
                 }
             }
-            Op::Delete { key, kind, path: p } => {
+            Op::Delete { key, kind, path: p, .. } => {
                 names::key(key)?;
                 Item { path: names::path(p.as_deref().unwrap_or(path))?, key: key.clone(), owner: owner(kind)?, action: ItemAction::Delete }
             }
@@ -608,6 +614,13 @@ impl Secrets {
     /// unless `force` (an approved request, a rotation).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit(&self, project: &str, env_slug: &str, items: Vec<Item>, kind: &str, message: &str, if_seq: Option<i64>, force: bool, caller: &Caller) -> Result<Applied> {
+        self.commit_with(project, env_slug, items, &[], kind, message, if_seq, force, caller)
+    }
+
+    /// [`Self::commit`], checking each key's expected version in the same transaction
+    /// (`if_version`: the key moved since it was read, so the change is refused as `stale`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_with(&self, project: &str, env_slug: &str, items: Vec<Item>, expect: &[(usize, i64)], kind: &str, message: &str, if_seq: Option<i64>, force: bool, caller: &Caller) -> Result<Applied> {
         let warnings = self.warnings(project, env_slug, &items, caller);
         // A rollback restores what was there, typed or not.
         if kind != "rollback" {
@@ -625,6 +638,15 @@ impl Secrets {
                 && last_seq(c, &env.id)? > s
             {
                 return Err(Error::Conflict("stale", format!("{} changed after #{s}", env.slug)));
+            }
+            for (i, want) in expect {
+                let item = &items[*i];
+                let now_at: Option<i64> = c.query_row("SELECT version FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ?", params![env.id, item.path, item.key, item.owner], |r| r.get(0)).optional()?;
+                let have = now_at.unwrap_or(0);
+                if have != *want {
+                    let now_is = if have == 0 { "it doesn't exist".to_string() } else { format!("it's at version {have}") };
+                    return Err(Error::Conflict("stale", format!("{} changed since version {want}: {now_is}; read it again and reapply", item.key)));
+                }
             }
             apply(c, &dek, &env, &prepared.items, kind, message, caller, now)
         });
@@ -663,7 +685,19 @@ impl Secrets {
         names::message(&message)?;
         let items = items(&path, &b.ops, caller)?;
         self.check_items(project, env, &items, caller)?;
-        self.commit(project, env, items, "write", &message, b.if_seq, false, caller)
+        // Each op makes one item, in order.
+        let expect: Vec<(usize, i64)> = b
+            .ops
+            .iter()
+            .enumerate()
+            .filter_map(|(i, op)| match op {
+                Op::Set { if_version, .. } | Op::Delete { if_version, .. } => if_version.map(|v| (i, v)),
+            })
+            .collect();
+        if expect.iter().any(|(_, v)| *v < 0) {
+            return Err(Error::BadRequest("if_version is a key's version, or 0 for a key that must not exist yet".into()));
+        }
+        self.commit_with(project, env, items, &expect, "write", &message, b.if_seq, false, caller)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -675,11 +709,13 @@ impl Secrets {
         Ok(Written { change: a.change, secret, warnings: a.warnings })
     }
 
-    pub fn delete_secret(&self, project: &str, env: &str, path: &str, key: &str, kind: Option<SecretType>, caller: &Caller) -> Result<Written> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn delete_secret(&self, project: &str, env: &str, path: &str, key: &str, kind: Option<SecretType>, if_version: Option<i64>, caller: &Caller) -> Result<Written> {
         let path = names::path(path)?;
         caller.need(Action::Delete, &Scope::at(project, env, &path))?;
-        let items = items(&path, &[Op::Delete { key: key.into(), kind, path: None }], caller)?;
-        let a = self.commit(project, env, items, "write", &format!("deleted {key}"), None, false, caller)?;
+        let items = items(&path, &[Op::Delete { key: key.into(), kind, path: None, if_version }], caller)?;
+        let expect: Vec<(usize, i64)> = if_version.map(|v| (0, v)).into_iter().collect();
+        let a = self.commit_with(project, env, items, &expect, "write", &format!("deleted {key}"), None, false, caller)?;
         Ok(Written { change: a.change, secret: None, warnings: vec![] })
     }
 
