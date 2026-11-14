@@ -686,6 +686,11 @@ impl Secrets {
                 out.push(format!("{}: {why}", item.key));
             }
             let ItemAction::Set { value: Some(v), .. } = &item.action else { continue };
+            // What a value references is part of the value: a writer who can't reveal it there (a
+            // rollback's, a promote's, who never saw it) isn't told.
+            if !caller.allows(Action::Reveal, &Scope::at(project, slug, &item.path)) {
+                continue;
+            }
             for r in refs::refs(v.expose()) {
                 let (env, path) = match &r.env {
                     None => (slug.to_string(), item.path.clone()),

@@ -1652,7 +1652,38 @@ stacked pull request is mergeable, and #20 is level with `main`.
 Then roll secrets for VS Code (#58): hovers and warnings where code reads a variable, names
 completed, and `.env` values moved into roll as `roll://` references (checked in code-server).
 Then `roll completions` and direnv documented (#59).
-Docker builds (BuildKit secrets) and Compose are documented and checked.
+Docker builds (BuildKit secrets) and Compose are documented and checked. Then a server's
+credential under a name frameworks put in the browser bundle (`NEXT_PUBLIC_`, `VITE_`…) is
+flagged on write and in health (#60). Measured again (9,900 keys, alternating with #20): health
+is unchanged by #60 and stays under the grid; a values answer takes its digest only when a watch
+asks (`digest=1`, #49), since that costs about a read.
+Then reach (#61): for a folder or key, the tokens and identities that reach it, whether untrusted
+code can, where it flows (syncs, shares, imports), and who read it in 30 days.
+
+A tenth independent review (2026-11-14, of ESO, renewing logins, pinned keys and the ninth review's
+fixes) found no high-severity issue; it found ESO writing an unresolved key as an empty value and
+taking a query through its key (#55: `strict=1`, `urlquery`, checked live on k3s), stdout unmasked in
+Jenkins, Buildkite, pods and units and a JSON value's secret fields (#54), a login with no timeout
+that dropped a working token and ignored 401s (#56), and no way to rotate pinned keys in place
+(#57): all fixed. roll MCP has `secrets_reach` and `secrets_folder_policies` tools for #61 and #53.
+
+An eleventh independent review (2026-11-14, of VS Code, completions, browser-bundle names, reach and
+the tenth review's fixes) found two high-severity issues in #58, both fixed: "Move to roll" misread
+multi-line and commented `.env` entries (it now reads them as the CLI does and replaces the whole
+entry), and a repository's settings could send the token elsewhere (`roll.apiUrl` and
+`roll.project` come from your own settings only). It also found masking that changed data (#54:
+stdout is masked only in CI and never into a file; `ROLL_MASK=1` for pods and units), re-keyed
+identities outliving their re-keyer (#57), readers missed through imports and previews (#61), a
+kind of credential shown to read-only callers and references not judged (#60), a stalled renewal
+(#56) and a refused strict read keeping its leases (#55): all fixed.
+
+A twelfth independent review (2026-11-14, of the eleventh review's fixes) found no high-severity
+issue; it found a login racing a key replacement could still get a token (#57: the login's write
+checks the keys it verified), Jenkins' file log unmasked (#54: documented, `ROLL_MASK=1`, since a
+file can't be told from a dump), late logins and late 401s overwriting fresh tokens (#56), reach
+looking one step away and at unshared importers (#61), a write's warning naming a credential's
+kind without reveal (#60), and `.env` corner cases and a repository choosing the environment (#58):
+all fixed.
 
 Then (2026-11-14, latest): `roll run` masks values in what the command prints when it isn't a
 terminal (#54), as 1Password's `op run` and GitHub Actions do; pulling into Kubernetes with External
@@ -1760,8 +1791,8 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A tenth independent review** of ESO (#55), renewing identity logins (#56), pinned issuer keys
-   (#57) and the ninth review's fixes, and its fixes.
+1. **A thirteenth independent review**, narrow: the twelfth review's fixes (#54, #56, #57, #58,
+   #60, #61) only.
 2. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
    #49 and #54 meet, `watch` keeps both (answered digests, streams and signals).
 3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
@@ -1776,12 +1807,15 @@ user's call).
    token; the trust policy pins `sub`, as GCP's and Azure's do).
 7. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
    notice.
-8. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
+8. *Waits on #30 meeting #24/#25:* the Access tab shows roll-access tokens waiting for an admin's
+   approval (`pending`) and rotations that keep the old secret working (`keep_old_for_s`), and
+   reach (#61) lists roll-access grants too.
+9. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
    installs list Slack user ids and act as the owner's automation; a review must count as the
    person who pressed the button (their permissions, the request's gates), never as the app.
-9. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
+10. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
    project can link their own databases, buckets and streams.
-10. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+11. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
    environment).
 
 Open pull requests after this one:
@@ -1808,6 +1842,10 @@ Open pull requests after this one:
   after its grace; a user with two keys already is refused, never pruned.
 - **#55, pulling into Kubernetes with External Secrets Operator** (after #20): its webhook
   provider (one store for whole environments and single keys) and `values?dynamic=false`.
+- **#61, reach** (after #20): who and what can read a folder or key; `GET …/reach`, `roll secrets
+  reach`, a key's "Who can read it…".
+- **#60, server credentials under browser-bundle names** (after #20): `NEXT_PUBLIC_`, `VITE_`,
+  `PUBLIC_`… holding a server-only value; the write warns, health's `public` finding.
 - **#59, `roll completions` and direnv** (after #20): completion scripts for every command; a
   documented `.envrc`.
 - **#58, roll secrets for VS Code** (after #20): hovers, warnings and completion where code reads
