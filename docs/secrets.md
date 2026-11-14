@@ -411,7 +411,9 @@ is one click.
 every standard environment and folder at once, worst first, so none waits on someone opening the
 right folder: `expired`, `missing` (a required key an environment doesn't define, through its
 imports and base), `exposed` (a protected value also in an unprotected environment), `weak`,
-`expiring`, `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
+`expiring`, `certificate_expiring` (a certificate a project CA signed for a CSR that ends
+within two weeks: links' certificates are replaced by roll, a CSR's only by whoever asked; `key` is
+its names, `path` its CA), `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
 and it's older than that). Each `Finding` names the environment, folder and key where it's set,
 with a detail (the other environments, the reason, the date): never a value, and nothing is
 decrypted. Only what the caller may read is listed, and `weak` only where it may reveal.
@@ -1531,7 +1533,7 @@ type Insights = { path: string; max_age_days: number | null; reads_since: number
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */ };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
-type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
+type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };
