@@ -961,8 +961,7 @@ Tests: `crates/search-es/tests/inference.rs` runs every service against a mock s
 Not yet: highlighting chunks (the `semantic` highlighter), the retrievers' simplified
 `query`/`fields` form, `copy_to` into `semantic_text` fields and multi-fields under them,
 validation of `index_options` (kept as given), the multimodal `embedding` task type and the new
-`semantic` field type, the `random_reranker` and `text_similarity_reranker` retrievers, and the
-rewrite in `_render/template` previews (`_msearch`, search templates and async search embed queries).
+`semantic` field type, the `random_reranker` and `text_similarity_reranker` retrievers.
 
 ## Per area
 
