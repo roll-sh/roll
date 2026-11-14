@@ -297,11 +297,12 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         // choice, not an agent's).
         Ok(Some(g)) if access.policy_now().idle(&g, code_sql::now_ms()) => return invalid_token(&access),
         Ok(Some(g)) => g,
-        // One that starts later says when, so its holder isn't left guessing.
+        // One that waits for an admin, or starts later, says so: its holder isn't left guessing.
         Ok(None) => {
             let a = access.clone();
-            return match blocking(move || a.store.not_started(&token)).await {
-                Ok(Some(at)) => {
+            return match blocking(move || a.store.not_yet(&token)).await {
+                Ok(Some(crate::store::NotYet::Pending)) => deny(StatusCode::UNAUTHORIZED, "pending_approval", "this token waits for an admin's approval".into(), json!({})),
+                Ok(Some(crate::store::NotYet::Starts(at))) => {
                     let when = chrono::DateTime::from_timestamp_millis(at).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)).unwrap_or_default();
                     deny(StatusCode::UNAUTHORIZED, "not_yet_valid", format!("this token works from {when}"), json!({ "not_before": at }))
                 }

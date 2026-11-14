@@ -748,6 +748,9 @@ static ROWS: &[Row] = &[
     row("PATCH", "/v1/access/tokens/{id}", "access", ADMIN, Tgt::Product),
     row("DELETE", "/v1/access/tokens/{id}", "access", ADMIN, Tgt::Product),
     row("POST", "/v1/access/tokens/{id}/rotate", "access", ADMIN, Tgt::Product),
+    // Deciding a person's pending token is an admin's (the handler refuses any token).
+    row("POST", "/v1/access/tokens/{id}/approve", "access", ADMIN, Tgt::Product),
+    row("POST", "/v1/access/tokens/{id}/deny", "access", ADMIN, Tgt::Product),
     row("GET", "/v1/access/tokens/{id}/tighten", "access", R, Tgt::Product),
     row("GET", "/v1/access/tokens/{id}/networks", "access", R, Tgt::Product),
     // What an agent with the token is offered over MCP (roll-mcp reads the token as the caller first).

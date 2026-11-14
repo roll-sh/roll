@@ -14,6 +14,7 @@ import {
   type Checkup,
   productName,
   withToolsets,
+  APPROVABLE,
   startsLater,
   toolsetCost,
   type ToolsetCost,
@@ -320,6 +321,10 @@ const REACH_TONE: Record<ReturnType<typeof reach>, string> = {
 };
 
 /** A token in a list (its name links to its page) or at the top of its own page. */
+/** Who's looking, asked once for every row that needs it (a pending token's Approve and Deny). */
+let me: Promise<{ kind: string }> | null = null;
+const meOnce = () => (me ??= accessApi.me().catch(() => ({ kind: "unknown" })));
+
 export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () => Promise<void>; linked?: boolean }) {
   const ws = useWorkspace();
   const projectName = (id: string) => ws.projects.find((p) => p.id === id)?.name ?? id;
@@ -332,6 +337,23 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
   const { copied, copy } = useCopy();
   const status = statusOf(g);
   const r = reach(g);
+  // A pending token: an admin decides it here (a person sees that it waits).
+  const [admin, setAdmin] = useState(false);
+  useEffect(() => {
+    if (g.pending) void meOnce().then((m) => setAdmin(m.kind === "operator"));
+  }, [g.pending]);
+  const decide = async (approve: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await (approve ? accessApi.approveToken(g.id) : accessApi.denyToken(g.id));
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
   const rotate = async () => {
     setBusy(true);
     setError(null);
@@ -372,6 +394,17 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
               <span className="truncate text-[14px] font-medium">{g.name}</span>
             )}
             <span className="rounded border border-line px-1.5 text-[11px] text-subtle">{g.kind === "oauth" ? (g.client?.name ?? "OAuth") : g.kind}</span>
+            {g.pending && status === "active" && <span className="rounded border border-accent/50 px-1.5 text-[11px] text-accent">waits for an admin</span>}
+            {g.pending && admin && status === "active" && (
+              <span className="flex items-center gap-1.5">
+                <button onClick={() => void decide(true)} disabled={busy} className={`${btn} h-6 px-2 text-[11px]`}>
+                  Approve
+                </button>
+                <button onClick={() => void decide(false)} disabled={busy} className={`${btn} h-6 px-2 text-[11px] text-danger`}>
+                  Deny
+                </button>
+              </span>
+            )}
             {status === "active" ? (
               <span className={`rounded border px-1.5 text-[11px] ${REACH_TONE[r]}`}>{r}</span>
             ) : (
@@ -588,6 +621,23 @@ function PolicyPanel() {
         <input type="checkbox" checked={Boolean(p.require_expiry)} onChange={(e) => void save({ ...p, require_expiry: e.target.checked })} />
         must expire
       </label>
+      <span className="flex flex-wrap items-center gap-1.5">
+        people's tokens that can
+        {APPROVABLE.map((act) => {
+          const on = (p.approve_people ?? []).includes(act);
+          return (
+            <label key={act} className="flex items-center gap-1">
+              <input
+                type="checkbox"
+                checked={on}
+                onChange={() => void save({ ...p, approve_people: on ? (p.approve_people ?? []).filter((x) => x !== act) : [...(p.approve_people ?? []), act] })}
+              />
+              {act}
+            </label>
+          );
+        })}
+        need your approval
+      </span>
       <label className="flex items-center gap-1.5">
         stops after
         <input

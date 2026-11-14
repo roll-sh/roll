@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS grants (
     revoked_why TEXT,
     temp_rules TEXT,
     ask_otherwise INTEGER,
-    not_before INTEGER
+    not_before INTEGER,
+    pending INTEGER
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS grant_secrets (
     hash TEXT PRIMARY KEY,
@@ -181,6 +182,18 @@ pub struct Grant {
     /// What its rules don't allow asks a person instead of being refused ("ask for anything else").
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub ask_otherwise: bool,
+    /// A person's token an admin hasn't approved yet: it doesn't work until they do.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
+}
+
+/// Why a live token isn't honoured yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotYet {
+    /// An admin hasn't approved it.
+    Pending,
+    /// It starts at this time (unix ms).
+    Starts(i64),
 }
 
 /// A rule allowed for a while (an approval's "for an hour").
@@ -214,7 +227,7 @@ impl Grant {
 
     /// Honoured now: live, and past its `not_before`.
     pub fn usable(&self, now: i64) -> bool {
-        self.live(now) && self.not_before.is_none_or(|b| b <= now)
+        self.live(now) && !self.pending && self.not_before.is_none_or(|b| b <= now)
     }
 }
 
@@ -254,6 +267,9 @@ pub struct NewGrant {
     /// What the rules don't allow asks a person instead of being refused.
     #[serde(default)]
     pub ask_otherwise: bool,
+    /// Set by roll, never by the caller: it waits for an admin's approval.
+    #[serde(skip)]
+    pub pending: bool,
 }
 
 /// A change to a grant: only the fields it has.
@@ -493,9 +509,9 @@ fn write_audit(db: &Db, events: &[AuditEvent]) {
     }
 }
 
-/// A grant's columns, as `grant_row` reads them (23 of them: a query may add its own after).
+/// A grant's columns, as `grant_row` reads them (24 of them: a query may add its own after).
 const GRANT_COLUMNS: &str = "g.id, g.name, g.kind, g.rules, g.expires_at, g.ip_allow, g.created_by, g.created_at, g.last_used_at, g.last_used_ip, g.revoked_at, \
-     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.user_id, g.revoked_why, g.temp_rules, g.ask_otherwise, g.not_before";
+     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.user_id, g.revoked_why, g.temp_rules, g.ask_otherwise, g.not_before, g.pending";
 const GRANT_FROM: &str = "grants g LEFT JOIN oauth_clients c ON c.id = g.client_id";
 
 /// The position of the `n`th column a query selects after [`GRANT_COLUMNS`]: counted from the list,
@@ -529,6 +545,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         rules: serde_json::from_str(&rules).unwrap_or_default(),
         expires_at: r.get(4)?,
         not_before: r.get(22)?,
+        pending: r.get::<_, Option<bool>>(23)?.unwrap_or(false),
         ip_allow: serde_json::from_str(&ip).unwrap_or_default(),
         created_by: r.get(6)?,
         created_at: r.get(7)?,
@@ -679,6 +696,10 @@ impl Store {
         if !db.has_column("grants", "not_before")? {
             db.add_column("grants", "not_before", "INTEGER")?;
         }
+        // A person's token waiting for an admin's approval (the policy's `approve_people`).
+        if !db.has_column("grants", "pending")? {
+            db.add_column("grants", "pending", "INTEGER")?;
+        }
         let (audit_tx, rx) = std::sync::mpsc::sync_channel(AUDIT_QUEUE);
         let (writer, audit_pending) = (db.clone(), Arc::new(std::sync::atomic::AtomicUsize::new(0)));
         let pending = audit_pending.clone();
@@ -771,8 +792,8 @@ impl Store {
                 }
             }
             c.execute(
-                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise, not_before) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, new.name.trim(), kind_s, rules, new.expires_at, ip, created_by, now, client_id, new.rate_per_minute.map(i64::from), user, new.ask_otherwise, new.not_before],
+                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise, not_before, pending) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, new.name.trim(), kind_s, rules, new.expires_at, ip, created_by, now, client_id, new.rate_per_minute.map(i64::from), user, new.ask_otherwise, new.not_before, new.pending],
             )?;
             c.execute(
                 "INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -849,9 +870,9 @@ impl Store {
     }
 
     /// The grant a presented secret belongs to, when both are live. Looked up every time.
-    /// When the token `secret` starts working, if it's a live one that hasn't yet (its refusal can
-    /// say so; only asked once [`Store::by_secret`] found nothing).
-    pub fn not_started(&self, secret: &str) -> Result<Option<i64>> {
+    /// Why a live token `secret` isn't honoured yet, so its refusal can say so (only asked once
+    /// [`Store::by_secret`] found nothing): it waits for an admin, or starts later.
+    pub fn not_yet(&self, secret: &str) -> Result<Option<NotYet>> {
         let now = code_sql::now_ms();
         let h = hash(secret);
         let row = self.db.read(|c| {
@@ -862,7 +883,36 @@ impl Store {
             )
             .optional()
         })?;
-        Ok(row.filter(|(g, kind, exp)| kind == "token" && exp.is_none_or(|e| e > now) && g.live(now)).and_then(|(g, ..)| g.not_before.filter(|b| *b > now)))
+        Ok(row.filter(|(g, kind, exp)| kind == "token" && exp.is_none_or(|e| e > now) && g.live(now)).and_then(|(g, ..)| {
+            if g.pending {
+                Some(NotYet::Pending)
+            } else {
+                g.not_before.filter(|b| *b > now).map(NotYet::Starts)
+            }
+        }))
+    }
+
+    /// An admin's decision on a pending token: approved, it works (from its start); denied, it's
+    /// revoked, saying so.
+    pub fn decide_pending(&self, id: &str, approve: bool) -> Result<Grant> {
+        let now = code_sql::now_ms();
+        let changed = self.db.write(|c| {
+            if approve {
+                c.execute("UPDATE grants SET pending = 0 WHERE id = ? AND pending = 1 AND revoked_at IS NULL", [id])
+            } else {
+                c.execute("UPDATE grants SET pending = 0, revoked_at = ?, revoked_why = 'an admin denied it' WHERE id = ? AND pending = 1 AND revoked_at IS NULL", params![now, id])
+            }
+        })?;
+        if changed == 0 {
+            return Err(Error::Conflict("the token isn't waiting for approval".into()));
+        }
+        self.get(id)
+    }
+
+    /// Put a person's token back to waiting (its rules now reach what the policy has an admin approve).
+    pub fn set_pending(&self, id: &str) -> Result<()> {
+        self.db.write(|c| c.execute("UPDATE grants SET pending = 1 WHERE id = ?", [id]))?;
+        Ok(())
     }
 
     pub fn by_secret(&self, secret: &str) -> Result<Option<Grant>> {

@@ -553,6 +553,14 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
 
 - `POST /v1/access/tokens` with their session makes a grant with `user: "usr_…"`, and so does the
   consent screen. A token theirs makes is theirs too.
+- **An admin approves what reaches far** (GitHub's organization approval of fine-grained tokens).
+  The policy's `approve_people` (`["admin", "reveal"]`, set on the access page) names actions.
+  A person's own token whose rules reach one of them, or that asks for anything else, is made
+  `pending`: it answers 401 `pending_approval` until an admin approves it
+  (`POST /v1/access/tokens/{id}/approve`) or denies it (`…/deny`: revoked, "an admin denied it").
+  Only an admin decides, never the person or a token, and the person is mailed either way.
+  Widening an approved token's rules past the policy makes it wait again. One their token makes
+  stays within that token, so it doesn't wait.
 - **It acts as them, never as more.** On every request the evaluator looks the person up as they
   are now (`roll_auth::Sessions::person`, never cached): disabled or gone, the token answers 401.
   A product's own background work that looks a stored grant up (`roll_auth::Grants::grant`: a

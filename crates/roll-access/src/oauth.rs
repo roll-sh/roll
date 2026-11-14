@@ -239,7 +239,7 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
         return Err(Error::BadRequest("redirect_uri isn't one the client registered".into()));
     }
     a.check_policy(c.expires_at)?;
-    let new = NewGrant { name: c.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| client.name.clone()), rules: c.rules.clone(), expires_at: c.expires_at, not_before: None, ip_allow: c.ip_allow.clone(), rate_per_minute: c.rate_per_minute, ask_otherwise: c.ask_otherwise };
+    let new = NewGrant { name: c.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| client.name.clone()), rules: c.rules.clone(), expires_at: c.expires_at, not_before: None, ip_allow: c.ip_allow.clone(), rate_per_minute: c.rate_per_minute, ask_otherwise: c.ask_otherwise, pending: false };
     let (a2, cl, uri, ch, res, by) = (a.clone(), client.clone(), c.redirect_uri.clone(), c.code_challenge.clone(), Some(resource(&a)), crate::api::actor(&ext));
     let code = tokio::task::spawn_blocking(move || a2.store.issue_code(&cl, &new, crate::store::Issuer { created_by: &by, user: user.as_deref() }, &uri, &ch, res.as_deref()))
         .await
