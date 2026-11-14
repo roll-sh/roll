@@ -1462,6 +1462,40 @@ impl EnvLive {
         self.tick().await;
     }
 
+    /// Replace one instance (a stuck one, its pool leaked): on a web service a fresh one is
+    /// started and answering first, then this one leaves rotation and drains; a worker's stops
+    /// and the reaper starts what's wanted. If the fresh one doesn't start, this one stays.
+    pub async fn restart_instance(self: &Arc<Self>, name: &str) -> Result<(), String> {
+        let tpl = self.template().ok_or("nothing is deployed here")?;
+        let inst = self.instances().into_iter().find(|i| i.name == name).ok_or_else(|| format!("no instance {name} here"))?;
+        let replace = tpl.run.kind == RunType::Web && inst.awake() && inst.deployment == tpl.deployment;
+        {
+            let _g = self.wake.lock().await;
+            if self.closed.load(Ordering::SeqCst) {
+                return Err("this environment was torn down".into());
+            }
+            if replace {
+                let fresh = self.make(&tpl).await.map_err(|e| format!("a fresh instance couldn't be made: {e:#}"))?;
+                self.insts.lock().push(fresh.clone());
+                let deadline = Instant::now() + Duration::from_secs(tpl.run.health_timeout_s as u64);
+                if let Err(e) = self.start(&fresh, &tpl.run, tpl.run.health_path.as_deref(), deadline).await {
+                    return Err(format!("the fresh instance didn't start ({e}); {name} keeps serving"));
+                }
+            }
+            if !self.insts.lock().iter().any(|i| Arc::ptr_eq(i, &inst)) {
+                return Err(format!("{name} went meanwhile"));
+            }
+            self.insts.lock().retain(|i| !Arc::ptr_eq(i, &inst));
+            *inst.phase.lock() = Phase::Stopping;
+        }
+        self.log.stream(Stream::System).line(format!("restarting {name}{}", if replace { ": a fresh instance answers in its place" } else { "" }));
+        self.drain(vec![inst], self.drain_of(&tpl.run));
+        if !replace {
+            self.tick().await;
+        }
+        Ok(())
+    }
+
     /// Make every instance look idle for `d` longer than it is (tests drive the reaper with
     /// this instead of waiting).
     pub fn backdate(&self, d: Duration) {

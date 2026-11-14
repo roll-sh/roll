@@ -446,6 +446,10 @@ pub enum AppsCmd {
     Restart {
         #[command(flatten)]
         target: Target,
+        /// Just this instance (its name, or the number it ends with): a fresh one answers before
+        /// it leaves, the others stay.
+        #[arg(long)]
+        instance: Option<String>,
     },
     /// Requests, latency, CPU, memory and cold starts over the last hour.
     Metrics {
@@ -2175,9 +2179,22 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let svc = service(api, &target).await?;
             api.post(&format!("{}/wake", env_path(&svc, &target.env)), json!({})).await?
         }
-        AppsCmd::Restart { target } => {
+        AppsCmd::Restart { target, instance } => {
             let svc = service(api, &target).await?;
-            api.post(&format!("{}/restart", env_path(&svc, &target.env)), json!({})).await?
+            let base = env_path(&svc, &target.env);
+            match instance {
+                Some(i) => {
+                    let name = match i.parse::<u64>() {
+                        Ok(n) => {
+                            let now = api.get(&base).await?;
+                            now["instances"].as_array().into_iter().flatten().filter_map(|x| x["id"].as_str()).find(|x| x.rsplit('-').next() == Some(&n.to_string())).map(str::to_string).ok_or_else(|| anyhow::anyhow!("no instance {n} in {}", target.env))?
+                        }
+                        Err(_) => i,
+                    };
+                    api.post(&format!("{base}/instances/{}/restart", enc(&name)), json!({})).await?
+                }
+                None => api.post(&format!("{base}/restart"), json!({})).await?,
+            }
         }
         AppsCmd::Metrics { target, minutes, range } => {
             let minutes = match range.as_deref() {

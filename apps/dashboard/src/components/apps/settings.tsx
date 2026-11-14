@@ -5,7 +5,7 @@ import { Field, Segmented } from "../redis/shared";
 import { btn, Confirm, danger, input, Panel, primary } from "../ui";
 import { ActivityPanel } from "./activity";
 import { DrainsPanel } from "./drains";
-import { EnvironmentPanel } from "./environment";
+import { EnvironmentPanel, InstancesPanel } from "./environment";
 import { NotificationsPanel } from "./notifications";
 import { SpendPanel } from "./spend";
 import { resourceKey } from "@/lib/workspace-resources";
@@ -545,6 +545,7 @@ export function SettingsTab({
         </button>
       </div>
 
+      {env && <InstancesPanel service={service} env={env} runner={runner} />}
       {env && <EnvironmentPanel key={env.name} service={service} env={env} runner={runner} onDeleted={onEnvDeleted} />}
 
       <NotificationsPanel project={service.project} projectName={projectName} runner={runner} />

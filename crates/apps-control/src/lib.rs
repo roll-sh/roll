@@ -194,6 +194,8 @@ pub struct Apps {
     job_slots: Arc<tokio::sync::Semaphore>,
     /// Services whose project reached its spend limit this month (`spend`), as last read.
     capped: Mutex<std::collections::HashSet<String>>,
+    /// Held while the capped services are read and applied ([`Apps::refresh_capped`]).
+    capped_refresh: tokio::sync::Mutex<()>,
     /// roll previews' notes for a preview's feedback button ([`Apps::set_feedback_notes`]).
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
     /// Log drains whose batch came back (the drainer sends the next).
@@ -319,6 +321,7 @@ impl Apps {
             running_runs: Mutex::default(),
             job_slots: Arc::new(tokio::sync::Semaphore::new(jobs::MAX_CONTAINERS)),
             capped: Mutex::new(Default::default()),
+            capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             access: Mutex::new(HashMap::new()),
@@ -1231,6 +1234,14 @@ impl Apps {
         self.load_live(service, env).await?;
         let live = self.live(service, env);
         live.acquire().await.map_err(|e| Error::Conflict(e.to_string()))?;
+        self.environment(service, env).await
+    }
+
+    /// `POST …/instances/{name}/restart`: just that one, replaced ([`EnvLive::restart_instance`]).
+    pub async fn restart_instance(self: &Arc<Self>, service: &str, env: &str, name: &str) -> Result<Environment> {
+        self.environment(service, env).await?;
+        let live = self.load_live(service, env).await?;
+        live.restart_instance(name).await.map_err(|e| if e.starts_with("no instance") { Error::NotFound(e) } else { Error::Conflict(e) })?;
         self.environment(service, env).await
     }
 

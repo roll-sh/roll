@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { appsApi, formatFirewall, parseAllowList, parseFirewall, PRODUCTION, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
 import { btn, Confirm, CopyButton, danger, input, Panel, primary, useCopy } from "../ui";
-import { CPU, MEMORY, mb, SureButton, type Runner } from "./shared";
+import { clock, CPU, MEMORY, mb, StateBadge, SureButton, type Runner } from "./shared";
 
 /** A private environment's token: 32 of [a-z0-9], from the browser's CSPRNG. */
 export function newAccessToken(): string {
@@ -18,6 +18,38 @@ export function newAccessToken(): string {
 
 /** The link that lets a visitor into a private environment (once: then a cookie). */
 export const accessLink = (url: string, token: string) => `${url.replace(/\/$/, "")}/?roll_access=${encodeURIComponent(token)}`;
+
+/** The environment's instances, each restarted on its own (a fresh one answers before it leaves). */
+export function InstancesPanel({ service, env, runner }: { service: Service; env: Environment; runner: Runner }) {
+  if (env.instances.length === 0) return null;
+  return (
+    <Panel title="Instances" aside={<span className="text-[12px] text-muted">restart one on its own</span>}>
+      <ul className="divide-y divide-line">
+        {env.instances.map((i) => (
+          <li key={i.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-2.5 text-[13px]">
+            <span className="flex min-w-0 items-center gap-3">
+              <StateBadge state={i.state} />
+              <span className="truncate font-mono text-[12px]">{i.id}</span>
+            </span>
+            <span className="flex items-center gap-3 font-mono text-[11.5px] text-subtle">
+              {i.started_at && <span>since {clock(i.started_at, true)}</span>}
+              {i.in_flight > 0 && <span>{i.in_flight} in flight</span>}
+              <SureButton
+                className={btn}
+                disabled={runner.busy !== null}
+                sure="Sure? Restart it"
+                title="Replace just this instance: a fresh one answers before it leaves"
+                onSure={() => runner.run(`restart:${i.id}`, () => appsApi.restartInstance(service.id, env.name, i.id))}
+              >
+                Restart
+              </SureButton>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </Panel>
+  );
+}
 
 /**
  * The environment shown, its own settings: the branch that deploys to it, promoting another

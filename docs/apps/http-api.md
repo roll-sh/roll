@@ -70,6 +70,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore` | | `Backup` (the volume as it was; the environment asleep meanwhile) | delete (it replaces the volume's files) |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/cancel` | | `Deployment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/restart` | | 202 `Environment` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/instances/{name}/restart` | | `Environment` (a web service's: a fresh instance answers before this one drains; 404 for no such instance, 409 if the fresh one didn't start: this one keeps serving) | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/sleep` | | `Environment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/wake` | | `Environment` | write (it starts compute someone pays for; a visitor's request wakes a public environment through the proxy, not this route) |
 | `GET /v1/apps/services/{id}/environments/{env}/variables` | | `Variables` (values masked) | read |

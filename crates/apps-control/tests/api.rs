@@ -488,6 +488,23 @@ async fn a_deploy_whose_app_listens_elsewhere_says_where() {
     assert!(d["error"].as_str().unwrap().contains("listens on 0.0.0.0:3000, not on port 8080"), "{d}");
 }
 
+/// One instance is replaced on its own: a fresh one answers before it leaves, the others stay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_instance_is_restarted_without_the_rest() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 2})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let running = |v: &Value| v["instances"].as_array().unwrap().iter().filter(|i| i["state"] == "running").map(|i| i["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let env = get_until(&w.api, &base, |v| running(v).len() == 2).await;
+    let (old, kept) = (running(&env)[0].clone(), running(&env)[1].clone());
+    let (st, after) = call(&w.api, "POST", &format!("{base}/instances/{old}/restart"), None).await;
+    assert_eq!(st, StatusCode::OK, "{after}");
+    let now = running(&after);
+    assert!(!now.contains(&old) && now.contains(&kept) && now.len() == 2, "{now:?}");
+    assert_eq!(call(&w.api, "POST", &format!("{base}/instances/nope/restart"), None).await.0, StatusCode::NOT_FOUND);
+}
+
 /// A GET that finds its instance gone (killed: nothing listens, and roll doesn't know yet) goes
 /// to a fresh instance instead of a 503; a request with a body isn't sent twice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1690,7 +1707,8 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     assert!((h["x-roll-timestamp"].to_str().unwrap().parse::<i64>().unwrap() - code_sql::now_ms() / 1000).abs() < 120);
     assert!(h.contains_key("x-roll-delivery"));
     // The failing one is logged and waits to try again.
-    let log = call(&w.api, "GET", &format!("{base}/{}/deliveries", down["id"].as_str().unwrap()), None).await.1;
+    // Tried at once, as the other was (the eight at a time run side by side: a moment apart).
+    let log = get_until(&w.api, &format!("{base}/{}/deliveries", down["id"].as_str().unwrap()), |l| l[0]["attempts"].as_u64().is_some_and(|n| n >= 1)).await;
     let first = &log.as_array().unwrap()[0];
     assert_eq!((first["status"].as_str(), first["attempts"].as_u64(), first["code"].as_u64()), (Some("pending"), Some(1), Some(500)), "{log}");
     // Targets are checked: not a URL that isn't one, not Slack anywhere but Slack.

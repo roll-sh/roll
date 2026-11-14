@@ -86,6 +86,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/volume/backups"), get(backups).post(backup_volume))
         .route(&format!("{env}/volume/backups/{{bid}}/restore"), post(restore_volume))
         .route(&format!("{env}/restart"), post(restart))
+        .route(&format!("{env}/instances/{{name}}/restart"), post(restart_instance))
         .route(&format!("{env}/sleep"), post(sleep))
         .route(&format!("{env}/wake"), post(wake))
         .route(&format!("{env}/variables"), get(variables).patch(change_variables))
@@ -788,6 +789,12 @@ async fn cancel(State(apps): S, Path((id, env, dep)): Path<(String, String, Stri
 async fn restart(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     let e = apps.restart(&id, &env).await?;
     Ok((StatusCode::ACCEPTED, Json(e)).into_response())
+}
+
+async fn restart_instance(State(apps): S, Path((id, env, name)): Path<(String, String, String)>, ext: Extensions) -> R {
+    let e = apps.restart_instance(&id, &env, &name).await?;
+    apps.audit("instance.restarted", &id, &env, actor(&ext), json!({ "instance": name })).await;
+    ok(e)
 }
 
 async fn sleep(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {

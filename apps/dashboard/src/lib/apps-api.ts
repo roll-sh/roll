@@ -660,6 +660,8 @@ export const appsApi = {
   cancel: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/cancel`),
 
   restart: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/restart`),
+  /** Just this one: a fresh instance answers before it leaves (a web service's), the others stay. */
+  restartInstance: (id: string, e: string, name: string) => call<Environment>("POST", `${env(id, e)}/instances/${encodeURIComponent(name)}/restart`),
   sleep: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/sleep`),
   wake: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/wake`),
 
