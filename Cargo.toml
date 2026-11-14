@@ -10,10 +10,12 @@ license = "UNLICENSED"
 publish = false
 
 [workspace.dependencies]
+aho-corasick = "1"
 anyhow = "1"
 axum = "0.8"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 getrandom = "0.4"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -22,6 +24,12 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-postgres = "0.7"
+# roll secrets: MySQL servers outside roll (rotation and dynamic logins); rustls with ring, no zlib.
+# roll secrets: mongodb+srv:// seeds for MongoDB outside roll.
+hickory-resolver = "0.26"
+# SQL Server outside roll (roll secrets): TLS through the workspace's tokio-rustls.
+tiberius = { version = "0.13", default-features = false, features = ["rustls", "tds73"] }
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust", "rustls-tls", "ring", "tls12"] }
 tower = { version = "0.5", features = ["util"] }
 hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio", "server", "server-auto"] }
@@ -71,6 +79,10 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rustls-pemfile = "2"
 rdkafka = { version = "0.39", features = ["cmake-build", "ssl-vendored", "zstd"] }
 rcgen = "0.14"
+# roll secrets: certificate lifetimes (rcgen takes time's dates).
+time = "0.3"
+# roll secrets: SSH certificates (Ed25519 CAs and user keys).
+ed25519-dalek = "2"
 x509-parser = "0.18"
 pg-control = { path = "crates/pg-control" }
 pg-storage = { path = "crates/pg-storage" }
@@ -201,6 +213,8 @@ ring = "0.17"
 # Tests only: RSA keys to sign web identity tokens with, and the STS client.
 rsa = "0.9"
 aws-sdk-sts = "1"
+# roll secrets: rotating IAM users' access keys, as a role the project registered.
+aws-sdk-iam = "1"
 # Tests only: the S3 Control client (access points).
 aws-sdk-s3control = "1"
 zeroize = "1"
@@ -208,6 +222,9 @@ zeroize = "1"
 # structure of private keys (matching a key to its certificate; no private-key operations).
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 x509-cert = { version = "0.2", default-features = false, features = ["pem"] }
+# roll secrets: a project CA's OCSP responder.
+x509-ocsp = { version = "0.2.1", default-features = false }
+der = { version = "0.7", features = ["alloc", "oid"] }
 pkcs1 = { version = "0.7", default-features = false, features = ["std"] }
 pkcs8 = { version = "0.10", default-features = false, features = ["std"] }
 sec1 = { version = "0.7", default-features = false, features = ["der", "std"] }

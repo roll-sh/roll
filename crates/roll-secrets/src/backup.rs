@@ -23,6 +23,9 @@ pub struct Archive {
     pub environments: Vec<ArchivedEnvironment>,
     #[serde(default)]
     pub required: Vec<Required>,
+    /// Encryption keys (transit.rs): their bytes, so a restore still opens what they encrypted.
+    #[serde(default)]
+    pub encryption_keys: Vec<crate::transit::ArchivedKey>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,6 +48,9 @@ pub struct ArchivedEnvironment {
     pub max_age_days: Option<i64>,
     #[serde(default)]
     pub folders: Vec<String>,
+    /// Folders' own change policies: (path, approvals, approvers).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folder_policies: Vec<(String, i64, Vec<String>)>,
     /// By folder.
     #[serde(default)]
     pub imports: BTreeMap<String, Vec<Import>>,
@@ -106,7 +112,11 @@ impl Secrets {
                 let mut out = vec![];
                 for (id, path, version, ct, key, comment, tags, link, expires_at) in secrets {
                     let link: Option<Link> = link.and_then(|l| serde_json::from_str(&l).ok());
+                    // A sensitive key's value never leaves roll for a person, a backup included:
+                    // it's restored by name, to be set again.
+                    let sensitive = crate::names::sensitive(&from_json::<Vec<String>>(&tags));
                     let value = match (&link, ct) {
+                        _ if sensitive => None,
                         (None, Some(ct)) => Some(dek.open(&crate::crypto::value_aad(project, &id, version), &ct)?),
                         _ => None,
                     };
@@ -125,12 +135,15 @@ impl Secrets {
                     approvers: e.approvers.clone(),
                     max_age_days: e.max_age_days,
                     folders,
+                    folder_policies: self.db.read(|c| crate::folder_policy::all(c, &e.id))?.into_iter().map(|p| (p.path, p.approvals, p.approvers)).collect(),
                     imports,
                     secrets: out,
                 });
             }
-            Ok::<_, Error>(Archive { v: V, project: project.to_string(), at: now, environments, required: crate::required::of(c, project)? })
+            Ok::<_, Error>(Archive { v: V, project: project.to_string(), at: now, environments, required: crate::required::of(c, project)?, encryption_keys: vec![] })
         })?;
+        let mut archive = archive;
+        archive.encryption_keys = self.transit_export(project)?;
         let plain = zeroize::Zeroizing::new(serde_json::to_vec(&archive).expect("JSON"));
         let sealed = crate::crypto::seal_to(recipient, &context(project), &plain).map_err(Error::BadRequest)?;
         let n: usize = archive.environments.iter().map(|e| e.secrets.len()).sum();
@@ -180,6 +193,7 @@ impl Secrets {
                     link: s.link.clone().map(Some),
                     path: None,
                     expires_at: s.expires_at.map(Some),
+                    if_version: None,
                 });
             }
             for (path, ops) in by_path {
@@ -226,12 +240,21 @@ impl Secrets {
             warnings.push(format!("required keys: {err}"));
         }
         // Protection last: it would turn the writes above into change requests.
+        for e in &order {
+            for (path, approvals, approvers) in &e.folder_policies {
+                let p = crate::folder_policy::SetFolderPolicy { approvals: Some(*approvals), approvers: Some(approvers.clone()) };
+                if let Err(err) = self.set_folder_policy(project, &e.slug, path, p, caller) {
+                    warnings.push(format!("{} {path} policy: {err}", e.slug));
+                }
+            }
+        }
         for e in order.iter().filter(|e| e.protected) {
             let p = envs::Policy { protected: true, approvals: Some(e.approvals), approvers: Some(e.approvers.clone()), notify_url: None };
             if let Err(err) = self.set_policy(project, &e.slug, p, caller) {
                 warnings.push(format!("{} policy: {err}", e.slug));
             }
         }
+        warnings.extend(self.transit_import(project, archive.encryption_keys, caller)?);
         let now = self.db.now_ms()?;
         self.db.write(|c| audit::record(c, project, caller, "project.restore", None, None, &[], &format!("restored {environments} environments and {secrets} keys from {}'s backup", archive.project), now))?;
         Ok(Restored { environments, secrets, warnings })

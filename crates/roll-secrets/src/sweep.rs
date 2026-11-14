@@ -29,6 +29,29 @@ pub struct Lease {
     pub revoked_at: Option<i64>,
 }
 
+/// A managed credential and its rotation (`GET …/rotations`).
+#[derive(Debug, Serialize)]
+pub struct Rotation {
+    pub environment: String,
+    pub path: String,
+    /// The keys that share it (rotating one rotates all).
+    pub keys: Vec<String>,
+    pub kind: String,
+    pub r#ref: String,
+    /// The resource's name, where its product knows it.
+    pub name: String,
+    #[serde(skip)]
+    credential: String,
+    /// Days between scheduled rotations; none: only by hand.
+    pub rotate_days: Option<u64>,
+    pub grace_minutes: u64,
+    pub issued_at: Option<i64>,
+    pub next_due: Option<i64>,
+    /// Why the last scheduled rotation failed, until one works.
+    pub last_error: Option<String>,
+    pub failed_at: Option<i64>,
+}
+
 const LEASE_SELECT: &str = "SELECT l.id, e.slug, COALESCE(l.path, '/'), l.key, l.kind, l.link, l.consumer, l.issued_at, l.expires_at, l.revoked_at FROM leases l JOIN environments e ON e.id = l.env_id";
 
 fn lease_row(r: &code_sql::Row<'_>) -> code_sql::Result<Lease> {
@@ -60,6 +83,55 @@ pub struct Swept {
 }
 
 impl Secrets {
+    /// Every managed credential the caller may read, one per environment and credential: what it
+    /// links to, its keys, when it was issued and is next due, and why its last scheduled rotation
+    /// failed (as Infisical's rotation page shows them).
+    pub fn rotations(&self, project: &str, caller: &Caller) -> Result<Vec<Rotation>> {
+        caller.need(Action::Read, &Scope::project(project))?;
+        self.project(project)?;
+        type Row = (String, String, String, String, String, Option<String>, Option<i64>);
+        let rows: Vec<Row> = self.db.read(|c| {
+            c.query(
+                "SELECT e.slug, s.path, s.key, s.link, s.link_state, s.rotation_error, s.rotation_failed_at FROM secrets s JOIN environments e ON e.id = s.env_id
+                 WHERE s.project_id = ? AND s.owner = '' AND s.link_state IS NOT NULL AND s.link LIKE '%\"mode\":\"managed\"%' ORDER BY e.position, s.path, s.key",
+                [project],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            )
+        })?;
+        let mut out: Vec<Rotation> = vec![];
+        for (environment, path, key, link, state, error, failed_at) in rows {
+            if !caller.allows(Action::Read, &Scope::at(project, &environment, &path)) {
+                continue;
+            }
+            let (Ok(link), Ok(state)) = (serde_json::from_str::<Link>(&link), serde_json::from_str::<Json>(&state)) else { continue };
+            let credential = state.get("credential").and_then(Json::as_str).unwrap_or_default().to_string();
+            if let Some(r) = out.iter_mut().find(|r| r.environment == environment && r.credential == credential) {
+                r.keys.push(key);
+                r.last_error = r.last_error.take().or(error);
+                r.failed_at = r.failed_at.or(failed_at);
+                continue;
+            }
+            let issued_at = state.get("issued_at").and_then(Json::as_i64);
+            let rotate_days = link.rotate_days();
+            out.push(Rotation {
+                name: self.links.get(&link.kind).ok().and_then(|p| p.name(&link.r#ref)).unwrap_or_else(|| link.r#ref.clone()),
+                environment,
+                path,
+                keys: vec![key],
+                kind: link.kind.clone(),
+                r#ref: link.r#ref.clone(),
+                credential,
+                rotate_days,
+                grace_minutes: link.grace_minutes(),
+                issued_at,
+                next_due: issued_at.zip(rotate_days).map(|(at, d)| at + d as i64 * 86_400_000),
+                last_error: error,
+                failed_at,
+            });
+        }
+        Ok(out)
+    }
+
     pub fn leases(&self, project: &str, caller: &Caller) -> Result<Vec<Lease>> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
@@ -144,7 +216,9 @@ impl Secrets {
         let handle: Json = serde_json::from_str(&handle).unwrap_or_default();
         if let Err(e) = self.links.get(&link.kind).and_then(|p| p.revoke(&link.r#ref, &handle)) {
             // Give it back to the sweeper, which tries again.
-            self.db.write(|c| c.execute("UPDATE leases SET revoked_at = NULL, expires_at = ? WHERE id = ?", params![now + 60_000, id]))?;
+            // Kept for health (`revoke_failing`) while the sweeper retries.
+            let why: String = e.to_string().chars().take(300).collect();
+            self.db.write(|c| c.execute("UPDATE leases SET revoked_at = NULL, expires_at = ?, revoke_error = ? WHERE id = ?", params![now + 60_000, why, id]))?;
             return Err(Error::Link(format!("revoking {id}: {e}")));
         }
         Ok(true)
@@ -213,6 +287,31 @@ impl Secrets {
     /// Rotate a managed link's credential (with every secret that shares it), or a live link's
     /// resource credential. A rotation doesn't need approval on a protected environment.
     pub fn rotate(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller) -> Result<Applied> {
+        let out = self.rotate_now(project, slug, path, key, caller);
+        if out.is_ok() {
+            self.note_rotation(project, slug, path, key, None);
+        }
+        out
+    }
+
+    /// A scheduled rotation's failure, kept on the key for health (`rotation_failing`) until one
+    /// succeeds; `None` clears it.
+    fn note_rotation(&self, project: &str, slug: &str, path: &str, key: &str, failure: Option<&str>) {
+        let now = self.db.now_ms().unwrap_or_default();
+        let failure = failure.map(|f| f.chars().take(300).collect::<String>());
+        let at = failure.as_ref().map(|_| now);
+        let done = self.db.write(|c| {
+            c.execute(
+                "UPDATE secrets SET rotation_error = ?, rotation_failed_at = ? WHERE project_id = ? AND path = ? AND key = ? AND owner = '' AND env_id = (SELECT id FROM environments WHERE project_id = ? AND slug = ?)",
+                params![failure, at, project, path, key, project, slug],
+            )
+        });
+        if let Err(e) = done {
+            tracing::warn!(%project, env = %slug, %key, "keeping a rotation's outcome failed: {e}");
+        }
+    }
+
+    fn rotate_now(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller) -> Result<Applied> {
         let path = names::path(path)?;
         caller.need(Action::Write, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
@@ -356,10 +455,12 @@ impl Secrets {
                 Err(e) => {
                     out.failed += 1;
                     tracing::warn!(%project, env = %slug, %key, "a scheduled rotation failed: {e}");
+                    self.note_rotation(&project, &slug, &path, &key, Some(&e.to_string()));
                 }
             }
         }
         self.expire_shares()?;
+        self.reseal_wrapped();
         self.sweep_retention()?;
         self.sweep_identity_tokens()?;
         self.sweep_reminders()?;
@@ -381,5 +482,21 @@ impl Secrets {
         let (_, failed) = self.sweep_sinks()?;
         out.failed += failed;
         Ok(out)
+    }
+}
+
+impl Secrets {
+    /// After a deployment-key rotation, customer-wrapped data keys sealed inside by the previous
+    /// key are resealed (opening a project does it): a batch per sweep, so the previous key can be
+    /// dropped once health says every one is done. A key KMS refuses stays as it is.
+    fn reseal_wrapped(&self) {
+        let Ok(keys) = self.keys() else { return };
+        let current = keys.current_id().to_string();
+        let rows: Vec<(String, String)> = self.db.read(|c| c.query("SELECT project_id, dek FROM projects WHERE dek LIKE 'kms:%' LIMIT 500", (), |r| Ok((r.get(0)?, r.get(1)?)))).unwrap_or_default();
+        for (project, _) in rows.into_iter().filter(|(_, d)| crate::kms::sealed_by(d).is_some_and(|id| id != current)).take(50) {
+            if let Err(e) = self.project(&project) {
+                tracing::warn!(%project, "resealing a customer-wrapped data key after a rotation: {e}");
+            }
+        }
     }
 }

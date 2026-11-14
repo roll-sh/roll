@@ -105,6 +105,17 @@ pub trait LinkProvider: Send + Sync {
     fn suggested(&self) -> &[(&'static str, Mode)] {
         &[]
     }
+    /// The fields as offered for one resource: suggested key names can depend on it (a search
+    /// cluster's flavor names `OPENSEARCH_URL` rather than `ELASTICSEARCH_URL`).
+    fn fields_for(&self, r#ref: &str) -> Vec<Field> {
+        let _ = r#ref;
+        self.fields().to_vec()
+    }
+    /// [`LinkProvider::suggested`] for one resource.
+    fn suggested_for(&self, r#ref: &str) -> Vec<(&'static str, Mode)> {
+        let _ = r#ref;
+        self.suggested().to_vec()
+    }
     /// A resource's display name, if the product knows it.
     fn name(&self, r#ref: &str) -> Option<String> {
         let _ = r#ref;
@@ -134,6 +145,11 @@ pub trait LinkProvider: Send + Sync {
     fn rotate_source(&self, r#ref: &str) -> Result<bool> {
         let _ = r#ref;
         Ok(false)
+    }
+    /// One managed credential per resource in the whole project (the resource's own state, such
+    /// as which of two roles is in use, can't be shared between environments).
+    fn exclusive(&self) -> bool {
+        false
     }
     /// Refuse a link this kind can't serve as asked (its options, its mode, its resource's
     /// policy), when it's written rather than at its first issue.
@@ -191,7 +207,7 @@ impl Links {
             return Err(Error::BadRequest(format!("{} {} is {}, not {}", l.kind, l.field, f.modes.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(" or "), l.mode.as_str())));
         }
         for k in l.options.keys() {
-            if !["ttl_minutes", "grace_minutes", "rotate_days", "branch", "permission"].contains(&k.as_str()) {
+            if !["ttl_minutes", "grace_minutes", "rotate_days", "branch", "permission", "names", "principals"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown link option {k}")));
             }
         }
@@ -221,11 +237,31 @@ impl crate::Secrets {
             .filter(|r| members.contains(&(r.kind.as_str().to_string(), r.r#ref.clone())))
             .filter_map(|r| {
                 let provider = self.links.0.get(r.kind.as_str())?;
-                Some(Target { kind: r.kind.as_str().into(), name: provider.name(&r.r#ref).unwrap_or_else(|| r.r#ref.clone()), r#ref: r.r#ref, fields: provider.fields().to_vec() })
+                Some(Target { kind: r.kind.as_str().into(), name: provider.name(&r.r#ref).unwrap_or_else(|| r.r#ref.clone()), fields: provider.fields_for(&r.r#ref), r#ref: r.r#ref })
             })
             .collect();
+        if let Some(provider) = self.links.0.get(crate::aws::KIND) {
+            out.extend(self.aws_role_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::aws::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+        }
+        if let Some(provider) = self.links.0.get(crate::iam::KIND) {
+            out.extend(self.aws_user_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::iam::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+        }
         if let Some(provider) = self.links.0.get(crate::rotators::KIND) {
             out.extend(self.rotator_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::rotators::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+        }
+        if let Some(provider) = self.links.0.get(crate::outside::KIND) {
+            out.extend(self.outside_db_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::outside::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+        }
+        for (kind, id, name) in self.cloud_refs(project)? {
+            if let Some(provider) = self.links.0.get(kind.as_str()) {
+                out.push(Target { kind, r#ref: id, name, fields: provider.fields().to_vec() });
+            }
+        }
+        if let Some(provider) = self.links.0.get(crate::pki::KIND) {
+            out.extend(self.ca_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::pki::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+        }
+        if let Some(provider) = self.links.0.get(crate::ssh::KIND) {
+            out.extend(self.ssh_ca_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::ssh::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
         }
         Ok(out)
     }

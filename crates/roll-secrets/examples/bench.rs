@@ -14,7 +14,7 @@ fn main() {
     let project = ws.create("", "bench", "", None).unwrap().id;
     let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
     let backend = format!("{:?}", db.backend());
-    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), deliver: None, open: true, trust_forwarded_for: false, web_url: None, grants: None, people: None };
+    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), deliver: None, open: true, trust_forwarded_for: false, web_url: None, grants: None, people: None, kms: None, sts: None, outside: None, clouds: None };
     let s = Secrets::new(db, ws, opts).unwrap();
     let c = Caller::operator();
     let time = |what: &str, f: &mut dyn FnMut()| {
@@ -23,14 +23,14 @@ fn main() {
         println!("{backend:>8} {n:>6} keys  {what:<24} {:>8.1} ms", t.elapsed().as_secs_f64() * 1000.0);
     };
     let ops: Vec<Op> = (0..n)
-        .map(|i| Op::Set { key: format!("K{i:05}"), value: Some(format!("value-{i:05}-abcdefghijklmnop")), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None })
-        .chain((0..n / 10).map(|i| Op::Set { key: format!("R{i:05}"), value: Some(format!("${{K{i:05}}}/x")), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None }))
+        .map(|i| Op::Set { key: format!("K{i:05}"), value: Some(format!("value-{i:05}-abcdefghijklmnop")), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None })
+        .chain((0..n / 10).map(|i| Op::Set { key: format!("R{i:05}"), value: Some(format!("${{K{i:05}}}/x")), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None }))
         .collect();
     time("one change (all keys)", &mut || {
         s.batch(&project, "production", Batch { path: None, message: None, ops: ops.clone(), if_seq: None }, &c).unwrap();
     });
     time("one key", &mut || {
-        s.batch(&project, "production", Batch { path: None, message: None, ops: vec![Op::Set { key: "ONE".into(), value: Some("1".into()), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None }], if_seq: None }, &c).unwrap();
+        s.batch(&project, "production", Batch { path: None, message: None, ops: vec![Op::Set { key: "ONE".into(), value: Some("1".into()), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None }], if_seq: None }, &c).unwrap();
     });
     for _ in 0..2 {
         time("grid", &mut || drop(s.grid(&project, "/", &c).unwrap()));
@@ -40,5 +40,15 @@ fn main() {
         time("insights", &mut || drop(s.insights(&project, "production", "/", &c).unwrap()));
         time("health", &mut || drop(s.project_health(&project, &c, false).unwrap()));
         time("compare", &mut || drop(s.compare(&project, "production", "staging", "/", &c).unwrap()));
+    }
+    // Reach's walk at its cap: 300 folders import production (it stops at 256), each read once.
+    let from = vec![roll_secrets::Import { environment: "production".into(), path: "/".into(), project: None }];
+    for i in 0..300 {
+        let at = format!("/f{i:03}");
+        s.set_imports(&project, "staging", &at, from.clone(), &c).unwrap();
+        drop(s.values(&project, "staging", &at, true, None, &c).unwrap());
+    }
+    for _ in 0..2 {
+        time("reach (300 importers)", &mut || drop(s.reach(&project, "production", "/", None, &c).unwrap()));
     }
 }

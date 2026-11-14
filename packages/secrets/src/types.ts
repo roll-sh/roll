@@ -78,11 +78,11 @@ export type Secret = {
   weak?: string;
 };
 /** `expires_at`: null clears it; absent keeps it. */
-export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string; expires_at?: number | null };
+export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number };
 /** `path`: another folder for this one operation (default: the batch's). */
 export type Op =
-  | { op: "set"; key: string; value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; path?: string; expires_at?: number | null }
-  | { op: "delete"; key: string; type?: SecretType; path?: string };
+  | { op: "set"; key: string; value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; path?: string; expires_at?: number | null; if_version?: number }
+  | { op: "delete"; key: string; type?: SecretType; path?: string; if_version?: number };
 export type Batch = { path?: string; message?: string; ops: Op[]; if_seq?: number };
 export type ChangeKind = "write" | "rollback" | "promote" | "rotate" | "request" | "rename";
 export type Change = { seq: number; environment: string; path: string; message: string; by: string; at: number; keys: number; kind: ChangeKind };
@@ -99,18 +99,22 @@ export type Problem = { key: string; problem: string };
 /** `leases`: ids of dynamic credentials issued. */
 /** `dynamic`: the keys holding a dynamic link's short-lived credential. */
 /** `dynamic`: keys holding a dynamic link's short-lived credential; `linked`: keys whose value comes from any link. */
-export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[] };
+/** `withheld`: sensitive keys left out (only roll's runtimes and syncs read them); `sensitive`: those included (a runtime's read), never to be shown. */
+/** `digest` (with `?digest=1`): the folder's `…/digest`, taken just before this read (a watch compares from it). */
+export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; withheld?: string[]; sensitive?: string[]; digest?: string };
 export type CellSource = "own" | "import" | "base";
 /** `misfit`: the typed-key rule the stored value breaks (shown only to whoever may reveal it). */
 export type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: CellSource; comment: boolean; personal: boolean; misfit?: string; expires_at?: number };
 export type RowStatus = "same" | "different" | "missing";
 export type GridRow = { key: string; cells: Record<string, Cell | null>; status: RowStatus };
 export type Grid = { path: string; environments: string[]; rows: GridRow[]; folders: string[]; previews: number };
-export type CompareStatus = "same" | "different" | "only_from" | "only_to";
+/** `hidden`: in both, but the caller can't compare them (it may not reveal one, or one is sensitive). */
+export type CompareStatus = "same" | "different" | "only_from" | "only_to" | "hidden";
 export type CompareRow = { key: string; status: CompareStatus; from: number | null; to: number | null };
 export type Compare = { from: string; to: string; path: string; rows: CompareRow[] };
 export type RequestState = "open" | "approved" | "rejected" | "applied" | "closed" | "stale";
-export type Review = { by: string; verdict: "approve" | "reject"; comment: string; at: number };
+/** `gates`: the gates (folder, or null for the environment's) the review counts for. */
+export type Review = { by: string; verdict: "approve" | "reject"; comment: string; at: number; gates?: (string | null)[] };
 /** One item of a change request with its values: `now` is null for a new key or a live/dynamic link. */
 /** `proposed_weak`: why the proposed credential is easy to guess. */
 export type RequestValue = { key: string; path: string; type: "shared" | "personal"; delete: boolean; now: string | null; now_link: Link | null; proposed: string | null; proposed_link: Link | null; proposed_weak?: string };
@@ -121,6 +125,10 @@ export type KeyInsight = { key: string; version: number; updated_at: number; upd
   /** Why a credential's value is easy to guess; only for a caller who may reveal it. */
   weak?: string;
 };
+/** A token or identity that reaches a folder, with what it may do there. */
+export type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };
+/** `GET …/reach` (a project admin's): every way a folder's (or one key's) values can leave roll. Names only. */
+export type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string };
 export type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: KeyInsight[] };
 
 export type ChangeRequest = {
@@ -135,8 +143,12 @@ export type ChangeRequest = {
   reviews: Review[];
   approvals: number;
   approvals_needed: number;
+  /** What it must pass: the environment's policy (no `path`) and each folder policy covering a key it changes. */
+  gates: { path?: string; approvals: number; approvers?: string[]; approved: number }[];
   applied_seq: number | null;
 };
+/** A folder's own change policy: its keys change only through approved requests. */
+export type FolderPolicy = { path: string; approvals: number; approvers: string[]; created_at: number; created_by: string };
 export type LinkField = { field: string; label: string; modes: LinkMode[]; secret: boolean; suggest: string; credential?: string };
 export type LinkTarget = { kind: string; ref: string; name: string; fields: LinkField[] };
 export type Lease = {
@@ -195,8 +207,11 @@ export type Identity = {
   last_subject: string | null;
   /** Client addresses (CIDRs) a login works from; null: any. */
   allowed_ips: string[] | null;
+  /** How many keys it pins, when it carries its issuer's keys (a cluster roll can't reach). */
+  pinned_keys?: number;
 };
-export type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[] };
+/** `jwks`: the issuer's keys (a JWKS document as text); then the issuer is never fetched. */
+export type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; jwks?: string };
 export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 export type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null };
 /** `since`: rows at or after this time (ms); `before`: rows older than this id. */
@@ -236,14 +251,44 @@ export type SyncField = { name: string; label: string; required: boolean; placeh
 /** A kind the server registered: its target's fields, whether pushes carry values, whether it has a signing secret. */
 export type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: SyncField[] };
 /** `resealed`: "all", or how many projects still need the previous key (null without a key); `links`, `syncs`: the kinds registered. */
-export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; resealed: "all" | number | null; links: string[]; syncs: string[] };
+/** `customer_managed`: projects whose data key a customer's own KMS key wraps too. */
+export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; resealed: "all" | number | null; customer_managed: number; links: string[]; syncs: string[] };
+/** An IAM user whose access keys roll rotates, acting as one of the project's AWS roles (`role` is its id). */
+export type AwsUser = { id: string; name: string; role: string; user: string; created_at: number; created_by: string };
+/** An AWS role a project registered for dynamic credentials (its trust policy pins `sts:ExternalId` = `roll-secrets:<project>`). */
+export type AwsRole = { id: string; name: string; role_arn: string; created_at: number; created_by: string };
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
+export type Finding = { issue: "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
+/** A managed credential and its rotation: its keys, resource, schedule, and why its last scheduled rotation failed. */
+export type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
+/** An encryption key (encryption as a service): its versions, never its material. */
+/** A transit key version's public signing key (Ed25519): raw base64, PEM (SPKI) and a JWK. */
+export type TransitPublicKey = { version: number; public_key: string; pem: string; jwk: { kty: "OKP"; crv: "Ed25519"; x: string; kid: string; alg: "EdDSA"; use: "sig" } };
+export type TransitKey = { id: string; name: string; latest_version: number; min_decrypt_version: number; versions: { version: number; created_at: number; imported?: boolean; vault_version?: number }[]; created_at: number; created_by: string };
+/** A project's certificate authority: what it signs for, and its certificate (PEM) for clients to trust. */
+/** A certificate a CA signed for a CSR (`POST …/cas/{id}/sign`): the device keeps its key. */
+/** A certificate a CA signed and that hasn't expired (`GET …/cas/{id}/certificates`). */
+export type CaCertificate = { serial: string; names: string[]; source: "csr" | "link"; not_after: number; issued_at: number; issued_by: string; revoked_at?: number };
+export type SignedCertificate = { certificate: string; ca: string; serial: string; names: string[]; not_after: number };
+export type Ca = { id: string; name: string; certificate: string; domains: string[]; allow_ip: boolean; max_days: number; created_at: number; created_by: string };
+/** A project's SSH CA: the principals it signs for, and its public key for servers' TrustedUserCAKeys. */
+export type SshCa = { id: string; name: string; public_key: string; principals: string[]; max_hours: number; host_domains?: string[]; max_host_days: number; known_hosts?: string; created_at: number; created_by: string };
+/** A person's own key certified by an SSH CA (`POST …/ssh-cas/{id}/sign-user`). */
+export type UserCertificate = { certificate: string; serial: string; principals: string[]; valid_before: number };
+/** A server's host key signed by an SSH CA (`POST …/ssh-cas/{id}/sign-host`). */
+export type HostCertificate = { certificate: string; known_hosts: string; serial: string; hosts: string[]; valid_before: number };
+/** A GCP service account or an Azure app that trusts roll's token for this project (dynamic `access_token` links). */
+export type CloudAccount =
+  | { id: string; name: string; cloud: "gcp"; audience: string; service_account: string; created_at: number; created_by: string }
+  | { id: string; name: string; cloud: "azure"; tenant: string; client_id: string; scope: string; created_at: number; created_by: string };
+export type NewCloudAccount = { name: string } & ({ cloud: "gcp"; audience: string; service_account: string } | { cloud: "azure"; tenant: string; client_id: string; scope?: string });
+/** A Postgres, MySQL, Redis or MongoDB server outside roll: two login roles that take turns (managed), a group dynamic logins join, or both; the admin URL stays sealed. */
+export type OutsideDatabase = { id: string; name: string; host: string; roles: string[]; group?: string; ca?: string; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 

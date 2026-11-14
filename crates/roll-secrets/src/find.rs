@@ -105,6 +105,8 @@ impl Secrets {
         for (key, e) in &local {
             match have.get(*key) {
                 None => d.added.push(key.to_string()),
+                // Never a test of a guess against a sensitive value.
+                Some(x) if !caller.sees(project, slug, &path, &x.row.tags) => {}
                 Some(x) if x.row.link.is_some() => d.linked.push(key.to_string()),
                 Some(x) if x.row.refs.as_ref().is_some_and(|r| !r.is_empty()) => d.references.push(key.to_string()),
                 Some(x) if dek.fingerprint(e.value.expose()) == x.row.fp => d.same.push(key.to_string()),

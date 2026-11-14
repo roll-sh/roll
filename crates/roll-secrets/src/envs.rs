@@ -355,7 +355,7 @@ impl Secrets {
                 crate::Op::Set { key, .. } | crate::Op::Delete { key, .. } => key.clone(),
             }).collect();
             let own = self.secrets(project, slug, &path, caller)?;
-            ops.extend(own.into_iter().filter(|s| s.source == crate::read::Source::Own && s.kind == crate::SecretType::Shared && s.link.is_none() && !named.contains(&s.key)).map(|s| crate::Op::Delete { key: s.key, kind: None, path: None }));
+            ops.extend(own.into_iter().filter(|s| s.source == crate::read::Source::Own && s.kind == crate::SecretType::Shared && s.link.is_none() && !named.contains(&s.key)).map(|s| crate::Op::Delete { key: s.key, kind: None, path: None, if_version: None }));
         }
         let change = if ops.is_empty() { None } else { self.batch(project, slug, crate::Batch { path: Some(path), message: Some("ensured".into()), ops, if_seq: None }, caller)?.change };
         let environment = self.environment(project, slug, caller)?;
@@ -679,6 +679,10 @@ impl Secrets {
             if env.protected {
                 return Err(Error::Conflict("approval_required", format!("{slug} is protected: deleting a folder needs a change request")));
             }
+            // A folder with a change policy, or one holding one, goes only through change requests.
+            if let Some(p) = crate::folder_policy::all(c, &env.id)?.into_iter().find(|p| names::under(&p.path, &path) || names::under(&path, &p.path)) {
+                return Err(Error::Conflict("approval_required", format!("changes to {} in {slug} need approval: delete its keys through a change request", p.path)));
+            }
             let under = |p: &str| names::under(p, &path);
             let rows = c.query("SELECT path, key, owner FROM secrets WHERE env_id = ?", [&env.id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
             let items: Vec<Item> =
@@ -732,13 +736,15 @@ impl Secrets {
         }
         self.project(project)?;
         let now = self.db.now_ms()?;
-        // On a protected environment, imports change what it resolves to without a change: an
-        // admin's decision, like its policy.
-        if self.db.read(|c| by_slug(c, project, slug))?.protected {
-            caller.need(Action::Admin, &Scope::at(project, slug, &path))?;
-        }
+        // On a protected environment, or in a folder with a change policy, imports change what it
+        // resolves to without a change: an admin's decision, like its policy. Checked in the write,
+        // so a policy added meanwhile counts.
+        let admin = caller.allows(Action::Admin, &Scope::at(project, slug, &path));
         self.db.write(|c| {
             let env = by_slug(c, project, slug)?;
+            if !admin && (env.protected || !crate::folder_policy::covering(c, &env.id, &[path.as_str()])?.is_empty()) {
+                return Err(Error::Forbidden(format!("imports into {slug}:{path} change what it resolves to without approval: an admin's to set")));
+            }
             c.execute("DELETE FROM imports WHERE env_id = ? AND path = ?", [&env.id, &path])?;
             for (n, i) in list.iter().enumerate() {
                 // Another project's environment that's missing and one that isn't shared answer
@@ -782,7 +788,7 @@ pub(crate) fn ensure_folders(c: &Conn<'_>, env_id: &str, path: &str, now: i64) -
 }
 
 fn drop_env(c: &Conn<'_>, env: &EnvRow) -> Result<()> {
-    for t in ["secrets", "versions", "requests", "leases", "folders", "imports", "exports"] {
+    for t in ["secrets", "versions", "requests", "leases", "folders", "imports", "exports", "folder_policies"] {
         c.execute(&format!("DELETE FROM {t} WHERE env_id = ?"), [&env.id])?;
     }
     c.execute("DELETE FROM imports WHERE from_env_id = ?", [&env.id])?;

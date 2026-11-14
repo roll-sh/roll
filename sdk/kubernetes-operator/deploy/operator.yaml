@@ -1,0 +1,79 @@
+# The roll secrets operator. Before applying: a workload identity in roll for this cluster's
+# issuer and the operator's service account (roll secrets identities add … ; docs/secrets.md,
+# "Kubernetes"), then set ROLL_API_URL, ROLL_IDENTITY and the token's audience below.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: roll-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: roll-secrets-operator
+  namespace: roll-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: roll-secrets-operator
+rules:
+  - apiGroups: [roll.sh]
+    resources: [rollsecrets]
+    verbs: [get, list, watch]
+  - apiGroups: [roll.sh]
+    resources: [rollsecrets/status]
+    verbs: [patch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: roll-secrets-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: roll-secrets-operator
+subjects:
+  - kind: ServiceAccount
+    name: roll-secrets-operator
+    namespace: roll-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: roll-secrets-operator
+  namespace: roll-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: roll-secrets-operator }
+  template:
+    metadata:
+      labels: { app: roll-secrets-operator }
+    spec:
+      serviceAccountName: roll-secrets-operator
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: operator
+          image: ghcr.io/roll-sh/roll-secrets-operator:latest
+          env:
+            - { name: ROLL_API_URL, value: "https://api.roll.example" }
+            - { name: ROLL_IDENTITY, value: "idn_…" }
+            - { name: ROLL_OIDC_TOKEN_FILE, value: /var/run/secrets/roll/token }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - { name: roll-token, mountPath: /var/run/secrets/roll, readOnly: true }
+      volumes:
+        # The pod's own OIDC token for roll: its audience is the API's URL, as the identity expects.
+        - name: roll-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: https://api.roll.example
+                  expirationSeconds: 3600

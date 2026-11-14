@@ -7,6 +7,14 @@ pub const SLUG_MAX: usize = 32;
 pub const ENV_NAME_MAX: usize = 48;
 pub const KEY_MAX: usize = 256;
 pub const VALUE_MAX: usize = 64 * 1024;
+
+/// The tag that makes a key sensitive (docs/secrets.md, "Sensitive keys"): its value reaches only
+/// roll's runtimes and syncs, never a person or a token, and the tag can't be taken off.
+pub const SENSITIVE: &str = "sensitive";
+
+pub(crate) fn sensitive<S: AsRef<str>>(tags: &[S]) -> bool {
+    tags.iter().any(|t| t.as_ref() == SENSITIVE)
+}
 pub const COMMENT_MAX: usize = 1000;
 pub const TAGS_MAX: usize = 16;
 pub const SEGMENT_MAX: usize = 64;

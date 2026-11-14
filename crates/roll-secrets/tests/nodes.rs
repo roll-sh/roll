@@ -7,12 +7,12 @@ use std::sync::Arc;
 
 fn node(dir: &std::path::Path, ws: Arc<roll_workspace::Workspace>) -> Arc<Secrets> {
     let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.join("secrets.db")), "secrets").unwrap();
-    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None };
+    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, clouds: None };
     Arc::new(Secrets::new(db, ws, opts).unwrap())
 }
 
 fn set(key: &str, value: &str) -> Op {
-    Op::Set { key: key.into(), value: Some(value.into()), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None }
+    Op::Set { key: key.into(), value: Some(value.into()), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None }
 }
 
 #[test]

@@ -17,6 +17,9 @@ mod search;
 mod storage;
 mod redis;
 mod seal;
+mod mask;
+mod secret_refs;
+mod fallback;
 mod secrets;
 mod apps;
 
@@ -111,6 +114,14 @@ enum Cmd {
     /// Run a command with an environment's secrets in its environment, without writing files:
     /// `roll run -p shop -e production -- npm start`.
     Run(secrets::Run),
+    /// Print a completion script for your shell: `roll completions zsh > "${fpath[1]}/_roll"`,
+    /// `roll completions bash > ~/.local/share/bash-completion/completions/roll`,
+    /// `roll completions fish > ~/.config/fish/completions/roll.fish`.
+    Completions { shell: clap_complete::Shell },
+    /// SSH with an environment's short-lived certificate (an SSH CA's `ssh` link): the key and
+    /// certificate go to a private temporary directory for the session, then are deleted:
+    /// `roll ssh -e production -- deploy@db1.example.com`.
+    Ssh(secrets::Ssh),
     /// Preview environments: every service and a branch of every data resource of a project,
     /// per change or pull request.
     #[command(subcommand, alias = "previews")]
@@ -223,12 +234,30 @@ enum Db {
     Sql { endpoint: String, sql: String },
 }
 
+/// An answer that wasn't a success: its message, and its status for whoever needs to tell a
+/// refusal from a failing server (`roll run --fallback`).
+#[derive(Debug)]
+pub(crate) struct ApiStatus {
+    pub status: reqwest::StatusCode,
+    pub message: String,
+}
+
+impl std::fmt::Display for ApiStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ApiStatus {}
+
 struct Api {
     base: String,
     http: reqwest::Client,
     key: Option<String>,
     /// Sent with every request (`roll storage` sends the account it acts in).
     headers: Vec<(String, String)>,
+    /// A workload identity's login, renewed before it ends (then `key` is only its first token).
+    login: Option<std::sync::Arc<secrets::Relogin>>,
 }
 
 impl Api {
@@ -236,7 +265,7 @@ impl Api {
     /// status is a success.
     async fn open_stream(&self, path: &str) -> anyhow::Result<reqwest::Response> {
         let mut req = self.http.get(format!("{}{path}", self.base));
-        if let Some(k) = &self.key {
+        if let Some(k) = &self.bearer().await? {
             req = req.bearer_auth(k);
         }
         for (k, v) in &self.headers {
@@ -256,34 +285,61 @@ impl Api {
     }
 
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
+        self.answer(method, path, body).await?.map_err(|(status, message)| anyhow::Error::new(ApiStatus { status, message }))
+    }
+
+    /// What `call` answers, telling no answer at all (the outer error: rolld unreachable) from an
+    /// answer that wasn't a success (its status and message).
+    async fn answer(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> anyhow::Result<Result<Value, (reqwest::StatusCode, String)>> {
+        let (mut status, mut text, used) = self.send(method.clone(), path, body.as_ref()).await?;
+        // A workload identity's login the server no longer takes (its clock ran ahead of ours, or
+        // it was revoked): log in again, once.
+        if status == reqwest::StatusCode::UNAUTHORIZED
+            && let Some(l) = &self.login
+        {
+            l.refused(used.as_deref().unwrap_or_default()).await;
+            (status, text, _) = self.send(method, path, body.as_ref()).await?;
+        }
+        if !status.is_success() {
+            // Errors are `{"error": ...}`, but whatever answered may not be the roll API at all.
+            let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            // Batch endpoints report per-record errors.
+            let per_record = value["offsets"].as_array().and_then(|o| o.iter().find_map(|r| r["error"].as_str()));
+            let message = match value["error"].as_str().or(per_record) {
+                Some(e) => e.to_string(),
+                None if text.trim().is_empty() => status.to_string(),
+                None => format!("{status}: {}", text.trim()),
+            };
+            return Ok(Err((status, message)));
+        }
+        if text.is_empty() {
+            return Ok(Ok(Value::Null));
+        }
+        Ok(Ok(serde_json::from_str(&text).with_context(|| format!("{} didn't answer with JSON: {}", self.base, text.chars().take(200).collect::<String>()))?))
+    }
+    /// One request; its status, its body, and the token it carried.
+    async fn send(&self, method: reqwest::Method, path: &str, body: Option<&Value>) -> anyhow::Result<(reqwest::StatusCode, String, Option<String>)> {
         let mut req = self.http.request(method, format!("{}{path}", self.base));
-        if let Some(k) = &self.key {
+        let used = self.bearer().await?;
+        if let Some(k) = &used {
             req = req.bearer_auth(k);
         }
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
         if let Some(b) = body {
-            req = req.json(&b);
+            req = req.json(b);
         }
         let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
         let status = res.status();
-        let text = res.text().await?;
-        if !status.is_success() {
-            // Errors are `{"error": ...}`, but whatever answered may not be the roll API at all.
-            let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-            // Batch endpoints report per-record errors.
-            let per_record = value["offsets"].as_array().and_then(|o| o.iter().find_map(|r| r["error"].as_str()));
-            match value["error"].as_str().or(per_record) {
-                Some(e) => bail!("{e}"),
-                None if text.trim().is_empty() => bail!("{status}"),
-                None => bail!("{status}: {}", text.trim()),
-            }
+        Ok((status, res.text().await?, used))
+    }
+    /// The token to send: a workload identity's login, logging in again when it's near its end.
+    async fn bearer(&self) -> anyhow::Result<Option<String>> {
+        match &self.login {
+            Some(l) => Ok(Some(l.token(self).await?)),
+            None => Ok(self.key.clone()),
         }
-        if text.is_empty() {
-            return Ok(Value::Null);
-        }
-        serde_json::from_str(&text).with_context(|| format!("{} didn't answer with JSON: {}", self.base, text.chars().take(200).collect::<String>()))
     }
     /// The cell's root (for `/_roll/…`), from a tasks URL that may name a tenant
     /// (`…/t/<tenant>/v1/tasks`).
@@ -294,7 +350,7 @@ impl Api {
         {
             base = root;
         }
-        Api { base: base.to_string(), http: self.http.clone(), key: self.key.clone(), headers: self.headers.clone() }
+        Api { base: base.to_string(), http: self.http.clone(), key: self.key.clone(), headers: self.headers.clone(), login: self.login.clone() }
     }
     async fn get(&self, p: &str) -> anyhow::Result<Value> {
         self.call(reqwest::Method::GET, p, None).await
@@ -308,12 +364,15 @@ impl Api {
 /// else a workload identity's login (`ROLL_IDENTITY`), else the operator token.
 async fn secrets_api(api: &Api) -> anyhow::Result<Api> {
     let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
-    let token = match (env("ROLL_TOKEN"), env("ROLL_IDENTITY")) {
-        (Some(t), _) => Some(t),
-        (None, Some(identity)) => Some(secrets::identity_login(api, identity.trim()).await?),
-        (None, None) => api.key.clone(),
+    let (token, login) = match (env("ROLL_TOKEN"), env("ROLL_IDENTITY")) {
+        (Some(t), _) => (Some(t), None),
+        (None, Some(identity)) => {
+            let l = secrets::Relogin::new(api, identity.trim()).await?;
+            (Some(l.first.clone()), Some(std::sync::Arc::new(l)))
+        }
+        (None, None) => (api.key.clone(), None),
     };
-    Ok(Api { base: api.base.clone(), http: api.http.clone(), key: token, headers: api.headers.clone() })
+    Ok(Api { base: api.base.clone(), http: api.http.clone(), key: token, headers: api.headers.clone(), login })
 }
 
 fn s(v: &Value) -> String {
@@ -437,7 +496,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::from_arg_matches(&matches)?;
     // A scoped token, when set, is what everything uses: the narrower credential wins.
     let admin = cli.roll_token.filter(|t| !t.trim().is_empty()).or(cli.admin_token.filter(|t| !t.trim().is_empty()));
-    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: admin.clone().or(cli.api_key), headers: Vec::new() };
+    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: admin.clone().or(cli.api_key), headers: Vec::new(), login: None };
     let cmd = match cli.cmd {
         Cmd::Db(cmd) => cmd,
         Cmd::Agent(cmd) => return agent::run(&api.base, cli.json, cmd).await,
@@ -445,7 +504,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Code(cmd) => {
             // `--token` on the command line wins; otherwise ROLL_CODE_TOKEN (not the tasks token).
             let token = if token_flag { cli.token } else { std::env::var("ROLL_CODE_TOKEN").ok() };
-            let code_api = Api { base: api.base.clone(), http: api.http.clone(), key: token.filter(|t| !t.is_empty()).or(admin), headers: api.headers.clone() };
+            let code_api = Api { base: api.base.clone(), http: api.http.clone(), key: token.filter(|t| !t.is_empty()).or(admin), headers: api.headers.clone(), login: None };
             return code::run(&code_api, cli.json, cmd).await;
         }
         Cmd::Redis(cmd) => return redis::run(&api, cli.json, cmd).await,
@@ -462,14 +521,39 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Tasks(cmd) => {
             let base = cli.tasks_url.map(|u| u.trim_end_matches('/').to_string()).unwrap_or(format!("{}/v1/tasks", api.base));
-            let tasks_api = Api { base, http: api.http.clone(), key: cli.token.filter(|t| !t.is_empty()).or(admin), headers: Vec::new() };
+            let tasks_api = Api { base, http: api.http.clone(), key: cli.token.filter(|t| !t.is_empty()).or(admin), headers: Vec::new(), login: None };
             return tasks::run(&tasks_api, *cmd, cli.json).await;
         }
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
         Cmd::Search(cmd) => return search::run(&api, cli.json, cmd).await,
         Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
         Cmd::Secrets { at, cmd } => return secrets::run(&secrets_api(&api).await?, cli.json, at, cmd).await,
-        Cmd::Run(r) => return secrets::run_command(&secrets_api(&api).await?, r).await,
+        Cmd::Run(r) => {
+            if r.fallback.is_none() {
+                return secrets::run_command(&secrets_api(&api).await?, r).await;
+            }
+            // Through an outage: don't wait on a hung rolld, and a workload identity's login that
+            // gets no answer goes on to the fallback (whose key is ROLL_FALLBACK_KEY then).
+            let timed = Api { http: reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(5)).timeout(std::time::Duration::from_secs(30)).build()?, ..api };
+            let api = match secrets_api(&timed).await {
+                Ok(a) => a,
+                Err(e) if secrets::no_answer(&e) => {
+                    eprintln!("roll run: logging in: {e}");
+                    // A workload identity logs in at the first request rolld answers: a watch
+                    // started from the fallback reloads then, as with a token.
+                    let identity = std::env::var("ROLL_TOKEN").ok().filter(|t| !t.trim().is_empty()).is_none().then(|| std::env::var("ROLL_IDENTITY").ok()).flatten().filter(|i| !i.trim().is_empty());
+                    let login = identity.map(|i| std::sync::Arc::new(secrets::Relogin::pending(i.trim())));
+                    Api { key: None, login, ..timed }
+                }
+                Err(e) => return Err(e),
+            };
+            return secrets::run_command(&api, r).await;
+        }
+        Cmd::Ssh(a) => return secrets::ssh_command(&secrets_api(&api).await?, a).await,
+        Cmd::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "roll", &mut std::io::stdout());
+            return Ok(());
+        }
         Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
         Cmd::Token(cmd) => return access::token(&api, cli.json, cmd).await,
         Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,

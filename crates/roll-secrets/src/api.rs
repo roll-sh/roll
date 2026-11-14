@@ -22,6 +22,9 @@ use std::sync::Arc;
 type S = State<Arc<Secrets>>;
 type Q = Query<HashMap<String, String>>;
 
+/// A transit batch: 4 MiB of plaintext as base64 in JSON.
+const TRANSIT_BODY: usize = 6 << 20;
+
 pub fn router(s: Arc<Secrets>) -> Router {
     const P: &str = "/v1/secrets/projects/{project}";
     const E: &str = "/v1/secrets/projects/{project}/environments/{env}";
@@ -37,6 +40,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/environments/order"), put(order))
         .route(E, get(environment).put(ensure_environment).patch(update_environment).delete(delete_environment))
         .route(&format!("{E}/policy"), put(policy))
+        .route(&format!("{E}/folder-policies"), get(folder_policies).put(set_folder_policy).delete(delete_folder_policy))
         .route(&format!("{E}/folders"), get(folders).post(create_folder).delete(delete_folder))
         .route(&format!("{E}/imports"), get(imports).put(set_imports))
         .route(&format!("{E}/exports"), get(exports).put(set_exports))
@@ -54,6 +58,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{E}/values"), get(values))
         .route(&format!("{E}/digest"), get(digest))
         .route(&format!("{E}/insights"), get(insights))
+        .route(&format!("{E}/reach"), get(reach))
         .route(&format!("{E}/resolve"), post(resolve))
         .route(&format!("{E}/changes"), get(changes).post(batch))
         .route(&format!("{E}/changes/{{seq}}"), get(change))
@@ -75,15 +80,52 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/tokens/{{id}}"), axum::routing::delete(revoke_token))
         .route(&format!("{P}/identities"), get(identities).post(create_identity))
         .route(&format!("{P}/identities/{{id}}"), axum::routing::delete(delete_identity))
+        .route(&format!("{P}/identities/{{id}}/jwks"), axum::routing::put(set_identity_keys))
         .route("/v1/secrets/login", post(login))
+        .route("/v1/secrets/oidc/.well-known/openid-configuration", get(oidc_discovery))
+        .route("/v1/secrets/oidc/jwks", get(oidc_jwks))
         .route(&format!("{P}/audit"), get(audit))
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
         .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
         .route(&format!("{P}/leaks"), post(scan_leaks))
         .route(&format!("{P}/health"), get(project_health))
         .route("/v1/secrets/findings", get(all_health))
+        .route(&format!("{P}/rotations"), get(rotations))
+        .route(&format!("{P}/kms"), get(kms_key).put(set_kms_key).delete(unset_kms_key))
+        .route(&format!("{P}/aws-roles"), get(aws_roles).post(add_aws_role))
+        .route(&format!("{P}/aws-roles/{{id}}"), axum::routing::delete(delete_aws_role))
+        .route(&format!("{P}/aws-users"), get(aws_users).post(add_aws_user))
+        .route(&format!("{P}/aws-users/{{id}}"), axum::routing::delete(delete_aws_user))
         .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
+        .route(&format!("{P}/transit"), get(transit_keys).post(add_transit_key))
+        .route(&format!("{P}/transit/{{name}}"), axum::routing::patch(config_transit_key).delete(delete_transit_key))
+        .route(&format!("{P}/transit/{{name}}/rotate"), post(rotate_transit_key))
+        .route(&format!("{P}/transit/{{name}}/encrypt"), post(transit_encrypt).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/decrypt"), post(transit_decrypt).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/rewrap"), post(transit_rewrap).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/datakey"), post(transit_datakey))
+        .route(&format!("{P}/transit/{{name}}/sign"), post(transit_sign).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/verify"), post(transit_verify).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/hmac"), post(transit_hmac).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/hmac/verify"), post(transit_hmac_verify).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/public"), get(transit_public))
+        .route(&format!("{P}/cas"), get(cas).post(add_ca))
+        .route(&format!("{P}/cas/{{id}}"), axum::routing::delete(delete_ca))
+        .route(&format!("{P}/ssh-cas"), get(ssh_cas).post(add_ssh_ca))
+        .route(&format!("{P}/ssh-cas/{{id}}"), axum::routing::delete(delete_ssh_ca))
+        .route(&format!("{P}/ssh-cas/{{id}}/sign-host"), post(sign_host_key))
+        .route(&format!("{P}/ssh-cas/{{id}}/sign-user"), post(sign_user_key))
+        .route(&format!("{P}/cas/{{id}}/sign"), post(sign_csr))
+        .route(&format!("{P}/cas/{{id}}/certificates"), get(ca_certificates))
+        .route(&format!("{P}/cas/{{id}}/revoke"), post(revoke_certificate))
+        .route("/v1/secrets/crl/{id}", get(crl))
+        .route("/v1/secrets/ocsp/{id}", post(ocsp_post).layer(axum::extract::DefaultBodyLimit::max(crate::ocsp::REQUEST_MAX)))
+        .route("/v1/secrets/ocsp/{id}/{*request}", get(ocsp_get))
+        .route(&format!("{P}/cloud-accounts"), get(cloud_accounts).post(add_cloud_account))
+        .route(&format!("{P}/cloud-accounts/{{id}}"), axum::routing::delete(delete_cloud_account))
+        .route(&format!("{P}/outside-databases"), get(outside_databases).post(add_outside_database))
+        .route(&format!("{P}/outside-databases/{{id}}"), axum::routing::delete(delete_outside_database))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
@@ -107,6 +149,7 @@ impl IntoResponse for Error {
             Error::Conflict(code, _) => (StatusCode::CONFLICT, Some(*code)),
             Error::TooMany(_) => (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")),
             Error::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, Some("no_key")),
+            Error::KeyDenied(_) => (StatusCode::LOCKED, Some("kms_denied")),
             Error::Link(_) => (StatusCode::BAD_GATEWAY, Some("link")),
             Error::Db(_) | Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
         };
@@ -288,6 +331,20 @@ async fn delete_environment(State(s): S, Who(c): Who, Path((project, env)): Path
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn folder_policies(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.folder_policies(&project, &env, &c)).await?))
+}
+
+async fn set_folder_policy(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q, b: Bytes) -> crate::Result<Response> {
+    let p: crate::folder_policy::SetFolderPolicy = if b.is_empty() { crate::folder_policy::SetFolderPolicy { approvals: None, approvers: None } } else { body(&b)? };
+    Ok(ok(blocking(s, move |s| s.set_folder_policy(&project, &env, &path_of(&q), p, &c)).await?))
+}
+
+async fn delete_folder_policy(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_folder_policy(&project, &env, &path_of(&q), &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn policy(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
     let p: Policy = body(&b)?;
     Ok(ok(blocking(s, move |s| s.set_policy(&project, &env, p, &c)).await?))
@@ -396,6 +453,9 @@ struct SetBody {
     message: Option<String>,
     #[serde(default, deserialize_with = "some")]
     expires_at: Option<Option<i64>>,
+    /// Check-and-set: only if the key is still at this version (0: only if it doesn't exist).
+    #[serde(default)]
+    if_version: Option<i64>,
 }
 
 fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
@@ -403,14 +463,15 @@ fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<O
 }
 
 async fn set_secret(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q, b: Bytes) -> crate::Result<Response> {
-    let SetBody { value, comment, tags, kind, link, message, expires_at } = body(&b)?;
-    let op = Op::Set { key: key.clone(), value, comment, tags, kind, link, path: None, expires_at };
+    let SetBody { value, comment, tags, kind, link, message, expires_at, if_version } = body(&b)?;
+    let op = Op::Set { key: key.clone(), value, comment, tags, kind, link, path: None, expires_at, if_version };
     Ok(ok(blocking(s, move |s| s.set_secret(&project, &env, &path_of(&q), &key, op, message, &c)).await?))
 }
 
 async fn delete_secret(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q) -> crate::Result<Response> {
     let kind = kind_of(&q)?;
-    Ok(ok(blocking(s, move |s| s.delete_secret(&project, &env, &path_of(&q), &key, kind, &c)).await?))
+    let if_version = q.get("if_version").map(|v| v.parse::<i64>().map_err(|_| crate::Error::BadRequest("if_version is a number".into()))).transpose()?;
+    Ok(ok(blocking(s, move |s| s.delete_secret(&project, &env, &path_of(&q), &key, kind, if_version, &c)).await?))
 }
 
 async fn reveal(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q) -> crate::Result<Response> {
@@ -448,25 +509,58 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
     // As it was after a change, or at a time: what was stored then.
     let num = |k: &str| q.get(k).map(|v| v.parse::<i64>().map_err(|_| Error::BadRequest(format!("{k} is a number")))).transpose();
     let (seq, at) = (num("seq")?, num("at")?);
-    let (v, as_of) = if seq.is_some() || at.is_some() {
+    // A reader that mustn't take a partial answer (External Secrets Operator writes what it gets):
+    // any problem fails the read, so it keeps what it had.
+    let strict = flag(&q, "strict", false);
+    let (v, as_of, digest) = if seq.is_some() || at.is_some() {
         let (n, v) = blocking(s, move |s| s.values_at(&project, &env, &path_of(&q), seq, at, &c)).await?;
-        (v, Some(n))
+        (v, Some(n), None)
     } else {
-        (blocking(s, move |s| s.values(&project, &env, &path_of(&q), resolve, None, &c)).await?, None)
+        // With `digest=1` (a watch): the folder's digest (`…/digest`), taken just before the read,
+        // so a write landing after it is a change. Asked for, since it costs about a read.
+        let want = flag(&q, "digest", false);
+        let dynamic = flag(&q, "dynamic", true);
+        blocking(s, move |s| {
+            let path = path_of(&q);
+            let digest = if want { s.digest(&project, &env, &path, &c).ok() } else { None };
+            let v = s.values_for(&project, &env, &path, resolve, None, dynamic, &c)?;
+            if strict && !v.problems.is_empty() {
+                // Nothing is answered, so nothing this read issued may outlive it.
+                for lease in &v.leases {
+                    s.revoke_leases_where("id = ?", lease);
+                }
+            }
+            Ok::<_, Error>((v, None, digest))
+        })
+        .await?
     };
+    if strict && !v.problems.is_empty() {
+        let keys: Vec<&str> = v.problems.iter().map(|p| p.key.as_str()).collect();
+        return Err(Error::Conflict("unresolved", format!("{} didn't resolve: {} (strict: nothing is answered)", keys.len(), keys.join(", "))));
+    }
     let r = match format {
         None if as_of.is_some() => {
             let mut j = serde_json::to_value(&v).expect("JSON");
             j["seq"] = json!(as_of);
             ok(j)
         }
-        None => ok(&v),
+        None => {
+            let mut j = serde_json::to_value(&v).expect("JSON");
+            if let Some(d) = digest {
+                j["digest"] = json!(d);
+            }
+            ok(j)
+        }
         Some(f) => {
             let text = dotenv::format(&v.values, f, &manifest).map_err(Error::BadRequest)?;
             ([(header::CONTENT_TYPE, f.content_type())], text.to_string()).into_response()
         }
     };
     Ok(secret_response(r))
+}
+
+async fn reach(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.reach(&project, &env, &path_of(&q), q.get("key").map(String::as_str), &c)).await?))
 }
 
 async fn insights(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
@@ -603,7 +697,7 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
         let own: Vec<&crate::Secret> = mine.iter().filter(|x| x.kind == crate::SecretType::Shared).collect();
         let in_file: std::collections::HashSet<String> = entries.iter().map(|e| e.key.clone()).collect();
         let removed: Vec<Op> = if i.replace {
-            own.iter().filter(|x| x.link.is_none() && !in_file.contains(&x.key)).map(|x| Op::Delete { key: x.key.clone(), kind: None, path: None }).collect()
+            own.iter().filter(|x| x.link.is_none() && !in_file.contains(&x.key)).map(|x| Op::Delete { key: x.key.clone(), kind: None, path: None, if_version: None }).collect()
         } else {
             vec![]
         };
@@ -627,6 +721,7 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
                 link: None,
                 path: None,
                 expires_at: None,
+                if_version: None,
             })
             .chain(removed)
             .collect();
@@ -723,6 +818,16 @@ async fn revoke_token(State(s): S, Who(c): Who, Path((project, id)): Path<(Strin
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(serde::Deserialize)]
+struct KeysBody {
+    jwks: String,
+}
+
+async fn set_identity_keys(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let k: KeysBody = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.set_identity_keys(&project, &id, &k.jwks, &c)).await?))
+}
+
 async fn identities(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.identities(&project, &c)).await?))
 }
@@ -746,6 +851,29 @@ struct LoginBody {
 }
 
 /// A workload's OIDC token for a short-lived scoped token (public: the token is the credential).
+/// roll's OIDC issuer (public: clouds fetch it anonymously).
+async fn oidc_discovery(State(s): S) -> crate::Result<Response> {
+    Ok(ok(blocking(s, |s| s.oidc_discovery()).await?))
+}
+
+async fn oidc_jwks(State(s): S) -> crate::Result<Response> {
+    Ok(ok(blocking(s, |s| s.oidc_jwks()).await?))
+}
+
+async fn cloud_accounts(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.cloud_accounts(&project, &c)).await?))
+}
+
+async fn add_cloud_account(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::clouds::NewCloudAccount = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_cloud_account(&project, n, &c)).await?))
+}
+
+async fn delete_cloud_account(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_cloud_account(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn login(State(s): S, parts: Parts, b: Bytes) -> crate::Result<Response> {
     let l: LoginBody = body(&b)?;
     let ip = s.client_ip(&parts);
@@ -836,6 +964,59 @@ async fn project_health(State(s): S, Who(c): Who, Path(project): Path<String>, Q
     Ok(ok(blocking(s, move |s| s.project_health(&project, &c, code)).await?))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KmsBody {
+    key: String,
+}
+
+/// The customer-managed key wrapping the project's data key (`{key: null}` when none).
+async fn kms_key(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(json!({ "key": blocking(s, move |s| s.kms_key(&project, &c)).await? })))
+}
+
+async fn set_kms_key(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let k: KmsBody = body(&b)?;
+    Ok(ok(json!({ "key": blocking(s, move |s| s.set_kms_key(&project, Some(k.key), &c)).await? })))
+}
+
+async fn unset_kms_key(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    blocking(s, move |s| s.set_kms_key(&project, None, &c)).await?;
+    Ok(ok(json!({ "key": null })))
+}
+
+async fn aws_roles(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.aws_roles(&project, &c)).await?))
+}
+
+async fn add_aws_role(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::aws::NewAwsRole = body(&b)?;
+    Ok(created(json!(blocking(s, move |s| s.add_aws_role(&project, n, &c)).await?)))
+}
+
+async fn aws_users(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.aws_users(&project, &c)).await?))
+}
+
+async fn add_aws_user(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::iam::NewAwsUser = body(&b)?;
+    Ok(created(json!(blocking(s, move |s| s.add_aws_user(&project, n, &c)).await?)))
+}
+
+async fn delete_aws_user(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_aws_user(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_aws_role(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_aws_role(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn rotations(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.rotations(&project, &c)).await?))
+}
+
 async fn rotators(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.rotators(&project, &c)).await?))
 }
@@ -851,6 +1032,247 @@ async fn add_rotator(State(s): S, Who(c): Who, Path(project): Path<String>, b: B
 async fn delete_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_rotator(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn outside_databases(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.outside_databases(&project, &c)).await?))
+}
+
+async fn add_outside_database(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::outside::NewOutsideDatabase = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_outside_database(&project, n, &c)).await?))
+}
+
+async fn delete_outside_database(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_outside_database(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn cas(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.cas(&project, &c)).await?))
+}
+
+async fn add_ca(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::pki::NewCa = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_ca(&project, n, &c)).await?))
+}
+
+async fn delete_ca(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_ca(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn ssh_cas(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.ssh_cas(&project, &c)).await?))
+}
+
+async fn add_ssh_ca(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::ssh::NewSshCa = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_ssh_ca(&project, n, &c)).await?))
+}
+
+async fn sign_user_key(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let req: crate::ssh::UserKey = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.sign_user_key(&project, &id, req, &c)).await?))
+}
+
+async fn sign_host_key(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let req: crate::ssh::HostKey = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.sign_host_key(&project, &id, req, &c)).await?))
+}
+
+async fn delete_ssh_ca(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_ssh_ca(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn sign_csr(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let req: crate::pki::Csr = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.sign_csr(&project, &id, req, &c)).await?))
+}
+
+async fn ca_certificates(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.ca_certificates(&project, &id, &c)).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Revoke {
+    serial: String,
+}
+
+async fn revoke_certificate(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<StatusCode> {
+    let r: Revoke = body(&b)?;
+    blocking(s, move |s| s.revoke_certificate(&project, &id, &r.serial, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// A CA's CRL, without a token: DER (`application/pkix-crl`), or PEM with `?format=pem`.
+async fn crl(State(s): S, Path(id): Path<String>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>) -> crate::Result<Response> {
+    use base64::Engine as _;
+    let der = blocking(s, move |s| s.crl(&id)).await?;
+    let pem = q.get("format").is_some_and(|f| f == "pem");
+    let (kind, body) = if pem {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der.as_slice());
+        let lines: Vec<&str> = b64.as_bytes().chunks(64).map(|c| std::str::from_utf8(c).expect("base64")).collect();
+        ("application/x-pem-file", format!("-----BEGIN X509 CRL-----\n{}\n-----END X509 CRL-----\n", lines.join("\n")).into_bytes())
+    } else {
+        ("application/pkix-crl", der.to_vec())
+    };
+    Ok(([(axum::http::header::CONTENT_TYPE, kind), (axum::http::header::CACHE_CONTROL, "public, max-age=300")], body).into_response())
+}
+
+/// OCSP over POST: the request's DER as the body (`application/ocsp-request`). No token.
+async fn ocsp_post(State(s): S, Path(id): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let (der, _) = blocking(s, move |s| s.ocsp(&id, &b)).await?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/ocsp-response")], der.to_vec()).into_response())
+}
+
+/// OCSP over GET: the request's DER in base64, URL-encoded, as the last path segment (RFC 6960
+/// A.1), so caches and CDNs can keep answers.
+async fn ocsp_get(State(s): S, Path((id, request)): Path<(String, String)>) -> crate::Result<Response> {
+    use base64::Engine as _;
+    // The path segment is percent-decoded already.
+    let der = base64::engine::general_purpose::STANDARD.decode(request.trim()).unwrap_or_default();
+    let (answer, successful) = blocking(s, move |s| s.ocsp(&id, &der)).await?;
+    // Only a signed answer may be kept by a cache: never a tryLater or a malformedRequest.
+    let cache = if successful { "public, max-age=60" } else { "no-store" };
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/ocsp-response"), (axum::http::header::CACHE_CONTROL, cache)], answer.to_vec()).into_response())
+}
+
+async fn transit_keys(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.transit_keys(&project, &c)).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewTransitKey {
+    name: String,
+    /// A key brought from outside (base64, 32 bytes).
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    vault_version: Option<u32>,
+}
+
+async fn add_transit_key(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: NewTransitKey = body(&b)?;
+    let brought = bring(n.key, n.vault_version)?;
+    Ok(created(blocking(s, move |s| s.add_transit_key(&project, &n.name, brought, &c)).await?))
+}
+
+fn bring(key: Option<String>, vault_version: Option<u32>) -> crate::Result<Option<crate::transit::Brought>> {
+    match (key, vault_version) {
+        (Some(key), vault_version) => Ok(Some(crate::transit::BringKey { key, vault_version }.check()?)),
+        (None, Some(_)) => Err(crate::Error::BadRequest("vault_version goes with the key it names".into())),
+        (None, None) => Ok(None),
+    }
+}
+
+async fn rotate_transit_key(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let brought = if b.is_empty() { None } else { Some(body::<crate::transit::BringKey>(&b)?.check()?) };
+    Ok(ok(blocking(s, move |s| s.rotate_transit_key(&project, &name, brought, &c)).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransitConfig {
+    min_decrypt_version: u32,
+}
+
+async fn config_transit_key(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let t: TransitConfig = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.set_min_decrypt_version(&project, &name, t.min_decrypt_version, &c)).await?))
+}
+
+#[derive(Deserialize)]
+struct Confirm {
+    #[serde(default)]
+    confirm: String,
+}
+
+async fn delete_transit_key(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, axum::extract::Query(q): axum::extract::Query<Confirm>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_transit_key(&project, &name, &q.confirm, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// One item, or `{items: […]}` for a batch: the answer has the same shape.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OneOrMany<T> {
+    Many { items: Vec<T> },
+    One(T),
+}
+
+impl<T> OneOrMany<T> {
+    fn split(self) -> (Vec<T>, bool) {
+        match self {
+            OneOrMany::Many { items } => (items, true),
+            OneOrMany::One(t) => (vec![t], false),
+        }
+    }
+}
+
+fn shaped(field: &str, out: Vec<serde_json::Value>, many: bool) -> serde_json::Value {
+    if many { json!({ "items": out.into_iter().map(|v| json!({ field: v })).collect::<Vec<_>>() }) } else { json!({ field: out.into_iter().next().unwrap_or_default() }) }
+}
+
+async fn transit_encrypt(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Plain>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_encrypt(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("ciphertext", out.into_iter().map(serde_json::Value::String).collect(), many)))
+}
+
+async fn transit_decrypt(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Cipher>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_decrypt(&project, &name, items, &c)).await?;
+    Ok(secret_response(ok(shaped("plaintext", out.iter().map(|v| serde_json::Value::String(v.expose().to_string())).collect(), many))))
+}
+
+async fn transit_rewrap(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Cipher>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_rewrap(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("ciphertext", out.into_iter().map(serde_json::Value::String).collect(), many)))
+}
+
+async fn transit_sign(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Input>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_sign(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("signature", out.into_iter().map(serde_json::Value::String).collect(), many)))
+}
+
+async fn transit_verify(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Signed>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_verify(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("valid", out.into_iter().map(serde_json::Value::Bool).collect(), many)))
+}
+
+async fn transit_hmac(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Input>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_hmac(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("hmac", out.into_iter().map(serde_json::Value::String).collect(), many)))
+}
+
+async fn transit_hmac_verify(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Signed>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_hmac_verify(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("valid", out.into_iter().map(serde_json::Value::Bool).collect(), many)))
+}
+
+async fn transit_public(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.transit_public(&project, &name, &c)).await?))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct DataKey {
+    #[serde(default)]
+    context: Option<String>,
+}
+
+async fn transit_datakey(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let d: DataKey = if b.is_empty() { DataKey::default() } else { body(&b)? };
+    Ok(secret_response(ok(blocking(s, move |s| s.transit_datakey(&project, &name, d.context, &c)).await?)))
 }
 
 async fn list_syncs(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

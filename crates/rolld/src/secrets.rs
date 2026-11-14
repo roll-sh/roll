@@ -19,7 +19,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use tower::ServiceExt;
+mod clouds;
 
+mod outside;
 mod syncs;
 
 /// The router of every product's routes (no gate), set once rolld has built it.
@@ -121,6 +123,160 @@ async fn kms_decrypt(conf: &aws_config::SdkConfig, ciphertext: &str) -> Result<V
     String::from_utf8(plain).map(Value::new).map_err(|_| "the KMS-decrypted deployment key isn't text".to_string())
 }
 
+/// Customers' own KMS keys for their projects' data keys (docs/secrets.md, "Customer-managed
+/// keys"): AWS KMS in the key's own region, with roll's credentials (the customer's key policy
+/// grants roll's role), the encryption context naming roll secrets and the project. Errors name
+/// KMS's code, never key material.
+pub struct CustomerKms {
+    conf: tokio::sync::OnceCell<aws_config::SdkConfig>,
+}
+
+impl CustomerKms {
+    pub fn new(conf: Option<aws_config::SdkConfig>) -> CustomerKms {
+        CustomerKms { conf: tokio::sync::OnceCell::new_with(conf) }
+    }
+
+    async fn client(&self, key: &str) -> Result<aws_sdk_kms::Client, String> {
+        let conf = self.conf.get_or_init(|| aws_config::load_defaults(aws_config::BehaviorVersion::latest())).await;
+        // arn:aws:kms:<region>:<account>:key/<id>: the key's own region.
+        let region = key.split(':').nth(3).filter(|r| !r.is_empty()).ok_or("the key's ARN names no region")?;
+        Ok(aws_sdk_kms::Client::from_conf(aws_sdk_kms::config::Builder::from(conf).region(aws_sdk_kms::config::Region::new(region.to_string())).build()))
+    }
+
+    // The store calls from its blocking threads (and nothing else may): wait for KMS there.
+    fn block<T>(f: impl std::future::Future<Output = T>) -> T {
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
+    }
+}
+
+fn kms_code<E: aws_sdk_kms::error::ProvideErrorMetadata>(e: &E) -> String {
+    e.code().unwrap_or("no answer").to_string()
+}
+
+impl roll_secrets::kms::ProjectKms for CustomerKms {
+    fn encrypt(&self, key: &str, project: &str, plain: &[u8]) -> Result<Vec<u8>, String> {
+        Self::block(async {
+            let out = self
+                .client(key)
+                .await?
+                .encrypt()
+                .key_id(key)
+                .plaintext(aws_sdk_kms::primitives::Blob::new(plain))
+                .encryption_context("roll", "secrets")
+                .encryption_context("project", project)
+                .send()
+                .await
+                .map_err(|e| kms_code(&e))?;
+            out.ciphertext_blob.map(|b| b.into_inner()).ok_or_else(|| "KMS answered without a ciphertext".to_string())
+        })
+    }
+
+    fn decrypt(&self, key: &str, project: &str, ciphertext: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+        Self::block(async {
+            let out = self
+                .client(key)
+                .await?
+                .decrypt()
+                .key_id(key)
+                .ciphertext_blob(aws_sdk_kms::primitives::Blob::new(ciphertext))
+                .encryption_context("roll", "secrets")
+                .encryption_context("project", project)
+                .send()
+                .await
+                .map_err(|e| kms_code(&e))?;
+            out.plaintext.map(|b| zeroize::Zeroizing::new(b.into_inner())).ok_or_else(|| "KMS answered without a plaintext".to_string())
+        })
+    }
+}
+
+/// STS for dynamic AWS credentials from roles projects register (roll-secrets' aws.rs): roll's own
+/// credentials assume the customer's role with the project's ExternalId. Errors are STS's code.
+pub struct RollSts {
+    conf: tokio::sync::OnceCell<aws_config::SdkConfig>,
+}
+
+impl RollSts {
+    pub fn new(conf: Option<aws_config::SdkConfig>) -> RollSts {
+        RollSts { conf: tokio::sync::OnceCell::new_with(conf) }
+    }
+}
+
+impl roll_secrets::aws::Sts for RollSts {
+    fn assume(&self, role_arn: &str, external_id: &str, session_name: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+        // The store calls from its blocking threads (and nothing else may): wait for STS there.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let conf = self.conf.get_or_init(|| aws_config::load_defaults(aws_config::BehaviorVersion::latest())).await;
+                let out = aws_sdk_sts::Client::new(conf)
+                    .assume_role()
+                    .role_arn(role_arn)
+                    .external_id(external_id)
+                    .role_session_name(session_name)
+                    .duration_seconds(seconds)
+                    .send()
+                    .await
+                    .map_err(|e| aws_sdk_sts::error::ProvideErrorMetadata::code(&e).unwrap_or("no answer").to_string())?;
+                let c = out.credentials.ok_or("STS answered without credentials")?;
+                Ok(roll_secrets::aws::Session {
+                    expires_at: c.expiration.to_millis().map_err(|_| "STS answered an expiry roll can't read")?,
+                    access_key_id: Value::new(c.access_key_id),
+                    secret_access_key: Value::new(c.secret_access_key),
+                    session_token: Value::new(c.session_token),
+                })
+            })
+        })
+    }
+
+    fn iam_keys(&self, role_arn: &str, external_id: &str, user: &str) -> Result<Vec<String>, String> {
+        let iam = self.iam(role_arn, external_id)?;
+        Self::wait(async move {
+            let out = iam.list_access_keys().user_name(user).send().await.map_err(|e| aws_code(&e))?;
+            Ok(out.access_key_metadata.into_iter().filter_map(|k| k.access_key_id).collect())
+        })
+    }
+
+    fn iam_create_key(&self, role_arn: &str, external_id: &str, user: &str) -> Result<(Value, Value), String> {
+        let iam = self.iam(role_arn, external_id)?;
+        Self::wait(async move {
+            let k = iam.create_access_key().user_name(user).send().await.map_err(|e| aws_code(&e))?.access_key.ok_or("IAM answered without a key")?;
+            Ok((Value::new(k.access_key_id), Value::new(k.secret_access_key)))
+        })
+    }
+
+    fn iam_delete_key(&self, role_arn: &str, external_id: &str, user: &str, key_id: &str) -> Result<(), String> {
+        let iam = self.iam(role_arn, external_id)?;
+        Self::wait(async move {
+            match iam.delete_access_key().user_name(user).access_key_id(key_id).send().await {
+                Ok(_) => Ok(()),
+                Err(e) if aws_code(&e) == "NoSuchEntity" => Ok(()),
+                Err(e) => Err(aws_code(&e)),
+            }
+        })
+    }
+}
+
+impl RollSts {
+    /// The store calls from its blocking threads (and nothing else may): wait for AWS there.
+    fn wait<T>(f: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
+    }
+
+    /// IAM as `role_arn`, assumed for a quarter of an hour with the project's ExternalId (IAM is
+    /// global: us-east-1).
+    fn iam(&self, role_arn: &str, external_id: &str) -> Result<aws_sdk_iam::Client, String> {
+        use roll_secrets::aws::Sts;
+        let s = self.assume(role_arn, external_id, "roll-iam", 900)?;
+        let conf = Self::wait(async { Ok(self.conf.get_or_init(|| aws_config::load_defaults(aws_config::BehaviorVersion::latest())).await.clone()) })?;
+        let creds = aws_sdk_iam::config::Credentials::new(s.access_key_id.expose(), s.secret_access_key.expose(), Some(s.session_token.expose().to_string()), None, "roll-secrets");
+        Ok(aws_sdk_iam::Client::from_conf(aws_sdk_iam::config::Builder::from(&conf).credentials_provider(creds).region(aws_sdk_iam::config::Region::new("us-east-1")).build()))
+    }
+}
+
+/// AWS's error code, never the request (it may hold a key).
+fn aws_code<E: aws_sdk_iam::error::ProvideErrorMetadata>(e: &E) -> String {
+    e.code().unwrap_or("no answer").to_string()
+}
+
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     #[cfg(unix)]
@@ -146,9 +302,12 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     let web_url = std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.trim().is_empty());
     // Syncs' webhooks go to private addresses only where roll code's may (local development).
     let allow_private = args.code_webhook_allow_private.unwrap_or(open);
-    let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))), grants, people: Some(Arc::new(people)) };
+    let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))), grants, people: Some(Arc::new(people)), kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))), outside: Some(Arc::new(outside::Guarded { allow_private })), clouds: Some(roll_secrets::clouds::Clouds { issuer: issuer_url(args), tokens: Arc::new(clouds::RollClouds::new()) }),
+    };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
+    // Where clients reach rolld: a CA's certificates name its CRL there.
+    secrets.set_public_api(args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())));
     // A deleted project's secrets go with it.
     let s = secrets.clone();
     workspace.on_delete(Box::new(move |id| {
@@ -165,6 +324,12 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     sweeper(secrets.clone(), "local", Secrets::sweep_local);
     sweeper(secrets.clone(), "outbound", Secrets::sweep_outbound);
     Ok(secrets)
+}
+
+/// roll's OIDC issuer for GCP and Azure (roll-secrets' issuer.rs): where clouds reach rolld.
+fn issuer_url(args: &crate::Args) -> String {
+    let api = args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port()));
+    format!("{}/v1/secrets/oidc", api.trim_end_matches('/'))
 }
 
 fn sweeper(s: Arc<Secrets>, what: &'static str, pass: fn(&Secrets) -> roll_secrets::Result<roll_secrets::Swept>) {
@@ -192,7 +357,7 @@ fn links(api: Api) -> Links {
     l.register(Arc::new(Stream(api.clone())));
     l.register(Arc::new(Bucket(api.clone())));
     l.register(Arc::new(Nosql(api.clone())));
-    l.register(Arc::new(Search(api)));
+    l.register(Arc::new(Search(api, Default::default())));
     l
 }
 
@@ -524,24 +689,72 @@ impl LinkProvider for Nosql {
     }
 }
 
-/// Search clusters (roll search): where clients reach one (live), and API keys of their own
-/// (managed or dynamic) from `POST /v1/search/clusters/{id}/keys`; never the cluster's own
-/// password, which rotating would take from everyone else.
-struct Search(Api);
+/// Search clusters (roll search): where clients reach one (live), and credentials of their own
+/// (managed or dynamic) from `POST /v1/search/clusters/{id}/keys`: an API key on an Elasticsearch
+/// cluster, an internal user (`user`, `password`) on an OpenSearch one, which has no API keys.
+/// Never the cluster's own password, which rotating would take from everyone else.
+/// The product's API, and clusters' flavors as last read (`(when, flavor)`), so naming a
+/// cluster's fields for one request asks roll search once.
+struct Search(Api, std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>);
+
+const SEARCH_FIELDS: &[Field] = &[
+    live("url", "URL", false, "ELASTICSEARCH_URL"),
+    live("host", "Host", false, "ELASTICSEARCH_HOST"),
+    live("port", "Port", false, "ELASTICSEARCH_PORT"),
+    live("username", "Cluster name", false, "ELASTICSEARCH_USERNAME"),
+    issued("api_key", "API key (Authorization: ApiKey …)", true, "ELASTICSEARCH_API_KEY", "key"),
+    // OpenSearch's: a user of its own (`<user>@<cluster>`, which the node routes).
+    issued("user", "User (OpenSearch)", false, "OPENSEARCH_USERNAME", "key"),
+    issued("password", "Password (OpenSearch)", true, "OPENSEARCH_PASSWORD", "key"),
+];
+
+/// The same fields as an OpenSearch cluster's clients name them.
+const OPENSEARCH_FIELDS: &[Field] = &[
+    live("url", "URL", false, "OPENSEARCH_URL"),
+    live("host", "Host", false, "OPENSEARCH_HOST"),
+    live("port", "Port", false, "OPENSEARCH_PORT"),
+    live("username", "Cluster name", false, "OPENSEARCH_CLUSTER"),
+    issued("api_key", "API key (Elasticsearch only)", true, "ELASTICSEARCH_API_KEY", "key"),
+    issued("user", "User", false, "OPENSEARCH_USERNAME", "key"),
+    issued("password", "Password", true, "OPENSEARCH_PASSWORD", "key"),
+];
+
+impl Search {
+    /// The cluster's flavor (`elasticsearch`, `opensearch`), when roll search says; kept 30 s.
+    fn flavor(&self, r#ref: &str) -> Option<String> {
+        if let Some((at, f)) = self.1.lock().expect("flavors").get(r#ref)
+            && at.elapsed() < std::time::Duration::from_secs(30)
+        {
+            return Some(f.clone());
+        }
+        let f = self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(r#ref)), None).ok()?["flavor"].as_str().map(String::from)?;
+        let mut m = self.1.lock().expect("flavors");
+        if m.len() > 1_000 {
+            m.retain(|_, (at, _)| at.elapsed() < std::time::Duration::from_secs(30));
+        }
+        m.insert(r#ref.to_string(), (std::time::Instant::now(), f.clone()));
+        Some(f)
+    }
+}
 
 impl LinkProvider for Search {
     fn kind(&self) -> &str {
         "search"
     }
     fn fields(&self) -> &[Field] {
-        const F: &[Field] = &[
-            live("url", "URL", false, "ELASTICSEARCH_URL"),
-            live("host", "Host", false, "ELASTICSEARCH_HOST"),
-            live("port", "Port", false, "ELASTICSEARCH_PORT"),
-            live("username", "Cluster name", false, "ELASTICSEARCH_USERNAME"),
-            issued("api_key", "API key (Authorization: ApiKey …)", true, "ELASTICSEARCH_API_KEY", "key"),
-        ];
-        F
+        SEARCH_FIELDS
+    }
+    /// An OpenSearch cluster's fields are named as its clients read them (`OPENSEARCH_URL`).
+    fn fields_for(&self, r#ref: &str) -> Vec<Field> {
+        if self.flavor(r#ref).as_deref() == Some("opensearch") { OPENSEARCH_FIELDS.to_vec() } else { SEARCH_FIELDS.to_vec() }
+    }
+    fn suggested_for(&self, r#ref: &str) -> Vec<(&'static str, Mode)> {
+        match self.flavor(r#ref).as_deref() {
+            Some("opensearch") => vec![("url", Mode::Live), ("user", Mode::Managed), ("password", Mode::Managed)],
+            Some(_) => self.suggested().to_vec(),
+            // Not known (roll search didn't answer): where it is, never a guess at a credential.
+            None => vec![("url", Mode::Live)],
+        }
     }
     fn suggested(&self) -> &[(&'static str, Mode)] {
         &[("url", Mode::Live), ("api_key", Mode::Managed)]
@@ -566,7 +779,18 @@ impl LinkProvider for Search {
         }
         let k = self.0.call(Method::POST, &format!("/v1/search/clusters/{}/keys", enc(r#ref)), Some(body))?;
         let id = text(&k, "/id")?;
-        Ok(Issued { parts: BTreeMap::from([("api_key".to_string(), text(&k, "/api_key")?)]), handle: json!({ "id": id.expose() }) })
+        Ok(Issued { parts: search_parts(&k)?, handle: json!({ "id": id.expose() }) })
+    }
+    /// A field the cluster's flavor doesn't issue (an API key from OpenSearch, a user from
+    /// Elasticsearch) is refused when the link is written. A build of roll search that doesn't
+    /// say its flavor is taken at its word later, at the first issue.
+    fn check(&self, link: &Link) -> roll_secrets::Result<()> {
+        let c = self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(&link.r#ref)), None)?;
+        match (c["flavor"].as_str(), link.field.as_str()) {
+            (Some("opensearch"), "api_key") => Err(Error::BadRequest("an OpenSearch cluster has no API keys: link user and password (OPENSEARCH_USERNAME, OPENSEARCH_PASSWORD)".into())),
+            (Some("elasticsearch"), "user" | "password") => Err(Error::BadRequest("an Elasticsearch cluster issues API keys: link api_key (ELASTICSEARCH_API_KEY)".into())),
+            _ => Ok(()),
+        }
     }
     /// A key's expiry is set when it's made (roll search has no way to move it), so a renewal
     /// would leave a lease that outlives its key.
@@ -577,6 +801,15 @@ impl LinkProvider for Search {
         let Some(id) = h["id"].as_str() else { return Ok(()) };
         self.0.delete_gone(&format!("/v1/search/clusters/{}/keys/{}", enc(r#ref), enc(id)))
     }
+}
+
+/// What `…/keys` answered, by field: an API key (Elasticsearch), or a user and its password
+/// (OpenSearch).
+fn search_parts(k: &Json) -> roll_secrets::Result<BTreeMap<String, Value>> {
+    if k["api_key"].is_string() {
+        return Ok(BTreeMap::from([("api_key".to_string(), text(k, "/api_key")?)]));
+    }
+    Ok(BTreeMap::from([("user".to_string(), text(k, "/username")?), ("password".to_string(), text(k, "/password")?)]))
 }
 
 /// roll code's search for roll secrets' health (`code` check): whether a repository's default
@@ -635,6 +868,84 @@ impl roll_workspace::Owners for People {
     }
 }
 
+/// roll secrets for roll apps' deploys (`apps_control::integrations::SecretSource`), set once the
+/// store is open (it opens after roll apps starts).
+#[derive(Clone, Default)]
+pub struct ForApps(Arc<OnceLock<(Arc<Secrets>, Arc<roll_workspace::Workspace>)>>);
+
+impl ForApps {
+    pub fn set(&self, secrets: Arc<Secrets>, workspace: Arc<roll_workspace::Workspace>) {
+        let _ = self.0.set((secrets, workspace));
+    }
+}
+
+#[async_trait::async_trait]
+impl apps_control::integrations::SecretSource for ForApps {
+    fn name(&self) -> &'static str {
+        "roll secrets"
+    }
+
+    /// The service's project's `env`, resolved as `app:<svc>`. A project or environment roll
+    /// secrets doesn't have is no variables (a service needn't use secrets), and so is a project
+    /// that doesn't stand for the service (`Workspace::trusts`). An unresolved reference fails the
+    /// deploy, and so does a dynamic credential: it ends with its lease, and a service that scales
+    /// to zero can't renew it.
+    async fn resolve(&self, project: &str, env: &str, service: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
+        let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: deploy again in a moment"))?;
+        let (project, env, service) = (project.to_string(), env.to_string(), service.to_string());
+        tokio::task::spawn_blocking(move || {
+            let Ok(p) = ws.get(roll_workspace::Scope::All, &project) else { return Ok(Vec::new()) };
+            if !ws.trusts(&p, roll_workspace::Kind::Service, &service) {
+                tracing::warn!(%project, %service, "apps: the project doesn't stand for the service, so it gets none of the project's secrets");
+                return Ok(Vec::new());
+            }
+            let consumer = format!("app:{service}");
+            let caller = roll_secrets::Caller::consumer(&consumer);
+            match secrets.environment(&project, &env, &caller) {
+                Ok(_) => {}
+                Err(roll_secrets::Error::NotFound(_)) => return Ok(Vec::new()),
+                Err(e) => return Err(e.into()),
+            }
+            let v = secrets.values(&project, &env, "/", true, Some(&consumer), &caller)?;
+            if let Some(p) = v.problems.first() {
+                anyhow::bail!("{} of {env}'s secrets didn't resolve ({}: {})", v.problems.len(), p.key, p.problem);
+            }
+            if let Some(k) = v.dynamic.first() {
+                anyhow::bail!("{k} in {env} is a dynamic credential, which ends with its lease: link it as managed or live for a service");
+            }
+            // Linked keys are addresses as rolld sees them: apps rewrites them for the container.
+            let linked: std::collections::HashSet<String> = v.linked.into_iter().collect();
+            // Sensitive keys (secrets #46) come with the flag apps seals them by; none until then.
+            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: false, value: value.expose().to_string(), name }).collect())
+        })
+        .await?
+    }
+
+    /// apps' `…/variables/values` shows secrets' values: only to whoever may reveal `env` by roll
+    /// secrets' own rules (a token's scope, a person's own projects, protected environments).
+    /// The environment's digest (versions and keyed fingerprints, nothing decrypted): apps keeps
+    /// it with each live deployment and says when the secrets changed since. None for a project
+    /// or environment roll secrets doesn't have.
+    async fn digest(&self, project: &str, env: &str) -> anyhow::Result<Option<String>> {
+        let Some((secrets, _)) = self.0.get().cloned() else { return Ok(None) };
+        let (project, env) = (project.to_string(), env.to_string());
+        tokio::task::spawn_blocking(move || match secrets.digest(&project, &env, "/", &roll_secrets::Caller::consumer("roll:apps")) {
+            Ok(d) => Ok(Some(d)),
+            Err(roll_secrets::Error::NotFound(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        })
+        .await?
+    }
+
+    async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, project: &str, env: &str) -> bool {
+        let Some((secrets, _)) = self.0.get().cloned() else { return false };
+        match secrets.caller_of(who.operator, who.user, who.grant) {
+            Ok(caller) => caller.allows(roll_secrets::Action::Reveal, &roll_secrets::Scope::at(project, env, "/")),
+            Err(_) => false,
+        }
+    }
+}
+
 /// roll secrets for roll code's checks and sandboxes (`code_control::SecretEnv`), set once the
 /// store is open (it opens after roll code starts).
 #[derive(Clone, Default)]
@@ -654,7 +965,8 @@ impl ForCode {
         tokio::task::spawn_blocking(move || {
             // Never a protected environment: not asked for, nor through a reference, an import or
             // an ephemeral environment's base.
-            let caller = secrets.untrusted(&project, &roll_secrets::Caller::consumer(&consumer))?;
+            // Not a runtime: a sandbox is a terminal, so sensitive keys stay out (checks too).
+            let caller = secrets.untrusted(&project, &roll_secrets::Caller::consumer(&consumer).not_runtime())?;
             if !caller.allows(roll_secrets::Action::Reveal, &roll_secrets::Scope::env(&project, &slug)) {
                 anyhow::bail!("{slug} is protected: protected environments never go to checks or sandboxes");
             }
@@ -740,6 +1052,157 @@ mod tests {
     use axum::http::HeaderMap;
     use serde_json::{Value as Json, json};
     use std::sync::{Arc, Mutex};
+    /// A search link takes whichever credential the cluster's flavor issues.
+    #[test]
+    fn a_search_key_is_an_api_key_or_an_opensearch_user() {
+        let es = super::search_parts(&json!({ "id": "k1", "api_key": "abc" })).unwrap();
+        assert_eq!(es.keys().collect::<Vec<_>>(), ["api_key"]);
+        let os = super::search_parts(&json!({ "id": "roll-key-x", "username": "roll-key-x@logs", "password": "pw" })).unwrap();
+        assert_eq!((os["user"].expose(), os["password"].expose()), ("roll-key-x@logs", "pw"));
+        assert!(super::search_parts(&json!({ "id": "x" })).is_err());
+    }
+
+
+    /// A service's deploy gets its project's environment as `app:<svc>`; where roll secrets has no
+    /// such project or environment it gets nothing (a service needn't use secrets), never a failure.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_service_gets_its_projects_environment_and_nothing_where_there_is_none() {
+        use apps_control::integrations::SecretSource;
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        let project = ws.create("", "shop", "", None).unwrap().id;
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+        let opts = roll_secrets::Options {
+            keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
+            key_source: roll_secrets::KeySource::Env,
+            links: Default::default(),
+            syncs: Default::default(),
+            open: true,
+            trust_forwarded_for: false,
+            web_url: None,
+            deliver: None,
+            grants: None,
+            people: None,
+            kms: None,
+            sts: None,
+            outside: None,
+            clouds: None,
+        };
+        let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
+        let set = axum::http::Request::put(format!("/v1/secrets/projects/{project}/environments/production/secrets/DB_URL"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(json!({ "value": "postgres://db/shop" }).to_string()))
+            .unwrap();
+        assert!(roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap().status().is_success());
+        let apps = super::ForApps::default();
+        apps.set(secrets.clone(), ws);
+        let got = apps.resolve(&project, "production", "svc_web").await.unwrap();
+        assert_eq!(got.iter().map(|v| (v.name.as_str(), v.value.as_str(), v.linked)).collect::<Vec<_>>(), [("DB_URL", "postgres://db/shop", false)]);
+        assert!(apps.resolve(&project, "pr-9", "svc_web").await.unwrap().is_empty());
+        assert!(apps.resolve("prj_gone", "production", "svc_web").await.unwrap().is_empty());
+        // Seeing them in the clear in apps is roll secrets' call: the operator may, a stranger's
+        // token for another project may not.
+        let operator = apps_control::integrations::Asker { operator: true, user: None, grant: None };
+        assert!(apps.may_reveal(operator, &project, "production").await);
+        let rule = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Project { project: "prj_other".into() }]), environments: None, paths: None, actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Reveal, roll_auth::scope::Effect::Allow)]) };
+        let grant = roll_auth::Grant { ask_otherwise: false, id: "tok_x".into(), name: "x".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) };
+        assert!(!apps.may_reveal(apps_control::integrations::Asker { operator: true, user: None, grant: Some(&grant) }, &project, "production").await);
+        // The read is the service's in the audit log.
+        let audit = secrets.audit(&project, roll_secrets::AuditFilter::default(), &roll_secrets::Caller::operator()).unwrap();
+        assert!(audit.iter().any(|a| a.actor == "app:svc_web"), "{audit:?}");
+        // Apps learns a deploy's secrets changed since: the digest moves with a value, nothing
+        // decrypted, and there's none for an environment roll secrets doesn't have.
+        let before = apps.digest(&project, "production").await.unwrap().expect("a digest");
+        let set = axum::http::Request::put(format!("/v1/secrets/projects/{project}/environments/production/secrets/DB_URL"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(json!({ "value": "postgres://db/shop2" }).to_string()))
+            .unwrap();
+        assert!(roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap().status().is_success());
+        assert_ne!(apps.digest(&project, "production").await.unwrap(), Some(before));
+        assert_eq!(apps.digest(&project, "pr-9").await.unwrap(), None);
+    }
+
+    /// A customer's key wraps a project's data key: Encrypt and Decrypt name the key and carry the
+    /// project in the encryption context, in the key's own region; a refusal is KMS's code.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_customer_key_wraps_with_the_project_as_its_context() {
+        use base64::Engine as _;
+        use roll_secrets::kms::ProjectKms;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let seen: Arc<Mutex<Vec<(String, String, Json)>>> = Default::default();
+        let s = seen.clone();
+        let app = axum::Router::new().fallback(move |headers: HeaderMap, body: axum::body::Bytes| {
+            let s = s.clone();
+            async move {
+                let req: Json = serde_json::from_slice(&body).unwrap_or_default();
+                let target = headers.get("x-amz-target").and_then(|t| t.to_str().ok()).unwrap_or_default().to_string();
+                let region = headers.get("authorization").and_then(|a| a.to_str().ok()).and_then(|a| a.split('/').nth(2)).unwrap_or_default().to_string();
+                s.lock().unwrap().push((target.clone(), region, req.clone()));
+                let ok = req["KeyId"] == "arn:aws:kms:ap-south-1:999999999999:key/c1" && req["EncryptionContext"] == json!({ "roll": "secrets", "project": "prj_a" });
+                match (target.as_str(), ok) {
+                    ("TrentService.Encrypt", true) => (axum::http::StatusCode::OK, axum::Json(json!({ "KeyId": req["KeyId"], "CiphertextBlob": b64(b"wrapped") }))),
+                    ("TrentService.Decrypt", true) if req["CiphertextBlob"] == json!(b64(b"wrapped")) => (axum::http::StatusCode::OK, axum::Json(json!({ "KeyId": req["KeyId"], "Plaintext": b64(b"v1:inner") }))),
+                    _ => (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({ "__type": "AccessDeniedException", "message": "no" }))),
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conf = aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new("eu-west-1"))
+            .endpoint_url(&base)
+            .credentials_provider(aws_sdk_kms::config::SharedCredentialsProvider::new(aws_sdk_kms::config::Credentials::new("AKIATEST", "secret", None, None, "test")))
+            .build();
+        let kms = super::CustomerKms::new(Some(conf));
+        let key = "arn:aws:kms:ap-south-1:999999999999:key/c1";
+        let ct = kms.encrypt(key, "prj_a", b"v1:inner").unwrap();
+        assert_eq!(kms.decrypt(key, "prj_a", &ct).unwrap().as_slice(), b"v1:inner");
+        assert_eq!(kms.decrypt(key, "prj_other", &ct).unwrap_err(), "AccessDeniedException", "another project's context");
+        let regions: Vec<String> = seen.lock().unwrap().iter().map(|(_, r, _)| r.clone()).collect();
+        assert!(regions.iter().all(|r| r == "ap-south-1"), "the key's own region: {regions:?}");
+    }
+
+    /// A project's AWS role is assumed with its ExternalId and the session's name and duration;
+    /// a refusal is STS's code.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_aws_role_is_assumed_with_the_projects_external_id() {
+        use roll_secrets::aws::Sts;
+        let seen: Arc<Mutex<Vec<String>>> = Default::default();
+        let s = seen.clone();
+        let app = axum::Router::new().fallback(move |body: axum::body::Bytes| {
+            let s = s.clone();
+            async move {
+                let form = String::from_utf8_lossy(&body).to_string();
+                s.lock().unwrap().push(form.clone());
+                if form.contains("ExternalId=roll-secrets%3Aprj_a") && form.contains("RoleArn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2Froll") {
+                    let xml = r#"<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleResult><Credentials><AccessKeyId>ASIATEST</AccessKeyId><SecretAccessKey>secret</SecretAccessKey><SessionToken>token</SessionToken><Expiration>2030-01-01T00:00:00Z</Expiration></Credentials><AssumedRoleUser><Arn>arn:aws:sts::123456789012:assumed-role/roll/s</Arn><AssumedRoleId>AROA:s</AssumedRoleId></AssumedRoleUser></AssumeRoleResult></AssumeRoleResponse>"#;
+                    (axum::http::StatusCode::OK, [("content-type", "text/xml")], xml.to_string())
+                } else {
+                    let xml = r#"<ErrorResponse><Error><Type>Sender</Type><Code>AccessDenied</Code><Message>no</Message></Error></ErrorResponse>"#;
+                    (axum::http::StatusCode::FORBIDDEN, [("content-type", "text/xml")], xml.to_string())
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conf = aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new("eu-west-1"))
+            .endpoint_url(&base)
+            .credentials_provider(aws_sdk_sts::config::SharedCredentialsProvider::new(aws_sdk_sts::config::Credentials::new("AKIATEST", "secret", None, None, "test")))
+            .build();
+        let sts = super::RollSts::new(Some(conf));
+        let s = sts.assume("arn:aws:iam::123456789012:role/roll", "roll-secrets:prj_a", "roll-app-web", 1200).unwrap();
+        assert_eq!((s.access_key_id.expose(), s.session_token.expose(), s.expires_at), ("ASIATEST", "token", 1_893_456_000_000));
+        let form = seen.lock().unwrap()[0].clone();
+        assert!(form.contains("RoleSessionName=roll-app-web") && form.contains("DurationSeconds=1200"), "{form}");
+        assert_eq!(sts.assume("arn:aws:iam::123456789012:role/roll", "roll-secrets:prj_other", "x", 900).err().as_deref(), Some("AccessDenied"));
+    }
 
     /// A KMS that decrypts one ciphertext, and only with roll secrets' encryption context.
     #[tokio::test(flavor = "multi_thread")]

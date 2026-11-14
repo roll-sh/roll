@@ -10,10 +10,14 @@
 //! closure that only touches the database; providers (issuing and revoking credentials) are
 //! called outside it. [`api::router`] serves it under `/v1/secrets`.
 
+pub mod folder_policy;
 pub mod access;
 mod alerts;
 pub mod api;
 pub mod health;
+pub mod outside;
+pub mod aws;
+pub mod iam;
 pub mod rotators;
 mod strength;
 mod audit;
@@ -28,8 +32,15 @@ pub mod insights;
 pub mod leaks;
 pub mod links;
 pub mod names;
+pub mod transit;
+pub mod ocsp;
+pub mod pki;
+pub mod ssh;
+pub mod clouds;
+pub mod issuer;
 mod oidc;
 mod read;
+pub mod reach;
 pub mod refs;
 mod notices;
 mod purge;
@@ -41,6 +52,7 @@ pub mod suggestions;
 mod sweep;
 pub mod syncs;
 mod tokens;
+pub mod kms;
 mod write;
 
 pub use access::{Action, Caller, People, Person, Scope};
@@ -252,9 +264,13 @@ pub enum Error {
     /// 409 with a code: `conflict`, `approval_required`, `stale`, `last_environment`.
     #[error("{1}")]
     Conflict(&'static str, String),
-    /// 503: no deployment key.
+    /// 503: no deployment key, or a KMS that didn't answer.
     #[error("{0}")]
     Unavailable(String),
+    /// 423 `kms_denied`: a customer-managed key refused (revoked, disabled, deleted). Never an
+    /// outage: `roll run --fallback` doesn't start from its file on it.
+    #[error("{0}")]
+    KeyDenied(String),
     /// 429: too many attempts (`rate_limited`).
     #[error("{0}")]
     TooMany(String),
@@ -298,6 +314,11 @@ pub struct Options {
     /// People's accounts, looked up when what a person made acts (never cached). `None`: nothing a
     /// person made acts later.
     pub people: Option<std::sync::Arc<dyn access::People>>,
+    /// The customers' KMS, for projects whose data key they wrap with their own key; `None`: no
+    /// project can.
+    pub kms: Option<std::sync::Arc<dyn kms::ProjectKms>>,
+    /// STS, for dynamic AWS credentials from roles projects register (aws.rs); `None`: none.
+    pub sts: Option<std::sync::Arc<dyn aws::Sts>>,
     /// rolld has no operator token (loopback development): a request without a token is the
     /// operator's.
     pub open: bool,
@@ -306,6 +327,11 @@ pub struct Options {
     pub trust_forwarded_for: bool,
     /// The dashboard's address (`ROLL_WEB_URL`): a share's link is `<it>/share/<id>#<key>`.
     pub web_url: Option<String>,
+    /// roll's OIDC issuer and the clouds' token endpoints, for dynamic GCP and Azure credentials
+    /// (clouds.rs); `None` without a public URL for the issuer.
+    pub clouds: Option<clouds::Clouds>,
+    /// Sets passwords on Postgres servers outside roll (outside.rs); `None`: not on this server.
+    pub outside: Option<std::sync::Arc<dyn outside::OutsideDb>>,
 }
 
 /// The secrets store.
@@ -319,15 +345,23 @@ pub struct Secrets {
     deliver: Option<Arc<dyn sinks::Deliver>>,
     grants: Option<Arc<dyn roll_auth::Grants>>,
     people: Option<Arc<dyn access::People>>,
+    unwrap: kms::Unwrapper,
+    sts: Option<Arc<dyn aws::Sts>>,
     open: bool,
     trust_forwarded_for: bool,
     web_url: Option<String>,
+    clouds: Option<clouds::Clouds>,
+    outside: Option<Arc<dyn outside::OutsideDb>>,
     /// OIDC issuers' public keys (identities.rs).
     oidc: oidc::Keys,
     /// Logins per identity and per client address in the last minute.
     logins: oidc::Window,
     /// roll code's search, once rolld has it (health's `code` check).
     code_refs: std::sync::OnceLock<Arc<dyn health::CodeRefs>>,
+    /// Where clients reach rolld's API, once rolld says (certificates' CRL distribution point).
+    public_api: Arc<std::sync::OnceLock<String>>,
+    /// Signed CRLs by CA, with when they were made (pki.rs): the public route signs one a minute.
+    crls: pki::Crls,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -350,6 +384,7 @@ impl Secrets {
         db.ensure_schema(shares::SCHEMA)?;
         db.ensure_schema(syncs::SCHEMA)?;
         db.ensure_schema(sinks::SCHEMA)?;
+        db.ensure_schema(folder_policy::SCHEMA)?;
         // The references in a value (`staging.DB_URL`), so listings decrypt nothing; NULL for rows
         // written before it, which are decrypted to find them.
         db.add_column("secrets", "refs", "TEXT")?;
@@ -366,6 +401,8 @@ impl Secrets {
         db.ensure_schema(identities::SCHEMA)?;
         db.ensure_schema(exports::SCHEMA)?;
         db.add_column("tokens", "identity", "TEXT")?;
+        // An identity's pinned keys: a JWKS, for an issuer roll doesn't fetch (identities.rs).
+        db.add_column("identities", "jwks", "TEXT")?;
         // Typed keys (required.rs).
         db.add_column("required", "type", "TEXT")?;
         db.add_column("required", "pattern", "TEXT")?;
@@ -381,19 +418,55 @@ impl Secrets {
         db.add_column("versions", "expires_at", "INTEGER")?;
         // Why a credential's value is easy to guess (strength.rs), judged when it was written.
         db.add_column("secrets", "weak", "TEXT")?;
+        // Why a key would put a server's credential in a browser bundle (strength.rs), as weak's.
+        db.add_column("secrets", "public", "TEXT")?;
         // Who supplies a required key (health and the daily notice name them).
         db.add_column("required", "owner", "TEXT")?;
+        // Scheduled rotations and revocations that fail, for health (health.rs).
+        db.add_column("secrets", "rotation_error", "TEXT")?;
+        db.add_column("secrets", "rotation_failed_at", "INTEGER")?;
+        db.add_column("leases", "revoke_error", "TEXT")?;
         // A deleted project kept only until what it issued is revoked (forget_project).
         db.add_column("projects", "forgotten_at", "INTEGER")?;
         db.ensure_schema(notices::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
+        db.ensure_schema(transit::SCHEMA)?;
+        db.ensure_schema(pki::SCHEMA)?;
+        db.ensure_schema(ssh::SCHEMA)?;
+        db.ensure_schema(aws::SCHEMA)?;
+        db.ensure_schema(issuer::SCHEMA)?;
+        db.ensure_schema(clouds::SCHEMA)?;
+        db.ensure_schema(iam::SCHEMA)?;
         // Rotators are a link kind of roll secrets' own: they call out through rolld.
         let mut links = opts.links;
-        if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
-            links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), deliver: deliver.clone() }));
+        let unwrap = kms::Unwrapper::new(opts.kms.clone());
+        if let Some(sts) = &opts.sts {
+            links.register(Arc::new(aws::Provider { db: db.clone(), sts: sts.clone() }));
+            links.register(Arc::new(iam::Provider { db: db.clone(), sts: sts.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
+        if let (Some(c), Ok(keys)) = (&opts.clouds, &opts.keyring) {
+            // The issuer's key exists before anyone asks for its public half.
+            issuer::ensure_key(&db, keys)?;
+            for kind in [clouds::GCP, clouds::AZURE] {
+                links.register(Arc::new(clouds::Provider { kind, db: db.clone(), keys: keys.clone(), clouds: c.clone() }));
+            }
+        }
+        if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
+            links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone() }));
+        }
+        // A project's CAs are roll secrets' own: nothing to reach outside.
+        let public_api: Arc<std::sync::OnceLock<String>> = Default::default();
+        let crls = pki::Crls::default();
+        if let Ok(keys) = &opts.keyring {
+            links.register(Arc::new(pki::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), public_api: public_api.clone(), crls: crls.clone() }));
+            links.register(Arc::new(ssh::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone() }));
+        }
+        db.ensure_schema(outside::SCHEMA)?;
+        if let (Some(outside), Ok(keys)) = (&opts.outside, &opts.keyring) {
+            links.register(Arc::new(outside::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), outside: outside.clone() }));
+        }
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls })
     }
 
     pub fn links(&self) -> &Links {
@@ -432,9 +505,27 @@ impl Secrets {
                 })?
             }
         };
-        let (dek, resealed) = keys.open_dek(project, &sealed)?;
-        if let Some(new) = resealed {
-            self.db.write(|c| c.execute("UPDATE projects SET dek = ? WHERE project_id = ? AND dek = ?", [new.as_str(), project, sealed.as_str()]))?;
+        let inner = self.unwrap.inner(project, &sealed)?;
+        let (dek, resealed) = keys.open_dek(project, &inner)?;
+        // Sealed by the previous deployment key (a rotation): resealed with the current one. A
+        // wrapped key stays wrapped by the same customer key; if KMS won't wrap it now, the key
+        // still opened, so the read goes on and the sweeper tries again.
+        let stale_wrap = kms::sealed_by(&sealed).is_some_and(|id| id != keys.current_id());
+        if let Some(new) = resealed.or_else(|| stale_wrap.then(|| inner.clone())) {
+            let new = match kms::wrapped_by(&sealed) {
+                Some(key) => match self.unwrap.rewrap(&key, project, keys.current_id(), &new) {
+                    Ok(w) => Some(w),
+                    Err(e) => {
+                        tracing::warn!(%project, "resealing a customer-wrapped data key: {e}");
+                        None
+                    }
+                },
+                None => Some(new),
+            };
+            if let Some(new) = new {
+                self.db.write(|c| c.execute("UPDATE projects SET dek = ? WHERE project_id = ? AND dek = ?", [new.as_str(), project, sealed.as_str()]))?;
+                self.unwrap.forget(&sealed);
+            }
         }
         Ok(dek)
     }
@@ -445,12 +536,23 @@ impl Secrets {
         let resealed = match &self.keys {
             Ok(keys) => {
                 let rows = self.db.read(|c| c.query("SELECT project_id, dek FROM projects", (), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
-                let old = rows.iter().filter(|(p, d)| keys.open_dek(p, d).map(|(_, r)| r.is_some()).unwrap_or(true)).count();
-                if old == 0 { serde_json::json!("all") } else { serde_json::json!(rows.len() - old) }
+                // A customer-wrapped key says which deployment key sealed it inside (KMS isn't asked).
+                let old = rows
+                    .iter()
+                    .filter(|(p, d)| match kms::sealed_by(d) {
+                        Some(id) => id != keys.current_id(),
+                        None => keys.open_dek(p, d).map(|(_, r)| r.is_some()).unwrap_or(true),
+                    })
+                    .count();
+                // The issuer's signing key is sealed with the deployment key too: resealed here, and
+                // the previous key isn't "done with" while one still needs it.
+                let issuer_old = if self.clouds.is_some() { issuer::reseal(&self.db, keys)? } else { 0 };
+                if old == 0 && issuer_old == 0 { serde_json::json!("all") } else { serde_json::json!(rows.len() - old) }
             }
             Err(_) => serde_json::Value::Null,
         };
-        Ok(serde_json::json!({ "ok": self.keys.is_ok(), "key": self.key_source, "resealed": resealed, "links": self.links.kinds().map(|p| p.kind().to_string()).collect::<Vec<_>>(), "syncs": self.syncs.kinds().map(|t| t.kind().to_string()).collect::<Vec<_>>() }))
+        let customer_managed = self.db.read(|c| c.query_row("SELECT COUNT(*) FROM projects WHERE dek LIKE 'kms:%'", (), |r| r.get::<_, i64>(0)))?;
+        Ok(serde_json::json!({ "ok": self.keys.is_ok(), "key": self.key_source, "resealed": resealed, "customer_managed": customer_managed, "links": self.links.kinds().map(|p| p.kind().to_string()).collect::<Vec<_>>(), "syncs": self.syncs.kinds().map(|t| t.kind().to_string()).collect::<Vec<_>>() }))
     }
 
     /// Forget everything about a project (its workspace project was deleted). What it issued is
@@ -462,7 +564,7 @@ impl Secrets {
         let failed = self.revoke_managed(self.managed_where("project_id = ?", project));
         let now = self.db.now_ms()?;
         self.db.write(|c| {
-            for t in ["secrets", "versions", "changes", "requests", "tokens", "audit", "required", "shares", "syncs", "audit_sinks", "notices", "identities"] {
+            for t in ["secrets", "versions", "changes", "requests", "tokens", "audit", "required", "shares", "syncs", "audit_sinks", "notices", "identities", "transit_keys"] {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
             }
             c.execute("DELETE FROM leases WHERE project_id = ? AND revoked_at IS NOT NULL", [project])?;
@@ -477,20 +579,28 @@ impl Secrets {
                 c.execute("DELETE FROM folders WHERE env_id = ?", [e])?;
                 c.execute("DELETE FROM imports WHERE env_id = ? OR from_env_id = ?", [e, e])?;
                 c.execute("DELETE FROM exports WHERE env_id = ?", [e])?;
+                c.execute("DELETE FROM folder_policies WHERE env_id = ?", [e])?;
             }
             // What other projects shared with this one goes with it.
             c.execute("DELETE FROM exports WHERE to_project = ?", [project])?;
             c.execute("DELETE FROM environments WHERE project_id = ?", [project])?;
             c.execute("UPDATE projects SET forgotten_at = ? WHERE project_id = ?", code_sql::params![now, project])?;
-            forget_if_done(c, project)
+            forget_if_done(c, project, now)
         })
     }
 
     /// Forgotten projects whose last lease is revoked: their key and registries go.
     pub(crate) fn sweep_forgotten(&self) -> Result<()> {
+        let now = self.db.now_ms()?;
         self.db.write(|c| {
-            for p in c.query("SELECT project_id FROM projects WHERE forgotten_at IS NOT NULL LIMIT 100", (), |r| r.get::<_, String>(0))? {
-                forget_if_done(c, &p)?;
+            // Those still serving revocations (pki.rs) wait apart, so they don't crowd out the rest.
+            let due = c.query(
+                "SELECT project_id FROM projects p WHERE forgotten_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ca_certs k WHERE k.project_id = p.project_id AND k.revoked_at IS NOT NULL AND k.not_after >= ?) LIMIT 100",
+                [now],
+                |r| r.get::<_, String>(0),
+            )?;
+            for p in due {
+                forget_if_done(c, &p, now)?;
             }
             Ok(())
         })
@@ -498,12 +608,15 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators"];
+const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "aws_users", "aws_roles", "cloud_accounts", "cas", "ca_certs", "ssh_cas"];
 
-/// Drop a forgotten project's key and registries once no lease of its waits to be revoked.
-fn forget_if_done(c: &code_sql::Conn<'_>, project: &str) -> Result<()> {
+/// Drop a forgotten project's key and registries once no lease of its waits to be revoked, and no
+/// certificate its CAs revoked is still within its lifetime (their CRLs, signed with the CA's key,
+/// keep being served until then: a client that can't fetch one would trust the certificate again).
+fn forget_if_done(c: &code_sql::Conn<'_>, project: &str, now: i64) -> Result<()> {
     let waiting: i64 = c.query_row("SELECT COUNT(*) FROM leases WHERE project_id = ? AND revoked_at IS NULL", [project], |r| r.get(0))?;
-    if waiting == 0 {
+    let revoked: i64 = c.query_row("SELECT COUNT(*) FROM ca_certs WHERE project_id = ? AND revoked_at IS NOT NULL AND not_after >= ?", code_sql::params![project, now], |r| r.get(0))?;
+    if waiting == 0 && revoked == 0 {
         c.execute("DELETE FROM leases WHERE project_id = ?", [project])?;
         for t in REGISTRIES {
             c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;

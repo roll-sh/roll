@@ -128,6 +128,75 @@ impl roll_secrets::Deliver for Sent {
 }
 
 const ISSUER: &str = "https://token.actions.githubusercontent.com";
+const ISSUER_URL: &str = "https://roll.example/v1/secrets/oidc";
+
+/// GCP and Azure: they trust roll's token only for the pinned subject, and keep what they saw.
+#[derive(Default)]
+struct FakeClouds {
+    pinned: Mutex<Option<String>>,
+    seen: Mutex<Vec<String>>,
+    /// Answer every exchange with an outage.
+    down: std::sync::atomic::AtomicBool,
+}
+
+impl FakeClouds {
+    fn trust(&self, jwt: &Secret, audience: &str) -> Result<u32, String> {
+        use base64::Engine;
+        let claims: Value = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(jwt.expose().split('.').nth(1).unwrap()).unwrap()).unwrap();
+        if self.down.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("503 Service Unavailable".into());
+        }
+        let mut seen = self.seen.lock().unwrap();
+        seen.push(jwt.expose().to_string());
+        if claims["aud"] != audience || self.pinned.lock().unwrap().as_deref().is_some_and(|p| claims["sub"] != p) {
+            return Err("invalid_grant: the subject isn't trusted".into());
+        }
+        Ok(seen.len() as u32)
+    }
+}
+
+impl roll_secrets::clouds::CloudTokens for FakeClouds {
+    fn gcp(&self, audience: &str, _: &str, jwt: &Secret, lifetime: u32) -> Result<(Secret, i64), String> {
+        let n = self.trust(jwt, audience)?;
+        Ok((Secret::new(format!("ya29.{n}")), i64::from(lifetime) * 1000))
+    }
+    fn azure(&self, _: &str, _: &str, _: &str, jwt: &Secret) -> Result<(Secret, i64), String> {
+        let n = self.trust(jwt, roll_secrets::clouds::AZURE_AUDIENCE)?;
+        Ok((Secret::new(format!("eyJ0eXAi.{n}")), 3_600_000))
+    }
+}
+
+/// A Postgres server outside roll: each role's current password and, for a dynamic login, its
+/// group and `VALID UNTIL`; the flag refuses every change.
+#[derive(Default)]
+struct Outside(std::sync::Mutex<BTreeMap<String, String>>, std::sync::atomic::AtomicBool, std::sync::Mutex<BTreeMap<String, (String, i64)>>);
+
+impl roll_secrets::outside::OutsideDb for Outside {
+    fn check(&self, url: &str, _: Option<&str>, roles: &[String], _: Option<&str>) -> Result<(), String> {
+        if url.contains("@db.example") && roles.iter().all(|r| r.starts_with("app_")) { Ok(()) } else { Err("there's no role that can log in".into()) }
+    }
+    fn set_password(&self, _: &str, _: Option<&str>, role: &str, password: &str) -> Result<(), String> {
+        if self.1.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("connection refused".into());
+        }
+        self.0.lock().unwrap().insert(role.into(), password.into());
+        Ok(())
+    }
+    fn create_login(&self, _: &str, _: Option<&str>, name: &str, password: &str, group: &str, until: i64) -> Result<(), String> {
+        self.0.lock().unwrap().insert(name.into(), password.into());
+        self.2.lock().unwrap().insert(name.into(), (group.into(), until));
+        Ok(())
+    }
+    fn extend_login(&self, _: &str, _: Option<&str>, name: &str, until: i64) -> Result<(), String> {
+        self.2.lock().unwrap().get_mut(name).ok_or("no such role")?.1 = until;
+        Ok(())
+    }
+    fn drop_login(&self, _: &str, _: Option<&str>, name: &str) -> Result<(), String> {
+        self.0.lock().unwrap().remove(name);
+        self.2.lock().unwrap().remove(name);
+        Ok(())
+    }
+}
 
 /// An ES256 key of the fake issuer, its JWKS, and tokens it signs.
 struct Issuer(ring::signature::EcdsaKeyPair);
@@ -182,14 +251,90 @@ impl roll_workspace::Owners for People {
     }
 }
 
+/// A customer's KMS: its key policy pins one project (or, unpinned, takes any), and it stops
+/// decrypting once revoked.
+#[derive(Default)]
+struct FakeKms {
+    revoked: Mutex<bool>,
+    pinned: Mutex<Option<String>>,
+}
+
+impl roll_secrets::kms::ProjectKms for FakeKms {
+    fn encrypt(&self, key: &str, project: &str, plain: &[u8]) -> Result<Vec<u8>, String> {
+        if self.pinned.lock().unwrap().as_deref().is_some_and(|p| p != project) {
+            return Err("AccessDeniedException".into());
+        }
+        Ok([format!("{key}|{project}|").as_bytes(), plain].concat())
+    }
+    fn decrypt(&self, key: &str, project: &str, ct: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+        if *self.revoked.lock().unwrap() {
+            return Err("AccessDeniedException".into());
+        }
+        let prefix = format!("{key}|{project}|");
+        ct.strip_prefix(prefix.as_bytes()).map(|p| zeroize::Zeroizing::new(p.to_vec())).ok_or_else(|| "InvalidCiphertextException".into())
+}
+}
+
+/// STS for one role whose trust policy pins one ExternalId (or, unpinned, takes any).
+#[derive(Default)]
+struct FakeSts {
+    pinned: Mutex<Option<String>>,
+    sessions: Mutex<u32>,
+    /// IAM user `legacy-ci`'s access key ids, and how many were ever made.
+    keys: Mutex<(Vec<String>, u32)>,
+}
+
+impl roll_secrets::aws::Sts for FakeSts {
+    fn assume(&self, role_arn: &str, external_id: &str, _session: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+        if role_arn != "arn:aws:iam::123456789012:role/roll" || self.pinned.lock().unwrap().as_deref().is_some_and(|p| p != external_id) {
+            return Err("AccessDenied".into());
+        }
+        let mut n = self.sessions.lock().unwrap();
+        *n += 1;
+        Ok(roll_secrets::aws::Session {
+            access_key_id: Secret::new(format!("ASIA{n}")),
+            secret_access_key: Secret::new(format!("secret-{n}")),
+            session_token: Secret::new(format!("token-{n}")),
+            expires_at: i64::from(seconds) * 1000,
+        })
+    }
+    fn iam_keys(&self, role_arn: &str, external_id: &str, user: &str) -> Result<Vec<String>, String> {
+        self.assume(role_arn, external_id, "iam", 900)?;
+        if user != "legacy-ci" {
+            return Err("NoSuchEntity".into());
+        }
+        Ok(self.keys.lock().unwrap().0.clone())
+    }
+    fn iam_create_key(&self, role_arn: &str, external_id: &str, user: &str) -> Result<(Secret, Secret), String> {
+        if self.iam_keys(role_arn, external_id, user)?.len() >= 2 {
+            return Err("LimitExceeded".into());
+        }
+        let mut k = self.keys.lock().unwrap();
+        k.1 += 1;
+        let id = format!("AKIA{}", k.1);
+        k.0.push(id.clone());
+        Ok((Secret::new(id), Secret::new(format!("iam-secret-{}", k.1))))
+    }
+    fn iam_delete_key(&self, role_arn: &str, external_id: &str, user: &str, key_id: &str) -> Result<(), String> {
+        self.iam_keys(role_arn, external_id, user)?;
+        self.keys.lock().unwrap().0.retain(|k| k != key_id);
+        Ok(())
+    }
+}
+
 struct Api {
     sent: Arc<Sent>,
+    kms: Arc<FakeKms>,
+    ws: Arc<roll_workspace::Workspace>,
+    sts: Arc<FakeSts>,
     people: Arc<People>,
     router: Router,
     secrets: Arc<Secrets>,
     db: code_sql::Db,
     fake: Arc<Fake>,
     sync: Arc<FakeSync>,
+    clouds: Arc<FakeClouds>,
+    outside: Arc<Outside>,
     project: String,
     _dir: tempfile::TempDir,
 }
@@ -208,11 +353,15 @@ impl Api {
         syncs.register(sync.clone());
         let sent = Arc::new(Sent::default());
         let people = Arc::new(People::default());
+        let kms = Arc::new(FakeKms::default());
+        let outside = Arc::new(Outside::default());
+        let sts = Arc::new(FakeSts::default());
         ws.set_owners(people.clone());
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: None, people: Some(people.clone()) };
+        let clouds = Arc::new(FakeClouds::default());
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: None, people: Some(people.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }) };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
-        let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets.clone()));
-        let mut api = Api { sent, people, router, secrets, db, fake, sync, project: String::new(), _dir: dir };
+        let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone()));
+        let mut api = Api { sent, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, sync, outside, clouds, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -345,6 +494,23 @@ async fn every_write_is_a_version_and_an_environment_rolls_back_to_any_change() 
     tokio::task::spawn_blocking(move || sec.sweep().unwrap()).await.unwrap();
     assert_eq!(api.values("production", "/").await["values"]["A"], "10");
     assert_eq!(api.ok(Method::GET, "", None).await["history_days"], 1);
+    // Check-and-set: two writers read A at one version; the second's change is refused whole.
+    let b = api.ok(Method::GET, "/environments/production/secrets/A", None).await["version"].as_i64().unwrap();
+    api.ok(Method::PUT, "/environments/production/secrets/A", Some(json!({ "value": "first", "if_version": b }))).await;
+    let (st, e) = api.call(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "D", "value": "4" }, { "op": "set", "key": "A", "value": "second", "if_version": b }] }))).await;
+    assert!(st == StatusCode::CONFLICT && e["code"] == "stale" && e["error"].as_str().unwrap().contains("A changed since version"), "{e}");
+    assert_eq!((api.values("production", "/").await["values"]["A"].clone(), api.values("production", "/").await["values"]["D"].clone()), (json!("first"), Value::Null), "nothing of the refused change");
+    // 0: only if it doesn't exist yet.
+    assert_eq!(api.call(Method::PUT, "/environments/production/secrets/A", Some(json!({ "value": "x", "if_version": 0 }))).await.0, StatusCode::CONFLICT);
+    api.ok(Method::PUT, "/environments/production/secrets/NEWKEY", Some(json!({ "value": "x", "if_version": 0 }))).await;
+    // Protected: a stale read is told so, not sent to a request; a request keeps the check.
+    let now = api.ok(Method::GET, "/environments/production/secrets/A", None).await["version"].as_i64().unwrap();
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true }))).await;
+    let (st, e) = api.call(Method::PUT, "/environments/production/secrets/A", Some(json!({ "value": "y", "if_version": now - 1 }))).await;
+    assert!(st == StatusCode::CONFLICT && e["code"] == "stale", "{e}");
+    let (st, e) = api.call(Method::POST, "/environments/production/requests", Some(json!({ "ops": [{ "op": "set", "key": "A", "value": "y", "if_version": now - 1 }] }))).await;
+    assert!(st == StatusCode::CONFLICT && e["code"] == "stale", "{e}");
+    api.ok(Method::POST, "/environments/production/requests", Some(json!({ "ops": [{ "op": "set", "key": "A", "value": "y", "if_version": now }] }))).await;
 }
 
 #[tokio::test]
@@ -368,6 +534,9 @@ async fn references_imports_and_personal_values_resolve_and_cycles_are_reported(
     assert_eq!(v["values"]["LITERAL"], "${HOME}");
     // What a reference reaches moves the digest (roll run --watch, syncs), in another environment too.
     let before = api.ok(Method::GET, "/environments/development/digest", None).await["digest"].clone();
+    // A values answer carries the same digest, taken before its read: a watch compares from it.
+    let (_, with) = api.call(Method::GET, "/environments/development/values?digest=1", None).await;
+    assert_eq!((with["digest"].clone(), api.values("development", "/").await.get("digest").cloned()), (before.clone(), None), "asked for (a watch)");
     api.set("production", "DB_HOST", "prod2.db").await;
     assert_ne!(api.ok(Method::GET, "/environments/development/digest", None).await["digest"], before);
     api.set("production", "DB_HOST", "prod.db").await;
@@ -533,6 +702,34 @@ async fn protected_environments_take_change_requests_that_another_principal_appr
     assert_eq!((p["change"].clone(), p["request"]["state"].as_str()), (Value::Null, Some("open")));
     api.ok(Method::POST, &format!("/environments/production/requests/{}/apply", p["request"]["id"].as_str().unwrap()), Some(json!({ "bypass": true }))).await;
     assert_eq!(api.values("production", "/").await["values"]["KEY"], "from-staging");
+    // A folder's own change policy, in an environment that isn't protected: its keys change only
+    // through approved requests; the rest of the environment as before.
+    api.ok(Method::PUT, "/environments/staging/folder-policies?path=/payments", Some(json!({ "approvals": 1 }))).await;
+    let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/STRIPE?path=/payments/eu", Some(json!({ "value": "sk_1" }))).await;
+    assert!(s == StatusCode::CONFLICT && e["code"] == "approval_required" && e["error"].as_str().unwrap().contains("/payments"), "{e}");
+    api.ok(Method::PUT, "/environments/staging/secrets/OTHER", Some(json!({ "value": "free" }))).await;
+    let r = api.ok(Method::POST, "/environments/staging/requests", Some(json!({ "path": "/payments/eu", "ops": [{ "op": "set", "key": "STRIPE", "value": "sk_1" }] }))).await;
+    assert_eq!(r["gates"], json!([{ "path": "/payments", "approvals": 1, "approved": 0 }]));
+    let id = r["id"].as_str().unwrap();
+    let (s, r) = api.req(Method::POST, &format!("/environments/staging/requests/{id}/review"), Some(json!({ "verdict": "approve" })), reviewer["token"].as_str()).await;
+    assert_eq!((s, r["state"].as_str()), (StatusCode::OK, Some("approved")));
+    api.ok(Method::POST, &format!("/environments/staging/requests/{id}/apply"), None).await;
+    assert_eq!(api.values("staging", "/payments/eu").await["values"]["STRIPE"], "sk_1");
+    // Protected as well: an admin of /payments only approves for its folder's gate, never for the
+    // environment's.
+    api.ok(Method::PUT, "/environments/staging/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    let folder_admin = api.ok(Method::POST, "/tokens", Some(json!({ "name": "payments", "environments": ["staging"], "paths": ["/payments"], "actions": ["read", "write", "admin"] }))).await;
+    let r = api.ok(Method::POST, "/environments/staging/requests", Some(json!({ "path": "/payments/eu", "ops": [{ "op": "set", "key": "STRIPE", "value": "sk_2" }] }))).await;
+    let id = r["id"].as_str().unwrap();
+    let (s, r) = api.req(Method::POST, &format!("/environments/staging/requests/{id}/review"), Some(json!({ "verdict": "approve" })), folder_admin["token"].as_str()).await;
+    assert_eq!((s, r["state"].as_str()), (StatusCode::OK, Some("open")), "{r}");
+    assert_eq!(r["gates"].as_array().unwrap().iter().map(|g| g["approved"].as_i64().unwrap()).collect::<Vec<_>>(), [0, 1], "the environment's gate, then /payments'");
+    api.ok(Method::PUT, "/environments/staging/policy", Some(json!({ "protected": false }))).await;
+    // Nor by deleting the folder, or one above it.
+    for folder in ["/payments", "/payments/eu"] {
+        let (s, e) = api.call(Method::DELETE, &format!("/environments/staging/folders?path={folder}"), None).await;
+        assert!(s == StatusCode::CONFLICT && e["code"] == "approval_required", "{folder}: {e}");
+    }
 }
 
 #[tokio::test]
@@ -618,6 +815,21 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     let renewed = api.ok(Method::POST, &format!("/leases/{lease}/renew"), Some(json!({ "ttl_minutes": 120 }))).await;
     assert!(renewed["expires_at"].as_i64().unwrap() > before + 60 * 60_000);
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
+    // A reader that can't renew (External Secrets Operator) asks for none: the key is left out
+    // (named in `dynamic`), no lease. With `strict`, a key that doesn't resolve fails the whole
+    // read, so the reader keeps what it had instead of writing an empty value.
+    // A required key left out that way is still set: not a problem.
+    api.ok(Method::PUT, "/required", Some(json!([{ "key": "TEMP_KEY" }]))).await;
+    let pulled = api.ok(Method::GET, "/environments/staging/values?dynamic=false&strict=1", None).await;
+    assert!(pulled["values"].get("TEMP_KEY").is_none() && pulled["dynamic"] == json!(["TEMP_KEY"]), "{pulled}");
+    assert_eq!((pulled["leases"].as_array().map(Vec::len), api.fake.live_keys.lock().unwrap().len()), (Some(0), 3));
+    api.set("staging", "BROKEN", "${NOPE}").await;
+    let (s, e) = api.call(Method::GET, "/environments/staging/values?dynamic=false&strict=1", None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("unresolved")), "{e}");
+    // Dynamic keys asked for, and the read refused: what it issued is revoked, nothing outlives it.
+    let (s, _) = api.call(Method::GET, "/environments/staging/values?strict=1", None).await;
+    assert_eq!((s, api.fake.live_keys.lock().unwrap().len()), (StatusCode::CONFLICT, 3));
+    api.ok(Method::DELETE, "/environments/staging/secrets/BROKEN", None).await;
 
     // An environment that goes takes its managed credentials with it.
     api.ok(Method::POST, "/environments", Some(json!({ "slug": "tmp" }))).await;
@@ -949,6 +1161,18 @@ async fn health_lists_every_finding_in_every_environment_worst_first() {
     // Across projects: this one, with its findings.
     let all = api.ok(Method::GET, "/v1/secrets/findings", None).await;
     assert_eq!((all.as_array().map(Vec::len), all[0]["project"].as_str(), all[0]["findings"].as_array().map(Vec::len)), (Some(1), Some(api.project.as_str()), Some(6)));
+    // A server's credential under a name a framework sends to every browser: the write warns and
+    // health flags it; a publishable key under the same prefix is left alone.
+    let w = api.ok(Method::PUT, "/environments/development/secrets/NEXT_PUBLIC_STRIPE_KEY", Some(json!({ "value": "sk_live_51Hx9Q2aBcD7eFgH8iJkLmN" }))).await;
+    assert!(w["warnings"][0].as_str().unwrap().starts_with("NEXT_PUBLIC_STRIPE_KEY: NEXT_PUBLIC_ keys go into the browser bundle (Next.js)"), "{w}");
+    api.set("development", "NEXT_PUBLIC_STRIPE_PUBLISHABLE", "pk_live_51Hx9Q2aBcD7eFgH8iJkLmN").await;
+    let public: Vec<String> = api.ok(Method::GET, "/health", None).await.as_array().unwrap().iter().filter(|f| f["issue"] == "public").map(|f| f["key"].as_str().unwrap().to_string()).collect();
+    assert_eq!(public, ["NEXT_PUBLIC_STRIPE_KEY"]);
+    // What kind of credential it is comes from the value: not for a caller who can't reveal it.
+    let reader = api.ok(Method::POST, "/tokens", Some(json!({ "name": "reader", "actions": ["read"] }))).await;
+    let (_, seen) = api.req(Method::GET, "/health", None, reader["token"].as_str()).await;
+    let detail = seen.as_array().unwrap().iter().find(|f| f["issue"] == "public").map(|f| f["detail"].clone());
+    assert_eq!(detail, Some(json!("NEXT_PUBLIC_ keys go into the browser bundle (Next.js), and this one holds a server credential")));
 }
 
 #[tokio::test]
@@ -986,6 +1210,41 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
     let (s, _) = api.call(Method::DELETE, &format!("/rotators/{}", r["id"].as_str().unwrap()), None).await;
     assert_eq!(s, StatusCode::CONFLICT);
 
+    // A scheduled rotation and a revocation that fail show in health until they succeed.
+    api.sent.2.store(true, std::sync::atomic::Ordering::Relaxed);
+    let p = api.project.clone();
+    api.db
+        .write(move |c| {
+            // Due now (rotate_days 1, issued long ago) and the retired key's grace over.
+            let state: String = c.query_row("SELECT link_state FROM secrets WHERE project_id = ? AND key = 'STRIPE_KEY'", [p.as_str()], |r| r.get(0))?;
+            let mut state: Value = serde_json::from_str(&state).unwrap();
+            state["issued_at"] = json!(0);
+            c.execute("UPDATE secrets SET link_state = ?, link = replace(link, '\"mode\":\"managed\"', '\"mode\":\"managed\",\"options\":{\"rotate_days\":1}') WHERE project_id = ? AND key = 'STRIPE_KEY'", [state.to_string().as_str(), p.as_str()])?;
+            c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ?", [p.as_str()])
+        })
+        .unwrap();
+    let sweep = || {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap() }
+    };
+    sweep().await;
+    let health = api.ok(Method::GET, "/health", None).await;
+    let issues: Vec<&str> = health.as_array().unwrap().iter().filter_map(|f| f["issue"].as_str()).collect();
+    assert!(issues.contains(&"rotation_failing") && issues.contains(&"revoke_failing"), "{health}");
+    assert!(health.to_string().contains("connection refused"), "the reason: {health}");
+    // The rotations list says it too, per credential.
+    let rot = api.ok(Method::GET, "/rotations", None).await;
+    assert_eq!((rot[0]["keys"].clone(), rot[0]["kind"].as_str(), rot[0]["rotate_days"].as_u64()), (json!(["STRIPE_KEY"]), Some("rotator"), Some(1)), "{rot}");
+    assert!(rot[0]["last_error"].as_str().unwrap().contains("connection refused"), "{rot}");
+    api.sent.2.store(false, std::sync::atomic::Ordering::Relaxed);
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ? AND revoked_at IS NULL", [p.as_str()])).unwrap();
+    sweep().await;
+    let health = api.ok(Method::GET, "/health", None).await;
+    assert!(!health.to_string().contains("failing"), "both cleared once they succeed: {health}");
+    let rot = api.ok(Method::GET, "/rotations", None).await;
+    assert!(rot[0]["last_error"].is_null() && rot[0]["next_due"].as_i64().unwrap() > rot[0]["issued_at"].as_i64().unwrap(), "{rot}");
+
     // The project goes while the rotator is down: what it issued is still revoked, by the
     // sweeper, which keeps the rotator (and the project's key) until then.
     api.sent.2.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1004,6 +1263,524 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
     let revoked: Vec<Value> = api.sent.0.lock().unwrap().iter().filter(|b| b["action"] == "revoke").map(|b| b["handle"].clone()).collect();
     assert!(revoked.contains(&json!(2)), "the key in use when the project went is revoked: {revoked:?}");
     assert_eq!((count("rotators"), count("projects"), count("leases")), (0, 0, 0));
+}
+
+#[tokio::test]
+async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
+    let api = Api::new().await;
+    // A password with a # unencoded: parsers disagree on where it ends, so it's refused, never
+    // shown as the host.
+    let (s, e) = api.call(Method::POST, "/outside-databases", Some(json!({ "name": "x", "url": "postgres://admin:abc#def@db.example/app", "roles": ["app_blue", "app_green"] }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && !e.to_string().contains("abc"), "{e}");
+    let new = json!({ "name": "billing", "url": "postgres://admin:hunter2@db.example:5432/app?sslmode=require", "roles": ["app_blue", "app_green"], "group": "app_rw" });
+    let d = api.ok(Method::POST, "/outside-databases", Some(new)).await;
+    assert_eq!((d["host"].as_str(), d.get("url")), (Some("db.example:5432"), None), "the admin URL stays sealed: {d}");
+    let link = |field: &str| json!({ "kind": "outside_database", "ref": d["id"], "field": field, "mode": "managed" });
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "DB_USER", "link": link("username") }, { "op": "set", "key": "DB_PASSWORD", "link": link("password") }] }))).await;
+    let login = || async {
+        let v = api.values("production", "/").await["values"].clone();
+        (v["DB_USER"].as_str().unwrap().to_string(), v["DB_PASSWORD"].as_str().unwrap().to_string())
+    };
+    let password = |role: &str| api.outside.0.lock().unwrap().get(role).cloned();
+    let blue = login().await;
+    assert_eq!((blue.0.as_str(), password("app_blue")), ("app_blue", Some(blue.1.clone())));
+
+    // Each rotation hands out the other role; the one in use keeps working through the grace.
+    let rotate = || api.call(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None);
+    assert!(rotate().await.0.is_success());
+    let green = login().await;
+    assert_eq!((green.0.as_str(), password("app_green"), password("app_blue")), ("app_green", Some(green.1.clone()), Some(blue.1.clone())));
+    // Both roles are taken (green in use, blue in its grace): another rotation waits, resetting
+    // nothing, even once the issue's own short hold on green is over.
+    let id = d["id"].as_str().unwrap().to_string();
+    let unhold = || {
+        let id = id.clone();
+        api.db
+            .write(move |c| {
+                let s: String = c.query_row("SELECT state FROM outside_dbs WHERE id = ?", [id.as_str()], |r| r.get(0))?;
+                let mut v: Value = serde_json::from_str(&s).unwrap();
+                v["held"] = json!({});
+                c.execute("UPDATE outside_dbs SET state = ? WHERE id = ?", [v.to_string().as_str(), id.as_str()])
+            })
+            .unwrap()
+    };
+    unhold();
+    assert_eq!(rotate().await.0, StatusCode::CONFLICT);
+    assert_eq!((login().await, password("app_blue")), (green.clone(), Some(blue.1.clone())));
+    // Blue's grace ends: its password goes, and it's free again.
+    let expire = |cond: &'static str| {
+        let p = api.project.clone();
+        api.db.write(move |c| c.execute(&format!("UPDATE leases SET expires_at = 0 WHERE project_id = ? AND {cond}"), [p.as_str()])).unwrap();
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap() }
+    };
+    expire("1 = 1").await;
+    assert_ne!(password("app_blue"), Some(blue.1.clone()));
+    // A rotation the server refused changes nothing, and the next one takes the free role.
+    api.outside.1.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(!rotate().await.0.is_success());
+    api.outside.1.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!((login().await, password("app_green")), (green.clone(), Some(green.1.clone())));
+    assert!(rotate().await.0.is_success());
+    let blue2 = login().await;
+    assert_eq!((blue2.0.as_str(), password("app_green")), ("app_blue", Some(green.1.clone())));
+    // A retirement that comes late (blue's first) doesn't undo blue's reissue.
+    let (p, late) = (api.project.clone(), json!({ "kind": "outside_database", "ref": d["id"], "field": "username", "mode": "managed" }).to_string());
+    api.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO leases (id, project_id, env_id, key, kind, link, handle, consumer, issued_at, expires_at, revoked_at) VALUES ('lse_late', ?, '', '', 'retired', ?, '{\"role\":\"app_blue\",\"generation\":1}', 'test', 0, 1, NULL)",
+                [p.as_str(), late.as_str()],
+            )
+        })
+        .unwrap();
+    expire("id = 'lse_late'").await;
+    assert_eq!(password("app_blue"), Some(blue2.1.clone()));
+    // Its two roles serve one environment.
+    let (s, v) = api.call(Method::PUT, "/environments/staging/secrets/DB_USER", Some(json!({ "link": link("username") }))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+
+    // Dynamic: each resolve is a login of its own in the group, valid until its lease ends (the
+    // server enforces it), renewed with the lease, dropped when it ends.
+    let dynamic = |field: &str| json!({ "kind": "outside_database", "ref": d["id"], "field": field, "mode": "dynamic", "options": { "ttl_minutes": 15 } });
+    api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": [{ "op": "set", "key": "TMP_USER", "link": dynamic("username") }, { "op": "set", "key": "TMP_PASSWORD", "link": dynamic("password") }] }))).await;
+    let a = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:report" }))).await;
+    let b = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:report" }))).await;
+    let user = a["values"]["TMP_USER"].as_str().unwrap().to_string();
+    assert_ne!(user, b["values"]["TMP_USER"].as_str().unwrap());
+    assert_eq!(password(&user).as_deref(), a["values"]["TMP_PASSWORD"].as_str());
+    let (group, until) = api.outside.2.lock().unwrap()[&user].clone();
+    let lease = a["leases"][0].as_str().unwrap();
+    let expires = api.ok(Method::GET, "/leases", None).await.as_array().unwrap().iter().find(|l| l["id"] == lease).unwrap()["expires_at"].as_i64().unwrap();
+    assert!(group == "app_rw" && until > expires && until <= expires + 10 * 60_000, "{group} {until} {expires}");
+    let renewed = api.ok(Method::POST, &format!("/leases/{lease}/renew"), Some(json!({ "ttl_minutes": 120 }))).await;
+    assert!(api.outside.2.lock().unwrap()[&user].1 > renewed["expires_at"].as_i64().unwrap());
+    api.ok(Method::DELETE, &format!("/leases/{lease}"), None).await;
+    assert_eq!(password(&user), None);
+
+    let (s, _) = api.call(Method::DELETE, &format!("/outside-databases/{}", d["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");
+}
+
+#[tokio::test]
+async fn a_cloud_account_trusts_one_projects_token() {
+    use base64::Engine;
+    let api = Api::new().await;
+    let doc = api.ok(Method::GET, "/v1/secrets/oidc/.well-known/openid-configuration", None).await;
+    assert_eq!((doc["issuer"].as_str(), doc["jwks_uri"].as_str()), (Some(ISSUER_URL), Some(format!("{ISSUER_URL}/jwks").as_str())));
+    let gcp = json!({ "name": "analytics", "cloud": "gcp", "audience": "//iam.googleapis.com/projects/1234/locations/global/workloadIdentityPools/roll/providers/roll", "service_account": "reports@shop-prod.iam.gserviceaccount.com" });
+    // An outage proves nothing about the trust: the account isn't taken until the cloud answers.
+    api.clouds.down.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (s, e) = api.call(Method::POST, "/cloud-accounts", Some(gcp.clone())).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("couldn't tell"), "{e}");
+    api.clouds.down.store(false, std::sync::atomic::Ordering::Relaxed);
+    // A pool that takes any of roll's projects (another customer's, say) is refused.
+    let (s, e) = api.call(Method::POST, "/cloud-accounts", Some(gcp.clone())).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains(&format!("roll-secrets:{}", api.project)), "{e}");
+    *api.clouds.pinned.lock().unwrap() = Some(format!("roll-secrets:{}", api.project));
+    let g = api.ok(Method::POST, "/cloud-accounts", Some(gcp)).await;
+    let a = api.ok(Method::POST, "/cloud-accounts", Some(json!({ "name": "infra", "cloud": "azure", "tenant": "contoso.onmicrosoft.com", "client_id": "11111111-2222-3333-4444-555555555555" }))).await;
+    // Each resolve gets a token of its own, from a token roll signed for this project.
+    for (key, kind, acct) in [("GOOGLE_OAUTH_ACCESS_TOKEN", "gcp", &g), ("AZURE_ACCESS_TOKEN", "azure", &a)] {
+        api.ok(Method::PUT, &format!("/environments/production/secrets/{key}"), Some(json!({ "link": { "kind": kind, "ref": acct["id"], "field": "access_token", "mode": "dynamic", "options": { "ttl_minutes": 15 } } }))).await;
+    }
+    let one = api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "job:report" }))).await;
+    let two = api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "job:report" }))).await;
+    assert!(one["values"]["GOOGLE_OAUTH_ACCESS_TOKEN"].as_str().unwrap().starts_with("ya29.") && one["values"]["AZURE_ACCESS_TOKEN"].is_string());
+    assert_ne!(one["values"]["GOOGLE_OAUTH_ACCESS_TOKEN"], two["values"]["GOOGLE_OAUTH_ACCESS_TOKEN"]);
+    // What the cloud got verifies against roll's published keys, and names this project.
+    let jwt = api.clouds.seen.lock().unwrap().last().unwrap().clone();
+    let b64 = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s).unwrap();
+    let parts: Vec<&str> = jwt.split('.').collect();
+    let (header, claims): (Value, Value) = (serde_json::from_slice(&b64(parts[0])).unwrap(), serde_json::from_slice(&b64(parts[1])).unwrap());
+    let jwks = api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await;
+    let key = jwks["keys"].as_array().unwrap().iter().find(|k| k["kid"] == header["kid"]).expect("the signing key is published");
+    let public = ring::signature::RsaPublicKeyComponents { n: b64(key["n"].as_str().unwrap()), e: b64(key["e"].as_str().unwrap()) };
+    public.verify(&ring::signature::RSA_PKCS1_2048_8192_SHA256, format!("{}.{}", parts[0], parts[1]).as_bytes(), &b64(parts[2])).expect("roll's signature");
+    assert_eq!((claims["iss"].as_str(), claims["sub"].clone(), header["alg"].as_str()), (Some(ISSUER_URL), json!(format!("roll-secrets:{}", api.project)), Some("RS256")));
+    assert_eq!(claims["exp"].as_i64().unwrap() - claims["iat"].as_i64().unwrap(), 300);
+    // An account a key links to stays, and a lease can't outlive its token.
+    assert_eq!(api.call(Method::DELETE, &format!("/cloud-accounts/{}", g["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
+    let (s, _) = api.call(Method::PUT, "/environments/production/secrets/LONG_TOKEN", Some(json!({ "link": { "kind": "gcp", "ref": g["id"], "field": "access_token", "mode": "dynamic", "options": { "ttl_minutes": 120 } } }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // The deployment key rotates: the issuer's key is resealed with the new one (health says when
+    // the previous key can go), and keeps signing once the previous key is gone.
+    let reopen = |current: &str, previous: Option<&str>| {
+        let opts = Options { keyring: Ok(Keyring::new(current, previous).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: api.clouds.clone() }), kms: None, sts: None, outside: None };
+        Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap()
+    };
+    let (old, new) = ("k".repeat(32), "n".repeat(32));
+    let rotated = reopen(&new, Some(&old));
+    let p = api.project.clone();
+    // Any request reseals its project's key; health reseals the issuer's.
+    let s = tokio::task::spawn_blocking(move || {
+        rotated.cloud_accounts(&p, &roll_secrets::Caller::operator()).unwrap();
+        rotated.health().unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(s["resealed"], "all", "{s}");
+    let after = Arc::new(reopen(&new, None));
+    let (a, acct) = (after.clone(), g["id"].as_str().unwrap().to_string());
+    let jwks = tokio::task::spawn_blocking(move || a.oidc_jwks().unwrap()).await.unwrap();
+    assert_eq!(jwks["keys"].as_array().unwrap().len(), 1, "the same key, still published");
+    let a = after.clone();
+    tokio::task::spawn_blocking(move || a.links().get("gcp").unwrap().issue(&acct, "token", &serde_json::from_value(json!({ "kind": "gcp", "ref": "x", "field": "access_token", "mode": "dynamic" })).unwrap(), "after", Some(15)).map(|_| ()))
+        .await
+        .unwrap()
+        .expect("signing with the resealed key");
+}
+
+#[tokio::test]
+async fn a_projects_ca_signs_short_lived_certificates_for_its_names_only() {
+    use x509_parser::prelude::*;
+    let api = Api::new().await;
+    api.secrets.set_public_api("https://roll.example".into());
+    let ca = api.ok(Method::POST, "/cas", Some(json!({ "name": "internal", "domains": ["svc.internal"] }))).await;
+    let ca_pem = ca["certificate"].as_str().unwrap().to_string();
+    let link = |field: &str, mode: &str, names: Value| json!({ "kind": "pki", "ref": ca["id"], "field": field, "mode": mode, "options": { "names": names, "ttl_minutes": 60, "rotate_days": 7 } });
+    // Each resolve gets a certificate of its own, signed by the CA, for the link's names.
+    let names = json!(["api.svc.internal"]);
+    let ops: Vec<Value> = [("certificate", "TLS_CERT"), ("private_key", "TLS_KEY"), ("ca", "TLS_CA")].iter().map(|(f, k)| json!({ "op": "set", "key": k, "link": link(f, "dynamic", names.clone()) })).collect();
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": ops }))).await;
+    let r = api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "app:api" }))).await;
+    let (cert, key, chain) = (r["values"]["TLS_CERT"].as_str().unwrap(), r["values"]["TLS_KEY"].as_str().unwrap(), r["values"]["TLS_CA"].as_str().unwrap());
+    assert!(key.starts_with("-----BEGIN PRIVATE KEY-----") && chain == ca_pem);
+    let (_, ca_der) = parse_x509_pem(ca_pem.as_bytes()).unwrap();
+    let (_, ca_cert) = parse_x509_certificate(&ca_der.contents).unwrap();
+    let (_, der) = parse_x509_pem(cert.as_bytes()).unwrap();
+    let (_, leaf) = parse_x509_certificate(&der.contents).unwrap();
+    leaf.verify_signature(Some(ca_cert.public_key())).expect("signed by the project's CA");
+    let sans: Vec<String> = leaf.subject_alternative_name().unwrap().unwrap().value.general_names.iter().map(|n| format!("{n}")).collect();
+    assert_eq!(sans, ["DNSName(api.svc.internal)"]);
+    let life = leaf.validity().not_after.timestamp() - leaf.validity().not_before.timestamp();
+    assert!((3900..=4000).contains(&life), "the lease's TTL plus five minutes: {life}");
+    // The CA is limited to its domains and no IP addresses, so trusting it trusts nothing else.
+    let nc = ca_cert.name_constraints().unwrap().unwrap().value;
+    assert_eq!(nc.permitted_subtrees.as_ref().map(Vec::len), Some(1));
+    assert_eq!(nc.excluded_subtrees.as_ref().map(Vec::len), Some(2));
+    // A name outside its domains is refused; managed certificates live twice their rotation.
+    let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/WEB_CERT", Some(json!({ "link": link("certificate", "managed", json!("web.example.com")) }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("doesn't sign for web.example.com"), "{e}");
+    // A managed certificate rotates before it ends, or isn't taken.
+    for options in [json!({ "names": "web.svc.internal" }), json!({ "names": "web.svc.internal", "rotate_days": 60 })] {
+        let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/WEB_CERT", Some(json!({ "link": { "kind": "pki", "ref": ca["id"], "field": "certificate", "mode": "managed", "options": options } }))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    }
+    api.ok(Method::PUT, "/environments/staging/secrets/WEB_CERT", Some(json!({ "link": link("certificate", "managed", json!("web.svc.internal, *.web.svc.internal")) }))).await;
+    let stored = api.values("staging", "/").await["values"]["WEB_CERT"].as_str().unwrap().to_string();
+    let (_, der) = parse_x509_pem(stored.as_bytes()).unwrap();
+    let (_, managed) = parse_x509_certificate(&der.contents).unwrap();
+    assert_eq!((managed.validity().not_after.timestamp() - managed.validity().not_before.timestamp()) / 86_400, 14);
+    // A CSR: its key stays with the device; only its key and names are taken, never what else it
+    // asks for (here, to be a CA itself and to sign code).
+    let device = rcgen::KeyPair::generate().unwrap();
+    let csr = |names: &[&str]| {
+        let mut p = rcgen::CertificateParams::new(names.iter().map(|n| n.to_string()).collect::<Vec<_>>()).unwrap();
+        p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        p.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::CodeSigning];
+        p.serialize_request(&device).unwrap().pem().unwrap()
+    };
+    let at = format!("/cas/{}/sign", ca["id"].as_str().unwrap());
+    let sign = |csr: String, days: u32| api.call(Method::POST, &at, Some(json!({ "csr": csr, "days": days })));
+    let (s, signed) = sign(csr(&["sensor-7.svc.internal"]), 3).await;
+    assert_eq!(s, StatusCode::OK, "{signed}");
+    let (_, der) = parse_x509_pem(signed["certificate"].as_str().unwrap().as_bytes()).unwrap();
+    let (_, leaf) = parse_x509_certificate(&der.contents).unwrap();
+    leaf.verify_signature(Some(ca_cert.public_key())).expect("signed by the project's CA");
+    assert_eq!(leaf.public_key().subject_public_key.data.as_ref(), rcgen::PublicKeyData::der_bytes(&device), "the device's own key");
+    assert!(!leaf.is_ca() && !leaf.extended_key_usage().unwrap().unwrap().value.code_signing, "not what the CSR asked beyond its names");
+    assert_eq!((leaf.validity().not_after.timestamp() - leaf.validity().not_before.timestamp()) / 86_400, 3);
+    assert_eq!(sign(csr(&["sensor-7.example.com"]), 3).await.0, StatusCode::BAD_REQUEST, "a name outside the CA's domains");
+    assert_eq!(sign(csr(&["sensor-7.svc.internal"]), 91).await.0, StatusCode::BAD_REQUEST, "longer than the CA allows");
+    // Revoking: a lost device's certificate by hand, a lease's when it ends. The CA's CRL (public)
+    // lists both, and every certificate names where it is.
+    let id = ca["id"].as_str().unwrap();
+    let crl_url = format!("https://roll.example/v1/secrets/crl/{id}");
+    assert!(der.contents.windows(crl_url.len()).any(|w| w == crl_url.as_bytes()), "the CRL distribution point");
+    let listed = api.ok(Method::GET, &format!("/cas/{id}/certificates"), None).await;
+    assert!(listed.as_array().unwrap().iter().any(|c| c["serial"] == signed["serial"] && c["source"] == "csr") && listed.as_array().unwrap().iter().any(|c| c["source"] == "link"), "{listed}");
+    let revoke_at = format!("/cas/{id}/revoke");
+    let revoke = |serial: Value| api.call(Method::POST, &revoke_at, Some(json!({ "serial": serial })));
+    assert_eq!(revoke(signed["serial"].clone()).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(revoke(json!("00")).await.0, StatusCode::NOT_FOUND);
+    // A CRL fetched now is kept a minute; a revocation still shows in the next one.
+    assert_eq!(api.call(Method::GET, &format!("/v1/secrets/crl/{id}?format=pem"), None).await.0, StatusCode::OK);
+    let lease_cert = parse_x509_pem(cert.as_bytes()).unwrap().1;
+    let lease_serial = parse_x509_certificate(&lease_cert.contents).unwrap().1.raw_serial().to_vec();
+    assert_eq!(api.call(Method::DELETE, &format!("/leases/{}", r["leases"][0].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
+    let (s, crl) = api.call(Method::GET, &format!("/v1/secrets/crl/{id}?format=pem"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, pem) = parse_x509_pem(crl.as_str().unwrap().as_bytes()).unwrap();
+    let (_, crl) = parse_x509_crl(&pem.contents).unwrap();
+    crl.verify_signature(ca_cert.public_key()).expect("signed by the CA");
+    let revoked: Vec<Vec<u8>> = crl.iter_revoked_certificates().map(|r| r.raw_serial().to_vec()).collect();
+    assert!(revoked.contains(&leaf.raw_serial().to_vec()) && revoked.contains(&lease_serial), "both revoked: {revoked:?}");
+    // A CA whose revocations still matter keeps serving them: it can't be deleted until they end.
+    let devices = api.ok(Method::POST, "/cas", Some(json!({ "name": "devices", "domains": ["dev.internal"] }))).await;
+    let dev_id = devices["id"].as_str().unwrap();
+    let one = api.ok(Method::POST, &format!("/cas/{dev_id}/sign"), Some(json!({ "csr": csr(&["d1.dev.internal"]), "days": 2 }))).await;
+    api.call(Method::POST, &format!("/cas/{dev_id}/revoke"), Some(json!({ "serial": one["serial"] }))).await;
+    let (s, e) = api.call(Method::DELETE, &format!("/cas/{dev_id}"), None).await;
+    assert!(s == StatusCode::CONFLICT && e.to_string().contains("revocation list"), "{e}");
+    // A CSR's certificate ending within two weeks is health's to say (nothing renews it); a
+    // revoked one isn't.
+    let d2 = api.ok(Method::POST, &format!("/cas/{dev_id}/sign"), Some(json!({ "csr": csr(&["d2.dev.internal"]), "days": 5 }))).await;
+    let health = api.ok(Method::GET, "/health", None).await;
+    let ending: Vec<&Value> = health.as_array().unwrap().iter().filter(|f| f["issue"] == "certificate_expiring").collect();
+    assert_eq!(ending.iter().map(|f| (f["key"].as_str().unwrap(), f["path"].as_str().unwrap())).collect::<Vec<_>>(), [("d2.dev.internal", "devices")], "{health}");
+    // OCSP, beside the CRL: one revoked and one good certificate, answered and signed by the CA.
+    {
+        use der::{Decode, Encode};
+        let ca_pem = devices["certificate"].as_str().unwrap();
+        let (_, pem) = parse_x509_pem(ca_pem.as_bytes()).unwrap();
+        let ca = x509_cert::Certificate::from_der(&pem.contents).unwrap();
+        let sha1 = |b: &[u8]| der::asn1::OctetString::new(ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, b).as_ref().to_vec()).unwrap();
+        let (name_hash, key_hash) = (sha1(&ca.tbs_certificate.subject.to_der().unwrap()), sha1(ca.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes()));
+        let ask = |serial: &str| x509_ocsp::Request {
+            req_cert: x509_ocsp::CertId {
+                hash_algorithm: x509_cert::spki::AlgorithmIdentifierOwned { oid: der::oid::ObjectIdentifier::new_unwrap("1.3.14.3.2.26"), parameters: None },
+                issuer_name_hash: name_hash.clone(),
+                issuer_key_hash: key_hash.clone(),
+                serial_number: x509_cert::serial_number::SerialNumber::new(&(0..serial.len()).step_by(2).map(|i| u8::from_str_radix(&serial[i..i + 2], 16).unwrap()).collect::<Vec<_>>()).unwrap(),
+            },
+            single_request_extensions: None,
+        };
+        let request = x509_ocsp::OcspRequest { tbs_request: x509_ocsp::TbsRequest { version: Default::default(), requestor_name: None, request_list: vec![ask(one["serial"].as_str().unwrap()), ask(d2["serial"].as_str().unwrap())], request_extensions: None }, optional_signature: None };
+        let req = Request::builder().method(Method::POST).uri(format!("/v1/secrets/ocsp/{dev_id}")).body(Body::from(request.to_der().unwrap())).unwrap();
+        let resp = api.router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let answer = x509_ocsp::OcspResponse::from_der(&bytes).unwrap();
+        let basic = x509_ocsp::BasicOcspResponse::from_der(answer.response_bytes.unwrap().response.as_bytes()).unwrap();
+        let statuses: Vec<&str> = basic.tbs_response_data.responses.iter().map(|r| match r.cert_status { x509_ocsp::CertStatus::Good(_) => "good", x509_ocsp::CertStatus::Revoked(_) => "revoked", x509_ocsp::CertStatus::Unknown(_) => "unknown" }).collect();
+        assert_eq!(statuses, ["revoked", "good"]);
+        let public = ca.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes();
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_ASN1, public).verify(&basic.tbs_response_data.to_der().unwrap(), basic.signature.raw_bytes()).expect("signed by the CA");
+    }
+    // A CA a key links to stays.
+    assert_eq!(api.call(Method::DELETE, &format!("/cas/{}", ca["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn an_ssh_ca_signs_short_lived_user_certificates_for_its_principals() {
+    use base64::Engine;
+    use ed25519_dalek::Verifier;
+    let api = Api::new().await;
+    let ca = api.ok(Method::POST, "/ssh-cas", Some(json!({ "name": "ops", "principals": ["deploy", "ubuntu"], "max_hours": 8 }))).await;
+    let ca_pub = ca["public_key"].as_str().unwrap();
+    assert!(ca_pub.starts_with("ssh-ed25519 AAAA"), "{ca_pub}");
+    let link = |field: &str, principals: &str| json!({ "kind": "ssh", "ref": ca["id"], "field": field, "mode": "dynamic", "options": { "principals": principals, "ttl_minutes": 30 } });
+    // A login the CA doesn't sign for is refused when it's linked.
+    let (s, e) = api.call(Method::PUT, "/environments/production/secrets/ROOT_CERT", Some(json!({ "link": link("certificate", "root") }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("doesn't sign for root"), "{e}");
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "SSH_CERT", "link": link("certificate", "deploy") }, { "op": "set", "key": "SSH_KEY", "link": link("private_key", "deploy") }] }))).await;
+    let r = api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "job:release" }))).await;
+    let (cert, key) = (r["values"]["SSH_CERT"].as_str().unwrap(), r["values"]["SSH_KEY"].as_str().unwrap());
+    assert!(key.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
+    // The certificate: signed by the CA's key over everything before its signature, for `deploy`,
+    // for the lease's TTL plus five minutes.
+    let blob = base64::engine::general_purpose::STANDARD.decode(cert.split(' ').nth(1).unwrap()).unwrap();
+    fn take(b: &[u8], p: &mut usize) -> Vec<u8> {
+        let n = u32::from_be_bytes(b[*p..*p + 4].try_into().unwrap()) as usize;
+        let s = b[*p + 4..*p + 4 + n].to_vec();
+        *p += 4 + n;
+        s
+    }
+    let mut p = 0usize;
+    assert_eq!(take(&blob, &mut p), b"ssh-ed25519-cert-v01@openssh.com");
+    take(&blob, &mut p); // nonce
+    take(&blob, &mut p); // the user's key
+    p += 8 + 4; // serial, type
+    take(&blob, &mut p); // key id
+    assert_eq!(&take(&blob, &mut p)[4..], b"deploy");
+    let (after, before) = (u64::from_be_bytes(blob[p..p + 8].try_into().unwrap()), u64::from_be_bytes(blob[p + 8..p + 16].try_into().unwrap()));
+    assert_eq!(before - after, 36 * 60, "the lease's TTL plus five minutes, and a minute of skew");
+    p += 16;
+    for _ in 0..3 {
+        take(&blob, &mut p); // critical options, extensions, reserved
+    }
+    let signer = take(&blob, &mut p);
+    let signed_to = p;
+    let sig = take(&blob, &mut p);
+    let ca_key = base64::engine::general_purpose::STANDARD.decode(ca_pub.split(' ').nth(1).unwrap()).unwrap();
+    assert_eq!(signer, ca_key, "signed by the project's CA");
+    let public = ed25519_dalek::VerifyingKey::from_bytes(ca_key[ca_key.len() - 32..].try_into().unwrap()).unwrap();
+    public.verify(&blob[..signed_to], &ed25519_dalek::Signature::from_slice(&sig[sig.len() - 64..]).unwrap()).expect("the CA's signature");
+    assert_eq!(api.call(Method::DELETE, &format!("/ssh-cas/{}", ca["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
+    // Host certificates: a server's own key signed for names under the CA's host domains, and the
+    // known_hosts line that trusts them.
+    for public in ["com", "co.uk"] {
+        assert_eq!(api.call(Method::POST, "/ssh-cas", Some(json!({ "name": "wide", "principals": [], "host_domains": [public] }))).await.0, StatusCode::BAD_REQUEST, "{public}");
+    }
+    let hosts = api.ok(Method::POST, "/ssh-cas", Some(json!({ "name": "fleet", "principals": [], "host_domains": ["svc.internal"] }))).await;
+    let hosts_pub = hosts["public_key"].as_str().unwrap();
+    assert_eq!(hosts["known_hosts"], format!("@cert-authority *.svc.internal,svc.internal {hosts_pub}"));
+    let server = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
+    let mut server_blob = vec![];
+    for part in [&b"ssh-ed25519"[..], &server.verifying_key().to_bytes()[..]] {
+        server_blob.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        server_blob.extend_from_slice(part);
+    }
+    let line = format!("ssh-ed25519 {} root@db1", base64::engine::general_purpose::STANDARD.encode(&server_blob));
+    let sign_at = format!("/ssh-cas/{}/sign-host", hosts["id"].as_str().unwrap());
+    let sign = |hosts: Value| api.call(Method::POST, &sign_at, Some(json!({ "public_key": line, "hosts": hosts, "days": 30 })));
+    assert_eq!(sign(json!(["db1.example.com"])).await.0, StatusCode::BAD_REQUEST, "a name outside its domains");
+    let (s, signed) = sign(json!(["db1.svc.internal"])).await;
+    assert_eq!(s, StatusCode::OK, "{signed}");
+    let blob = base64::engine::general_purpose::STANDARD.decode(signed["certificate"].as_str().unwrap().split(' ').nth(1).unwrap()).unwrap();
+    let mut p = 0usize;
+    assert_eq!(take(&blob, &mut p), b"ssh-ed25519-cert-v01@openssh.com");
+    take(&blob, &mut p); // nonce
+    assert_eq!(take(&blob, &mut p), server.verifying_key().to_bytes(), "the server's own key");
+    p += 8;
+    assert_eq!(u32::from_be_bytes(blob[p..p + 4].try_into().unwrap()), 2, "a host certificate");
+    p += 4;
+    take(&blob, &mut p); // key id
+    assert_eq!(&take(&blob, &mut p)[4..], b"db1.svc.internal");
+    p += 16;
+    for _ in 0..3 {
+        take(&blob, &mut p);
+    }
+    let signer = take(&blob, &mut p);
+    let signed_to = p;
+    let sig = take(&blob, &mut p);
+    let fleet_key = base64::engine::general_purpose::STANDARD.decode(hosts_pub.split(' ').nth(1).unwrap()).unwrap();
+    assert_eq!(signer, fleet_key);
+    ed25519_dalek::VerifyingKey::from_bytes(fleet_key[fleet_key.len() - 32..].try_into().unwrap()).unwrap().verify(&blob[..signed_to], &ed25519_dalek::Signature::from_slice(&sig[sig.len() - 64..]).unwrap()).expect("the CA's signature");
+    // A person's own key (in an agent, on a token): a user certificate for logins the CA allows.
+    let user_at = format!("/ssh-cas/{}/sign-user", ca["id"].as_str().unwrap());
+    assert_eq!(api.call(Method::POST, &user_at, Some(json!({ "public_key": line, "principals": ["root"] }))).await.0, StatusCode::BAD_REQUEST);
+    let mine = api.ok(Method::POST, &user_at, Some(json!({ "public_key": line, "principals": ["deploy"], "ttl_minutes": 30 }))).await;
+    let blob = base64::engine::general_purpose::STANDARD.decode(mine["certificate"].as_str().unwrap().split(' ').nth(1).unwrap()).unwrap();
+    let mut p = 0usize;
+    take(&blob, &mut p);
+    take(&blob, &mut p);
+    assert_eq!(take(&blob, &mut p), server.verifying_key().to_bytes(), "the person's own key");
+    p += 8;
+    assert_eq!(u32::from_be_bytes(blob[p..p + 4].try_into().unwrap()), 1, "a user certificate");
+}
+
+#[tokio::test]
+async fn a_sensitive_keys_value_reaches_only_roll_s_runtimes() {
+    let api = Api::new().await;
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "PAYMENTS_KEY", "value": "sk_live_sensitive", "tags": ["sensitive"] }, { "op": "set", "key": "WRAPPED", "value": "Bearer ${PAYMENTS_KEY}" }] }))).await;
+    // Not to a person or a token: left out of values (named in `withheld`), refused on its own, not
+    // carried by a reference, not in history.
+    let v = api.values("production", "/").await;
+    assert!(v["values"].get("PAYMENTS_KEY").is_none() && v["withheld"] == json!(["PAYMENTS_KEY"]), "{v}");
+    assert!(v["problems"].to_string().contains("PAYMENTS_KEY is sensitive"), "{v}");
+    assert_eq!(api.call(Method::GET, "/environments/production/secrets/PAYMENTS_KEY/value", None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(api.call(Method::GET, "/environments/production/secrets/PAYMENTS_KEY/versions/1/value", None).await.0, StatusCode::FORBIDDEN);
+    // Sensitive is for good.
+    let (s, e) = api.call(Method::PUT, "/environments/production/secrets/PAYMENTS_KEY", Some(json!({ "tags": [] }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("sensitive for good"), "{e}");
+    // roll's own runtimes (apps, previews, checks) get it, and the reference resolves for them.
+    let (s, p) = (api.secrets.clone(), api.project.clone());
+    let got = tokio::task::spawn_blocking(move || s.values(&p, "production", "/", true, Some("app:web"), &roll_secrets::Caller::consumer("app:web")).unwrap()).await.unwrap();
+    assert_eq!((got.values["PAYMENTS_KEY"].expose(), got.values["WRAPPED"].expose()), ("sk_live_sensitive", "Bearer sk_live_sensitive"));
+    // …and are told which values never to show, a key that holds one through a reference too.
+    assert_eq!(got.sensitive, ["PAYMENTS_KEY", "WRAPPED"]);
+    // A sandbox's or a check's resolve isn't a runtime's.
+    let (s, p) = (api.secrets.clone(), api.project.clone());
+    let sandbox = tokio::task::spawn_blocking(move || s.values(&p, "production", "/", true, Some("sandbox:x"), &roll_secrets::Caller::consumer("sandbox:x").not_runtime()).unwrap()).await.unwrap();
+    assert!(!sandbox.values.contains_key("PAYMENTS_KEY"));
+
+    // Tagging a key that already has a value: its older versions hold the value too, so none shows.
+    api.ok(Method::PUT, "/environments/staging/secrets/OLD_KEY", Some(json!({ "value": "sk_live_old" }))).await;
+    api.ok(Method::PUT, "/environments/staging/secrets/OLD_KEY", Some(json!({ "tags": ["sensitive"] }))).await;
+    assert_eq!(api.call(Method::GET, "/environments/staging/secrets/OLD_KEY/versions/1/value", None).await.0, StatusCode::FORBIDDEN);
+    // No test of a guess: the leak scan, a local file and another environment's copy don't say.
+    assert_eq!(api.ok(Method::POST, "/leaks", Some(json!({ "candidates": ["sk_live_old"] }))).await, json!([]));
+    api.ok(Method::PUT, "/environments/development/secrets/OLD_KEY", Some(json!({ "value": "sk_live_old" }))).await;
+    let cmp = api.ok(Method::GET, "/compare?from=development&to=staging", None).await;
+    assert_eq!(cmp["rows"].as_array().unwrap().iter().find(|r| r["key"] == "OLD_KEY").unwrap()["status"], "hidden");
+}
+
+#[tokio::test]
+async fn an_encryption_key_encrypts_for_apps_and_never_leaves_roll() {
+    use base64::Engine;
+    let b64 = |s: &[u8]| base64::engine::general_purpose::STANDARD.encode(s);
+    let api = Api::new().await;
+    let k = api.ok(Method::POST, "/transit", Some(json!({ "name": "cards" }))).await;
+    assert_eq!(k["latest_version"], 1);
+    assert!(!api.ok(Method::GET, "/transit", None).await.to_string().contains("\"key\""), "no key material in a listing");
+    // Encrypt bound to a context; it opens under that context only.
+    let one = api.ok(Method::POST, "/transit/cards/encrypt", Some(json!({ "plaintext": b64(b"4111 1111 1111 1111"), "context": "order:42" }))).await;
+    let ct = one["ciphertext"].as_str().unwrap().to_string();
+    assert!(ct.starts_with("roll:v1:"), "{ct}");
+    let open = |ct: &str, context: &str| api.call(Method::POST, "/transit/cards/decrypt", Some(json!({ "ciphertext": ct, "context": context })));
+    assert_eq!(open(&ct, "order:42").await.1["plaintext"], b64(b"4111 1111 1111 1111"));
+    assert_eq!(open(&ct, "order:43").await.0, StatusCode::BAD_REQUEST);
+    // Rotation: new ciphertexts use v2, old ones still open, rewrap moves them without the plaintext.
+    assert_eq!(api.ok(Method::POST, "/transit/cards/rotate", None).await["latest_version"], 2);
+    let re = api.ok(Method::POST, "/transit/cards/rewrap", Some(json!({ "items": [{ "ciphertext": ct, "context": "order:42" }] }))).await;
+    let ct2 = re["items"][0]["ciphertext"].as_str().unwrap().to_string();
+    assert!(ct2.starts_with("roll:v2:") && open(&ct2, "order:42").await.1["plaintext"] == b64(b"4111 1111 1111 1111"));
+    // Retiring v1: what it encrypted no longer opens.
+    api.ok(Method::PATCH, "/transit/cards", Some(json!({ "min_decrypt_version": 2 }))).await;
+    let (s, e) = open(&ct, "order:42").await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("retired"), "{e}");
+    // A data key for local envelope encryption: its ciphertext opens to it.
+    let dk = api.ok(Method::POST, "/transit/cards/datakey", Some(json!({}))).await;
+    assert_eq!(base64::engine::general_purpose::STANDARD.decode(dk["plaintext"].as_str().unwrap()).unwrap().len(), 32);
+    assert_eq!(api.call(Method::POST, "/transit/cards/decrypt", Some(json!({ "ciphertext": dk["ciphertext"] }))).await.1["plaintext"], dk["plaintext"]);
+    // Signatures: by the newest version, checked here or by anyone with the public key.
+    let sig = api.ok(Method::POST, "/transit/cards/sign", Some(json!({ "input": b64(b"invoice 7") }))).await["signature"].as_str().unwrap().to_string();
+    assert!(sig.starts_with("roll:v2:"), "{sig}");
+    let check = |input: &[u8], sig: &str| api.ok(Method::POST, "/transit/cards/verify", Some(json!({ "items": [{ "input": b64(input), "signature": sig }] })));
+    assert_eq!(check(b"invoice 7", &sig).await["items"][0]["valid"], true);
+    assert_eq!(check(b"invoice 8", &sig).await["items"][0]["valid"], false);
+    assert_eq!(check(b"invoice 7", &sig.replace("roll:v2:", "roll:v9:")).await["items"][0]["valid"], false, "an unknown version doesn't verify");
+    let public = api.ok(Method::GET, "/transit/cards/public", None).await;
+    let raw = base64::engine::general_purpose::STANDARD.decode(public[1]["public_key"].as_str().unwrap()).unwrap();
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&sig["roll:v2:".len()..]).unwrap();
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, raw).verify(b"invoice 7", &bytes).expect("a stock Ed25519 check passes");
+    // HMACs: stable for one input (a blind index), checked only by writers.
+    let mac = |input: &[u8]| api.ok(Method::POST, "/transit/cards/hmac", Some(json!({ "input": b64(input) })));
+    let m = mac(b"ada@example.com").await["hmac"].clone();
+    assert_eq!(mac(b"ada@example.com").await["hmac"], m);
+    assert_ne!(mac(b"bob@example.com").await["hmac"], m);
+    assert_eq!(api.ok(Method::POST, "/transit/cards/hmac/verify", Some(json!({ "input": b64(b"ada@example.com"), "hmac": m }))).await["valid"], true);
+    // A backup carries the key: restored into another project, it still opens what it encrypted.
+    let secret = [9u8; 32];
+    let b = api.ok(Method::POST, "/backup", Some(json!({ "recipient": roll_secrets::crypto::public_key(&secret) }))).await;
+    let sealed: roll_secrets::crypto::Sealed = serde_json::from_value(b["sealed"].clone()).unwrap();
+    let archive: Value = serde_json::from_slice(&roll_secrets::crypto::open_sealed(&secret, b["context"].as_str().unwrap(), &sealed).unwrap()).unwrap();
+    let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "restored" }))).await;
+    let to = |p: &str| format!("/v1/secrets/projects/{}{p}", other["id"].as_str().unwrap());
+    api.ok(Method::POST, &to("/restore"), Some(archive)).await;
+    let back = api.call(Method::POST, &to("/transit/cards/decrypt"), Some(json!({ "ciphertext": ct2, "context": "order:42" }))).await;
+    assert_eq!(back.1["plaintext"], b64(b"4111 1111 1111 1111"), "{back:?}");
+    assert_eq!(api.ok(Method::POST, &to("/transit/cards/sign"), Some(json!({ "input": b64(b"invoice 7") }))).await["signature"], sig.as_str(), "and signs as it did");
+    // A key brought from Vault: Vault's own ciphertexts (aes256-gcm96, no AAD) open under the
+    // version that was Vault's, and rewrap into roll's form.
+    let vault_ct = |key: &[u8; 32], plain: &[u8]| {
+        use aes_gcm::aead::{Aead, KeyInit};
+        let nonce = [7u8; 12];
+        let mut raw = nonce.to_vec();
+        raw.extend(aes_gcm::Aes256Gcm::new_from_slice(key).unwrap().encrypt(aes_gcm::Nonce::from_slice(&nonce), plain).unwrap());
+        raw
+    };
+    let (k1, k2) = ([3u8; 32], [4u8; 32]);
+    assert_eq!(api.call(Method::POST, "/transit", Some(json!({ "name": "legacy", "key": b64(&[1u8; 16]) }))).await.0, StatusCode::BAD_REQUEST, "not 32 bytes");
+    let made = api.ok(Method::POST, "/transit", Some(json!({ "name": "legacy", "key": b64(&k1), "vault_version": 1 }))).await;
+    assert_eq!((made["versions"][0]["imported"].clone(), made["versions"][0]["vault_version"].clone()), (json!(true), json!(1)));
+    api.ok(Method::POST, "/transit/legacy/rotate", Some(json!({ "key": b64(&k2), "vault_version": 2 }))).await;
+    for (key, n, plain) in [(&k1, 1, &b"from vault v1"[..]), (&k2, 2, &b"from vault v2"[..])] {
+        let ct = format!("vault:v{n}:{}", b64(&vault_ct(key, plain)));
+        assert_eq!(api.ok(Method::POST, "/transit/legacy/decrypt", Some(json!({ "ciphertext": ct }))).await["plaintext"], b64(plain));
+        let moved = api.ok(Method::POST, "/transit/legacy/rewrap", Some(json!({ "ciphertext": ct }))).await["ciphertext"].as_str().unwrap().to_string();
+        assert!(moved.starts_with("roll:v2:"), "{moved}");
+        assert_eq!(api.ok(Method::POST, "/transit/legacy/decrypt", Some(json!({ "ciphertext": moved }))).await["plaintext"], b64(plain));
+    }
+    let wrong = format!("vault:v1:{}", b64(&vault_ct(&k2, b"x")));
+    assert_eq!(api.call(Method::POST, "/transit/legacy/decrypt", Some(json!({ "ciphertext": wrong }))).await.0, StatusCode::BAD_REQUEST);
+    // Deleting makes everything unreadable for good: only with the name repeated.
+    assert_eq!(api.call(Method::DELETE, "/transit/cards", None).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(api.call(Method::DELETE, "/transit/cards?confirm=cards", None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(open(&ct2, "order:42").await.0, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -1137,6 +1914,129 @@ async fn a_signed_in_person_manages_only_their_own_projects_secrets() {
 }
 
 #[tokio::test]
+async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_out() {
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_live_123").await;
+    let key = "arn:aws:kms:eu-west-1:123456789012:key/k1";
+    // A key whose policy would wrap any project's data key (another customer's, say) is refused.
+    let (s, e) = api.call(Method::PUT, "/kms", Some(json!({ "key": key }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("doesn't pin the project"), "{e}");
+    *api.kms.pinned.lock().unwrap() = Some(api.project.clone());
+    let set = api.ok(Method::PUT, "/kms", Some(json!({ "key": key }))).await;
+    assert_eq!(set["key"], key);
+    assert_eq!(api.ok(Method::GET, "/kms", None).await["key"], key);
+    let stored: String = api.db.read(|c| c.query_row("SELECT dek FROM projects WHERE project_id = ?", [api.project.as_str()], |r| r.get(0))).unwrap();
+    assert!(stored.starts_with("kms:v1:"), "{stored}");
+    assert_eq!(api.values("production", "/").await["values"]["STRIPE_KEY"], "sk_live_123", "the values didn't change");
+    // roll secrets' own link kinds open the key through the customer's too (a CA's, here).
+    api.secrets.set_public_api("https://roll.example".into());
+    let ca = api.ok(Method::POST, "/cas", Some(json!({ "name": "internal", "domains": ["svc.internal"] }))).await;
+    let link = json!({ "kind": "pki", "ref": ca["id"], "field": "certificate", "mode": "dynamic", "options": { "names": ["api.svc.internal"], "ttl_minutes": 60 } });
+    api.ok(Method::PUT, "/environments/production/secrets/TLS_CERT", Some(json!({ "link": link }))).await;
+    let cert = api.values("production", "/").await["values"]["TLS_CERT"].clone();
+    assert!(cert.as_str().is_some_and(|c| c.starts_with("-----BEGIN CERTIFICATE-----")), "{cert}");
+    let node = |keyring: Keyring| {
+        let opts = Options { keyring: Ok(keyring), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, clouds: None };
+        Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap())
+    };
+    // The deployment key rotates: health counts the wrapped project as not resealed until the
+    // sweeper reseals it inside its wrap (the previous key can't be dropped before).
+    let rotated = node(Keyring::new(&"n".repeat(32), Some(&"k".repeat(32))).unwrap());
+    assert_eq!(rotated.health().unwrap()["resealed"], json!(0));
+    rotated.sweep().unwrap();
+    assert_eq!(rotated.health().unwrap()["resealed"], "all");
+    let fresh = node(Keyring::new(&"n".repeat(32), None).unwrap());
+    let values = |s: Arc<Secrets>| {
+        let req = Request::get(format!("/v1/secrets/projects/{}/environments/production/values", api.project)).body(Body::empty()).unwrap();
+        async move {
+            let res = roll_secrets::router(s).oneshot(req).await.unwrap();
+            (res.status(), String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    assert!(values(fresh.clone()).await.1.contains("sk_live_123"), "opens with the new deployment key alone");
+    // The customer revokes it: a node without the key in memory is refused (423, not an outage).
+    *api.kms.revoked.lock().unwrap() = true;
+    let (status, body) = values(node(Keyring::new(&"n".repeat(32), None).unwrap())).await;
+    assert_eq!(status, StatusCode::LOCKED);
+    assert!(body.contains("kms_denied") && !body.contains("sk_live"), "{body}");
+    // Nor can the wrapping be changed then, even by a node that has the key in memory.
+    assert_eq!(roll_secrets::router(fresh).oneshot(Request::delete(format!("/v1/secrets/projects/{}/kms", api.project)).body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::LOCKED);
+    // Back with roll alone: no KMS needed any more.
+    *api.kms.revoked.lock().unwrap() = false;
+    let opts = Options { keyring: Ok(Keyring::new(&"n".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, clouds: None };
+    let after = Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap());
+    assert!(roll_secrets::router(after.clone()).oneshot(Request::delete(format!("/v1/secrets/projects/{}/kms", api.project)).body(Body::empty()).unwrap()).await.unwrap().status().is_success());
+    *api.kms.revoked.lock().unwrap() = true;
+    assert!(values(after).await.1.contains("sk_live_123"));
+}
+
+#[tokio::test]
+async fn an_aws_role_gives_each_lease_a_short_lived_session() {
+    let api = Api::new().await;
+    let role = json!({ "name": "deploy", "role_arn": "arn:aws:iam::123456789012:role/roll" });
+    // A role whose trust policy takes any ExternalId (another customer's that trusts roll, say)
+    // is refused: it must pin this project's.
+    let (s, e) = api.call(Method::POST, "/aws-roles", Some(role.clone())).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    assert!(e["error"].as_str().unwrap().contains(&format!("sts:ExternalId = roll-secrets:{}", api.project)), "{e}");
+    *api.sts.pinned.lock().unwrap() = Some(format!("roll-secrets:{}", api.project));
+    let made = api.ok(Method::POST, "/aws-roles", Some(role)).await;
+    let id = made["id"].as_str().unwrap().to_string();
+    // Its three keys share one session per resolve; each resolve gets a session of its own.
+    for (key, field) in [("AWS_ACCESS_KEY_ID", "access_key_id"), ("AWS_SECRET_ACCESS_KEY", "secret_access_key"), ("AWS_SESSION_TOKEN", "session_token")] {
+        api.ok(Method::PUT, &format!("/environments/production/secrets/{key}"), Some(json!({ "link": { "kind": "aws", "ref": id, "field": field, "mode": "dynamic", "options": { "ttl_minutes": 15 } } }))).await;
+    }
+    let before = *api.sts.sessions.lock().unwrap();
+    let a = api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "app:web" }))).await;
+    let b = api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "app:web" }))).await;
+    assert_eq!(*api.sts.sessions.lock().unwrap() - before, 2, "one session per resolve, for all three keys");
+    let n = a["values"]["AWS_ACCESS_KEY_ID"].as_str().unwrap().trim_start_matches("ASIA").to_string();
+    assert_eq!((a["values"]["AWS_SECRET_ACCESS_KEY"].as_str(), a["values"]["AWS_SESSION_TOKEN"].as_str()), (Some(format!("secret-{n}").as_str()), Some(format!("token-{n}").as_str())));
+    assert_ne!(a["values"]["AWS_SESSION_TOKEN"], b["values"]["AWS_SESSION_TOKEN"]);
+    assert_eq!(a["dynamic"].as_array().map(Vec::len), Some(3));
+    // An AWS session can't be extended: resolve again for a new one.
+    let lease = a["leases"][0].as_str().unwrap();
+    let (s, _) = api.call(Method::POST, &format!("/leases/{lease}/renew"), None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    // A role keys still link to stays.
+    assert_eq!(api.call(Method::DELETE, &format!("/aws-roles/{id}"), None).await.0, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn an_iam_users_access_keys_take_turns() {
+    let api = Api::new().await;
+    *api.sts.pinned.lock().unwrap() = Some(format!("roll-secrets:{}", api.project));
+    let role = api.ok(Method::POST, "/aws-roles", Some(json!({ "name": "keys", "role_arn": "arn:aws:iam::123456789012:role/roll" }))).await;
+    let (s, _) = api.call(Method::POST, "/aws-users", Some(json!({ "name": "ci", "role": role["id"], "user": "nobody" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a user the role can't see is refused");
+    let user = api.ok(Method::POST, "/aws-users", Some(json!({ "name": "ci", "role": role["id"], "user": "legacy-ci" }))).await;
+    let link = |field: &str| json!({ "kind": "aws_iam_user", "ref": user["id"], "field": field, "mode": "managed" });
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "AWS_ACCESS_KEY_ID", "link": link("access_key_id") }, { "op": "set", "key": "AWS_SECRET_ACCESS_KEY", "link": link("secret_access_key") }] }))).await;
+    let key = || async { api.values("production", "/").await["values"]["AWS_ACCESS_KEY_ID"].as_str().unwrap().to_string() };
+    let keys = || api.sts.keys.lock().unwrap().0.clone();
+    assert_eq!(key().await, "AKIA1");
+    // A rotation makes the second key; the first works through its grace.
+    api.ok(Method::POST, "/environments/production/secrets/AWS_ACCESS_KEY_ID/rotate", None).await;
+    assert_eq!((key().await, keys()), ("AKIA2".to_string(), vec!["AKIA1".to_string(), "AKIA2".to_string()]));
+    // Both slots are taken: another rotation is refused, and nothing is deleted to make room.
+    let (s, e) = api.call(Method::POST, "/environments/production/secrets/AWS_ACCESS_KEY_ID/rotate", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{e}");
+    assert_eq!((key().await, keys().len()), ("AKIA2".to_string(), 2));
+    // The grace ends: the old key goes, and the slot is free again.
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ?", [p.as_str()])).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    assert_eq!(keys(), ["AKIA2"]);
+    api.ok(Method::POST, "/environments/production/secrets/AWS_ACCESS_KEY_ID/rotate", None).await;
+    assert_eq!(key().await, "AKIA3");
+    // What's in use stays.
+    assert_eq!(api.call(Method::DELETE, &format!("/aws-roles/{}", role["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
+    assert_eq!(api.call(Method::DELETE, &format!("/aws-users/{}", user["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token() {
     let api = Api::new().await;
     api.set("staging", "API_KEY", "staging-key").await;
@@ -1175,6 +2075,29 @@ async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token()
     assert_eq!(audit.as_array().unwrap().iter().map(|a| a["action"].as_str().unwrap()).collect::<Vec<_>>(), ["secrets.export", "identity.login"]);
     let listed = api.ok(Method::GET, "/identities", None).await;
     assert_eq!(listed[0]["last_subject"], "repo:acme/web:ref:refs/heads/main");
+
+    // A cluster's own issuer isn't reachable: an identity pins its keys, and roll fetches nothing.
+    *api.sent.1.lock().unwrap() = None;
+    let cluster = Issuer::new();
+    let k8s = "https://kubernetes.default.svc.cluster.local";
+    let pods = |jwks: Value| json!({ "name": "pods", "issuer": k8s, "audience": "roll", "subject": "system:serviceaccount:shop:web", "environments": ["staging"], "actions": ["read", "reveal"], "jwks": jwks.to_string() });
+    assert_eq!(api.call(Method::POST, "/identities", Some(pods(json!({ "keys": [] })))).await.0, StatusCode::BAD_REQUEST, "no usable key");
+    let p = api.ok(Method::POST, "/identities", Some(pods(cluster.jwks()))).await;
+    assert_eq!(p["pinned_keys"], 1);
+    let pod = |signer: &Issuer| json!({ "identity": p["id"], "token": signer.sign(json!({ "iss": k8s, "aud": "roll", "sub": "system:serviceaccount:shop:web", "exp": now + 300, "iat": now })) });
+    let (s, l) = api.call(Method::POST, "/v1/secrets/login", Some(pod(&cluster))).await;
+    assert_eq!(s, StatusCode::OK, "{l}");
+    assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(pod(&issuer))).await.0, StatusCode::UNAUTHORIZED, "only its own keys");
+    // The cluster rotates its signing key: the identity's keys are replaced, its id kept.
+    let rotated = Issuer::new();
+    let (_, before) = api.call(Method::POST, "/v1/secrets/login", Some(pod(&cluster))).await;
+    let k = api.ok(Method::PUT, &format!("/identities/{}/jwks", p["id"].as_str().unwrap()), Some(json!({ "jwks": rotated.jwks().to_string() }))).await;
+    assert_eq!((k["id"].clone(), k["pinned_keys"].clone()), (p["id"].clone(), json!(1)));
+    assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(pod(&rotated))).await.0, StatusCode::OK);
+    assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(pod(&cluster))).await.0, StatusCode::UNAUTHORIZED, "the old key no longer");
+    // What it gave out under the old key ends with it (a rotation is often for a leaked key).
+    let (s, _) = api.req(Method::GET, "/environments/staging/values", None, before["token"].as_str()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
 
     // Deleting the identity ends what it gave out.
     api.ok(Method::DELETE, &format!("/identities/{id}"), None).await;
@@ -1323,4 +2246,39 @@ async fn a_key_is_found_in_every_project_the_caller_may_read() {
     let t = api.ok(Method::POST, "/tokens", Some(json!({ "name": "ro", "actions": ["read"] }))).await;
     let (_, mine) = api.req(Method::GET, "/v1/secrets/search?key=STRIPE_KEY", None, t["token"].as_str()).await;
     assert_eq!(mine.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn reach_names_who_and_what_can_read_a_folder() {
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_live_1").await;
+    let deploy = api.ok(Method::POST, "/tokens", Some(json!({ "name": "deploy", "environments": ["production"], "actions": ["read", "reveal"] }))).await;
+    api.ok(Method::POST, "/tokens", Some(json!({ "name": "staging-ci", "environments": ["staging"], "actions": ["read", "reveal"] }))).await;
+    api.ok(Method::PUT, "/environments/staging/imports?path=/", Some(json!([{ "environment": "production", "path": "/" }]))).await;
+    api.req(Method::GET, "/environments/production/values", None, deploy["token"].as_str()).await;
+    // A read of staging reads production's key through the import: counted, and said so; so is
+    // one of development, which imports staging (a chain).
+    api.ok(Method::PUT, "/environments/development/imports?path=/", Some(json!([{ "environment": "staging", "path": "/" }]))).await;
+    api.values("staging", "/").await;
+    api.values("development", "/").await;
+    let r = api.ok(Method::GET, "/environments/production/reach?path=/&key=STRIPE_KEY", None).await;
+    let names = |k: &str| r[k].as_array().unwrap().iter().map(|h| h["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    // The production token reaches it (with what it may do), staging's doesn't.
+    assert_eq!(names("tokens"), ["deploy"]);
+    assert_eq!(r["tokens"][0]["actions"], json!(["read", "reveal"]));
+    assert_eq!((r["untrusted"].as_bool(), r["imported_by"].clone()), (Some(true), json!(["staging:/", "development:/"])));
+    let readers: Vec<&str> = r["readers"].as_array().unwrap().iter().map(|x| x["actor"].as_str().unwrap()).collect();
+    assert!(readers.iter().any(|a| a.starts_with("token:")) && readers.contains(&"operator (through staging:/)") && readers.contains(&"operator (through development:/)"), "{readers:?}");
+    // Another project it's shared with is named only as a project, never its environments.
+    let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "platform" }))).await;
+    let platform = other["id"].as_str().unwrap().to_string();
+    api.ok(Method::PUT, "/environments/production/exports?path=/", Some(json!([{ "project": platform }]))).await;
+    api.ok(Method::PUT, &format!("/v1/secrets/projects/{platform}/environments/staging/imports?path=/"), Some(json!([{ "project": api.project, "environment": "production", "path": "/" }]))).await;
+    let r = api.ok(Method::GET, "/environments/production/reach?path=/", None).await;
+    let mut by: Vec<&str> = r["imported_by"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
+    by.sort();
+    assert_eq!(by, ["development:/", &format!("project {platform}"), "staging:/"], "{r}");
+    // It lists the project's credentials: a project admin's.
+    let (s, _) = api.req(Method::GET, "/environments/production/reach", None, deploy["token"].as_str()).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
 }

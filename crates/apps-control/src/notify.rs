@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 10] = ["deploy.failed", "crash_loop", "deploy.active", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "cron.failed", "job.failed"];
-const DEFAULT_EVENTS: [&str; 8] = ["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "cron.failed"];
+pub const EVENTS: [&str; 11] = ["deploy.failed", "crash_loop", "deploy.active", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "job.failed"];
+const DEFAULT_EVENTS: [&str; 9] = ["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed"];
 /// Targets per project.
 const MAX_TARGETS: usize = 20;
 /// After the first try: the waits before the next ones.
@@ -242,6 +242,7 @@ impl Apps {
             "alert.memory" => (format!("{what}: memory"), format!("Its instances used {}% of their {} MB limit for five minutes (the alert is at {}%).", e.data["value"], e.data["limit_mb"], e.data["threshold"])),
             "alert.errors" => (format!("{what}: errors"), format!("{}% of its {} requests in five minutes answered 5xx (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["threshold"])),
             "alert.latency" => (format!("{what}: slow"), format!("Its p95 latency reached {} ms (the alert is at {} ms).", e.data["value"], e.data["threshold"])),
+            "alert.log" => (format!("{what}: its log says {}", e.data["pattern"]), format!("{} lines in five minutes matched (the alert is at {}).", e.data["count"], e.data["threshold"])),
             "cron.failed" | "job.failed" => {
                 let what_ran = if e.kind == "cron.failed" { "A scheduled run" } else { "A job" };
                 let how = match (e.data["status"].as_str(), e.data["exit_code"].as_i64()) {
