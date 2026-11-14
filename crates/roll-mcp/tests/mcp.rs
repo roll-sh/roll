@@ -98,7 +98,8 @@ async fn tools_follow_the_tokens_rules() {
     assert_eq!(init["protocolVersion"], "2025-06-18");
     let all = names(&d.rpc(OPERATOR, "tools/list", json!({})).await);
     assert!(all.contains(&"postgres_delete_project".into()) && all.contains(&"workspace_list_projects".into()));
-    assert!(!all.iter().any(|n| n.starts_with("redis_")), "products that are off have no tools");
+    // Not even one any token may call (apps_plan).
+    assert!(!all.iter().any(|n| n.starts_with("redis_") || n.starts_with("apps_")), "products that are off have no tools");
     // A toolset narrows the list to those products' tools (approvals always there); an unknown one is refused.
     let (_, _, some) = d.http(OPERATOR, Method::POST, "/v1/mcp?toolsets=workspace", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
     let some = names(&some["result"]);
