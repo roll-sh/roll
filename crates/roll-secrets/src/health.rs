@@ -174,7 +174,9 @@ impl Secrets {
             let linked = || link.as_deref().and_then(|l| serde_json::from_str::<crate::Link>(l).ok());
             let judged = || crate::strength::browser_exposure(key, None, self.secret_field(linked().as_ref()).as_deref());
             if let Some(p) = public.clone().or_else(|| crate::strength::browser_named(key).then(judged).flatten()) {
-                add(Issue::Public, p);
+                // What kind of credential it is comes from the value: only for whoever may reveal it.
+                let shown = if caller.allows(Action::Reveal, &Scope::at(project, &e.slug, path)) { p } else { crate::strength::public_without_reveal(&p) };
+                add(Issue::Public, shown);
             }
             if e.protected
                 && link.is_none()

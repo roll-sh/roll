@@ -956,6 +956,11 @@ async fn health_lists_every_finding_in_every_environment_worst_first() {
     api.set("development", "NEXT_PUBLIC_STRIPE_PUBLISHABLE", "pk_live_51Hx9Q2aBcD7eFgH8iJkLmN").await;
     let public: Vec<String> = api.ok(Method::GET, "/health", None).await.as_array().unwrap().iter().filter(|f| f["issue"] == "public").map(|f| f["key"].as_str().unwrap().to_string()).collect();
     assert_eq!(public, ["NEXT_PUBLIC_STRIPE_KEY"]);
+    // What kind of credential it is comes from the value: not for a caller who can't reveal it.
+    let reader = api.ok(Method::POST, "/tokens", Some(json!({ "name": "reader", "actions": ["read"] }))).await;
+    let (_, seen) = api.req(Method::GET, "/health", None, reader["token"].as_str()).await;
+    let detail = seen.as_array().unwrap().iter().find(|f| f["issue"] == "public").map(|f| f["detail"].clone());
+    assert_eq!(detail, Some(json!("NEXT_PUBLIC_ keys go into the browser bundle (Next.js), and this one holds a server credential")));
 }
 
 #[tokio::test]

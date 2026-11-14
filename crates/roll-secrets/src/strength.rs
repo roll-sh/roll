@@ -117,12 +117,24 @@ pub(crate) fn browser_exposure(key: &str, value: Option<&str>, secret_link: Opti
         "a private key".into()
     } else if value.is_some_and(url_with_password) {
         "a connection string with a password".into()
+    } else if let Some(r) = value.and_then(|v| crate::refs::refs(v).into_iter().find(|r| SECRET_WORDS.iter().any(|w| r.key.to_ascii_uppercase().contains(w)))) {
+        // `NEXT_PUBLIC_STRIPE=${STRIPE_SECRET_KEY}`: the reference's own name says what it holds.
+        format!("a reference to {}, a secret by its name", r.display())
     } else if SECRET_WORDS.iter().any(|w| rest.contains(w)) {
         "a secret, by its name".into()
     } else {
         return None;
     };
     Some(format!("{prefix} keys go into the browser bundle ({framework}), and this one holds {what}"))
+}
+
+/// A `public` finding's detail for whoever may not reveal the value: which framework and prefix,
+/// not what kind of credential the value is (that's from the value itself).
+pub(crate) fn public_without_reveal(detail: &str) -> String {
+    match detail.split_once(", and this one holds") {
+        Some((head, _)) => format!("{head}, and this one holds a server credential"),
+        None => detail.to_string(),
+    }
 }
 
 /// `scheme://user:password@host…`.
@@ -143,6 +155,7 @@ mod tests {
             ("VITE_DATABASE_URL", Some("postgres://app:s3cret@db.internal/app"), None, "VITE_ keys go into the browser bundle (Vite), and this one holds a connection string with a password"),
             ("NUXT_PUBLIC_DB", None, Some("a postgres Password"), "NUXT_PUBLIC_ keys go into the browser bundle (Nuxt), and this one holds a postgres Password"),
             ("PUBLIC_SUPABASE_SERVICE_ROLE_KEY", Some("eyJhbGciOi"), None, "PUBLIC_ keys go into the browser bundle (SvelteKit and Astro), and this one holds a secret, by its name"),
+            ("NEXT_PUBLIC_STRIPE", Some("${STRIPE_SECRET_KEY}"), None, "NEXT_PUBLIC_ keys go into the browser bundle (Next.js), and this one holds a reference to STRIPE_SECRET_KEY, a secret by its name"),
         ] {
             assert_eq!(browser_exposure(key, value, link).as_deref(), Some(what), "{key}");
         }

@@ -422,10 +422,13 @@ JavaScript it sends to every visitor: `NEXT_PUBLIC_` (Next.js), `NUXT_PUBLIC_`, 
 a credential when its value has a server-only shape (`sk_live_`, `whsec_`, `ghp_`, `xoxb-`,
 `SG.`, a private key, a connection string with a password…), when it links a field its provider
 marks secret (a database's password or connection string), or when its name says so (`SECRET`,
-`PASSWORD`, `PRIVATE_KEY`, `SERVICE_ROLE`). Keys made to be public aren't flagged: Stripe's
+`PASSWORD`, `PRIVATE_KEY`, `SERVICE_ROLE`), as does a reference to such a key
+(`NEXT_PUBLIC_X=${STRIPE_SECRET_KEY}`). Keys made to be public aren't flagged: Stripe's
 `pk_live_`, a Firebase or Maps browser key, Supabase's anon key. The write that sets one warns
 (`warnings` on the answer), and health lists it with the framework and what it holds
 (`NEXT_PUBLIC_ keys go into the browser bundle (Next.js), and this one holds a Stripe secret key`).
+What kind of credential it is comes from the value, so a caller who may not reveal it (and the
+daily notice's channel) sees "a server credential" instead.
 Judged when a value is written, as `weak` is (a value written before this is judged by its name
 and link only), so health decrypts nothing.
 
