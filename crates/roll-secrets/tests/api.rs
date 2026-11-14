@@ -1079,6 +1079,8 @@ async fn a_projects_ca_signs_short_lived_certificates_for_its_names_only() {
     let revoke = |serial: Value| api.call(Method::POST, &revoke_at, Some(json!({ "serial": serial })));
     assert_eq!(revoke(signed["serial"].clone()).await.0, StatusCode::NO_CONTENT);
     assert_eq!(revoke(json!("00")).await.0, StatusCode::NOT_FOUND);
+    // A CRL fetched now is kept a minute; a revocation still shows in the next one.
+    assert_eq!(api.call(Method::GET, &format!("/v1/secrets/crl/{id}?format=pem"), None).await.0, StatusCode::OK);
     let lease_cert = parse_x509_pem(cert.as_bytes()).unwrap().1;
     let lease_serial = parse_x509_certificate(&lease_cert.contents).unwrap().1.raw_serial().to_vec();
     assert_eq!(api.call(Method::DELETE, &format!("/leases/{}", r["leases"][0].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
@@ -1089,6 +1091,13 @@ async fn a_projects_ca_signs_short_lived_certificates_for_its_names_only() {
     crl.verify_signature(ca_cert.public_key()).expect("signed by the CA");
     let revoked: Vec<Vec<u8>> = crl.iter_revoked_certificates().map(|r| r.raw_serial().to_vec()).collect();
     assert!(revoked.contains(&leaf.raw_serial().to_vec()) && revoked.contains(&lease_serial), "both revoked: {revoked:?}");
+    // A CA whose revocations still matter keeps serving them: it can't be deleted until they end.
+    let devices = api.ok(Method::POST, "/cas", Some(json!({ "name": "devices", "domains": ["dev.internal"] }))).await;
+    let dev_id = devices["id"].as_str().unwrap();
+    let one = api.ok(Method::POST, &format!("/cas/{dev_id}/sign"), Some(json!({ "csr": csr(&["d1.dev.internal"]), "days": 2 }))).await;
+    api.call(Method::POST, &format!("/cas/{dev_id}/revoke"), Some(json!({ "serial": one["serial"] }))).await;
+    let (s, e) = api.call(Method::DELETE, &format!("/cas/{dev_id}"), None).await;
+    assert!(s == StatusCode::CONFLICT && e.to_string().contains("revocation list"), "{e}");
     // A CA a key links to stays.
     assert_eq!(api.call(Method::DELETE, &format!("/cas/{}", ca["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
 }
