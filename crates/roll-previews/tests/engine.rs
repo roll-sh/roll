@@ -839,6 +839,14 @@ async fn a_preview_s_mail_is_caught_never_sent() {
     let list = e.engine.store.mails(&p.id).unwrap();
     assert_eq!((list.len(), list[0].subject.as_deref(), list[0].to.clone()), (1, Some("Hi"), vec!["ada@corp.example".to_string()]));
     assert_eq!(e.engine.store.mail_raw(&p.id, &list[0].id).unwrap().as_deref(), Some(&b"Subject: Hi\r\n\r\nbody\r\n"[..]));
+    // Bounded by bytes as well as by count: twelve 1 MiB messages keep the newest ten.
+    for i in 0..12 {
+        let raw = format!("Subject: big {i}\r\n\r\n{}", "x".repeat((1 << 20) - 40)).into_bytes();
+        e.engine.store.keep_mail(&p.id, &roll_previews::mail::Mail { from: "a@b".into(), to: vec!["c@d".into()], raw }).unwrap();
+    }
+    let kept = e.engine.store.mails(&p.id).unwrap();
+    assert!(kept.iter().map(|m| m.size).sum::<i64>() <= roll_previews::store::MAIL_BYTES, "{} kept", kept.len());
+    assert_eq!(kept[0].subject.as_deref(), Some("big 11"), "the newest stays");
     // A project that wants real mail says so.
     let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "mail": "deliver" })).unwrap();
     e.engine.store.put_settings(&e.project, &s).unwrap();

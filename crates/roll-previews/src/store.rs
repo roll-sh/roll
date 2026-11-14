@@ -280,6 +280,9 @@ struct ShotFacts {
     base: Option<BaseRow>,
 }
 
+/// The most caught mail a preview keeps, in bytes (its messages as sent).
+pub const MAIL_BYTES: i64 = 10 << 20;
+
 /// How many of a baseline's heads keep their screenshots (to compare changes at their merge base).
 pub const BASE_HISTORY: usize = 10;
 
@@ -1557,7 +1560,8 @@ impl Store {
         Ok(ids.into_iter().collect())
     }
 
-    /// A caught message, kept with its preview (its last 50).
+    /// A caught message, kept with its preview: its last 50, at most [`MAIL_BYTES`] of them in
+    /// all (the oldest go first), so a preview's code can't fill the store.
     pub fn keep_mail(&self, preview: &str, mail: &crate::mail::Mail) -> Result<()> {
         use base64::Engine as _;
         let now = self.now_ms()?;
@@ -1573,6 +1577,14 @@ impl Store {
                 "DELETE FROM mail WHERE preview_id = ? AND id NOT IN (SELECT id FROM mail WHERE preview_id = ? ORDER BY at DESC, id DESC LIMIT 50)",
                 params![preview, preview],
             )?;
+            let kept: Vec<(String, i64)> = c.query("SELECT id, size FROM mail WHERE preview_id = ? ORDER BY at DESC, id DESC", [preview], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let mut total = 0i64;
+            for (mid, size) in kept {
+                total += size;
+                if total > MAIL_BYTES {
+                    c.execute("DELETE FROM mail WHERE id = ?", [mid.as_str()])?;
+                }
+            }
             Ok::<_, Error>(())
         })
     }
