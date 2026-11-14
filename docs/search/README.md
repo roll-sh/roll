@@ -217,23 +217,7 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-1. **Semantic search** (the largest gap against Elasticsearch 9 and Elastic Cloud after machine
-   learning). Landed (compatibility.md, "Inference" and "`semantic_text`"): the `_inference` API
-   (`openai` with `url`, `cohere`, `anthropic`; keys sealed, `roll_net::PublicOnly`; `rate_limit`
-   enforced; the preconfigured endpoints as a cluster without ML nodes; the test plugin's services
-   on YAML test clusters) and `semantic_text` fields (embedded at index time in batches, chunked,
-   stored as `_inference_fields`, `copy_to` sources; `semantic`, `match`, `knn`, `sparse_vector`
-   and `exists` on them in `_search`, `_msearch` and templates; the semantic highlighter; `rrf`
-   and `linear`'s simplified form; `text_similarity_reranker`). Left: `semantic_text` as a
-   multi-field, `index_options` validation, the `embedding` task type and `semantic` field type,
-   `random_reranker`, rerankers inside compound retrievers. A delegate, `wip/search-inference`.
-2. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
-   endpoints, creates them (OpenAI or any compatible URL, Cohere, Anthropic; the API key sent
-   once, sealed, never shown back), tests them with a sample, deletes them, and opens a
-   `semantic_text` quickstart in the console. Left: `semantic_text` in the index browser's
-   mapping view, a roll secret as an endpoint's key, MCP tools (they follow the routes; the MCP
-   thread).
-3. **Indexing CPU and benchmarks on a quiet host** (docs/benchmarks/search.md). Indexing: the
+1. **Indexing CPU and benchmarks on a quiet host** (docs/benchmarks/search.md). Indexing: the
    direct document parser now takes float types, plain objects and the opensearch dialect
    (nyc_taxis 8 clients 90k docs/s against Elasticsearch's 66k and OpenSearch's 60k; an ECS log
    74.5k against 59.0k and 41.3k), but with one client roll spends more CPU per document than
@@ -249,21 +233,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    A/B; Rally rerun pending) and `terms_enum`; a full rerun of every Rally track with variance;
    one allocator policy (rolld's against search-dev's purge governor); `terms_enum`'s per-request
    overhead.
-4. **Integration with the stacked branches**: previews (search brancher: branch, find, reset,
-   delete, `own_bytes`, `ELASTICSEARCH_URL`) and apps are on this branch; `scripts/preview-cost.sh`
-   now branches a search cluster too (the branch reads the parent's document, its writes stay
-   in it, the service gets its `ELASTICSEARCH_URL`, landing deletes it). Apps' links to search:
-   search's side is `Control::mint_link` / `revoke_link` (an API key with a data-only role,
-   `ELASTICSEARCH_URL` + `ELASTICSEARCH_API_KEY`; on an OpenSearch-flavor cluster an internal
-   user of OpenSearch Security with a data-only role of its own, `OPENSEARCH_URL` with
-   `<user>@<cluster>:<password>@`; never the cluster's password or security);
-   rolld's `RollResources` glue goes on apps' `Resources::link` / `unlink` with whichever of #29
-   and #26 reaches main second. Secrets' link provider (#20) asks for `access: "data"` keys;
-   OpenSearch-flavor clusters have no API keys (a 400), so secrets' search link there wants a
-   link user like apps'. The fleet test with every product on passed on this branch
-   (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall 1.2 s in
-   the rolling restart).
-5. **Compatibility gaps** from the extended suites (4,956 of the 5,541 Elasticsearch passes),
+2. **Compatibility gaps** from the extended suites (4,956 of the 5,541 Elasticsearch passes),
    largest first. Landed: ent-search's last 5 (a `rule` retriever over `rrf`/`linear`, inference
    inside a rule query's organic, workflow-restricted API keys), ES|QL's last 5 (`TOP_SNIPPETS`,
    `CATEGORIZE`, approximation's columns, `LIMIT n BY`, `unsigned_long` past `i64::MAX`),
@@ -277,6 +247,37 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    fields); downsample's last one (allocation filtering). In the opensearch dialect, pick
    `auto_date_histogram`'s rounding from the bounds as OpenSearch's rewrite does where it differs
    from collecting (roll counts with Elasticsearch's choice in both dialects).
+3. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
+   endpoints, creates them (OpenAI or any compatible URL, Cohere, Anthropic; the API key sent
+   once, sealed, never shown back), tests them with a sample, deletes them, and opens a
+   `semantic_text` quickstart in the console. Left: `semantic_text` in the index browser's
+   mapping view, a roll secret as an endpoint's key, MCP tools (they follow the routes; the MCP
+   thread).
+4. **Semantic search** (the largest gap against Elasticsearch 9 and Elastic Cloud after machine
+   learning). Landed (compatibility.md, "Inference" and "`semantic_text`"): the `_inference` API
+   (`openai` with `url`, `cohere`, `anthropic`; keys sealed, `roll_net::PublicOnly`; `rate_limit`
+   enforced; the preconfigured endpoints as a cluster without ML nodes; the test plugin's services
+   on YAML test clusters) and `semantic_text` fields (embedded at index time in batches, chunked,
+   stored as `_inference_fields`, `copy_to` sources; `semantic`, `match`, `knn`, `sparse_vector`
+   and `exists` on them in `_search`, `_msearch` and templates; the semantic highlighter; `rrf`
+   and `linear`'s simplified form; `text_similarity_reranker`). Left: `semantic_text` as a
+   multi-field, `index_options` validation, the `embedding` task type and `semantic` field type,
+   `random_reranker`, rerankers inside compound retrievers (landed 2026-11-14; the rest is low
+   priority).
+5. **Integration with the stacked branches**: previews (search brancher: branch, find, reset,
+   delete, `own_bytes`, `ELASTICSEARCH_URL`) and apps are on this branch; `scripts/preview-cost.sh`
+   now branches a search cluster too (the branch reads the parent's document, its writes stay
+   in it, the service gets its `ELASTICSEARCH_URL`, landing deletes it). Apps' links to search:
+   search's side is `Control::mint_link` / `revoke_link` (an API key with a data-only role,
+   `ELASTICSEARCH_URL` + `ELASTICSEARCH_API_KEY`; on an OpenSearch-flavor cluster an internal
+   user of OpenSearch Security with a data-only role of its own, `OPENSEARCH_URL` with
+   `<user>@<cluster>:<password>@`; never the cluster's password or security);
+   rolld's `RollResources` glue goes on apps' `Resources::link` / `unlink` with whichever of #29
+   and #26 reaches main second. Secrets' link provider (#20) asks for `access: "data"` keys;
+   OpenSearch-flavor clusters have no API keys (a 400), so secrets' search link there wants a
+   link user like apps'. The fleet test with every product on passed on this branch
+   (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall 1.2 s in
+   the rolling restart).
 6. **Dashboard polish**: the index browser and console are on the per-index routes, and a
    cluster's Settings has an API keys panel (create with data or admin access and an expiry,
    shown once; list on request, so it doesn't wake the cluster; revoke, naming keys apps and roll
