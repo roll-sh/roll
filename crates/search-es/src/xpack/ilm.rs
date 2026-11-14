@@ -184,6 +184,11 @@ fn parse_policy(ctx: &Ctx, p: &Value) -> EsResult<Value> {
             }
             match normalize_action(a, body) {
                 Ok(v) => {
+                    if a == "rollover" && body.get("max_size").is_some() {
+                        ctx.warn(format!(
+                            "Use of the [max_size] rollover condition found in phase [{phase}]. This condition has been deprecated in favour of the [max_primary_shard_size] condition and will be removed in a later version"
+                        ));
+                    }
                     actions.insert(a.clone(), v);
                 }
                 Err(e) => {
