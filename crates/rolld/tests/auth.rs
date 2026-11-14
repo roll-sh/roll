@@ -364,6 +364,23 @@ async fn every_control_plane_route_needs_the_operator_token() {
         let body = resp.text().await.unwrap_or_default();
         assert_eq!(status, 200, "GET {path} with a full scoped token: {body}");
     }
+    // Every product this rolld serves routes for has its tools on MCP: one without a ROLL_PRODUCTS
+    // switch of its own (previews, with roll code) once went unlisted.
+    let served: std::collections::BTreeSet<String> = scoped.lock().unwrap().iter().filter(|(h, _, c)| h == "api" && roll_auth::scope::PRODUCTS.contains(&c.as_str())).map(|(_, _, c)| c.clone()).collect();
+    let list: serde_json::Value = http
+        .post(format!("{api}/v1/mcp"))
+        .header("authorization", &operator)
+        .header("accept", "application/json")
+        .json(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let listed: std::collections::BTreeSet<&str> = list["result"]["tools"].as_array().expect("tools").iter().filter_map(|t| t["_meta"]["roll/product"].as_str()).collect();
+    let missing: Vec<&String> = served.iter().filter(|p| !listed.contains(p.as_str())).collect();
+    assert!(missing.is_empty(), "products rolld serves with no MCP tools listed (rolld's MCP product list leaves them out): {missing:?}");
 
     // CORS: the dashboard's origin, nobody else's.
     let preflight = |origin: &'static str| {

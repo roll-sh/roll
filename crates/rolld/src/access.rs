@@ -75,7 +75,7 @@ fn trusted_proxies() -> anyhow::Result<Vec<ipnet::IpNet>> {
     Ok(out)
 }
 
-pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth, products: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> anyhow::Result<Arc<Access>> {
+pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth, on: &[String], products: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> anyhow::Result<Arc<Access>> {
     let target = match args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty()) {
         Some(url) => code_sql::Target::Postgres { url: url.to_string(), schema: "access".into() },
         None => code_sql::Target::Sqlite(home.join("access.db")),
@@ -90,6 +90,7 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
         // The edge's own addresses (the load balancer's subnets): X-Forwarded-For only from them.
         trusted_proxies: trusted_proxies()?,
         metadata_allow_private: std::env::var("ROLL_ACCESS_METADATA_ALLOW_PRIVATE").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes")),
+        products: on.to_vec(),
         ..Default::default()
     };
     let resolvers = resolvers(products, workspace);

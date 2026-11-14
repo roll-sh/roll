@@ -46,7 +46,8 @@ export function Builder({
   const ws = useWorkspace();
   const draft = draftOf(rules);
   const [preset, setPreset] = useState<string | null>(null);
-  const products = ["*", ...catalog.products];
+  // What this rolld runs, and any product the rules name already (so editing never drops one).
+  const products = ["*", ...catalog.products, ...rules.map((r) => r.product).filter((p) => p !== "*" && !catalog.products.includes(p))].filter((p, i, all) => all.indexOf(p) === i);
   // Every product's resources by name, for "only these" (what this rolld runs).
   const [canvas, setCanvas] = useState<Record<string, { id: string; name: string }[]>>({});
   useEffect(() => {
