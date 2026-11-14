@@ -509,6 +509,36 @@ pub struct PageSpeed {
     /// Its cumulative layout shift (the largest session window, as Core Web Vitals counts it).
     #[serde(default)]
     pub cls: Option<f64>,
+    /// The project's endpoints (`github.endpoints`), timed in the same session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<EndpointTime>,
+}
+
+/// One endpoint's time (`github.endpoints`): the median of 10 GETs after one to warm up, and the
+/// last one's status (0: no answer).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct EndpointTime {
+    pub path: String,
+    pub ms: u32,
+    pub status: u16,
+}
+
+/// An endpoint's time against the branch's (`base_change.endpoints`).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EndpointAgainst {
+    pub path: String,
+    pub ms: u32,
+    pub status: u16,
+    /// The branch's, when it timed the same path.
+    pub main_ms: Option<u32>,
+}
+
+impl EndpointAgainst {
+    /// Slower than the branch's by half again and by more than 20 ms (noise on fast endpoints
+    /// isn't a finding).
+    pub fn slower(&self) -> bool {
+        self.main_ms.is_some_and(|m| self.ms as u64 * 2 > m as u64 * 3 && self.ms > m + 20)
+    }
 }
 
 impl PageSpeed {
@@ -517,7 +547,17 @@ impl PageSpeed {
     pub fn parse(json: &str) -> Option<PageSpeed> {
         let s: PageSpeed = serde_json::from_str(json.trim()).ok()?;
         let ms = 600_000;
+        let mut s = s;
         let ok = s.ttfb_ms <= ms && s.load_ms <= ms && s.fcp_ms.is_none_or(|f| f <= ms) && s.bytes <= 10 << 30;
+        // The endpoints the project named, each once and within reason; anything else dropped.
+        let mut seen = Vec::new();
+        s.endpoints.retain(|e| {
+            let keep = crate::settings::page_path_ok(&e.path) && e.ms <= 60_000 && e.status <= 599 && !seen.contains(&e.path) && seen.len() < crate::settings::MAX_ENDPOINTS;
+            if keep {
+                seen.push(e.path.clone());
+            }
+            keep
+        });
         (ok && s.lcp_ms.is_none_or(|l| l <= ms) && s.cls.is_none_or(|c| c.is_finite() && (0.0..=100.0).contains(&c))).then_some(s)
     }
 }
@@ -666,6 +706,9 @@ pub struct BaseChange {
     /// What it breaks inside the operations both keep (`openapi::breaking`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub api_breaking: Vec<String>,
+    /// Its endpoints' times against the branch's (`github.endpoints`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<EndpointAgainst>,
 }
 
 /// The first page's own links that answered 4xx/5xx or nothing (`status` 0), of `checked`
@@ -936,6 +979,23 @@ mod tests {
         // Never copied.
         assert_eq!(Data::of(Kind::Queue, Mode::Branch, 0), Data::None);
         assert_eq!(Data::of(Kind::Tasks, Mode::Branch, 0), Data::None);
+    }
+
+    /// The endpoints the session timed read back each once and within reason; one is slower than
+    /// main's only by half again and by more than 20 ms (a fast endpoint's noise isn't).
+    #[test]
+    fn endpoint_times_read_back_and_slower_means_clearly() {
+        let s = super::PageSpeed::parse(
+            r#"{"ttfb_ms": 1, "fcp_ms": null, "load_ms": 9, "bytes": 1, "endpoints": [{"path": "/api/users", "ms": 40, "status": 200},
+               {"path": "/api/users", "ms": 1, "status": 200}, {"path": "no slash", "ms": 1, "status": 200}, {"path": "/slow", "ms": 999999, "status": 200}]}"#,
+        )
+        .unwrap();
+        assert_eq!(s.endpoints.iter().map(|e| (e.path.as_str(), e.ms)).collect::<Vec<_>>(), [("/api/users", 40)]);
+        let e = |ms, main_ms| super::EndpointAgainst { path: "/x".into(), ms, status: 200, main_ms };
+        assert!(e(140, Some(40)).slower());
+        assert!(!e(14, Some(4)).slower(), "within 20 ms");
+        assert!(!e(55, Some(40)).slower(), "not half again");
+        assert!(!e(140, None).slower(), "nothing to compare with");
     }
 
     /// What the browser writes reads back; numbers past reason, or anything else, don't.

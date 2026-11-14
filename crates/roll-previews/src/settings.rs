@@ -189,7 +189,15 @@ pub struct GithubRule {
     /// and Bump's API diff), an operation main has and the change doesn't named as breaking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openapi: Option<String>,
+    /// Up to [`MAX_ENDPOINTS`] GET paths of the first service's (`/api/users`): timed with the
+    /// screenshot (the median of 10 after one to warm up) on the preview's data, which is the
+    /// parent's, and compared with main's, so an endpoint that got slower shows before it lands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<String>,
 }
+
+/// The most endpoints timed (`github.endpoints`).
+pub const MAX_ENDPOINTS: usize = 5;
 
 /// The unix second `data_at` means at `now` (unix seconds): `-24h`/`-30m`/`-7d` back from now, or
 /// an RFC 3339 time; `None` for anything else or more than 30 days back.
@@ -308,7 +316,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None, endpoints: Vec::new() }
     }
 }
 
@@ -471,6 +479,10 @@ impl Settings {
             return bad(format!(
                 "github.pages: at most {MAX_PAGES} different paths besides /, each starting with / or naming a service (admin:/users), up to 200 characters, no #, quotes or spaces"
             ));
+        }
+        let eps = &self.github.endpoints;
+        if eps.len() > MAX_ENDPOINTS || eps.iter().any(|p| !page_path_ok(p)) || eps.iter().enumerate().any(|(i, p)| eps[..i].contains(p)) {
+            return bad(format!("github.endpoints: at most {MAX_ENDPOINTS} different GET paths of the first service's (/api/users), up to 200 characters, no #, quotes or spaces"));
         }
         if self.github.openapi.as_deref().is_some_and(|p| !page_path_ok(p)) {
             return bad("github.openapi: a path of the first service's (/openapi.json), up to 200 characters, no #, quotes or spaces".into());

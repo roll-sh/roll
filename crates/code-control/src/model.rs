@@ -450,6 +450,22 @@ pub struct PreviewBaseChange {
     /// response field that goes, …): a sentence each, by operation. Untrusted text too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub api_breaking: Vec<String>,
+    /// Its endpoints' times (roll previews' `github.endpoints`, the median of 10 GETs) against
+    /// the branch's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<PreviewEndpoint>,
+}
+
+/// One endpoint's time against the branch's.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewEndpoint {
+    pub path: String,
+    pub ms: u32,
+    /// The last GET's status (0: no answer).
+    pub status: u16,
+    pub main_ms: Option<u32>,
+    /// Slower than the branch's by half again and by more than 20 ms.
+    pub slower: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

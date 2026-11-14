@@ -302,6 +302,13 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     let light = e.engine.store.view(e.engine.store.row(&chg.id).unwrap()).unwrap().light();
     let page = light.pages.iter().find(|p| p.path == "/pricing").unwrap();
     assert!(page.links.is_none() && page.against.is_none() && page.base_percent.is_some());
+    // Its endpoints against main's, timed with each one's screenshot (`github.endpoints`).
+    let timed = |ms| roll_previews::PageSpeed { ttfb_ms: 1, fcp_ms: None, load_ms: 9, bytes: 1, lcp_ms: None, cls: None, endpoints: vec![roll_previews::EndpointTime { path: "/api/users".into(), ms, status: 200 }] };
+    e.engine.store.set_screenshot(&base.id, "cs_main3", &png(255), Some(&timed(40)), None).unwrap();
+    e.engine.store.set_screenshot(&chg.id, "cs_1f", &dot, Some(&timed(140)), None).unwrap();
+    e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
+    let ep = e.engine.store.preview(&chg.id).unwrap().base_change.unwrap().endpoints;
+    assert!(ep.len() == 1 && ep[0].main_ms == Some(40) && ep[0].slower(), "{ep:?}");
 }
 
 #[tokio::test]

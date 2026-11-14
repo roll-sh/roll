@@ -844,7 +844,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -988,6 +988,14 @@ type Settings = {
     change page and folded in the comment as a diff block nothing on the page can close ("text +1
     −1 against main"). It's the page's own text, shown as text (live: the change's line in,
     `main` out).
+    Its endpoints too (`github.endpoints`, up to 5 GET paths of the first service's): the
+    session times each one in the checks' world, the median of 10 GETs after one to warm up (at
+    most 2 s a request, 20 s in all), its last status kept, on the preview's data, which is the
+    parent's: a query that got slow on production-sized data shows before it lands. Each is
+    compared with main's same path (`base_change.endpoints`), one slower by half again and by
+    more than 20 ms called slower: in the comment's folded checks ("1 endpoint slower than
+    main"; "`GET /api/users` 140 ms (main 40 ms), slower"), the sheet and the change page (live:
+    `/openapi.json` timed on both).
     A page that moves by itself (Argos's and Chromatic's flake detection): after each page's
     capture the session waits a second and captures it again, stilled as before; Chrome encodes
     the same pixels the same way, so different data is a page that changed with nobody touching
@@ -1206,6 +1214,8 @@ Ranked by what a person notices first. Done so far:
 - a look at the sheet from screenshots of a live preview with today's checks (desktop and phone):
   the data branch rows kept their names whole and their notes in word groups;
 - caught mail bounded by bytes (10 MiB a preview) as well as count;
+- endpoint times against main (`github.endpoints`: the median of 10 GETs on the preview's data,
+  a clearly slower one said so in the comment, the sheet and the change page);
 - pages that move by themselves told apart (Argos's and Chromatic's flake detection): each
   page captured twice a second apart in its session, and one whose captures differ said to
   "move by itself" in its visual review, the comment and the sheet (its change still reviewed);

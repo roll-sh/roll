@@ -334,7 +334,7 @@ ACTIVE=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
 
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
-api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json"}}' >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json"]}}' >/dev/null
 # roll keeps a preview of the default branch (github.baseline): the change's screenshots are
 # compared with its.
 MAINPV=""
@@ -558,11 +558,19 @@ api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
 # Its words against main's: the change's line in, main's out.
 WORDS=$(api GET "/v1/previews/$PV" | jq_ "(lambda t: '+%s -%s' % (t['added'], t['removed']))(d['base_change'].get('text') or {'added': [], 'removed': []})")
 # Its API against main's, read from each one's OpenAPI document (github.openapi).
-API_DIFF=$(api GET "/v1/previews/$PV" | jq_ "(lambda t: '+%s -%s' % (t['added'], t['removed']))(d['base_change'].get('api') or {'added': [], 'removed': []})")
+# (Compared again with each screenshot: until the comparison with this head's is in.)
+for _ in $(seq 1 120); do
+  API_DIFF=$(api GET "/v1/previews/$PV" | jq_ "(lambda t: '+%s -%s' % (t['added'], t['removed']))(d['base_change'].get('api') or {'added': [], 'removed': []})")
+  [ "$API_DIFF" != "+[] -[]" ] && break
+  sleep 0.5
+done
 [ "$API_DIFF" = "+['POST /orders'] -['DELETE /users/{id}']" ] || { echo "the change's API against main's should name the operation it removes and the one it adds: $API_DIFF"; exit 1; }
 # And what it breaks inside an operation both keep: the limit parameter becomes required.
 API_BREAKING=$(api GET "/v1/previews/$PV" | jq_ "' | '.join(d['base_change'].get('api_breaking') or [])")
 [ "$API_BREAKING" = "GET /users: the parameter query:limit becomes required" ] || { echo "the change's API should name what it breaks in an operation both keep: $API_BREAKING"; exit 1; }
+# Its endpoints timed on the preview's data, against main's (github.endpoints).
+ENDPOINTS=$(api GET "/v1/previews/$PV" | jq_ "' '.join('%s %s %s ms, main %s ms' % (x['path'], x['status'], x['ms'], x['main_ms']) for x in d['base_change'].get('endpoints') or [])")
+case "$ENDPOINTS" in "/openapi.json 200 "*" ms, main "[0-9]*" ms") ;; *) echo "the change's endpoints should be timed against main's: $ENDPOINTS"; exit 1;; esac
 case "$WORDS" in "+['preview of change 1"*"-['main']") ;; *) echo "the page's words should be compared with main's: $WORDS"; exit 1;; esac
 MAIN_LOAD=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('load_ms')")
 case "$MAIN_LOAD" in [0-9]*) ;; *) echo "the comparison with main should carry main's load time: $MAIN_LOAD"; exit 1;; esac
@@ -676,6 +684,7 @@ cat <<EOF
 | Core Web Vitals of the first page (the screenshot's load) | $VITALS |
 | The first page's words against main's | $WORDS |
 | Its API against main's (from each one's OpenAPI document) / what it breaks in the operations both keep | $API_DIFF / $API_BREAKING |
+| Its endpoints against main's (the median of 10 GETs) | $ENDPOINTS |
 | SEO basics of the first page | $SEO |
 | /pricing's own checks (against main's /pricing) | $PRICING |
 | The first page's broken links (HEAD only) / new against main | $LINKS / $LINKS_NEW |

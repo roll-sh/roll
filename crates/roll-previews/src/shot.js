@@ -215,6 +215,49 @@ const API = OPENAPI && `(async () => {
     clearTimeout(t);
   }
 })()`;
+// The project's endpoints ($ENDPOINTS, GET paths on the page's own origin): each timed as the
+// median of 10 GETs after one to warm up, its last status kept (0: no answer), at most 2 s a
+// request and 20 s in all (an endpoint past that is timed with what it answered).
+const ENDPOINTS = (() => {
+  try {
+    return JSON.parse(process.env.ENDPOINTS || "[]").filter((p) => typeof p === "string" && /^\/[^\s#"'`]{0,199}$/.test(p)).slice(0, 5);
+  } catch {
+    return [];
+  }
+})();
+const TIMES = ENDPOINTS.length > 0 && `(async () => {
+  const until = performance.now() + 20000;
+  const get = async (path) => {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 2000);
+    const at = performance.now();
+    try {
+      const r = await fetch(new URL(path, location.origin), { credentials: "same-origin", cache: "no-store", signal: c.signal });
+      await r.arrayBuffer();
+      return { ms: performance.now() - at, status: r.status };
+    } catch {
+      return { ms: performance.now() - at, status: 0 };
+    } finally {
+      clearTimeout(t);
+    }
+  };
+  const out = [];
+  for (const path of ${JSON.stringify(ENDPOINTS)}) {
+    if (performance.now() > until) break;
+    await get(path);
+    const runs = [];
+    let status = 0;
+    for (let i = 0; i < 10 && performance.now() < until; i++) {
+      const r = await get(path);
+      runs.push(r.ms);
+      status = r.status;
+    }
+    if (!runs.length) continue;
+    runs.sort((a, b) => a - b);
+    out.push({ path, ms: Math.round(runs[Math.floor(runs.length / 2)]), status });
+  }
+  return JSON.stringify(out);
+})()`;
 const AXE_SRC = (() => {
   try {
     return process.env.AXE ? fs.readFileSync(process.env.AXE, "utf8") : "";
@@ -334,6 +377,12 @@ const moves = async (sessionId, first) => {
   try {
     report.seo = JSON.parse(seo?.result?.value || "null");
   } catch {}
+  if (TIMES) {
+    const times = await Promise.race([check({ expression: TIMES, awaitPromise: true, returnByValue: true }, sessionId), sleep(25000).then(() => null)]);
+    try {
+      report.endpoints = JSON.parse(times?.result?.value || "[]");
+    } catch {}
+  }
   if (API) {
     const api = await Promise.race([check({ expression: API, awaitPromise: true, returnByValue: true }, sessionId), sleep(6000).then(() => null)]);
     try {

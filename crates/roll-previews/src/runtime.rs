@@ -959,6 +959,10 @@ impl Runtime {
         if let Some(path) = opts.openapi.as_deref().filter(|p| crate::settings::page_path_ok(p)) {
             args.extend(["--env".into(), format!("OPENAPI={path}")]);
         }
+        let endpoints: Vec<&String> = opts.endpoints.iter().filter(|p| crate::settings::page_path_ok(p)).take(crate::settings::MAX_ENDPOINTS).collect();
+        if !endpoints.is_empty() {
+            args.extend(["--env".into(), format!("ENDPOINTS={}", serde_json::to_string(&endpoints)?)]);
+        }
         // The PNG on the first line, the timings (if the command wrote them) on the second, the
         // phone-width PNG (if it took one) on the third, then the other pages: what each said,
         // and their PNGs a line each.
@@ -974,7 +978,7 @@ impl Runtime {
         ]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         // Each other page is taken and checked too (accessibility, links up to 20 s, SEO, words).
-        let within = Duration::from_secs(90 + 30 * pages.len() as u64);
+        let within = Duration::from_secs(90 + 30 * pages.len() as u64 + if endpoints.is_empty() { 0 } else { 25 });
         let out = match tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)).await {
             Ok(Ok(out)) => out,
             // Its container outlives a docker CLI that gave up on it (too much output).

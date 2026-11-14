@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { appsApi } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
-import { a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
+import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, replyBody, replyOf, type PreviewFeedback } from "./preview-feedback";
@@ -282,6 +282,7 @@ export function PreviewSheet({
             {p.base_change?.text && <TextAgainst diff={p.base_change.text} branch={p.base_change.branch} />}
             {p.base_change?.api && <TextAgainst diff={p.base_change.api} branch={p.base_change.branch} what="api" />}
             {p.base_change?.api_breaking && <ApiBreaking items={p.base_change.api_breaking} />}
+            {p.base_change?.endpoints && <Endpoints items={p.base_change.endpoints} branch={p.base_change.branch} />}
             {p.visual_review && p.visual_review.state !== "unchanged" && (
               <div className="mt-1.5 flex items-center gap-2 text-[11.5px]">
                 {p.visual_review.state === "accepted" ? (
@@ -965,6 +966,21 @@ function Promote({ preview: p }: { preview: Preview }) {
           Production gets the image this preview runs for {asking.name}, with production's own variables and data; nothing is built again.
         </Confirm>
       )}
+/** The project's endpoints timed on the preview's data (`github.endpoints`: the median of 10
+ * GETs) against main's, the clearly slower ones in red. */
+export function Endpoints({ items, branch }: { items: EndpointTime[]; branch: string }) {
+  if (!items.length) return null;
+  return (
+    <div className="mt-1.5 text-[11.5px]" aria-label={`Its endpoints against ${branch}`}>
+      <p className="text-muted">Its endpoints against {branch}</p>
+      <ul className="mt-0.5 space-y-0.5 font-mono text-[11px] tabular-nums">
+        {items.map((e) => (
+          <li key={e.path} className={endpointSlower(e) ? "text-danger" : "text-fg"}>
+            GET {e.path} {e.ms} ms{e.main_ms != null ? ` (${branch} ${e.main_ms} ms)` : ""}
+            {e.status === 0 ? ", no answer" : e.status >= 400 ? `, ${e.status}` : ""}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
