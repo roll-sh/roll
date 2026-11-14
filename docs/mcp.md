@@ -293,6 +293,9 @@ previews are listed once those products are on.
 | `storage_write_object` | Upload an object (replacing the key): content as text, or content_b64. | `PUT /v1/storage/buckets/{bucket}/upload` |
 | `storage_delete_object` | Delete an object (to the trash; with version_id, that version for good). | `DELETE /v1/storage/buckets/{bucket}/object` |
 | `storage_presign` | A URL anyone can use to get (or put) an object until it expires. | `POST /v1/storage/buckets/{bucket}/presign` |
+| `storage_branch_bucket` | A copy-on-write branch of a bucket. | `POST /v1/storage/buckets/{name}/branches` |
+| `storage_list_trash` | A bucket's deleted objects. | `GET /v1/storage/buckets/{name}/trash` |
+| `storage_restore_object` | An object back from the trash. | `POST /v1/storage/buckets/{name}/trash/restore` |
 | `storage_usage` | A bucket's usage. | `GET /v1/storage/buckets/{bucket}/usage` |
 | `streams_list` | Kafka-compatible streams. | `GET /v1/streams` |
 | `streams_get` | A stream's bootstrap address, topics and throughput. | `GET /v1/streams/{stream}` |
@@ -305,6 +308,9 @@ previews are listed once those products are on.
 | `streams_read` | Records from a topic, from an offset or a time. | `GET /v1/streams/{stream}/topics/{topic}/records` |
 | `streams_list_groups` | Consumer groups with their lag. | `GET /v1/streams/{stream}/groups` |
 | `streams_reset_group` | Move a group's offsets (earliest, latest, an offset or timestamp:<ms>). | `POST /v1/streams/{stream}/groups/{group}/reset` |
+| `streams_get_topic` | A topic's partitions, offsets and settings. | `GET /v1/streams/{s}/topics/{t}` |
+| `streams_get_group` | A group's members, offsets and lag per partition. | `GET /v1/streams/{s}/groups/{g}` |
+| `streams_branch` | A stream branched, records shared (its key's secret: reveal). | `POST /v1/streams/{s}/branches` |
 | `streams_usage` | A stream's usage and throughput. | `GET /v1/streams/{stream}/usage` |
 | `nosql_list_databases` | ScyllaDB/Cassandra-compatible databases. | `GET /v1/nosql/databases` |
 | `nosql_get_database` | A database's settings and endpoints (credentials need reveal). | `GET /v1/nosql/databases/{database}` |
@@ -314,6 +320,9 @@ previews are listed once those products are on.
 | `nosql_cql` | Run a CQL statement. SELECT reads; DROP and TRUNCATE delete; the rest write. | `POST /v1/nosql/databases/{database}/cql` |
 | `nosql_schema` | Keyspaces, tables and their columns. | `GET /v1/nosql/databases/{database}/schema` |
 | `nosql_usage` | A database's usage report. | `GET /v1/nosql/databases/{database}/usage` |
+| `nosql_reset` | A branch back to its parent's state, in place. | `POST /v1/nosql/databases/{id}/reset` |
+| `nosql_restore` | Rewind a database in place to a point in time. | `POST /v1/nosql/databases/{id}/restore` |
+| `nosql_diff` | What a branch changed against its parent. | `GET /v1/nosql/databases/{id}/diff` |
 | `queues_overview` | The broker's totals and listeners. | `GET /v1/queues/overview` |
 | `queues_list_vhosts` | RabbitMQ-compatible virtual hosts. | `GET /v1/queues/vhosts` |
 | `queues_create_vhost` | A new virtual host. | `POST /v1/queues/vhosts` |
@@ -334,6 +343,12 @@ previews are listed once those products are on.
 | `tasks_list_runs` | Durable function runs. | `GET /v1/tasks/runs` |
 | `tasks_get_run` | A run with its steps. | `GET /v1/tasks/runs/{id}` |
 | `tasks_invoke` | Start a durable function run. | `POST /v1/tasks/functions/{id}/invoke` |
+| `tasks_retry_message` | Deliver a failed message again. | `POST /v1/tasks/messages/{id}/retry` |
+| `tasks_retry_dead_letters` | Dead letters delivered again: some, a queue's, or all. | `POST /v1/tasks/dlq/retry` |
+| `tasks_cancel_run` | Stop a durable function run. | `POST /v1/tasks/runs/{id}/cancel` |
+| `tasks_rerun` | A past run's function run again with its input. | `POST /v1/tasks/runs/{id}/rerun` |
+| `tasks_list_functions` | Durable functions. | `GET /v1/tasks/functions` |
+| `tasks_list_queues` | Queues with their parallelism, rate and backlog. | `GET /v1/tasks/queues` |
 | `tasks_stats` | Nodes, queue stats, dead letters, schedules and functions. | `GET /v1/tasks/stats` |
 | `search_list_clusters` | Elasticsearch-compatible search clusters. | `GET /v1/search/clusters` |
 | `search_get_cluster` | A cluster's settings, state, indices, size, URL and branches. | `GET /v1/search/clusters/{cluster}` |
@@ -460,25 +475,29 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+1. **Everyday routes with no tool on the core products** (`tool-gaps.py origin/main <product>`):
+   storage, streams, queues, tasks and NoSQL have 2–5× more routes than tools. Add what an agent
+   uses day to day (as postgres' reset and endpoint, redis' restore were); credentials, consoles
+   and a person's calls stay out.
+2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25), and compare each product's routes with its tools
    (an everyday route with no tool is a gap: apps' were found this way).
-2. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+3. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
    lands after #20, #25 and #30): kept merged both ways (secrets' head of 2026-11-14 merged: a
    forgotten project's credentials revoked first and retried by the sweeper, with the integration's
    `identity_logins` kept in what's forgotten). The canvas check costs nothing measurable
    (`gate_latency`, release, pinned, A/B twice: 83–115 µs p50 with it, 105–116 µs without).
-3. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
+4. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
    `.index("name")` on the per-key routes and `Scope.key` in their own check (`GrantGrants` sets
    `id` since #30's fix). The tools and the builder's key picker are in; check both live once the
    rows land (a token on `prj_x/one-key` signs with it and is refused another key and the
    project's environments).
-4. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+5. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Considered and left out: a connection narrowed to one project (Supabase's `project_ref`): their
@@ -497,32 +516,35 @@ start and pre-deploy commands, schedule, kind, port, volume and `run.public`, ar
 a day or less); workload tokens (`Access::mint_workload`: minutes, within an identity's scope, owned
 by its maker, out of the list and caps) for secrets' identity logins; a person's own tokens' news is
 mailed to them (an approval waiting on them, used from a new network, revoked as leaked, about to
-expire; only their own, never a secret); against Neon's MCP server and main's routes:
-`postgres_reset_branch` (reset from parent), `postgres_get_endpoint`, `postgres_update_endpoint`,
-`redis_restore`, `apps_delete_environment`; each product's routes compared with its tools
-(`tool-gaps.py`): `search_update_cluster`, `search_delete_cluster`, `secrets_list_rotators`,
-`secrets_list_syncs` and `secrets_diff` added; previews' bypass, search's keys, password and
-console, and secrets' bulk values, reviews and settings stay a person's; apps' missing everyday
-tools (`apps_create_service` takes links and run settings, an environment's state, linking and
-unlinking resources, checking a domain, volume backups and restoring one; all on main); a tool any
-token may call (`apps_plan`) is listed only where its product runs (it showed with apps off);
-previews' tools listed (they never were: roll previews runs with roll code and has no product
-switch, so MCP's product list left it out; rolld's auth test now fails on any product it serves with
-no tools listed); the token builder offers only the products this rolld runs (and any a token's
-rules name already), not all sixteen; checked live on #25's build (both official SDKs end to end,
-progress during an approval, URL elicitation; `serverInfo.icons` answered), which found roll code's
-fronted tools still carrying the approval argument for the operator (37 of 78): they drop it too
-now; the fourteenth review (key-scoped rules, before any row uses them): secrets' key names are
-literal (a key named `_all` is only that key; a list or a `*` in a request names none) and an
-approval remembers only a request that named one key; a pending answer says the call finds its
-approval without the argument too; the approval argument only where a person can be asked (a model
-reads every tool's schema: 92 → 73 KB for the operator and for tokens that only allow, every product
-on; `tools/list` 140 → 120 KB, 190 tools); the builder lists a secrets project's encryption keys to
-tick (one picker with search's indices; secrets' projects come from the workspace); encryption keys
-as MCP tools (`secrets_transit_encrypt`, `_decrypt`, `_sign`, `_verify`, `_public_key`; secrets #47:
-their rows narrow to one key); roll's mark as the server's icon (`serverInfo.icons`); a rule can
-narrow a secrets project to some of its encryption keys (`{id, index}`, as search's indices: signing
-with one key needn't be write on the project; secrets' transit rows add `.index("name")`);
+expire; only their own, never a secret); the core products' everyday routes as tools (streams: a
+topic, a group's lag, branching; tasks: retrying messages and dead letters, cancelling and rerunning
+runs, functions, queues; NoSQL: reset, restore, a branch's diff; storage: branching a bucket, the
+trash and restoring from it); against Neon's MCP server and main's routes: `postgres_reset_branch`
+(reset from parent), `postgres_get_endpoint`, `postgres_update_endpoint`, `redis_restore`,
+`apps_delete_environment`; each product's routes compared with its tools (`tool-gaps.py`):
+`search_update_cluster`, `search_delete_cluster`, `secrets_list_rotators`, `secrets_list_syncs` and
+`secrets_diff` added; previews' bypass, search's keys, password and console, and secrets' bulk
+values, reviews and settings stay a person's; apps' missing everyday tools (`apps_create_service`
+takes links and run settings, an environment's state, linking and unlinking resources, checking a
+domain, volume backups and restoring one; all on main); a tool any token may call (`apps_plan`) is
+listed only where its product runs (it showed with apps off); previews' tools listed (they never
+were: roll previews runs with roll code and has no product switch, so MCP's product list left it
+out; rolld's auth test now fails on any product it serves with no tools listed); the token builder
+offers only the products this rolld runs (and any a token's rules name already), not all sixteen;
+checked live on #25's build (both official SDKs end to end, progress during an approval, URL
+elicitation; `serverInfo.icons` answered), which found roll code's fronted tools still carrying the
+approval argument for the operator (37 of 78): they drop it too now; the fourteenth review
+(key-scoped rules, before any row uses them): secrets' key names are literal (a key named `_all` is
+only that key; a list or a `*` in a request names none) and an approval remembers only a request
+that named one key; a pending answer says the call finds its approval without the argument too; the
+approval argument only where a person can be asked (a model reads every tool's schema: 92 → 73 KB
+for the operator and for tokens that only allow, every product on; `tools/list` 140 → 120 KB, 190
+tools); the builder lists a secrets project's encryption keys to tick (one picker with search's
+indices; secrets' projects come from the workspace); encryption keys as MCP tools
+(`secrets_transit_encrypt`, `_decrypt`, `_sign`, `_verify`, `_public_key`; secrets #47: their rows
+narrow to one key); roll's mark as the server's icon (`serverInfo.icons`); a rule can narrow a
+secrets project to some of its encryption keys (`{id, index}`, as search's indices: signing with one
+key needn't be write on the project; secrets' transit rows add `.index("name")`);
 `secrets_list_rotations` and `secrets_ca_certificates` (secrets #48, #44); `tools/list` 11% smaller
 with every product on (183 tools, 150 → 134 KB: the approval argument's description shortened, the
 title not repeated in annotations); apps' plan, activity, deploys, links, cron runs and limits as
