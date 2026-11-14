@@ -491,7 +491,21 @@ export interface NotifyTarget {
   secret?: string;
 }
 
-export type NotifyEvent = "deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed";
+export type NotifyEvent =
+  | "deploy.failed"
+  | "crash_loop"
+  | "deploy.active"
+  | "spend.alert"
+  | "spend.limit"
+  | "alert.memory"
+  | "alert.errors"
+  | "alert.latency"
+  | "alert.log"
+  | "cron.failed"
+  | "job.failed"
+  | "domain.active"
+  | "domain.expiring"
+  | "domain.expired";
 
 /** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
 export interface AppEvent {

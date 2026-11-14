@@ -1529,3 +1529,73 @@ mod tests {
         assert!(check_var_name("DATABASE_URL").is_ok() && check_var_name("1X").is_err());
     }
 }
+
+/// What DNS answered for a custom domain that doesn't verify ([`domain_diagnosis`]).
+pub struct DnsSeen {
+    pub cnames: Vec<String>,
+    /// At the challenge name.
+    pub txts: Vec<String>,
+    /// At the hostname itself (a TXT put on the wrong name).
+    pub host_txts: Vec<String>,
+    pub addresses: Vec<String>,
+}
+
+/// Why `host` isn't verified, from what DNS answered: what's missing and the likely mistake
+/// (another target, a proxy answering with addresses, the TXT on the wrong name or with more
+/// around the token), as Vercel's "Invalid configuration" says.
+pub fn domain_diagnosis(host: &str, target: &str, challenge: &str, token: &str, seen: &DnsSeen, shared: bool) -> String {
+    let list = |v: &[String]| v.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    let route = if seen.cnames.iter().any(|c| c == target) {
+        None
+    } else if !seen.cnames.is_empty() {
+        Some(format!("{host} points at {} instead of {target}", list(&seen.cnames)))
+    } else if !seen.addresses.is_empty() {
+        Some(format!(
+            "{host} answers with addresses ({}) instead of a CNAME to {target}: if its DNS is on Cloudflare, turn the proxy off for it (DNS only); an apex domain needs its provider's CNAME flattening or ALIAS",
+            list(&seen.addresses)
+        ))
+    } else {
+        Some(format!("{host} has no CNAME to {target} yet (a new record can take a few minutes to show)"))
+    };
+    let proof = if seen.txts.iter().any(|t| t == token) {
+        None
+    } else if seen.txts.iter().any(|t| t.contains(token)) {
+        Some(format!("the TXT {challenge} holds the token with more around it (quotes?): it must be exactly {token}"))
+    } else if !seen.txts.is_empty() {
+        Some(format!("the TXT {challenge} holds something else ({})", list(&seen.txts)))
+    } else if seen.host_txts.iter().any(|t| t.contains(token)) {
+        Some(format!("the TXT with the token is on {host}; it goes on {challenge}"))
+    } else {
+        Some(format!("no TXT {challenge} with the token yet"))
+    };
+    match (shared, route, proof) {
+        // Behind a shared target the CNAME routes it and only the TXT proves it's yours.
+        (true, None, Some(p)) => format!("{p} (the CNAME to {target} routes it; the TXT record proves it's yours)"),
+        (true, Some(r), Some(p)) => format!("{p}; and {r}"),
+        (false, Some(r), Some(p)) => format!("{r}; or prove it with a TXT: {p}"),
+        (_, Some(r), None) | (_, None, Some(r)) => r,
+        (_, None, None) => format!("{host} is set up; it's checked again in a minute"),
+    }
+}
+
+#[cfg(test)]
+mod domain_diagnosis_tests {
+    use super::*;
+
+    fn seen(cnames: &[&str], txts: &[&str], host_txts: &[&str], addresses: &[&str]) -> DnsSeen {
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect();
+        DnsSeen { cnames: v(cnames), txts: v(txts), host_txts: v(host_txts), addresses: v(addresses) }
+    }
+
+    #[test]
+    fn says_what_dns_answered_and_the_likely_mistake() {
+        let d = |s: &DnsSeen, shared| domain_diagnosis("www.shop.com", "edge.roll.site", "_roll-challenge.www.shop.com", "tok123", s, shared);
+        assert!(d(&seen(&["old.herokudns.com"], &[], &[], &[]), false).starts_with("www.shop.com points at old.herokudns.com instead of edge.roll.site"));
+        assert!(d(&seen(&[], &[], &[], &["104.21.4.1"]), false).contains("turn the proxy off"));
+        assert!(d(&seen(&[], &[], &["tok123"], &[]), true).starts_with("the TXT with the token is on www.shop.com; it goes on _roll-challenge.www.shop.com"));
+        assert!(d(&seen(&["edge.roll.site"], &["\"tok123\""], &[], &[]), true).contains("more around it (quotes?)"));
+        assert!(d(&seen(&["edge.roll.site"], &["other"], &[], &[]), true).contains("holds something else (other)"));
+        assert!(d(&seen(&[], &[], &[], &[]), false).contains("no CNAME to edge.roll.site yet"));
+    }
+}
+

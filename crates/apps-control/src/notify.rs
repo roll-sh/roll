@@ -15,8 +15,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 11] = ["deploy.failed", "crash_loop", "deploy.active", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "job.failed"];
-const DEFAULT_EVENTS: [&str; 9] = ["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed"];
+pub const EVENTS: [&str; 14] = [
+    "deploy.failed",
+    "crash_loop",
+    "deploy.active",
+    "spend.alert",
+    "spend.limit",
+    "alert.memory",
+    "alert.errors",
+    "alert.latency",
+    "alert.log",
+    "cron.failed",
+    "job.failed",
+    "domain.active",
+    "domain.expiring",
+    "domain.expired",
+];
+const DEFAULT_EVENTS: [&str; 11] = ["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired"];
 /// Targets per project.
 const MAX_TARGETS: usize = 20;
 /// After the first try: the waits before the next ones.
@@ -298,6 +313,15 @@ impl Apps {
                 (format!("{what}: {} failed", if e.kind == "cron.failed" { "cron run" } else { "job" }), format!("{what_ran} {how}."))
             }
             "crash_loop" => (format!("{what}: crashing"), format!("{} crashes in 10 minutes; the last because {}.", e.data["crashes"], e.data["last_error"].as_str().unwrap_or("it exited"))),
+            "domain.active" => (format!("{what}: {} is live", e.data["hostname"].as_str().unwrap_or("a domain")), "Its DNS checks out; it serves the environment now.".to_string()),
+            "domain.expiring" => (
+                format!("{what}: {} isn't verified", e.data["hostname"].as_str().unwrap_or("a domain")),
+                format!("It's removed tomorrow unless its DNS checks out: {}", e.data["error"].as_str().unwrap_or("its records aren't there yet")),
+            ),
+            "domain.expired" => (
+                format!("{what}: {} was removed", e.data["hostname"].as_str().unwrap_or("a domain")),
+                "It stayed unverified for 7 days, so the name is free again; add it again once its DNS is set.".to_string(),
+            ),
             other => (format!("{what}: {other}"), String::new()),
         }
     }

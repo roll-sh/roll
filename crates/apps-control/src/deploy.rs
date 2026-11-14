@@ -1900,6 +1900,9 @@ impl Apps {
                 continue;
             }
             let _ = self.expire_domain_claims(PENDING_CLAIM_TTL).await;
+            // A day before: the owner hears it's going (and what DNS says), not only after.
+            let cutoff = code_sql::now_ms() - (PENDING_CLAIM_TTL.as_millis() as i64 - 86_400_000);
+            let _ = self.db(move |s| s.warn_domain_claims(cutoff)).await;
             let Ok(due) = self.db(|s| s.domains_to_check()).await else { continue };
             for (svc, env, d) in due {
                 if d.status == DomainStatus::Active {

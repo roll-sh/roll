@@ -753,9 +753,15 @@ async fn a_custom_domain_routes_once_its_dns_points_at_roll() {
     assert_eq!(d["status"], "pending");
     assert_eq!(call(&w.api, "POST", &base, Some(json!({"hostname": "x.apps.localhost"}))).await.0, StatusCode::BAD_REQUEST, "roll's own names can't be added");
     assert_eq!(visit(&w, "www.example.com", "/").await.0, StatusCode::NOT_FOUND, "not before it's verified");
+    // Pointed at the old host: the check says where it points, not only that it doesn't.
+    w.dns.add("www.example.com", "CNAME", "old.herokudns.com");
+    let (_, v) = call(&w.api, "POST", &format!("{base}/www.example.com/verify"), None).await;
+    assert!(v["error"].as_str().unwrap().starts_with("www.example.com points at old.herokudns.com instead of"), "{v}");
     w.dns.add("www.example.com", "CNAME", d["target"].as_str().unwrap());
     let (_, v) = call(&w.api, "POST", &format!("{base}/www.example.com/verify"), None).await;
     assert_eq!(v["status"], "active", "{v}");
+    let ev = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    assert!(ev["events"].as_array().unwrap().iter().any(|e| e["kind"] == "domain.active" && e["data"]["hostname"] == "www.example.com"), "{ev}");
     assert_eq!(visit(&w, "www.example.com", "/x").await.0, StatusCode::OK);
     // The certificate: the provider heard of the hostname only once it was accepted (never the
     // refused one), and verifying reads where its certificate is.
@@ -766,6 +772,14 @@ async fn a_custom_domain_routes_once_its_dns_points_at_roll() {
     assert!(w.tls.calls.lock().iter().all(|c| c.ends_with(" www.example.com")), "{:?}", w.tls.calls.lock());
     assert_eq!(call(&w.api, "DELETE", &format!("{base}/www.example.com"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(w.tls.calls.lock().last().map(String::as_str), Some("remove www.example.com"));
+    // One still unverified a day before it's removed: its owner is told, once, with why.
+    call(&w.api, "POST", &base, Some(json!({"hostname": "shop.example.com"}))).await;
+    call(&w.api, "POST", &format!("{base}/shop.example.com/verify"), None).await;
+    assert_eq!(w.apps.db(|s| s.warn_domain_claims(i64::MAX)).await.unwrap(), 1);
+    assert_eq!(w.apps.db(|s| s.warn_domain_claims(i64::MAX)).await.unwrap(), 0);
+    let ev = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    let warned = ev["events"].as_array().unwrap().iter().find(|e| e["kind"] == "domain.expiring").cloned().unwrap_or_default();
+    assert!(warned["data"]["error"].as_str().is_some_and(|e| e.contains("no CNAME")), "{warned}");
 }
 
 /// A link puts its resource's variables (or credentials it made for itself, once, revoked when it
@@ -1627,7 +1641,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed"]), "the default events");
+    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");

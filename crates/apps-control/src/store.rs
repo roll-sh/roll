@@ -599,6 +599,7 @@ impl Store {
         db.add_column("deployments", "actor", "TEXT")?;
         db.add_column("deployments", "pruned_at", "INTEGER")?;
         db.add_column("runs", "instance", "TEXT")?;
+        db.add_column("domains", "warned_at", "INTEGER")?;
         // Targets made before filters follow every environment, previews too, as they did.
         db.add_column("notify_targets", "environments", "TEXT NOT NULL DEFAULT '[]'")?;
         db.add_column("notify_targets", "services", "TEXT NOT NULL DEFAULT '[]'")?;
@@ -1528,17 +1529,37 @@ impl Store {
     /// Remove the custom domains added before `cutoff` (ms) that were never verified, and return
     /// them: a claim nobody proves frees the hostname for its real owner.
     pub fn expire_domain_claims(&self, cutoff: i64) -> Result<Vec<(String, String, String)>> {
+        let now = self.now()?;
         self.db.write(|c| {
             let expired: Vec<(String, String, String)> = c.query(
                 "SELECT service, env, hostname FROM domains WHERE kind = 'custom' AND status <> 'active' AND verified_at IS NULL AND created_at < ?",
                 [cutoff],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?;
-            for (_, _, host) in &expired {
+            for (svc, env, host) in &expired {
                 c.execute("DELETE FROM domains WHERE hostname = ? AND status <> 'active' AND verified_at IS NULL", [host])?;
+                insert_event(c, now, "domain.expired", svc, env, None, &serde_json::json!({ "hostname": host }))?;
             }
             Ok(expired)
         })
+    }
+
+    /// Unverified custom domains made before `cutoff` not warned yet: warned now, each with
+    /// its `domain.expiring` event (and what DNS said), in one transaction.
+    pub fn warn_domain_claims(&self, cutoff: i64) -> Result<usize> {
+        let now = self.now()?;
+        Ok(self.db.write(|c| {
+            let due: Vec<(String, String, String, Option<String>)> = c.query(
+                "SELECT service, env, hostname, error FROM domains WHERE kind = 'custom' AND status <> 'active' AND verified_at IS NULL AND warned_at IS NULL AND created_at < ?",
+                [cutoff],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            for (svc, env, host, error) in &due {
+                c.execute("UPDATE domains SET warned_at = ? WHERE hostname = ?", params![now, host])?;
+                insert_event(c, now, "domain.expiring", svc, env, None, &serde_json::json!({ "hostname": host, "error": error }))?;
+            }
+            Ok::<_, code_sql::Error>(due.len())
+        })?)
     }
 
     // ── cron runs ──

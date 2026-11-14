@@ -1778,19 +1778,31 @@ impl Apps {
             return Err(Error::NotFound(format!("{h} isn't a domain of {service} in {env}")));
         };
         let target = self.target(&row.slug);
-        let cname_ok = self.deps.resolver.cname(&h).await.contains(&target);
+        let cnames = self.deps.resolver.cname(&h).await;
+        let cname_ok = cnames.contains(&target);
         let challenge = crate::model::challenge_name(&h);
-        let txt_ok = self.deps.resolver.txt(&challenge).await.contains(&d.token);
+        let txts = self.deps.resolver.txt(&challenge).await;
+        let txt_ok = txts.contains(&d.token);
         let shared = self.cfg.cname_target.is_some();
         let (status, error) = if txt_ok || (cname_ok && !shared) {
             (DomainStatus::Active, None)
-        } else if shared {
-            (DomainStatus::Pending, Some(format!("no TXT {challenge} with the token yet (the CNAME to {target} routes it; the TXT record proves it's yours)")))
         } else {
-            (DomainStatus::Pending, Some(format!("no CNAME to {target} and no TXT {challenge} with the token yet")))
+            // What DNS answered instead, and the likely mistake in it.
+            let seen = crate::model::DnsSeen {
+                cnames,
+                txts,
+                host_txts: self.deps.resolver.txt(&h).await,
+                addresses: if cname_ok { Vec::new() } else { self.deps.resolver.addresses(&h).await },
+            };
+            (DomainStatus::Pending, Some(crate::model::domain_diagnosis(&h, &target, &challenge, &d.token, &seen, shared)))
         };
+        let became_active = status == DomainStatus::Active && d.status != DomainStatus::Active;
         let (hh, err) = (h.clone(), error.clone());
         self.db(move |s| s.set_domain_status(&hh, status, err.as_deref())).await?;
+        if became_active {
+            let (sid, e, data) = (service.to_string(), env.to_string(), json!({ "hostname": h }));
+            let _ = self.db(move |s| s.add_event("domain.active", &sid, &e, None, &data)).await;
+        }
         if let Some((tls, tls_error)) = self.refresh_tls(&h).await {
             (d.tls, d.tls_error) = (tls, tls_error);
         }
