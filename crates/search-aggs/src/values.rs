@@ -1285,6 +1285,13 @@ impl BytesReader {
                 }
                 let mut vals: Vec<Vec<u8>> = Vec::with_capacity(self.sbuf.len());
                 for v in &self.sbuf {
+                    // An `ip` values source holds encoded addresses (they sort by address).
+                    if matches!(self.script_format, DocValueFormat::Ip)
+                        && let ScriptValue::Str(s) = v
+                    {
+                        vals.push(parse_ip(s)?.to_vec());
+                        continue;
+                    }
                     let s = match v {
                         ScriptValue::Null => continue,
                         ScriptValue::Date(ms) => match &self.script_format {
