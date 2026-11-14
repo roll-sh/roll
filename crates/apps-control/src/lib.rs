@@ -1320,10 +1320,10 @@ impl Apps {
         // Only an environment that exists gets live state.
         let (sid, e) = (service.to_string(), env.to_string());
         let row = self.db(move |s| s.environment(&sid, &e)).await?;
-        // Adopting keeps what runs on a runtime the nodes share: only the service's owner does
-        // (a request that reached this node as the service moved away mustn't take what the
-        // next owner kept, nor leave live state behind here).
-        if self.deps.runtime.shares_instances() && !self.owns(service) {
+        // Only the service's owner has live state: a request that reached this node as the
+        // service moved away mustn't take what the next owner kept (a runtime the nodes share),
+        // nor start instances here that nothing will stop (one this node alone runs).
+        if !self.owns(service) {
             return Err(Error::Unavailable("the service is moving to another node; try again in a moment".into()));
         }
         let live = self.live(service, env);

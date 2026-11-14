@@ -339,9 +339,12 @@ async fn a_joining_node_takes_services_with_no_request_failing() {
     for round in 0..600 {
         for (id, h) in &svcs {
             let req = Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap();
-            let st = f.nodes[round % 2].public.clone().oneshot(req).await.unwrap().status();
+            let resp = f.nodes[round % 2].public.clone().oneshot(req).await.unwrap();
+            let st = resp.status();
             if st != StatusCode::OK {
-                failed.push((round, id.clone(), st));
+                let body = String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string();
+                let why = body.split("<h1>").nth(1).and_then(|t| t.split("</p>").next()).unwrap_or("").chars().filter(|c| !c.is_control()).collect::<String>();
+                failed.push((round, id.clone(), st, why));
             }
         }
         moved = svcs.iter().any(|(id, _)| f.nodes[1].apps.deps.cluster.owns(&apps_control::lease_key(id)));

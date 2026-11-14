@@ -1577,6 +1577,24 @@ impl EnvLive {
         }
     }
 
+    /// Give the environment up on a runtime this node alone runs (its service moved): nothing new
+    /// comes here, and its instances stop once their requests in flight end (the drain window),
+    /// not under them.
+    pub async fn retire(&self) {
+        let all = {
+            let _g = self.wake.lock().await;
+            self.closed.store(true, Ordering::SeqCst);
+            *self.canary.lock() = None;
+            self.viewed.lock().clear();
+            let all: Vec<Arc<Inst>> = self.insts.lock().drain(..).collect();
+            let run = self.template.lock().take().map(|t| t.run.clone());
+            (all, run)
+        };
+        let (insts, run) = all;
+        let window = run.as_ref().map_or(self.cfg.drain, |r| self.drain_of(r));
+        self.drain(insts, window);
+    }
+
     pub async fn shutdown(&self) {
         let _g = self.wake.lock().await;
         self.closed.store(true, Ordering::SeqCst);

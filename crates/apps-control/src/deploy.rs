@@ -1232,13 +1232,18 @@ impl Apps {
         // The live deployments' instances still running (the previous owner died, they didn't)
         // stay, for `EnvLive::adopt` to keep; the rest (jobs, older deployments') go.
         let sid = service.to_string();
-        let live_prefixes: Vec<String> = self
+        let mut live_prefixes: Vec<String> = self
             .db(move |s| s.environments(&sid))
             .await
             .unwrap_or_default()
             .into_iter()
             .filter_map(|e| e.active.map(|a| crate::live::instance_prefix(service, &e.name, &a)))
             .collect();
+        // And a deploy this node is running right now (the lease can be taken while a new
+        // service's first deploy is preparing): its instances aren't a previous owner's.
+        let sid = service.to_string();
+        let pending = self.db(move |s| s.pending_deployments(&sid)).await.unwrap_or_default();
+        live_prefixes.extend(pending.iter().filter(|d| self.cancels.lock().contains_key(&d.id)).map(|d| crate::live::instance_prefix(service, &d.environment, &d.id)));
         // A cron run or a job this node started since it took the service (the schedule fires as
         // soon as it owns it) is its own, not a leftover.
         let own_runs: Vec<String> = self.running_runs.lock().iter().filter(|(_, s)| *s == service).map(|(id, _)| format!("run-{}", id.strip_prefix("run_").unwrap_or(id))).collect();
@@ -1347,7 +1352,7 @@ impl Apps {
             if shared {
                 l.let_go().await;
             } else {
-                l.shutdown().await;
+                l.retire().await;
             }
         }
     }

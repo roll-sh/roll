@@ -1675,13 +1675,15 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (a second product review of the experience, a product review of what one engineer can close here now, bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **A handoff mid-deploy**: `cluster.rs::a_joining_node_takes_services_with_no_request_failing`
-   fails about 1 in 16 under load. Seen: ten 503s in a row for one service during the join, and
-   (48 parallel runs) a service's first deploy failing at creation with its instance "exited on
-   its own". Likely: the lease moves while the old owner's deploy is preparing, and the new
-   owner's takeover sweep removes that not-yet-live deployment's instance (only the live
-   deployment's prefix is spared). Find it (record each failed answer's page), then spare a
-   pending deployment's instances on takeover or let the old owner finish first.
+1. **A handoff answers every request**: done: a takeover's sweep spares the instances of a deploy
+   this node is running (a new service's first deploy failed when its lease was taken mid-start:
+   "exited on its own"). Left (`cluster.rs::a_joining_node_takes_services_with_no_request_failing`,
+   about 1 in 12 of 72 parallel runs, the failed answer's page now recorded): right after a join,
+   a 503 "Restarting" (a request at an instance the old owner just stopped), a 502 (a connection
+   closed mid-request) and a run of 503 "failing to start" (a wake that kept failing). A node
+   giving a service up on a runtime it alone runs stops its instances at once (`shutdown`): let
+   requests in flight finish (the drain window), and send late ones on to the new owner rather
+   than answering from closed live state.
 2. **"Needs a redeploy" everywhere**: its banner with Redeploy is only on Variables; Settings' save
    bar says changes apply with the next deploy and offers none. The banner above the tabs, and
    "Save and redeploy".
