@@ -991,15 +991,15 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         }
         Secrets::Rotations { rotate_due } => {
             let v = c.call(Method::GET, &format!("{}/rotations", c.base()), None).await?;
-            if json_out {
+            if json_out && rotate_due.is_none() {
                 return print(&v);
             }
             let list = v.as_array().cloned().unwrap_or_default();
-            if list.is_empty() {
+            if list.is_empty() && !json_out {
                 eprintln!("no managed credentials in this project");
             }
             let mut failing = 0;
-            for r in &list {
+            for r in list.iter().filter(|_| !json_out) {
                 let keys: Vec<&str> = r["keys"].as_array().into_iter().flatten().filter_map(|k| k.as_str()).collect();
                 let path = r["path"].as_str().unwrap_or("/");
                 let at = if path == "/" { String::new() } else { format!(" {path}") };
@@ -1016,6 +1016,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             if let Some(days) = rotate_due {
                 let horizon = chrono::Utc::now().timestamp_millis() + days as i64 * 86_400_000;
                 let (mut done, mut failed) = (0, 0);
+                let mut results = vec![];
                 for r in &list {
                     let due = r["next_due"].as_i64().is_some_and(|n| n <= horizon) || r["last_error"].is_string();
                     let Some(key) = r["keys"].get(0).and_then(Value::as_str) else { continue };
@@ -1027,15 +1028,25 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     match c.call(Method::POST, &format!("{}/secrets/{}/rotate?path={}", c.env(&env), enc(key), enc(&path)), None).await {
                         Ok(_) => {
                             done += 1;
-                            eprintln!("rotated  {env} {key}");
+                            results.push(json!({ "environment": env, "path": path, "key": key, "rotated": true }));
+                            if !json_out {
+                                eprintln!("rotated  {env} {key}");
+                            }
                         }
                         Err(e) => {
                             failed += 1;
-                            eprintln!("failed   {env} {key}: {e}");
+                            results.push(json!({ "environment": env, "path": path, "key": key, "rotated": false, "error": e.to_string() }));
+                            if !json_out {
+                                eprintln!("failed   {env} {key}: {e}");
+                            }
                         }
                     }
                 }
-                eprintln!("{done} rotated, {failed} failed (due within {days} days, or failing)");
+                if json_out {
+                    print(&json!(results))?;
+                } else {
+                    eprintln!("{done} rotated, {failed} failed (due within {days} days, or failing)");
+                }
                 if failed > 0 {
                     bail!("{failed} rotations failed");
                 }
