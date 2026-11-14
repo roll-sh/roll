@@ -459,3 +459,94 @@ export function mappingNotes(resp: unknown): string[] {
   if (Array.isArray(m.dynamic_templates) && m.dynamic_templates.length) notes.push(`${m.dynamic_templates.length} dynamic template${m.dynamic_templates.length === 1 ? "" : "s"}`);
   return notes;
 }
+
+/** Field types the new-index editor offers (`dense_vector` is `knn_vector` on OpenSearch). */
+export const NEW_FIELD_TYPES = ["text", "keyword", "long", "double", "boolean", "date", "ip", "geo_point", "semantic_text", "dense_vector"] as const;
+export type NewFieldType = (typeof NEW_FIELD_TYPES)[number];
+
+/** One field of the new-index editor. */
+export interface NewField {
+  /** A path: `user.name` maps `name` under the object `user`. */
+  name: string;
+  type: NewFieldType;
+  /** text: the analyzer (`standard` when unset) and a `.keyword` sub-field for sorting. */
+  analyzer?: string;
+  keyword?: boolean;
+  /** semantic_text: the endpoint (required: the default, ELSER, can't run on roll). */
+  inferenceId?: string;
+  /** dense_vector: dimensions and similarity (`cosine`, `dot_product`, `l2_norm`). */
+  dims?: number;
+  similarity?: "cosine" | "dot_product" | "l2_norm";
+}
+
+const OS_SPACE: Record<string, string> = { cosine: "cosinesimil", dot_product: "innerproduct", l2_norm: "l2" };
+
+function fieldMapping(f: NewField, opensearch: boolean): Record<string, unknown> {
+  switch (f.type) {
+    case "text": {
+      const m: Record<string, unknown> = { type: "text" };
+      if (f.analyzer && f.analyzer !== "standard") m.analyzer = f.analyzer;
+      if (f.keyword) m.fields = { keyword: { type: "keyword", ignore_above: 256 } };
+      return m;
+    }
+    case "semantic_text":
+      return f.inferenceId ? { type: "semantic_text", inference_id: f.inferenceId } : { type: "semantic_text" };
+    case "dense_vector": {
+      const sim = f.similarity ?? "cosine";
+      if (opensearch) return { type: "knn_vector", dimension: f.dims ?? 0, space_type: OS_SPACE[sim] };
+      return { type: "dense_vector", dims: f.dims ?? 0, similarity: sim };
+    }
+    default:
+      return { type: f.type };
+  }
+}
+
+/** What would make Elasticsearch refuse the fields, or `null`. Rows without a name are skipped. */
+export function newIndexProblem(fields: NewField[], opensearch: boolean): string | null {
+  const named = fields.filter((f) => f.name.trim());
+  const names = new Set<string>();
+  for (const f of named) {
+    const n = f.name.trim();
+    if (n.split(".").some((p) => !p)) return `"${n}": a field name can't start or end with a dot, or hold two in a row.`;
+    if (names.has(n)) return `"${n}" is listed twice.`;
+    names.add(n);
+    if (f.type === "dense_vector") {
+      const max = opensearch ? 16000 : 4096;
+      if (!Number.isInteger(f.dims) || (f.dims ?? 0) < 1 || (f.dims ?? 0) > max) return `"${n}": dimensions are a whole number from 1 to ${max}.`;
+    }
+    if (f.type === "semantic_text" && opensearch) return `"${n}": semantic_text is Elasticsearch's; on OpenSearch, use a knn_vector field with an ingest pipeline.`;
+    // Without one, Elasticsearch embeds with its ELSER endpoint, which needs machine learning
+    // nodes: every write would fail.
+    if (f.type === "semantic_text" && !f.inferenceId) return `"${n}": pick an embeddings endpoint (the default, ELSER, needs machine learning nodes, which roll doesn't run).`;
+  }
+  for (const n of names) {
+    const parts = n.split(".");
+    for (let i = 1; i < parts.length; i++) {
+      const parent = parts.slice(0, i).join(".");
+      if (names.has(parent)) return `"${parent}" is a field and also holds "${n}": make "${parent}" an object (leave it out) or rename one.`;
+    }
+  }
+  return null;
+}
+
+/** The `PUT /<index>` body of the editor's fields (dotted names as objects). */
+export function newIndexBody(fields: NewField[], dynamic: "true" | "strict", opensearch: boolean): Record<string, unknown> {
+  const properties: Record<string, unknown> = {};
+  for (const f of fields) {
+    const name = f.name.trim();
+    if (!name) continue;
+    const parts = name.split(".");
+    let at = properties;
+    for (const p of parts.slice(0, -1)) {
+      const obj = (at[p] ??= { properties: {} }) as { properties: Record<string, unknown> };
+      at = obj.properties;
+    }
+    at[parts[parts.length - 1]] = fieldMapping(f, opensearch);
+  }
+  const mappings: Record<string, unknown> = {};
+  if (dynamic === "strict") mappings.dynamic = "strict";
+  mappings.properties = properties;
+  const body: Record<string, unknown> = { mappings };
+  if (opensearch && fields.some((f) => f.name.trim() && f.type === "dense_vector")) body.settings = { "index.knn": true };
+  return body;
+}

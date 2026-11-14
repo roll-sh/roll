@@ -1,7 +1,7 @@
 // Tests of the index browser's document helpers (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { cellText, columnsOf, deleteRequest, flatten, formatJson, hitSources, jsonSpans, mappingNotes, mappingRows, parseDocument, sourceCells, tableColumns, writeRequest } from "./search-docs";
+import { cellText, columnsOf, deleteRequest, flatten, formatJson, hitSources, jsonSpans, mappingNotes, mappingRows, newIndexBody, newIndexProblem, parseDocument, sourceCells, tableColumns, writeRequest } from "./search-docs";
 
 test("flatten", () => {
   assert.deepEqual([...flatten({ a: 1, u: { name: "x", geo: { lat: 1 } }, tags: ["a", "b"], e: {}, n: null })], [
@@ -190,4 +190,32 @@ test("mapping rows", () => {
   );
   assert.deepEqual(mappingNotes(resp), ["dynamic: strict"]);
   assert.deepEqual(mappingRows({ a: { mappings: {} } }), []);
+});
+
+test("a new index's request from the field editor", () => {
+  const fields = [
+    { name: "title", type: "text" as const, analyzer: "english", keyword: true },
+    { name: "seller.name", type: "keyword" as const },
+    { name: "body", type: "semantic_text" as const, inferenceId: "my-e5" },
+    { name: "vec", type: "dense_vector" as const, dims: 384, similarity: "dot_product" as const },
+    { name: "", type: "long" as const },
+  ];
+  assert.deepEqual(newIndexBody(fields, "strict", false), {
+    mappings: {
+      dynamic: "strict",
+      properties: {
+        title: { type: "text", analyzer: "english", fields: { keyword: { type: "keyword", ignore_above: 256 } } },
+        seller: { properties: { name: { type: "keyword" } } },
+        body: { type: "semantic_text", inference_id: "my-e5" },
+        vec: { type: "dense_vector", dims: 384, similarity: "dot_product" },
+      },
+    },
+  });
+  assert.equal(newIndexProblem(fields, false), null);
+  const os = newIndexBody([fields[3]], "true", true);
+  assert.deepEqual(os, { mappings: { properties: { vec: { type: "knn_vector", dimension: 384, space_type: "innerproduct" } } }, settings: { "index.knn": true } });
+  assert.match(newIndexProblem(fields, true) ?? "", /semantic_text/);
+  assert.match(newIndexProblem([{ name: "user", type: "keyword" }, { name: "user.name", type: "keyword" }], false) ?? "", /also holds/);
+  assert.match(newIndexProblem([{ name: "v", type: "dense_vector", dims: 5000 }], false) ?? "", /1 to 4096/);
+  assert.match(newIndexProblem([{ name: "body", type: "semantic_text" }], false) ?? "", /pick an embeddings endpoint/);
 });

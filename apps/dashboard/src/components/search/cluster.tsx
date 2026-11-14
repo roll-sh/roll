@@ -1,5 +1,5 @@
 import { HorizonMark } from "@roll/brand";
-import { ArrowLeft, FileUp, GitBranch, KeyRound, Moon, RefreshCw, Trash2 } from "lucide-react";
+import { ArrowLeft, FileUp, GitBranch, KeyRound, Moon, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { Link } from "@/components/link";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
@@ -21,6 +21,7 @@ import { formatTime, fromLocalInput, now, POLL_MS, Segmented, toLocalInput } fro
 import { ago, btn, Confirm, Connecting, CopyButton, EmptyPanel, ErrorNote, input, Offline, Panel, primary, Stats, useCopy } from "../ui";
 import { AnalyzeTab } from "./analyze";
 import { ImportPanel } from "./import";
+import { NewIndexPanel } from "./new-index";
 import { InferenceTab } from "./inference";
 import { ApiKeys } from "./api-keys";
 import { SearchConsole } from "./console";
@@ -437,6 +438,7 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [creating, setCreating] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -463,6 +465,9 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
         title="Indices"
         aside={
           <span className="flex gap-2">
+            <button onClick={() => setCreating(true)} disabled={creating} className={btn} title="Create an index with its fields mapped">
+              <Plus className="size-3.5" /> New index
+            </button>
             <button onClick={() => setImporting(true)} disabled={importing} className={btn} title="Index a JSON, NDJSON or CSV file">
               <FileUp className="size-3.5" /> Import
             </button>
@@ -483,7 +488,11 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
             <button onClick={() => setImporting(true)} className="text-accent hover:underline">
               Import a file
             </button>
-            , create one from the Console tab, or index a document with any client: indices are created on the first write.
+            ,{" "}
+            <button onClick={() => setCreating(true)} className="text-accent hover:underline">
+              create one with its fields
+            </button>
+            , or index a document with any client: indices are created on the first write.
           </p>
         ) : (
           rows && (
@@ -547,6 +556,19 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
           index to browse its documents, mapping and settings.
         </p>
       </Panel>
+      {creating && (
+        <NewIndexPanel
+          cluster={cluster}
+          existing={rows?.map((r) => r.index) ?? []}
+          onClose={() => setCreating(false)}
+          onOpenConsole={onOpenConsole}
+          onCreated={async (index) => {
+            setCreating(false);
+            await load();
+            setSelected(index);
+          }}
+        />
+      )}
       {importing && (
         <ImportPanel
           cluster={cluster}
