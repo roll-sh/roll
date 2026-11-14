@@ -259,9 +259,11 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    and importing a file into an index from the Indices tab (Kibana's "Upload a file"): NDJSON, a
    JSON array or CSV with typed columns, previewed before anything is sent, read in 1 MiB chunks
    and sent as `_bulk` batches of at most 4 MiB through the index's own route, with progress,
-   cancel and the first failures (100,000 ECS log lines, 42 MB, in 24 s on a debug build). Next:
-   creating an index with a mapping (a field editor, `semantic_text` with an endpoint picked from
-   the Inference tab), index templates and lifecycle policies listed per index, `_profile` of a
+   cancel and the first failures (100,000 ECS log lines, 42 MB, in 24 s on a debug build), and a
+   new index from a field editor (types and their options, objects from dotted names,
+   `dense_vector` or OpenSearch's `knn_vector`, `semantic_text` only on an endpoint the cluster can
+   run: the default ELSER needs machine learning nodes; the request shown or opened in the
+   console). Next: index templates and lifecycle policies listed per index, `_profile` of a
    console search drawn as a tree, saved console requests. Signed-in users who aren't admins follow
    accounts' phase 2: today every product but code, agents and projects answers them 403
    (docs/accounts.md), search included.
