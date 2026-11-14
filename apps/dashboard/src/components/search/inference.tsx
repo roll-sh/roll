@@ -16,10 +16,13 @@ type Service = "openai" | "cohere" | "anthropic";
 
 /** What each service offers here, and the model it suggests per task. */
 const SERVICES: Record<Service, { label: string; tasks: Record<string, string> }> = {
-  openai: { label: "OpenAI or compatible", tasks: { text_embedding: "text-embedding-3-small", completion: "gpt-4o-mini" } },
+  openai: { label: "OpenAI", tasks: { text_embedding: "text-embedding-3-small", completion: "gpt-4o-mini" } },
   cohere: { label: "Cohere", tasks: { text_embedding: "embed-english-v3.0", rerank: "rerank-english-v3.0", completion: "command-r" } },
   anthropic: { label: "Anthropic", tasks: { completion: "claude-sonnet-5-5" } },
 };
+
+/** Short labels for the task picker. */
+const TASK_LABELS: Record<string, string> = { text_embedding: "embeddings", completion: "completion", rerank: "rerank" };
 
 const ID_RE = /^[a-z0-9][a-z0-9._-]{0,99}$/;
 
@@ -262,7 +265,7 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
         >
           <div className="flex flex-wrap gap-3">
             <Segmented value={service} options={(Object.keys(SERVICES) as Service[]).map((s) => ({ label: SERVICES[s].label, value: s }))} onChange={pickService} />
-            <Segmented value={task} options={Object.keys(SERVICES[service].tasks).map((t) => ({ label: t.replace("_", " "), value: t }))} onChange={pickTask} />
+            <Segmented value={task} options={Object.keys(SERVICES[service].tasks).map((t) => ({ label: TASK_LABELS[t] ?? t, value: t }))} onChange={pickTask} />
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Endpoint id" hint="lowercase letters, digits, . _ -">
@@ -281,7 +284,7 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
               />
             </Field>
             {service === "openai" && (
-              <Field label="URL (optional)" hint="any OpenAI-compatible endpoint: vLLM, Ollama, LiteLLM; public addresses only">
+              <Field label="URL (optional)" hint="OpenAI-compatible: vLLM, Ollama, LiteLLM (public)">
                 <input className={`${input} w-full font-mono text-[12px]`} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://api.openai.com/v1/embeddings" />
               </Field>
             )}

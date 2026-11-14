@@ -87,7 +87,7 @@ export function ApiKeys({ cluster }: { cluster: SearchCluster }) {
       <div className="space-y-4 px-5 py-4">
         <p className="text-[13px] text-muted">
           A client that shouldn&apos;t share the cluster&apos;s password gets a key of its own, sent as{" "}
-          <span className="font-mono">Authorization: ApiKey …</span>. Data keys read and write indices, templates, pipelines and
+          <span className="font-mono">Authorization: ApiKey &lt;key&gt;</span>. Data keys read and write indices, templates, pipelines and
           lifecycle policies, but can&apos;t manage users or keys.
         </p>
         <form
