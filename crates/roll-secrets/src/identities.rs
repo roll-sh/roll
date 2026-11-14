@@ -87,6 +87,9 @@ pub struct Identity {
     pub last_subject: Option<String>,
     /// The client addresses (CIDRs) a login, and the token it gets, work from; `None`: any.
     pub allowed_ips: Option<Vec<String>>,
+    /// How many keys it pins, when it carries its issuer's keys instead of fetching them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinned_keys: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +107,10 @@ pub struct NewIdentity {
     pub ttl_minutes: Option<i64>,
     #[serde(default)]
     pub allowed_ips: Option<Vec<String>>,
+    /// The issuer's public keys (a JWKS document, as text), for an issuer roll can't or shouldn't
+    /// fetch: a cluster's own. Then `issuer` is only compared with the token's `iss`.
+    #[serde(default)]
+    pub jwks: Option<String>,
 }
 
 /// What a login gets: the token (shown once) and when it ends.
@@ -115,9 +122,11 @@ pub struct Login {
     pub identity: String,
 }
 
-const COLUMNS: &str = "id, project_id, name, issuer, audience, subject, claims, environments, paths, actions, ttl_minutes, created_at, created_by, last_used_at, last_subject, allowed_ips";
+const COLUMNS: &str = "id, project_id, name, issuer, audience, subject, claims, environments, paths, actions, ttl_minutes, created_at, created_by, last_used_at, last_subject, allowed_ips, jwks";
 
-fn identity_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Identity, String)> {
+/// An identity, its project, and its pinned keys.
+fn identity_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Identity, String, Option<String>)> {
+    let jwks: Option<String> = r.get(16)?;
     Ok((
         Identity {
             id: r.get(0)?,
@@ -135,8 +144,10 @@ fn identity_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Identity, String)> {
             last_used_at: r.get(13)?,
             last_subject: r.get(14)?,
             allowed_ips: r.get::<_, Option<String>>(15)?.and_then(|s| serde_json::from_str(&s).ok()),
+            pinned_keys: jwks.as_deref().and_then(|d| crate::oidc::pinned_keys(d).ok()),
         },
         r.get(1)?,
+        jwks,
     ))
 }
 
@@ -148,7 +159,7 @@ impl Secrets {
     pub fn identities(&self, project: &str, caller: &Caller) -> Result<Vec<Identity>> {
         caller.need(Action::Admin, &Scope::project(project))?;
         self.project(project)?;
-        self.db.read(|c| Ok(c.query(&format!("SELECT {COLUMNS} FROM identities WHERE project_id = ? ORDER BY created_at"), [project], identity_row)?.into_iter().map(|(i, _)| i).collect()))
+        self.db.read(|c| Ok(c.query(&format!("SELECT {COLUMNS} FROM identities WHERE project_id = ? ORDER BY created_at"), [project], identity_row)?.into_iter().map(|(i, ..)| i).collect()))
     }
 
     pub fn create_identity(&self, project: &str, n: NewIdentity, caller: &Caller) -> Result<Identity> {
@@ -163,8 +174,21 @@ impl Secrets {
             return Err(bad("an identity's name is 1–64 characters"));
         }
         let issuer = n.issuer.trim().trim_end_matches('/').to_string();
-        let deliver = self.deliver.as_ref().ok_or_else(|| bad("workload identities aren't on this server"))?;
-        deliver.check(&issuer).map_err(|_| bad("issuer is a public https:// URL (the token's iss)"))?;
+        let jwks = n.jwks.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+        let pinned_keys = match &jwks {
+            // Never fetched: the issuer is only the `iss` a token must carry.
+            Some(doc) => {
+                if issuer.is_empty() || issuer.len() > 512 {
+                    return Err(bad("issuer is the token's iss, 1–512 characters"));
+                }
+                Some(crate::oidc::pinned_keys(doc).map_err(bad)?)
+            }
+            None => {
+                let deliver = self.deliver.as_ref().ok_or_else(|| bad("workload identities aren't on this server"))?;
+                deliver.check(&issuer).map_err(|_| bad("issuer is a public https:// URL (the token's iss), or pin its keys with jwks"))?;
+                None
+            }
+        };
         let audience = n.audience.trim().to_string();
         if audience.is_empty() || audience.len() > 256 {
             return Err(bad("audience is the token's aud, 1–256 characters"));
@@ -188,7 +212,7 @@ impl Secrets {
         let (environments, paths, actions) = tokens::scope(project, n.environments, n.paths, n.actions, caller)?;
         self.project(project)?;
         let now = self.db.now_ms()?;
-        let i = Identity { id: names::new_id("idn", 12), name, issuer, audience, subject, claims: n.claims, environments, paths, actions, ttl_minutes: ttl, created_at: now, created_by: caller.principal.clone(), last_used_at: None, last_subject: None, allowed_ips: tokens::allowed(n.allowed_ips)? };
+        let i = Identity { id: names::new_id("idn", 12), name, issuer, audience, subject, claims: n.claims, environments, paths, actions, ttl_minutes: ttl, created_at: now, created_by: caller.principal.clone(), last_used_at: None, last_subject: None, allowed_ips: tokens::allowed(n.allowed_ips)?, pinned_keys };
         self.db.write(|c| {
             let count: i64 = c.query_row("SELECT COUNT(*) FROM identities WHERE project_id = ?", [project], |r| r.get(0))?;
             if count >= IDENTITIES_MAX {
@@ -200,12 +224,37 @@ impl Secrets {
                 }
             }
             c.execute(
-                &format!("INSERT INTO identities ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)"),
-                params![i.id, project, i.name, i.issuer, i.audience, i.subject, json(&i.claims), i.environments.as_ref().map(json), i.paths.as_ref().map(json), json(&i.actions), i.ttl_minutes, now, i.created_by, i.allowed_ips.as_ref().map(json)],
+                &format!("INSERT INTO identities ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)"),
+                params![i.id, project, i.name, i.issuer, i.audience, i.subject, json(&i.claims), i.environments.as_ref().map(json), i.paths.as_ref().map(json), json(&i.actions), i.ttl_minutes, now, i.created_by, i.allowed_ips.as_ref().map(json), jwks],
             )?;
-            audit::record(c, project, caller, "identity.create", None, None, &[], &format!("created identity {} for {} ({})", i.name, i.issuer, i.subject), now)
+            let keys = i.pinned_keys.map(|n| format!(", {n} pinned key{}", if n == 1 { "" } else { "s" })).unwrap_or_default();
+            audit::record(c, project, caller, "identity.create", None, None, &[], &format!("created identity {} for {} ({}{keys})", i.name, i.issuer, i.subject), now)
         })?;
         Ok(i)
+    }
+
+    /// Replace an identity's pinned keys (a cluster rotated its signing key): its id, and so every
+    /// workload's `ROLL_IDENTITY`, stays. During a rotation, give the old and the new keys together.
+    /// Choosing which keys it trusts is making it: it then acts only while the caller can sign in
+    /// and reach the project (`created_by`), and what it gave out under the old keys is revoked
+    /// (a rotation is often for a key that leaked; workloads log in again).
+    pub fn set_identity_keys(&self, project: &str, id: &str, jwks: &str, caller: &Caller) -> Result<Identity> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        if caller.principal.starts_with("identity:") || caller.principal.starts_with("token:") {
+            return Err(Error::Forbidden("an identity's keys are set by people, not tokens or logins".into()));
+        }
+        let jwks = jwks.trim();
+        let n = crate::oidc::pinned_keys(jwks).map_err(bad)?;
+        self.project(project)?;
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            let name: Option<String> = c.query_row("SELECT name FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?;
+            let name = name.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
+            c.execute("UPDATE identities SET jwks = ?, created_by = ? WHERE id = ?", params![jwks, caller.principal, id])?;
+            let revoked = c.execute("UPDATE tokens SET revoked_at = ? WHERE identity = ? AND revoked_at IS NULL", params![now, id])?;
+            audit::record(c, project, caller, "identity.keys", None, None, &[], &format!("identity {name} now pins {n} key{} ({revoked} live token{} revoked)", if n == 1 { "" } else { "s" }, if revoked == 1 { "" } else { "s" }), now)?;
+            Ok::<_, Error>(c.query_row(&format!("SELECT {COLUMNS} FROM identities WHERE id = ?"), [id], identity_row)?.0)
+        })
     }
 
     /// Delete an identity and revoke the tokens it gave out.
@@ -230,9 +279,8 @@ impl Secrets {
             return Err(Error::TooMany("too many logins: try again in a minute".into()));
         }
         let denied = || Error::Unauthorized(format!("no identity {identity} takes this token"));
-        let deliver = self.deliver.clone().ok_or_else(|| Error::NotFound("workload identities aren't on this server".into()))?;
         let found = self.db.read(|c| c.query_row(&format!("SELECT {COLUMNS} FROM identities WHERE id = ?"), [identity], identity_row).optional())?;
-        let (i, project) = found.ok_or_else(denied)?;
+        let (i, project, jwks) = found.ok_or_else(denied)?;
         if !self.maker_reaches(&i.created_by, &project)? {
             return Err(denied());
         }
@@ -243,7 +291,7 @@ impl Secrets {
         }
         let jwt = Jwt::parse(token)?;
         let now = self.db.now_ms()?;
-        self.oidc.verify(deliver.as_ref(), &jwt, &i.issuer, &i.audience, now / 1000)?;
+        self.oidc.verify(self.deliver.as_deref(), jwks.as_deref(), &jwt, &i.issuer, &i.audience, now / 1000)?;
         let sub = jwt.str("sub").unwrap_or_default().to_string();
         if !wildcard(&i.subject, &sub) {
             return Err(Error::Forbidden(format!("{sub} doesn't match identity {}'s subject", i.name)));
@@ -257,8 +305,13 @@ impl Secrets {
         let (t, secret) = tokens::new_token(i.name.clone(), i.environments.clone(), i.paths.clone(), i.actions.clone(), Some(expires_at), i.allowed_ips.clone(), now, &principal);
         let caller = Caller { principal, grants: std::sync::Arc::new(crate::access::Everything), ip };
         self.db.write(|c| {
-            // Deleted meanwhile: no token.
-            if c.execute("UPDATE identities SET last_used_at = ?, last_subject = ? WHERE id = ?", params![now, sub, i.id])? == 0 {
+            // Deleted meanwhile, or its keys replaced (and so its maker changed): no token. A login
+            // verified against the old keys mustn't get one after the replacement revoked theirs.
+            let changed = c.execute(
+                "UPDATE identities SET last_used_at = ?, last_subject = ? WHERE id = ? AND COALESCE(jwks, '') = ? AND created_by = ?",
+                params![now, sub, i.id, jwks.clone().unwrap_or_default(), i.created_by],
+            )?;
+            if changed == 0 {
                 return Err(denied());
             }
             tokens::insert(c, &project, &t, &secret, Some(&i.id))?;

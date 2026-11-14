@@ -1176,6 +1176,29 @@ async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token()
     let listed = api.ok(Method::GET, "/identities", None).await;
     assert_eq!(listed[0]["last_subject"], "repo:acme/web:ref:refs/heads/main");
 
+    // A cluster's own issuer isn't reachable: an identity pins its keys, and roll fetches nothing.
+    *api.sent.1.lock().unwrap() = None;
+    let cluster = Issuer::new();
+    let k8s = "https://kubernetes.default.svc.cluster.local";
+    let pods = |jwks: Value| json!({ "name": "pods", "issuer": k8s, "audience": "roll", "subject": "system:serviceaccount:shop:web", "environments": ["staging"], "actions": ["read", "reveal"], "jwks": jwks.to_string() });
+    assert_eq!(api.call(Method::POST, "/identities", Some(pods(json!({ "keys": [] })))).await.0, StatusCode::BAD_REQUEST, "no usable key");
+    let p = api.ok(Method::POST, "/identities", Some(pods(cluster.jwks()))).await;
+    assert_eq!(p["pinned_keys"], 1);
+    let pod = |signer: &Issuer| json!({ "identity": p["id"], "token": signer.sign(json!({ "iss": k8s, "aud": "roll", "sub": "system:serviceaccount:shop:web", "exp": now + 300, "iat": now })) });
+    let (s, l) = api.call(Method::POST, "/v1/secrets/login", Some(pod(&cluster))).await;
+    assert_eq!(s, StatusCode::OK, "{l}");
+    assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(pod(&issuer))).await.0, StatusCode::UNAUTHORIZED, "only its own keys");
+    // The cluster rotates its signing key: the identity's keys are replaced, its id kept.
+    let rotated = Issuer::new();
+    let (_, before) = api.call(Method::POST, "/v1/secrets/login", Some(pod(&cluster))).await;
+    let k = api.ok(Method::PUT, &format!("/identities/{}/jwks", p["id"].as_str().unwrap()), Some(json!({ "jwks": rotated.jwks().to_string() }))).await;
+    assert_eq!((k["id"].clone(), k["pinned_keys"].clone()), (p["id"].clone(), json!(1)));
+    assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(pod(&rotated))).await.0, StatusCode::OK);
+    assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(pod(&cluster))).await.0, StatusCode::UNAUTHORIZED, "the old key no longer");
+    // What it gave out under the old key ends with it (a rotation is often for a leaked key).
+    let (s, _) = api.req(Method::GET, "/environments/staging/values", None, before["token"].as_str()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
     // Deleting the identity ends what it gave out.
     api.ok(Method::DELETE, &format!("/identities/{id}"), None).await;
     let (s, _) = api.req(Method::GET, "/environments/staging/values", None, Some(&token)).await;

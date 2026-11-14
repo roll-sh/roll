@@ -113,6 +113,7 @@ export function Identities() {
                   {i.environments ? i.environments.join(", ") : "all environments"}
                   {i.paths ? ` · ${i.paths.join(", ")}` : ""} · {i.ttl_minutes} min
                   {i.allowed_ips ? ` · from ${i.allowed_ips.join(", ")}` : ""}
+                  {i.pinned_keys ? ` · ${i.pinned_keys} pinned ${i.pinned_keys === 1 ? "key" : "keys"}` : ""}
                 </span>
                 <span className="ml-auto truncate text-right font-mono text-[10.5px] text-subtle" title={i.last_subject ?? undefined}>
                   {i.last_used_at ? `logged in ${ago(i.last_used_at)}` : "never used"} · {i.id}
@@ -146,6 +147,16 @@ function Delete({ onDelete }: { onDelete: () => void }) {
 }
 
 const REPO = /^[\w.-]+\/[\w.-]+$/;
+
+/** A JWKS with at least one key, as text (the server checks which it can use). */
+function jwksHasKeys(text: string): boolean {
+  try {
+    const keys = (JSON.parse(text) as { keys?: unknown }).keys;
+    return Array.isArray(keys) && keys.length > 0;
+  } catch {
+    return false;
+  }
+}
 const GITLAB_PATH = /^[\w.-]+(\/[\w.-]+)+$/;
 
 function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreate: (n: NewIdentity) => Promise<void>; onCancel: () => void }) {
@@ -161,11 +172,14 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
   const [actions, setActions] = useState<Set<Action>>(new Set(["read", "reveal"]));
   const [ttl, setTtl] = useState("15");
   const [ips, setIps] = useState("");
+  const [jwks, setJwks] = useState("");
   const [busy, setBusy] = useState(false);
   const ipList = ips.split(/[\s,]+/).filter(Boolean);
   const minutes = Number(ttl);
   const repoOk = provider === "github" ? REPO.test(repo.trim()) : provider === "gitlab" ? GITLAB_PATH.test(repo.trim()) : true;
-  const otherOk = provider !== "other" || (issuer.trim().startsWith("https://") && subject.trim() !== "" && subject.trim() !== "*");
+  // Pinned keys: the issuer is only compared with iss (a cluster's own needn't be reachable).
+  const keysOk = jwks.trim() === "" || jwksHasKeys(jwks);
+  const otherOk = provider !== "other" || ((jwks.trim() ? issuer.trim() !== "" : issuer.trim().startsWith("https://")) && keysOk && subject.trim() !== "" && subject.trim() !== "*");
   const ok = name.trim() !== "" && repoOk && otherOk && audience.trim() !== "" && picked.size > 0 && actions.size > 0 && Number.isInteger(minutes) && minutes >= 5 && minutes <= 60;
   const toggle = <T,>(set: Set<T>, v: T) => {
     const n = new Set(set);
@@ -173,11 +187,11 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
     else n.add(v);
     return n;
   };
-  const shape = (): Pick<NewIdentity, "issuer" | "subject" | "claims"> => {
+  const shape = (): Pick<NewIdentity, "issuer" | "subject" | "claims" | "jwks"> => {
     const ref: Record<string, string> = branch.trim() ? { ref: `refs/heads/${branch.trim()}` } : {};
     if (provider === "github") return { issuer: GITHUB, subject: `repo:${repo.trim()}:*`, claims: ref };
     if (provider === "gitlab") return { issuer: GITLAB, subject: `project_path:${repo.trim()}:*`, claims: branch.trim() ? { ref: branch.trim() } : {} };
-    return { issuer: issuer.trim().replace(/\/+$/, ""), subject: subject.trim(), claims: {} };
+    return { issuer: issuer.trim().replace(/\/+$/, ""), subject: subject.trim(), claims: {}, ...(jwks.trim() && { jwks: jwks.trim() }) };
   };
   return (
     <form
@@ -236,6 +250,20 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
           <span className={label}>Audience (aud)</span>
           <input value={audience} onChange={(e) => setAudience(e.target.value)} className={`${field} font-mono`} />
         </label>
+        {provider === "other" && (
+          <label className="sm:col-span-2">
+            <span className={label}>Issuer&apos;s keys, for a cluster roll can&apos;t reach (optional; kubectl get --raw /openid/v1/jwks)</span>
+            <textarea
+              value={jwks}
+              onChange={(e) => setJwks(e.target.value)}
+              rows={3}
+              spellCheck={false}
+              placeholder='{"keys":[{"kty":"RSA","kid":"…","n":"…","e":"AQAB"}]}'
+              aria-invalid={!keysOk}
+              className={`${field} h-auto resize-y py-1.5 font-mono text-[11.5px]`}
+            />
+          </label>
+        )}
       </div>
       <div>
         <span className={label}>Environments</span>
