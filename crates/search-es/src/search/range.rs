@@ -512,8 +512,17 @@ pub fn range_query(ctx: &QueryCtx, r: &Range) -> EsResult<QueryRef> {
                     return Ok(match_none("empty"));
                 }
                 if d >= 0.0 {
-                    lo = value_text(v).trim().parse::<u64>().unwrap_or(d.ceil() as u64);
-                    if !r.include_lower && d.fract() == 0.0 {
+                    // The exact decimal rounded up (`BigDecimal`: a double loses digits here).
+                    let (exact, fraction) = match decimal_parts(&value_text(v)) {
+                        Some((i, true)) => match i.checked_add(1) {
+                            Some(c) => (c, true),
+                            None => return Ok(match_none("empty")),
+                        },
+                        Some((i, false)) => (i, false),
+                        None => (d.ceil() as u64, d.fract() != 0.0),
+                    };
+                    lo = exact;
+                    if !r.include_lower && !fraction {
                         if lo == u64::MAX {
                             return Ok(match_none("empty"));
                         }
@@ -526,8 +535,13 @@ pub fn range_query(ctx: &QueryCtx, r: &Range) -> EsResult<QueryRef> {
                 if d < 0.0 {
                     return Ok(match_none("empty"));
                 }
-                hi = value_text(v).trim().parse::<u64>().unwrap_or(d.floor() as u64);
-                if !r.include_upper && d.fract() == 0.0 {
+                // The exact decimal rounded down.
+                let (exact, fraction) = match decimal_parts(&value_text(v)) {
+                    Some((i, f)) => (i, f),
+                    None => (d.floor() as u64, d.fract() != 0.0),
+                };
+                hi = exact;
+                if !r.include_upper && !fraction {
                     if hi == 0 {
                         return Ok(match_none("empty"));
                     }
@@ -889,3 +903,14 @@ pub fn range_field_query(ctx: &QueryCtx, f: &FieldInfo, from: Option<&Value>, to
     Ok(arc(ConstantScoreQuery::new(arc(PointRangeQuery::new(f.number, lower, upper, bpd, pt).map_err(super::query::index_err)?))))
 }
 
+/// A plain decimal's integer part and whether its fraction is non-zero (`"18446744073709551614.5"`
+/// → `(18446744073709551614, true)`), exactly; `None` for anything else (signs, exponents,
+/// values past `u64`), which goes through a double.
+fn decimal_parts(text: &str) -> Option<(u64, bool)> {
+    let t = text.trim();
+    let (int, frac) = t.split_once('.').unwrap_or((t, ""));
+    if int.is_empty() || !int.bytes().all(|b| b.is_ascii_digit()) || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((int.parse::<u64>().ok()?, frac.bytes().any(|b| b != b'0')))
+}

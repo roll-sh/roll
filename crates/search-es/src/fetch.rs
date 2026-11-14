@@ -252,10 +252,8 @@ pub fn stored_value(f: &FieldInfo, v: &OwnedStoredValue) -> Value {
             None => Value::from(*ms),
         },
         (Kind::Ip, OwnedStoredValue::Bytes(b)) if b.len() == 16 => Value::Str(search_index::query::range::inet_to_string(b)),
-        (Kind::UnsignedLong, OwnedStoredValue::Long(l)) => {
-            let u = (*l as u64) ^ (1 << 63);
-            if u <= i64::MAX as u64 { Value::from(u as i64) } else { Value::Num(Number::UInt(u)) }
-        }
+        // Elasticsearch stores the unsigned value's text (`Long.toUnsignedString`).
+        (Kind::UnsignedLong, OwnedStoredValue::Long(l)) => Value::Str(((*l as u64) ^ (1 << 63)).to_string()),
         (Kind::Binary, OwnedStoredValue::Bytes(b)) => {
             use base64::Engine as _;
             Value::Str(base64::engine::general_purpose::STANDARD.encode(b))

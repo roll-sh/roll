@@ -371,7 +371,12 @@ impl DocHost {
                 _ => {}
             }
         }
-        out.longs.sort_unstable();
+        // Doc values order: an `unsigned_long`'s raw bits sort as the unsigned values.
+        if f.kind == Kind::UnsignedLong {
+            out.longs.sort_unstable_by_key(|v| *v as u64);
+        } else {
+            out.longs.sort_unstable();
+        }
         out.doubles.sort_unstable_by(f64::total_cmp);
         out.geo.sort_unstable_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
         strs.sort_unstable();

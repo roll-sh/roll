@@ -453,7 +453,9 @@ pub fn fetch_fields(table: &FieldTable, source: Option<&Value>, specs: &[FieldAn
             let mut flat = Vec::new();
             flatten_values(v, &f, &mut flat);
             for x in flat {
-                if x.is_null() {
+                // A number field's empty string is a null too (`NumberFieldMapper.valueFetcher`; a
+                // `token_count` counts its tokens: none).
+                if x.is_null() || (f.kind.is_numeric() && f.kind != Kind::TokenCount && matches!(&x, Value::Str(s) if s.is_empty())) {
                     if let Some(nv) = &null_value
                         && let Ok(Some(p)) = parse_value(&f, nv, format.as_deref())
                     {
