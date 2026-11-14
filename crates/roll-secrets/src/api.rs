@@ -90,6 +90,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/cas/{{id}}/certificates"), get(ca_certificates))
         .route(&format!("{P}/cas/{{id}}/revoke"), post(revoke_certificate))
         .route("/v1/secrets/crl/{id}", get(crl))
+        .route("/v1/secrets/ocsp/{id}", post(ocsp_post).layer(axum::extract::DefaultBodyLimit::max(crate::ocsp::REQUEST_MAX)))
+        .route("/v1/secrets/ocsp/{id}/{request}", get(ocsp_get))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
@@ -907,6 +909,22 @@ async fn crl(State(s): S, Path(id): Path<String>, axum::extract::Query(q): axum:
         ("application/pkix-crl", der.to_vec())
     };
     Ok(([(axum::http::header::CONTENT_TYPE, kind), (axum::http::header::CACHE_CONTROL, "public, max-age=300")], body).into_response())
+}
+
+/// OCSP over POST: the request's DER as the body (`application/ocsp-request`). No token.
+async fn ocsp_post(State(s): S, Path(id): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let der = blocking(s, move |s| s.ocsp(&id, &b)).await?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/ocsp-response")], der.to_vec()).into_response())
+}
+
+/// OCSP over GET: the request's DER in base64, URL-encoded, as the last path segment (RFC 6960
+/// A.1), so caches and CDNs can keep answers.
+async fn ocsp_get(State(s): S, Path((id, request)): Path<(String, String)>) -> crate::Result<Response> {
+    use base64::Engine as _;
+    // The path segment is percent-decoded already.
+    let der = base64::engine::general_purpose::STANDARD.decode(request.trim()).unwrap_or_default();
+    let answer = blocking(s, move |s| s.ocsp(&id, &der)).await?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/ocsp-response"), (axum::http::header::CACHE_CONTROL, "public, max-age=300")], answer.to_vec()).into_response())
 }
 
 async fn list_syncs(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

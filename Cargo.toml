@@ -210,6 +210,9 @@ zeroize = "1"
 # structure of private keys (matching a key to its certificate; no private-key operations).
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 x509-cert = { version = "0.2", default-features = false, features = ["pem"] }
+# roll secrets: a project CA's OCSP responder.
+x509-ocsp = { version = "0.2.1", default-features = false }
+der = { version = "0.7", features = ["alloc", "oid"] }
 pkcs1 = { version = "0.7", default-features = false, features = ["std"] }
 pkcs8 = { version = "0.10", default-features = false, features = ["std"] }
 sec1 = { version = "0.7", default-features = false, features = ["der", "std"] }

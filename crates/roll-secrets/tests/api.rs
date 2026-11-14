@@ -1100,10 +1100,39 @@ async fn a_projects_ca_signs_short_lived_certificates_for_its_names_only() {
     assert!(s == StatusCode::CONFLICT && e.to_string().contains("revocation list"), "{e}");
     // A CSR's certificate ending within two weeks is health's to say (nothing renews it); a
     // revoked one isn't.
-    api.ok(Method::POST, &format!("/cas/{dev_id}/sign"), Some(json!({ "csr": csr(&["d2.dev.internal"]), "days": 5 }))).await;
+    let d2 = api.ok(Method::POST, &format!("/cas/{dev_id}/sign"), Some(json!({ "csr": csr(&["d2.dev.internal"]), "days": 5 }))).await;
     let health = api.ok(Method::GET, "/health", None).await;
     let ending: Vec<&Value> = health.as_array().unwrap().iter().filter(|f| f["issue"] == "certificate_expiring").collect();
     assert_eq!(ending.iter().map(|f| (f["key"].as_str().unwrap(), f["path"].as_str().unwrap())).collect::<Vec<_>>(), [("d2.dev.internal", "devices")], "{health}");
+    // OCSP, beside the CRL: one revoked and one good certificate, answered and signed by the CA.
+    {
+        use der::{Decode, Encode};
+        let ca_pem = devices["certificate"].as_str().unwrap();
+        let (_, pem) = parse_x509_pem(ca_pem.as_bytes()).unwrap();
+        let ca = x509_cert::Certificate::from_der(&pem.contents).unwrap();
+        let sha1 = |b: &[u8]| der::asn1::OctetString::new(ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, b).as_ref().to_vec()).unwrap();
+        let (name_hash, key_hash) = (sha1(&ca.tbs_certificate.subject.to_der().unwrap()), sha1(ca.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes()));
+        let ask = |serial: &str| x509_ocsp::Request {
+            req_cert: x509_ocsp::CertId {
+                hash_algorithm: x509_cert::spki::AlgorithmIdentifierOwned { oid: der::oid::ObjectIdentifier::new_unwrap("1.3.14.3.2.26"), parameters: None },
+                issuer_name_hash: name_hash.clone(),
+                issuer_key_hash: key_hash.clone(),
+                serial_number: x509_cert::serial_number::SerialNumber::new(&(0..serial.len()).step_by(2).map(|i| u8::from_str_radix(&serial[i..i + 2], 16).unwrap()).collect::<Vec<_>>()).unwrap(),
+            },
+            single_request_extensions: None,
+        };
+        let request = x509_ocsp::OcspRequest { tbs_request: x509_ocsp::TbsRequest { version: Default::default(), requestor_name: None, request_list: vec![ask(one["serial"].as_str().unwrap()), ask(d2["serial"].as_str().unwrap())], request_extensions: None }, optional_signature: None };
+        let req = Request::builder().method(Method::POST).uri(format!("/v1/secrets/ocsp/{dev_id}")).body(Body::from(request.to_der().unwrap())).unwrap();
+        let resp = api.router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let answer = x509_ocsp::OcspResponse::from_der(&bytes).unwrap();
+        let basic = x509_ocsp::BasicOcspResponse::from_der(answer.response_bytes.unwrap().response.as_bytes()).unwrap();
+        let statuses: Vec<&str> = basic.tbs_response_data.responses.iter().map(|r| match r.cert_status { x509_ocsp::CertStatus::Good(_) => "good", x509_ocsp::CertStatus::Revoked(_) => "revoked", x509_ocsp::CertStatus::Unknown(_) => "unknown" }).collect();
+        assert_eq!(statuses, ["revoked", "good"]);
+        let public = ca.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes();
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_ASN1, public).verify(&basic.tbs_response_data.to_der().unwrap(), basic.signature.raw_bytes()).expect("signed by the CA");
+    }
     // A CA a key links to stays.
     assert_eq!(api.call(Method::DELETE, &format!("/cas/{}", ca["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
 }

@@ -597,7 +597,16 @@ TLS certificates for services (mTLS between them), with no CA to run.
   `GET /v1/secrets/crl/{id}` (DER, `application/pkix-crl`; `?format=pem`), without a token, as any
   CRL is fetched. Every certificate names it in its CRL distribution point (rolld's
   `ROLL_CODE_PUBLIC_URL`). Checked with OpenSSL: `openssl verify -crl_check` refuses a revoked one
-  (`certificate revoked`) and passes the rest. Clients that don't check CRLs still trust a revoked
+  (`certificate revoked`) and passes the rest. **OCSP** too, beside the
+  CRL (RFC 6960), for clients that ask about one certificate rather than fetch lists:
+  `POST /v1/secrets/ocsp/{id}` (the request's DER as the body) or `GET /v1/secrets/ocsp/{id}/<base64
+  of the request>` (cacheable), without a token. A certificate is `good` while the CA lists it
+  unrevoked, `revoked` with its time once revoked, `unknown` when the CA didn't sign it, it has
+  expired or the request names another issuer; the CA signs each answer itself, nonces are echoed,
+  and an answer without one is kept a minute per node (a revocation drops the CA's). Every
+  certificate names the responder (Authority Information Access). Checked with `openssl ocsp`:
+  `good` and `revoked`, `Response verify OK`, over POST with a nonce and over GET. Clients that
+  don't check CRLs or OCSP still trust a revoked
   certificate until it ends, so lifetimes stay short. A CA a key links to can't be deleted, nor one
   with a revoked certificate still within its lifetime (its CRL must keep answering; a deleted
   project's CAs keep serving theirs until then too); deleting one leaves what it signed valid until
@@ -1477,6 +1486,8 @@ isn't in the workspace is 404.
 | `GET /cas/{id}/certificates` | | `CaCertificate[]`: `{serial, names, source, not_after, issued_at, issued_by, revoked_at?}`, what it signed that hasn't expired, newest first (`read`) |
 | `POST /cas/{id}/revoke` | `{serial}` | 204; 404 for a serial it didn't sign or that has expired (`write`, audited) |
 | `GET /v1/secrets/crl/{id}` | | the CA's CRL, DER (`application/pkix-crl`) or `?format=pem`; no token |
+| `POST /v1/secrets/ocsp/{id}` | an OCSP request (DER) | an OCSP response (`application/ocsp-response`); no token |
+| `GET /v1/secrets/ocsp/{id}/{request}` | | the same, the request base64 and URL-encoded (RFC 6960 A.1); no token |
 | `POST /cas/{id}/sign` | `{csr, days?, ttl_minutes?}` | `{certificate, ca, serial, names, not_after}` (`write`, audited); 400 for a name outside the policy or a lifetime past `max_days` |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
