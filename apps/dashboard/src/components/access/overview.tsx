@@ -437,7 +437,8 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
         </div>
         {status === "active" && !confirm && (
           <span className="flex shrink-0 gap-1.5">
-            {g.kind !== "workload" && (
+            {/* A waiting token's rules are fixed until an admin decides (the API answers 409). */}
+            {g.kind !== "workload" && !g.pending && (
               <button onClick={() => setEditing((e) => !e)} className={btn} aria-expanded={editing}>
                 Edit
               </button>
