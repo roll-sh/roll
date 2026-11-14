@@ -4,6 +4,7 @@ import { FOLDER_PATH, SECRET_KEY, type NewSync, type Sync, type SyncKind, type S
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, label, primary, Section, Teach, useLoad } from "./ui";
 import { Rotators } from "./rotators";
+import { TransitKeys } from "./transit-keys";
 
 /** Syncs (docs/secrets.md, "Syncs"): one-way pushes of an environment's values to GitHub, a webhook or a deploy hook. */
 export function SyncsView() {
@@ -66,6 +67,7 @@ export function SyncsView() {
         )}
       </Section>
       <Rotators />
+      <TransitKeys />
     </div>
   );
 }
