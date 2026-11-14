@@ -98,10 +98,14 @@ function unescape(s: string): string {
   return s.replace(/\\(.?)/gs, (_, c: string) => named[c] ?? (c === "" ? "\\" : c));
 }
 
+/** roll's limits on a key's name and a value (roll-secrets' `names::KEY_MAX`, `VALUE_MAX`). */
+const KEY_MAX = 256;
+const VALUE_MAX = 64 * 1024;
+
 /**
- * A dotenv file's entries, or none at all when the CLI would refuse the file (a line that isn't
- * `KEY=value`, an unclosed quote): nothing is offered on a file `roll run --env-file` won't read. A
- * key set twice is its last entry, as the CLI keeps it.
+ * A dotenv file's entries, or none at all when roll's parser would refuse the file (a line that
+ * isn't `KEY=value`, an unclosed quote, a key or value over roll's limits): nothing is offered on a
+ * file `roll secrets import` won't read. A key set twice is its last entry, as roll keeps it.
  */
 export function dotenvLines(text: string): DotenvLine[] {
   const out: DotenvLine[] = [];
@@ -144,6 +148,7 @@ export function dotenvLines(text: string): DotenvLine[] {
       out.push({ line, endLine: line, key: m[2], value, from: start, to: start + value.length, reference: value.startsWith("roll://") });
     }
   }
+  if (out.some((e) => e.key.length > KEY_MAX || new TextEncoder().encode(e.value).length > VALUE_MAX)) return [];
   return out.filter((e, i) => !out.slice(i + 1).some((later) => later.key === e.key));
 }
 

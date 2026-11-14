@@ -77,6 +77,8 @@ describe("dotenv files", () => {
     expect(dotenvLines("A=1\nnot a pair\nB=2")).toEqual([]);
     expect(dotenvLines("export\tA=1")).toEqual([]);
     expect(dotenvLines('A="never closed\nB=2')).toEqual([]);
+    expect(dotenvLines(`${"K".repeat(257)}=1`)).toEqual([]);
+    expect(dotenvLines(`A=${"x".repeat(64 * 1024 + 1)}`)).toEqual([]);
   });
 });
 
