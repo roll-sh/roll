@@ -211,16 +211,17 @@ export function PreviewSheet({
                       <div className="min-w-0 flex-1 leading-tight">
                         <div className="flex items-center gap-1.5 text-[11.5px]">
                           <StateDot state={r.state} />
-                          <span className="truncate">{names.get(id) ?? r.parent}</span>
-                          <span className="text-subtle">→</span>
-                          <span className="truncate font-mono text-[11px]">{r.ref ?? "—"}</span>
+                          <span className="max-w-[50%] shrink-0 truncate">{names.get(id) ?? r.parent}</span>
+                          <span className="shrink-0 text-subtle">→</span>
+                          <span className="min-w-0 truncate font-mono text-[11px]">{r.ref ?? "—"}</span>
                         </div>
-                        <div className="mt-0.5 font-mono text-[10.5px] text-subtle">
-                          {KIND_NAME[r.kind]} · {r.mode === "schema" ? "schema only" : "branch"} · {formatBytes(r.bytes)}
-                          {masked?.get(id) ? ` · masked (${masked.get(id)})` : ""}
+                        <div className="mt-0.5 flex flex-wrap gap-x-1 font-mono text-[10.5px] text-subtle">
+                          <span className="whitespace-nowrap">
+                            {KIND_NAME[r.kind]} · {r.mode === "schema" ? "schema only" : "branch"} · {formatBytes(r.bytes)}
+                          </span>
+                          {!!masked?.get(id) && <span className="whitespace-nowrap">· masked ({masked.get(id)})</span>}
                           {r.data === "real" && (
-                            <span className="text-soft" title="Its branch holds the parent's data as it is: the preview's code reads it unmasked">
-                              {" "}
+                            <span className="whitespace-nowrap text-soft" title="Its branch holds the parent's data as it is: the preview's code reads it unmasked">
                               · production data, unmasked
                             </span>
                           )}
