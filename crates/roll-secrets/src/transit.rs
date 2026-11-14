@@ -142,8 +142,9 @@ fn data_aad(context: Option<&str>) -> String {
 }
 
 fn check_name(n: &str) -> Result<()> {
-    if n.is_empty() || n.len() > 64 || !n.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
-        return Err(Error::BadRequest("a key's name is letters, digits, - and _ (64 at most)".into()));
+    // Not `-…` nor `_all`: names a permission rule can list as written (docs/permissions.md).
+    if n.is_empty() || n.len() > 64 || !n.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) || n.starts_with('-') || n == "_all" {
+        return Err(Error::BadRequest("a key's name is letters, digits, - and _ (64 at most), not starting with - and not _all".into()));
     }
     Ok(())
 }
