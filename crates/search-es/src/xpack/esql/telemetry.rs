@@ -94,6 +94,7 @@ impl Used {
                 Cmd::Stats { .. } => "stats",
                 Cmd::Sort(_) => "sort",
                 Cmd::Limit(_) => "limit",
+                Cmd::LimitBy(..) => "limit_by",
                 Cmd::Keep(_) => "keep",
                 Cmd::Drop(_) => "drop",
                 Cmd::Rename(_) => "rename",
@@ -141,7 +142,14 @@ impl Used {
         match &e.kind {
             ExprKind::Call(name, args) => {
                 if !name.starts_with('$') {
-                    self.functions.insert(name.to_ascii_lowercase());
+                    let name = name.to_ascii_lowercase();
+                    // A time series aggregation runs as its plain aggregate, which counts too.
+                    if let Some(base) = name.strip_suffix("_over_time")
+                        && matches!(base, "avg" | "sum" | "min" | "max" | "count" | "count_distinct")
+                    {
+                        self.functions.insert(base.to_string());
+                    }
+                    self.functions.insert(name);
                 }
                 args.iter().for_each(|a| self.expr(a));
             }

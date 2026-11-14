@@ -332,6 +332,8 @@ pub enum Cmd {
     Stats { aggs: Vec<Named>, by: Vec<Named> },
     Sort(Vec<SortKey>),
     Limit(usize),
+    /// `LIMIT n BY expr, ...`: the first `n` rows of each distinct key.
+    LimitBy(usize, Vec<Expr>),
     Keep(Vec<(String, usize)>),
     Drop(Vec<(String, usize)>),
     Rename(Vec<(String, String, usize)>),
@@ -413,6 +415,8 @@ pub struct Settings {
     /// `time_zone`, validated (`Z`, offsets, region ids).
     pub time_zone: Option<String>,
     pub column_metadata: bool,
+    /// `approximation`: STATS results carry the approximation's columns.
+    pub approximation: bool,
 }
 
 impl Settings {
@@ -447,8 +451,8 @@ impl Settings {
                 SetValue::Lit(V::Bool(b)) => self.column_metadata = *b,
                 _ => return fail(format!("Setting [{name}] must be of type BOOLEAN")),
             },
-            // Query approximation is an optimization hint: exact results satisfy it.
-            "approximation" => {}
+            // Query approximation: roll computes exactly, and reports it as such.
+            "approximation" => self.approximation = !matches!(value, SetValue::Lit(V::Null | V::Bool(false))),
             "project_routing" => {
                 keyword(name)?;
                 return fail("Error validating setting [project_routing]: cross-project search not enabled".into());
@@ -868,6 +872,13 @@ impl<'a> P<'a> {
                 let e = self.unary()?;
                 let ExprKind::Lit(v) = &e.kind else { return Err(parse_error(self.src, e.start, &format!("mismatched input '{}' expecting {CONSTANT}", &self.src[e.start..e.end]))) };
                 match v {
+                    V::Int(i) if *i >= 0 && self.eat_kw("by") => {
+                        let mut by = vec![self.expr()?];
+                        while self.eat_op(",") {
+                            by.push(self.expr()?);
+                        }
+                        Cmd::LimitBy(*i as usize, by)
+                    }
                     V::Int(i) if *i >= 0 => Cmd::Limit(*i as usize),
                     other => {
                         let ty = match other {

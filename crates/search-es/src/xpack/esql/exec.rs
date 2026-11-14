@@ -48,10 +48,16 @@ pub struct Stats {
     pub original_types: Vec<(String, Vec<String>)>,
     /// Column `_meta` (`SET column_metadata=true`), by column name.
     pub col_meta: Vec<(String, Value)>,
+    /// The aggregates of the last `STATS` that query approximation reports on (output names).
+    pub approx: Vec<String>,
     /// Columns of conflicting types from a union source (a subquery or view) that nothing read
     /// yet: the error each is if a command above reads it.
     pub conflicts: Vec<(String, EsError)>,
 }
+
+/// Aggregates query approximation estimates (`SET approximation`), which get its confidence
+/// interval and certified columns.
+const APPROXIMABLE: &[&str] = &["count", "sum", "avg", "median", "percentile"];
 
 /// The default and maximum number of rows a query returns.
 pub const DEFAULT_LIMIT: usize = 1000;
@@ -97,6 +103,8 @@ pub struct Resources {
     suggest: std::sync::OnceLock<(Option<std::collections::HashSet<String>>, std::collections::HashSet<String>)>,
     /// `SET column_metadata=true`: the `_meta` of `BUCKET` groups, by output name.
     col_meta: parking_lot::Mutex<Vec<(String, Value)>>,
+    /// The last `STATS`'s approximable aggregates ([`Stats::approx`]).
+    approx: parking_lot::Mutex<Vec<String>>,
 }
 
 /// The `_meta.bucket` Elasticsearch reports for a `BUCKET` group: the numeric interval, or
@@ -947,6 +955,22 @@ impl Compiler<'_> {
                 let mut cs = Vec::new();
                 let mut ts = Vec::new();
                 for a in args {
+                    // A function's options map: its literal entries, as JSON.
+                    if let ExprKind::Call(n, pairs) = &a.kind
+                        && n == "$map"
+                    {
+                        let mut m = crate::json::Map::new();
+                        for kv in pairs.chunks(2) {
+                            if let [k, v] = kv
+                                && let (ExprKind::Lit(V::Str(key)), Some(val)) = (&k.kind, fold(self.src, v))
+                            {
+                                m.insert(key.clone(), val.to_json(val.type_of()));
+                            }
+                        }
+                        cs.push(CE::Lit(V::Str(crate::json::Value::Obj(m).to_json())));
+                        ts.push(DataType::Keyword);
+                        continue;
+                    }
                     let (c, t) = self.compile(a)?;
                     cs.push(c);
                     ts.push(t);
@@ -1307,6 +1331,8 @@ pub enum GroupKey {
     Null,
     Bool(bool),
     Int(i64),
+    /// An `unsigned_long` above `i64::MAX`.
+    UInt(u64),
     /// Doubles by their bits, as Elasticsearch's double `BlockHash` keys them
     /// (`doubleToLongBits`): `-0.0` and `0.0` are two groups.
     Double(u64),
@@ -1322,6 +1348,7 @@ impl GroupKey {
             V::Bool(b) => GroupKey::Bool(*b),
             V::Int(i) => GroupKey::Int(*i as i64),
             V::Long(l) => GroupKey::Int(*l),
+            V::ULong(u) => GroupKey::UInt(*u),
             V::Double(d) => GroupKey::Double(double_key(*d)),
             V::Str(s) | V::Ip(s) => GroupKey::Str(s.clone()),
             V::Date(d) => GroupKey::Date(*d),
@@ -1918,6 +1945,7 @@ fn hash_key(v: &V, h: &mut impl std::hash::Hasher) {
         V::Bool(b) => (1u8, *b).hash(h),
         V::Int(i) => (2u8, *i as i64).hash(h),
         V::Long(l) => (2u8, *l).hash(h),
+        V::ULong(u) => (7u8, *u).hash(h),
         V::Double(d) => (3u8, double_key(*d)).hash(h),
         V::Str(s) | V::Ip(s) => (4u8, s.as_str()).hash(h),
         V::Date(d) => (5u8, *d).hash(h),
@@ -1934,6 +1962,7 @@ fn same_key(a: &V, b: &V) -> bool {
         (V::Null, V::Null) => true,
         (V::Bool(x), V::Bool(y)) => x == y,
         (V::Int(_) | V::Long(_), V::Int(_) | V::Long(_)) => a.as_i64() == b.as_i64(),
+        (V::ULong(x), V::ULong(y)) => x == y,
         (V::Double(x), V::Double(y)) => double_key(*x) == double_key(*y),
         (V::Str(x) | V::Ip(x), V::Str(y) | V::Ip(y)) => x == y,
         (V::Date(x), V::Date(y)) => x == y,
@@ -1958,6 +1987,17 @@ impl Grouper {
         for n in by {
             let (c, t) = match &n.expr.kind {
                 ExprKind::Call(f, args) if f == "bucket" || f == "bin" => compile_bucket(src, cols, &n.expr, args)?,
+                // `CATEGORIZE(text)`: groups by each value's category ([`functions::categorize`]).
+                ExprKind::Call(f, args) if f == "categorize" => {
+                    let Some(a) = args.first() else {
+                        return Err(verification(src, n.expr.start, "error building [categorize]: expects one or two arguments"));
+                    };
+                    let (c, t) = Compiler { src, cols, aggs: None }.compile(a)?;
+                    if !t.is_string() && t != DataType::Null {
+                        return Err(verification(src, a.start, &format!("first argument of [{}] must be [string], found value [{}] type [{}]", &src[n.expr.start..n.expr.end], &src[a.start..a.end], functions::type_name_static(t))));
+                    }
+                    (CE::Fn(F::Categorize, vec![c], vec![t], at_of(src.text, &n.expr)), DataType::Keyword)
+                }
                 // `TBUCKET(span)`: `BUCKET(@timestamp, span)`.
                 ExprKind::Call(f, args) if f == "tbucket" => {
                     let mut full = vec![Expr { kind: ExprKind::Col("@timestamp".into()), start: n.expr.start, end: n.expr.start }];
@@ -1998,6 +2038,7 @@ impl Grouper {
             }
             outputs.push((c, t, n.name.clone()));
         }
+        *src.res.approx.lock() = aggs.iter().filter(|n| matches!(&n.expr.kind, ExprKind::Call(f, _) if APPROXIMABLE.contains(&f.as_str()))).map(|n| n.name.clone()).collect();
         Ok(Grouper { keys, outputs, specs, index: HashMap::default(), groups: Vec::new() })
     }
 
@@ -3548,6 +3589,9 @@ fn merge_stats(into: &mut Stats, from: Stats) {
         }
     }
     into.col_meta.extend(from.col_meta);
+    if !from.approx.is_empty() {
+        into.approx = from.approx;
+    }
     into.conflicts.extend(from.conflicts);
     for (n, t) in from.original_types {
         if !into.original_types.iter().any(|(x, _)| *x == n) {
@@ -3907,6 +3951,7 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
         let t = run_rest(&src, t, &rest, w)?;
         stats.rows_emitted = t.rows.len() as i64;
         stats.col_meta.extend(std::mem::take(&mut *src.res.col_meta.lock()));
+        stats.approx = std::mem::take(&mut *src.res.approx.lock());
         Ok((t, stats))
     })
 }
@@ -4128,6 +4173,7 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
     table = run_rest(&src, table, rest, w)?;
     stats.rows_emitted = table.rows.len() as i64;
     stats.col_meta.extend(std::mem::take(&mut *src.res.col_meta.lock()));
+    stats.approx = std::mem::take(&mut *src.res.approx.lock());
     Ok((table, stats))
 }
 
@@ -4225,6 +4271,7 @@ async fn finish(_cluster: &Cluster, src: &Src<'_>, t: Table, rest: &[Cmd], w: &m
     let t = run_rest(src, t, rest, w)?;
     stats.rows_emitted = t.rows.len() as i64;
     stats.col_meta.extend(std::mem::take(&mut *src.res.col_meta.lock()));
+    stats.approx = std::mem::take(&mut *src.res.approx.lock());
     Ok((t, stats))
 }
 
@@ -4290,6 +4337,20 @@ fn run_rest(src: &Src<'_>, mut t: Table, cmds: &[Cmd], w: &mut Warnings) -> EsRe
             }
             Cmd::Sort(keys) => sort_rows(src, keys, &mut t, w)?,
             Cmd::Limit(n) => t.rows.truncate((*n).min(MAX_LIMIT)),
+            Cmd::LimitBy(n, by) => {
+                let keys = by.iter().map(|e| Compiler { src, cols: &t.cols, aggs: None }.compile(e).map(|(c, _)| c)).collect::<EsResult<Vec<CE>>>()?;
+                let mut seen: HashMap<Vec<GroupKey>, usize> = HashMap::default();
+                let mut kept = Vec::with_capacity(t.rows.len());
+                for r in std::mem::take(&mut t.rows) {
+                    let key = keys.iter().map(|k| eval(k, &r, &[], w).map(|v| GroupKey::of(&v))).collect::<EsResult<Vec<GroupKey>>>()?;
+                    let c = seen.entry(key).or_default();
+                    if *c < *n {
+                        *c += 1;
+                        kept.push(r);
+                    }
+                }
+                t.rows = kept;
+            }
             c if is_row_wise(c) => {
                 let (p, out) = build_pipeline(src, std::slice::from_ref(c), t.cols.clone())?;
                 t.rows = p.run(std::mem::take(&mut t.rows), w)?;

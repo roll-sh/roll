@@ -255,7 +255,7 @@ the discovery/store plugins.
 | `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 9 | 9 | 0 |
 | `wildcard` | `x-pack/plugin/wildcard` | plain | 9 | 9 | 9 | 9 | 0 |
 | `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 1059 | 1059 | 353 |
-| `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 544 | 544 | 5 |
+| `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 549 | 549 | 0 |
 | `analysis-icu` | `plugins/analysis-icu` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `analysis-kuromoji` | `plugins/analysis-kuromoji` | plugins | 7 | 7 | 0 | 0 | 7 |
 | `analysis-nori` | `plugins/analysis-nori` | plugins | 6 | 6 | 0 | 0 | 6 |
@@ -311,7 +311,7 @@ the discovery/store plugins.
 <!-- test-search: wildcard >= 9 -->
 <!-- test-search: platinum >= 1059 -->
 <!-- test-search: inference >= 117 -->
-<!-- test-search: esql >= 544 -->
+<!-- test-search: esql >= 549 -->
 
 `platinum` by directory (roll / Elasticsearch passes): `ml` 349/618, `analytics` 113/114, `spatial`
 92/105, `security` 96/101, `rollup` 52/52, `exponential_histogram` 44/44, `vector-tile` 34/34,
@@ -1286,12 +1286,21 @@ the rest are skipped by the tests' own prerequisites.
   `LOOKUP JOIN ... ON <expression>` keys the lookup rows on the condition's equalities between
   left and lookup fields and checks the rest per row (several matches keep the lookup index's
   order, which Elasticsearch doesn't define).
+  `TOP_SNIPPETS` cuts the text into sentence chunks of `num_words` (default 300) and returns the
+  `num_snippets` (default 5) that score best for the query's words (BM25 over the chunks, words
+  lowercased; Elasticsearch scores with the field's analyzer). `CATEGORIZE` groups messages by
+  their words without digits, printed as Elasticsearch's category regex (`.*?Connected.+?to.*?`);
+  Elasticsearch also merges similar categories (its ML categorizer), roll doesn't.
+  `SET approximation` computes exactly and says so: each approximable aggregate (`COUNT`, `SUM`,
+  `AVG`, `MEDIAN`, `PERCENTILE`) of the last `STATS` gets `_approximation_confidence_interval(x)`
+  (`[x, x]`) and `_approximation_certified(x)` (`true`) with their `_meta`. `LIMIT n BY keys`
+  keeps the first `n` rows of each key. `unsigned_long` values above `i64::MAX` keep their
+  value (sorting, grouping, output; arithmetic on them answers `null`).
   Not yet: PromQL ranges other than the step, binary operators and unaggregated expressions,
-  `CATEGORIZE`, `TOP_SNIPPETS`, approximation's `_approximation_*` columns, `CHANGE_POINT`,
-  `COMPLETION`/`RERANK`, `unsigned_long` above `i64::MAX`, `EXPLAIN`, other `ST_*` functions
+  `CHANGE_POINT`, `COMPLETION`/`RERANK`, `EXPLAIN`, other `ST_*` functions
   (distance, relations, centroid/extent aggregations). roll claims the ES|QL capabilities whose tests pass; of the 619 tests of the `esql`
   extended suite (run with Elasticsearch's `is_partial` check, `--esql-not-partial`), 549 pass
-  on Elasticsearch 9.5.5 and 544 on roll (544 of Elasticsearch's 549). `_terms_enum` reads
+  on Elasticsearch 9.5.5 and 549 on roll (all of Elasticsearch's). `_terms_enum` reads
   the segments' term dictionaries (keyword, version, flattened subfields; ip from its doc
   values dictionary), so `search_after` reaches any term.
   Differential fixtures against Elasticsearch 9.5.5:
