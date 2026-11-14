@@ -130,7 +130,8 @@ async fn me(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
             out
         }
         // What a user's tokens can reach: what their session can (docs/accounts.md).
-        Who::User(u) => json!({ "kind": "user", "user": { "id": u.user, "handle": u.handle }, "reach": USER_REACH, "locked": a.config.locked }),
+        // `approve_people`: what in their tokens waits for an admin (the builder and consent say so first).
+        Who::User(u) => json!({ "kind": "user", "user": { "id": u.user, "handle": u.handle }, "reach": USER_REACH, "approve_people": a.policy_now().approve_people, "locked": a.config.locked }),
     }))
 }
 

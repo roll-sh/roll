@@ -242,7 +242,13 @@ export type Me =
   | { kind: "operator"; locked: boolean }
   | { kind: "token" | "oauth"; grant: Grant; locked: boolean }
   /** A signed-in user who isn't an admin: their tokens act as them and reach only `reach`. */
-  | { kind: "user"; user: { id: string; handle: string }; reach: string[]; locked: boolean };
+  | { kind: "user"; user: { id: string; handle: string }; reach: string[]; approve_people?: Action[]; locked: boolean };
+
+/** Whether a token `me` makes with these rules waits for an admin (the server's `Policy::needs_approval`). */
+export function waitsForAdmin(me: Me | null, rules: Rule[], askOtherwise: boolean): boolean {
+  const approve = me?.kind === "user" ? (me.approve_people ?? []) : [];
+  return approve.length > 0 && (askOtherwise || rules.some((r) => (Object.keys(r.actions) as Action[]).some((a) => approve.includes(a))));
+}
 
 /** The catalogue as `me` may use it: a user's tokens reach only what their account does. */
 export function catalogFor(c: Catalog, me: Me | null): Catalog {

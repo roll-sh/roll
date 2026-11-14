@@ -16,6 +16,7 @@ import {
   type Me,
   type OAuthClient,
   type Rule,
+  waitsForAdmin,
 } from "@/lib/access-api";
 import { requestSignIn, subscribeToken } from "@/lib/code-token";
 import { SignIn } from "../code/sign-in";
@@ -207,6 +208,9 @@ function Ask({ req }: { req: AuthorizeRequest }) {
           ))
         )}
       </div>
+      {waitsForAdmin(me, rules, askOtherwise) && (
+        <p className="text-[12px] text-accent">It reaches what an admin approves first: {client.name} connects now, and works once an admin approves it (they're mailed).</p>
+      )}
       <ErrorNote error={error} />
       <div className="flex gap-3">
         <button onClick={allow} disabled={busy || rules.length === 0 || Boolean(rate.problem)} className={primary}>
