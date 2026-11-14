@@ -202,6 +202,10 @@ pub struct Preview {
     /// `release` (or seed) ran at `head`: `+ …` added, `- …` removed (`schema::diff`). `None`:
     /// not known (no Postgres branch, or not read yet).
     pub schema_changes: Option<Vec<String>>,
+    /// What in `schema_changes` would hurt production when the change lands (`schema::risks`:
+    /// a dropped table or column, a type change, a column made NOT NULL).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_risks: Vec<String>,
     /// The project's `release` (migrations) at its last head: how long it took on this
     /// preview's data, which is the parent's (PlanetScale's deploy requests show this before a
     /// merge: what's slow here locks production as long).

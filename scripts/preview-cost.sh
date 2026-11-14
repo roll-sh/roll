@@ -390,7 +390,7 @@ SLEEPING=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
 say "migrate the preview's Postgres branch, push: the next head's schema changes name the table"
 if [ -n "$PG_BRANCH" ]; then
   PG_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['id']=='$PG_BRANCH'][0]")
-  api POST "/v1/endpoints/$PG_EP/query" '{"sql":"CREATE TABLE preview_only (id int PRIMARY KEY, note text NOT NULL DEFAULT '"'"'x'"'"')"}' >/dev/null
+  api POST "/v1/endpoints/$PG_EP/query" '{"sql":"CREATE TABLE preview_only (id int PRIMARY KEY, note text NOT NULL DEFAULT '"'"'x'"'"'); ALTER TABLE users ALTER COLUMN email SET NOT NULL"}' >/dev/null
   # The preview's code tries to get the superuser to run it (a function shadowing one the schema
   # diff calls, pg_get_indexdef(oid), the database's search_path pointed at it): the diff runs as the branch's role
   # with only the catalog's names, so the role stays what it is.
@@ -413,6 +413,10 @@ if [ -n "$PG_BRANCH" ]; then
   done
   case "$SCHEMA" in *"+ table public.preview_only"*) ;; *) echo "the schema changes should name the new table: $SCHEMA"; exit 1;; esac
   case "$SCHEMA" in *"+ field products.price "*) ;; *) echo "the schema changes should name the search branch's new field: $SCHEMA"; exit 1;; esac
+  # A column made NOT NULL is named as a migration risk; the new table isn't one.
+  RISKS=$(api GET "/v1/previews/$PV" | jq_ "' | '.join(d.get('schema_risks') or [])")
+  case "$RISKS" in "makes public.users.email (postgres:$PG) NOT NULL: "*) ;; *) echo "the schema's risks should name the NOT NULL column (and its database), and only it: $RISKS"; exit 1;; esac
+  case "$RISKS" in *" | "*) echo "only the NOT NULL column is a risk: $RISKS"; exit 1;; esac
   ESCALATED=$(api POST "/v1/endpoints/$PG_EP/query" "{\"sql\":\"SELECT rolsuper FROM pg_roles WHERE rolname = '$APP_ROLE'\"}" | jq_ "d['results'][0]['rows'][0][0]")
   [ "$ESCALATED" = f ] || { echo "the branch's role became a superuser ($ESCALATED)"; exit 1; }
   say "$SCHEMA"
@@ -674,6 +678,7 @@ cat <<EOF
 | A page's note resolved in roll: notes the page lists after | $RESOLVED |
 | \`roll preview connect --kind postgres\`: the branch's own role | $(role "$CONNECT") |
 | Postgres users.email in the branch / in the parent | $PG_MASKED / $PG_PARENT |
+| The migration's risks the preview names | ${RISKS:-} |
 | The teardown as the preview went (its exit code, with the branch's URL) / runs | 3 / $TEARDOWN |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |

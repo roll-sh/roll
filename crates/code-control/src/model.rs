@@ -293,6 +293,10 @@ pub struct PreviewEnvironment {
     /// read; untrusted text (a fork's migrations name the objects).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_changes: Option<Vec<String>>,
+    /// What in `schema_changes` would hurt production when it lands (roll previews'
+    /// `schema::risks`); untrusted text too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_risks: Vec<String>,
     /// How long the project's release (migrations) took on the preview's data at `head`, and at
     /// the run before.
     #[serde(default, skip_serializing_if = "Option::is_none")]

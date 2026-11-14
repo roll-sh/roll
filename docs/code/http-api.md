@@ -149,6 +149,7 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           github: {comment, status, deployment},
                           head?: string /* the changeset it's for: statuses are about it (after pushes that touched only ignored paths its services run an earlier one) */,
                           schema_changes?: string[] /* "+ …"/"- …": its Postgres schema against the parents' */,
+                          schema_risks?: string[] /* what in them would hurt production when it lands */,
                           screenshot_url?: string /* a public preview's screenshot, signed and expiring */,
                           diff_url?: string /* the same for where it differs from the default branch's, when it does */,
                           expires_at?: number /* ms: when it goes (its TTL, or a keep, running out), once a day away */,

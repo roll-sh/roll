@@ -257,6 +257,15 @@ export function PreviewSheet({
             {p.schema_changes && p.schema_changes.length > 0 && (
               <>
                 <Label>Schema changes</Label>
+                {p.schema_risks && p.schema_risks.length > 0 && (
+                  <ul className="mb-1.5 space-y-0.5 rounded-lg border border-danger/40 bg-danger/10 px-2.5 py-1.5 text-[11.5px] text-danger">
+                    {p.schema_risks.map((r, i) => (
+                      <li key={i} className="break-words">
+                        {r}
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 <pre className="max-h-48 overflow-auto rounded-lg border border-line-2 bg-raised px-2.5 py-1.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere] inset-shadow-highlight">
                   {p.schema_changes.map((l, i) => (
                     <div key={i} className={l.startsWith("- ") ? "text-danger" : l.startsWith("+ ") ? "text-fg" : "text-subtle"}>

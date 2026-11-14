@@ -700,6 +700,7 @@ async fn connect_import_webhooks_and_mirror() {
             github: Default::default(),
             head: None,
             schema_changes: None,
+            schema_risks: Vec::new(),
             release_ms: None,
             release_before_ms: None,
             screenshot_url: None,

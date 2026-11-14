@@ -356,6 +356,17 @@ a terminal), lines cut at 300 characters, 200 lines at most; the comment keeps t
 they can't close. A failure to read is
 logged and read again on the next converge; it never fails the preview.
 
+What in those lines would hurt production when the change lands is named above them
+(`schema_risks`, `roll_previews::schema::risks`; PlanetScale's deploy request warnings, Atlas's
+migration lint): a table that goes ("production's rows go with it"), a column that goes, a
+rename included ("the version running while it deploys may still read it": expand, then
+contract), a column whose type changes ("Postgres may rewrite the table under an exclusive
+lock") and one made `NOT NULL` ("scans the table under an exclusive lock", where a `CHECK … NOT
+VALID` validated first doesn't). Added columns and indexes aren't risks here: the release ran
+them on production's own rows, and its time is said beside it. The comment lists them unfolded
+as "Migration risks", each in a code span its names can't close; the sheet shows them in red over
+the lines.
+
 Search branches the same way: each one's `_mapping` and its parent's, read through roll search's
 operator console request (no cluster password), become `index <name>` and `field <index>.<path>
 <type>` lines (nested fields and multi-fields by path, system indices left out), so a change
@@ -800,6 +811,7 @@ type Preview = {
   services: Service[]; resources: Resource[];
   cost: { sleeping_usd_month: number; active_usd_hour: number; month_to_date_usd: number; bytes: number };
   schema_changes: string[] | null;    // "+ …"/"- …" against the parents, once read at `head`; null: not known
+  schema_risks?: string[];            // what in them would hurt production when it lands (dropped tables and columns, type changes, NOT NULL)
   kept_until: number | null;          // kept past its TTL until then (POST …/keep)
   screenshot_at: number | null;       // when GET …/screenshot was taken (github.screenshot)
   last_reset_at: number | null; last_active_at: number; expires_at: number | null;
@@ -1164,6 +1176,8 @@ Ranked by what a person notices first. Done so far:
 - a look at the sheet from screenshots of a live preview with today's checks (desktop and phone):
   the data branch rows kept their names whole and their notes in word groups;
 - caught mail bounded by bytes (10 MiB a preview) as well as count;
+- migration risks named over the schema changes (a dropped table or column, a type change, a
+  column made NOT NULL), on the sheet and unfolded in the pull request comment;
 - replies on a page's notes (Vercel Comments' threads): comment reviews naming the note, listed
   under it on the page, in the sheet (with a reply box) and by `roll preview notes`;
 - a teardown's failure told to the change: the `preview` event's `teardown`, and the pull

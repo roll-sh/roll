@@ -790,6 +790,7 @@ fn preview_comment(c: &Change, teardown: Option<&str>) -> String {
                 }
             }
             if let Some(lines) = e.schema_changes.as_ref().filter(|l| !l.is_empty()) {
+                out.push_str(&risks_line(&e.schema_risks));
                 out.push_str(&schema_block(lines));
             }
             if let Some(line) = release_line(e) {
@@ -828,6 +829,17 @@ fn preview_comment(c: &Change, teardown: Option<&str>) -> String {
     out
 }
 
+/// What in the schema changes would hurt production, unfolded above them (PlanetScale's deploy
+/// request warnings). The names are the change's migrations': each risk in a code span nothing in
+/// it can close.
+fn risks_line(risks: &[String]) -> String {
+    if risks.is_empty() {
+        return String::new();
+    }
+    let items: Vec<String> = risks.iter().map(|r| format!("- `{}`", r.replace('`', "'").chars().take(300).collect::<String>())).collect();
+    format!("**Migration risks** ({}):\n{}\n\n", risks.len(), items.join("\n"))
+}
+
 /// A preview's schema changes, folded. Object names come from the change's own migrations:
 /// nothing in them may end the fence, and the comment stays well under GitHub's size limit.
 fn schema_block(lines: &[String]) -> String {
@@ -859,6 +871,7 @@ mod preview_tests {
             github: PreviewGithub::default(),
             head: None,
             schema_changes: None,
+            schema_risks: Vec::new(),
             release_ms: None,
             release_before_ms: None,
             screenshot_url: None,
@@ -886,6 +899,8 @@ mod preview_tests {
         let block = schema_block(&["+ column public.users.nick text".into(), "+ table public.x```y".into()]);
         assert!(block.contains("<summary>Schema changes (2)</summary>") && block.contains("+ column public.users.nick text"), "{block}");
         assert_eq!(block.matches("```").count(), 2, "a name can't close the fence: {block}");
+        let risks = risks_line(&["drops column public.`x`.y: the version running while it deploys may still read it".into()]);
+        assert_eq!(risks, "**Migration risks** (1):\n- `drops column public.'x'.y: the version running while it deploys may still read it`\n\n", "a name can't end its code span");
         assert!(expiry_line(1_794_600_000_000).is_some_and(|l| l.contains("goes at 2026-11-13 20:00 UTC")));
         let earlier = |url: &str| crate::model::PreviewEarlier { service: "web".into(), head: "cs_1a2b3c4d5e6f".into(), url: url.into() };
         assert_eq!(earlier_line(&[earlier("https://web-1a2b3c4d5e-pr7-shop.preview.roll.site")]).as_deref(), Some("\nEarlier pushes, on the same data: [web at `1a2b3c4d5e`](https://web-1a2b3c4d5e-pr7-shop.preview.roll.site).\n"));

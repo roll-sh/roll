@@ -346,6 +346,8 @@ export interface PreviewEnvironment {
   head?: string;
   /** What the change did to the Postgres schema (`+ …`, `- …`). */
   schema_changes?: string[];
+  /** What in `schema_changes` would hurt production when it lands (roll previews' `schema::risks`). */
+  schema_risks?: string[];
   /** How long the release (migrations) took on the preview's data, and at the run before. */
   release_ms?: number;
   release_before_ms?: number;

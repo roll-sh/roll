@@ -2004,6 +2004,7 @@ impl Store {
                 })
                 .collect(),
             cost: cost.rounded(),
+            schema_risks: schema_changes.as_deref().map(crate::schema::risks).unwrap_or_default(),
             schema_changes,
             release,
             kept_until,
