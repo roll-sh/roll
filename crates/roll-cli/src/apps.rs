@@ -197,10 +197,45 @@ pub enum AppsCmd {
         #[arg(long)]
         timezone: Option<String>,
     },
-    /// Change run settings: `roll apps set --min 1 --max 5 --cpu 1 --memory 1024`.
+    /// Change a service's settings: `roll apps set --min 1 --max 5 --cpu 1 --memory 1024`. A text
+    /// setting given as `none` goes back to its default.
     Set {
         #[command(flatten)]
         target: Target,
+        /// A new name (part of its URLs).
+        #[arg(long)]
+        name: Option<String>,
+        /// Build from this roll code repo (`owner/name`) from now on.
+        #[arg(long, conflicts_with_all = ["image", "upload"])]
+        repo: Option<String>,
+        /// With `--repo`: the subdirectory to build.
+        #[arg(long, requires = "repo")]
+        root: Option<String>,
+        /// Run this image from now on (its digest is pinned per deploy).
+        #[arg(long, conflicts_with = "upload")]
+        image: Option<String>,
+        /// Deploy what `roll up` uploads from now on.
+        #[arg(long)]
+        upload: bool,
+        /// `auto` (detect; a Dockerfile wins) or `dockerfile`.
+        #[arg(long, value_parser = ["auto", "dockerfile"])]
+        builder: Option<String>,
+        /// The Dockerfile's path in the tree.
+        #[arg(long)]
+        dockerfile: Option<String>,
+        /// A multi-stage Dockerfile's stage to build (`--target`); `none`: its last.
+        #[arg(long)]
+        stage: Option<String>,
+        /// The install command, over the detected one.
+        #[arg(long)]
+        install: Option<String>,
+        /// The build command, over the detected one.
+        #[arg(long)]
+        build_command: Option<String>,
+        /// The start command baked into the image at the build (`--start` runs over it, no
+        /// rebuild).
+        #[arg(long)]
+        build_start: Option<String>,
         #[arg(long)]
         min: Option<u32>,
         #[arg(long)]
@@ -216,8 +251,30 @@ pub enum AppsCmd {
         /// Run once per deploy before the switch (a migration); a failure stops the deploy.
         #[arg(long)]
         pre_deploy: Option<String>,
+        /// The path checked at each deploy and every 10 s while running; `none`: the port
+        /// accepting.
         #[arg(long)]
         health: Option<String>,
+        /// How long a new instance has to pass its health check at a deploy.
+        #[arg(long, value_name = "SECONDS")]
+        health_timeout: Option<u32>,
+        /// Alert when an instance's memory stays at this share of its limit for five minutes (0
+        /// off).
+        #[arg(long, value_name = "PERCENT")]
+        alert_memory: Option<u8>,
+        /// Alert when 5xx answers reach this share of five minutes' requests (0 off).
+        #[arg(long, value_name = "PERCENT")]
+        alert_errors: Option<u8>,
+        /// Alert when p95 latency is at least this in three of five minutes (0 off).
+        #[arg(long, value_name = "MS")]
+        alert_p95: Option<u32>,
+        /// Alert when its output holds this text (any case) `--alert-log-count` times in five
+        /// minutes; `none` turns it off.
+        #[arg(long, value_name = "TEXT")]
+        alert_log: Option<String>,
+        /// With `--alert-log`: how many times (default 10).
+        #[arg(long)]
+        alert_log_count: Option<u32>,
         #[arg(long)]
         schedule: Option<String>,
         /// The zone a cron schedule's fields are in (IANA: `Europe/Budapest`).
@@ -235,7 +292,7 @@ pub enum AppsCmd {
         /// Idle seconds before it's stopped.
         #[arg(long, value_name = "SECONDS")]
         sleep_after: Option<u32>,
-        /// A cron run's limit, in seconds.
+        /// A cron run's limit; a web service's request limit (unanswered by then is a 504).
         #[arg(long, value_name = "SECONDS")]
         timeout: Option<u32>,
         /// A volume, `<mount>:<size in GB>` (`/data:5`); `none` removes it.
@@ -350,6 +407,36 @@ pub enum AppsCmd {
         tasks: Option<u32>,
         #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
         command: Vec<String>,
+    },
+    /// One-off jobs (`roll apps run`), newest first; `--logs JOB` prints one's output (`--follow`
+    /// until it ends), `--cancel JOB` stops one.
+    Jobs {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, value_name = "JOB", conflicts_with = "cancel")]
+        logs: Option<String>,
+        #[arg(long, requires = "logs")]
+        follow: bool,
+        #[arg(long, value_name = "JOB")]
+        cancel: Option<String>,
+    },
+    /// What a build would detect in a roll code repo (no build): the provider, its commands,
+    /// the port and why. Default: the service's own repo.
+    Plan {
+        #[command(flatten)]
+        target: Target,
+        /// `owner/name` in roll code.
+        #[arg(long)]
+        repo: Option<String>,
+        /// A subdirectory to build.
+        #[arg(long)]
+        root: Option<String>,
+        /// A commit (default: the default branch's head).
+        #[arg(long)]
+        revision: Option<String>,
+        /// Print the Dockerfile it would build with.
+        #[arg(long)]
+        dockerfile: bool,
     },
     /// Run the live image again with the current variables and settings (no build, same
     /// revision): how changed variables reach a `roll up` service.
@@ -526,6 +613,9 @@ pub enum AppsCmd {
         previews: bool,
         #[arg(long)]
         remove: Option<String>,
+        /// Send one a test event now (not retried) and print how it answered.
+        #[arg(long, value_name = "ID", conflicts_with_all = ["add", "remove"])]
+        test: Option<String>,
     },
     /// The project's spend limits this month: show them, or set `--alert` and `--hard` (dollars;
     /// `0` removes one). At the hard limit its services stop until it's raised.
@@ -1897,7 +1987,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale, public, drain, cpu_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale, public, drain, cpu_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() {
@@ -1931,17 +2021,62 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     Some(json!({ "mount": mount, "size_gb": size }))
                 }
             };
+            // `none` is a text setting's default (null in the PATCH).
+            let text = |v: Option<String>| v.map(|v| if v == "none" { Value::Null } else { Value::from(v) });
             let mut body = serde_json::Map::new();
+            if let Some(n) = name {
+                body.insert("name".into(), json!(n));
+            }
+            if let Some(r) = repo {
+                body.insert("source".into(), match root {
+                    Some(root) => json!({ "kind": "repo", "repo": r, "root": root }),
+                    None => json!({ "kind": "repo", "repo": r }),
+                });
+            } else if let Some(i) = image {
+                body.insert("source".into(), json!({ "kind": "image", "image": i }));
+            } else if upload {
+                body.insert("source".into(), json!({ "kind": "upload" }));
+            }
+            let mut build = serde_json::Map::new();
             match watch.as_deref() {
                 None => {}
                 Some("none") => {
-                    body.insert("build".into(), json!({ "watch": null }));
+                    build.insert("watch".into(), Value::Null);
                 }
                 Some(w) => {
                     let paths: Vec<&str> = w.split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
-                    body.insert("build".into(), json!({ "watch": paths }));
+                    build.insert("watch".into(), json!(paths));
                 }
             }
+            for (k, v) in [("builder", builder.map(Value::from)), ("dockerfile", text(dockerfile)), ("target", text(stage)), ("install", text(install)), ("build", text(build_command)), ("start", text(build_start))] {
+                if let Some(v) = v {
+                    build.insert(k.into(), v);
+                }
+            }
+            if !build.is_empty() {
+                body.insert("build".into(), Value::Object(build));
+            }
+            // The service's alerts with what was given replaced (the API takes them whole).
+            let alerts = if alert_memory.is_some() || alert_errors.is_some() || alert_p95.is_some() || alert_log.is_some() || alert_log_count.is_some() {
+                let mut a = svc["run"]["alerts"].as_object().cloned().unwrap_or_default();
+                for (k, v) in [("memory_pct", alert_memory.map(Value::from)), ("error_pct", alert_errors.map(Value::from)), ("p95_ms", alert_p95.map(Value::from)), ("log_count", alert_log_count.map(Value::from))] {
+                    if let Some(v) = v {
+                        a.insert(k.into(), v);
+                    }
+                }
+                match alert_log.as_deref() {
+                    None => {}
+                    Some("none") => {
+                        a.remove("log_match");
+                    }
+                    Some(t) => {
+                        a.insert("log_match".into(), json!(t));
+                    }
+                }
+                Some(Value::Object(a))
+            } else {
+                None
+            };
             let mut run = serde_json::Map::new();
             for (k, v) in [
                 ("min_instances", min.map(Value::from)),
@@ -1949,9 +2084,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("cpu", cpu.map(Value::from)),
                 ("memory_mb", memory.map(Value::from)),
                 ("port", port.map(Value::from)),
-                ("start", start.map(Value::from)),
-                ("pre_deploy", pre_deploy.map(Value::from)),
-                ("health_path", health.map(Value::from)),
+                ("start", text(start)),
+                ("pre_deploy", text(pre_deploy)),
+                ("health_path", text(health)),
+                ("health_timeout_s", health_timeout.map(Value::from)),
+                ("alerts", alerts),
                 ("schedule", schedule.map(Value::from)),
                 ("timezone", timezone.map(Value::from)),
                 ("type", kind.map(Value::from)),
@@ -2016,6 +2153,75 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             v
+        }
+        AppsCmd::Jobs { target, logs, follow, cancel } => {
+            let svc = service(api, &target).await?;
+            let base = format!("{}/jobs", env_path(&svc, &target.env));
+            if let Some(job) = cancel {
+                api.post(&format!("{base}/{}/cancel", enc(&job)), json!({})).await?
+            } else if let Some(job) = logs {
+                let path = format!("{base}/{}/logs", enc(&job));
+                if follow {
+                    return follow_matching(api, &format!("{path}?follow=1&tail=2000"), None).await;
+                }
+                let lines = api.get(&format!("{path}?tail=2000")).await?;
+                if !json_out {
+                    for l in lines.as_array().into_iter().flatten() {
+                        print_line(l);
+                    }
+                    return Ok(());
+                }
+                lines
+            } else {
+                let v = api.get(&base).await?;
+                if !json_out {
+                    for j in v.as_array().into_iter().flatten() {
+                        let at = j["started_at"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
+                        let code = j["exit_code"].as_i64().map(|c| format!("exit {c}")).unwrap_or_default();
+                        println!("{}  {:<10} {at}  {code:<8} {}", s(&j["id"]), s(&j["status"]), s(&j["command"]));
+                    }
+                    return Ok(());
+                }
+                v
+            }
+        }
+        AppsCmd::Plan { target, repo, root, revision, dockerfile } => {
+            let (repo, root) = match repo {
+                Some(r) => (r, root),
+                None => {
+                    let svc = service(api, &target).await?;
+                    match svc["source"]["kind"].as_str() {
+                        Some("repo") => (s(&svc["source"]["repo"]), root.or_else(|| svc["source"]["root"].as_str().map(str::to_string))),
+                        _ => bail!("{} isn't built from a repo: name one with --repo owner/name", s(&svc["name"])),
+                    }
+                }
+            };
+            let mut req = json!({ "repo": repo });
+            if let Some(r) = root {
+                req["root"] = json!(r);
+            }
+            if let Some(r) = revision {
+                req["revision"] = json!(r);
+            }
+            let plan = api.post("/v1/apps/plan", req).await?;
+            if !json_out {
+                let framework = plan["framework"].as_str().map(|f| format!(" ({f})")).unwrap_or_default();
+                println!("{}{framework}{}", s(&plan["provider"]), plan["language_version"].as_str().map(|v| format!("  {v}")).unwrap_or_default());
+                for k in ["install", "build", "start", "release"] {
+                    if let Some(c) = plan[k].as_str() {
+                        println!("  {k:<8} {c}");
+                    }
+                }
+                println!("  port     {}", plan["port"]);
+                for n in plan["notes"].as_array().into_iter().flatten() {
+                    println!("  · {}", s(n));
+                }
+                if dockerfile {
+                    println!("\n{}", s(&plan["dockerfile"]));
+                }
+                return Ok(());
+            }
+            plan
         }
         AppsCmd::Runs { target, now, logs, follow, cancel } => {
             let svc = service(api, &target).await?;
@@ -2357,7 +2563,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::Notifications { target, add, kind, only_env, only_service, previews, remove } => {
+        AppsCmd::Notifications { target, add, kind, only_env, only_service, previews, remove, test } => {
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/projects/{}/notifications", enc(&s(&svc["project"])));
             if let Some(url) = add {
@@ -2374,6 +2580,16 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             } else if let Some(id) = remove {
                 api.call(reqwest::Method::DELETE, &format!("{path}/{}", enc(&id)), None).await?;
                 json!({ "deleted": id })
+            } else if let Some(id) = test {
+                let r = api.post(&format!("{path}/{}/test", enc(&id)), json!({})).await?;
+                if !json_out {
+                    match (r["ok"] == true, r["code"].as_u64(), r["error"].as_str()) {
+                        (true, code, _) => println!("delivered{}", code.map(|c| format!(" ({c})")).unwrap_or_default()),
+                        (false, code, error) => bail!("not delivered: {}", error.map(str::to_string).or(code.map(|c| format!("answered {c}"))).unwrap_or_else(|| "no answer".into())),
+                    }
+                    return Ok(());
+                }
+                r
             } else {
                 let v = api.get(&path).await?;
                 if !json_out {

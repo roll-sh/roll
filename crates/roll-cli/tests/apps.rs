@@ -101,3 +101,19 @@ async fn variables_and_an_environment_through_the_cli() {
     let env = t.json(&["env", "-s", "web", "-p", "acme", "--roll-pages"]).await;
     assert!(env.get("pages").is_none(), "{env}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settings_through_the_cli() {
+    let t = start().await;
+    t.ok(&["create", "web", "-p", "acme", "--image", "nginx:1.27", "--port", "80"]).await;
+    // A rename, the health timeout, one alert changed with the others kept, a start command.
+    let svc = t.json(&["set", "-s", "web", "-p", "acme", "--name", "site", "--health-timeout", "90", "--alert-p95", "800", "--alert-log", "panic", "--start", "nginx -g 'daemon off;'"]).await;
+    assert_eq!(svc["name"], "site", "{svc}");
+    assert_eq!(svc["run"]["health_timeout_s"], 90, "{svc}");
+    let alerts = &svc["run"]["alerts"];
+    assert_eq!((alerts["p95_ms"].as_u64(), alerts["memory_pct"].as_u64(), alerts["log_match"].as_str()), (Some(800), Some(90), Some("panic")), "{svc}");
+    // `none` is a text setting's default; an alert left out stays.
+    let svc = t.json(&["set", "-s", "site", "-p", "acme", "--start", "none", "--alert-log", "none"]).await;
+    assert!(svc["run"].get("start").is_none() && svc["run"]["alerts"].get("log_match").is_none(), "{svc}");
+    assert_eq!(svc["run"]["alerts"]["p95_ms"], 800, "{svc}");
+}
