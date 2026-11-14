@@ -227,6 +227,19 @@ pub fn inference_ids(mapping: &Mapping) -> Vec<String> {
 }
 
 /// Every `semantic_text` field of a mapping with its full path.
+/// Whether the mapping has a `semantic_text` field: the write path's test, once per document,
+/// without building paths (most indices have none).
+pub fn has_fields(mapping: &Mapping) -> bool {
+    fn any(o: &ObjectMapper) -> bool {
+        o.children.values().any(|m| match m {
+            Mapper::Object(c) => any(c),
+            Mapper::Field(f) => f.ty == "semantic_text",
+            _ => false,
+        })
+    }
+    any(&mapping.root)
+}
+
 pub fn fields(mapping: &Mapping) -> Vec<(String, &FieldMapper)> {
     let mut out = Vec::new();
     walk(&mapping.root, "", &mut out);

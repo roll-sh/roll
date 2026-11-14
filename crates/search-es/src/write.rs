@@ -533,7 +533,7 @@ pub async fn prepare_checked(
     // pipeline produced and updates).
     let embedded;
     let (source, value) = match value.as_object() {
-        Some(doc) if !crate::xpack::inference::semantic::fields(&idx.mapping).is_empty() => {
+        Some(doc) if crate::xpack::inference::semantic::has_fields(&idx.mapping) => {
             let entries = crate::xpack::inference::semantic::infer_documents(cluster, &[(&idx.mapping, doc)]).await.pop().unwrap_or_else(|| Ok(Map::new()))?;
             if entries.is_empty() {
                 (source, value)

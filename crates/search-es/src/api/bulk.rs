@@ -379,7 +379,7 @@ async fn embed_ahead(ctx: &Ctx<'_>, items: &mut [Item], denied: &[Option<EsError
             continue;
         }
         let Some(idx) = it.index.as_deref().and_then(|e| write::resolve_existing(&st, e)) else { continue };
-        if crate::xpack::inference::semantic::fields(&idx.mapping).is_empty() {
+        if !crate::xpack::inference::semantic::has_fields(&idx.mapping) {
             continue;
         }
         let request = it.args.pipeline.as_deref();

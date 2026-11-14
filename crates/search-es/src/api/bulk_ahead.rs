@@ -193,7 +193,7 @@ fn prepare_one(t: &Target, ctx: &mut crate::mapping::MappingCtx, id: &str, routi
     // Index-time scripts and `semantic_text` inference run in the sequential path.
     if table.key.0 < idx.mapping_version
         || crate::search::index_time::has_scripts(&idx.mapping)
-        || !crate::xpack::inference::semantic::fields(&idx.mapping).is_empty()
+        || crate::xpack::inference::semantic::has_fields(&idx.mapping)
     {
         return None;
     }
