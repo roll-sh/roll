@@ -745,6 +745,22 @@ impl Store {
     }
 
     /// The grant a presented secret belongs to, when both are live. Looked up every time.
+    /// When the token `secret` starts working, if it's a live one that hasn't yet (its refusal can
+    /// say so; only asked once [`Store::by_secret`] found nothing).
+    pub fn not_started(&self, secret: &str) -> Result<Option<i64>> {
+        let now = code_sql::now_ms();
+        let h = hash(secret);
+        let row = self.db.read(|c| {
+            c.query_row(
+                &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id LEFT JOIN oauth_clients c ON c.id = g.client_id WHERE s.hash = ?"),
+                [&h],
+                |r| Ok((grant_row(r)?, r.get::<_, String>(22)?, r.get::<_, Option<i64>>(23)?)),
+            )
+            .optional()
+        })?;
+        Ok(row.filter(|(g, kind, exp)| kind == "token" && exp.is_none_or(|e| e > now) && g.live(now)).and_then(|(g, ..)| g.not_before.filter(|b| *b > now)))
+    }
+
     pub fn by_secret(&self, secret: &str) -> Result<Option<Grant>> {
         let now = code_sql::now_ms();
         let h = hash(secret);

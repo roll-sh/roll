@@ -289,15 +289,25 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         return invalid_token(&access);
     }
     let lookup = {
-        let a = access.clone();
-        blocking(move || a.store.by_secret(&token)).await
+        let (a, t) = (access.clone(), token.clone());
+        blocking(move || a.store.by_secret(&t)).await
     };
     let grant = match lookup {
         // Unused longer than the operator's policy allows: it stops (making it again is a person's
         // choice, not an agent's).
         Ok(Some(g)) if access.policy_now().idle(&g, code_sql::now_ms()) => return invalid_token(&access),
         Ok(Some(g)) => g,
-        Ok(None) => return invalid_token(&access),
+        // One that starts later says when, so its holder isn't left guessing.
+        Ok(None) => {
+            let a = access.clone();
+            return match blocking(move || a.store.not_started(&token)).await {
+                Ok(Some(at)) => {
+                    let when = chrono::DateTime::from_timestamp_millis(at).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)).unwrap_or_default();
+                    deny(StatusCode::UNAUTHORIZED, "not_yet_valid", format!("this token works from {when}"), json!({ "not_before": at }))
+                }
+                _ => invalid_token(&access),
+            };
+        }
         Err(e) => return e.into_response(),
     };
     let ip = client_ip(&req, &access.config);
