@@ -1346,6 +1346,15 @@ async fn reach_names_who_and_what_can_read_a_folder() {
     assert_eq!((r["untrusted"].as_bool(), r["imported_by"].clone()), (Some(true), json!(["staging:/", "development:/"])));
     let readers: Vec<&str> = r["readers"].as_array().unwrap().iter().map(|x| x["actor"].as_str().unwrap()).collect();
     assert!(readers.iter().any(|a| a.starts_with("token:")) && readers.contains(&"operator (through staging:/)") && readers.contains(&"operator (through development:/)"), "{readers:?}");
+    // Another project it's shared with is named only as a project, never its environments.
+    let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "platform" }))).await;
+    let platform = other["id"].as_str().unwrap().to_string();
+    api.ok(Method::PUT, "/environments/production/exports?path=/", Some(json!([{ "project": platform }]))).await;
+    api.ok(Method::PUT, &format!("/v1/secrets/projects/{platform}/environments/staging/imports?path=/"), Some(json!([{ "project": api.project, "environment": "production", "path": "/" }]))).await;
+    let r = api.ok(Method::GET, "/environments/production/reach?path=/", None).await;
+    let mut by: Vec<&str> = r["imported_by"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
+    by.sort();
+    assert_eq!(by, ["development:/", &format!("project {platform}"), "staging:/"], "{r}");
     // It lists the project's credentials: a project admin's.
     let (s, _) = api.req(Method::GET, "/environments/production/reach", None, deploy["token"].as_str()).await;
     assert_eq!(s, StatusCode::FORBIDDEN);

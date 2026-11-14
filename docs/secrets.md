@@ -1243,9 +1243,11 @@ credentials as the tokens list does. Names and metadata only, never a value:
   can read it, which is so unless the environment is protected.
 - **Where it goes by itself**: syncs of that folder (and that key), projects the folder is shared
   with, and this project's folders that import it.
-- **Where it goes by itself** also counts folders that import it in any project it's still shared
-  with, and environments based on it (previews), and theirs in turn (up to 8 steps, as reads
-  follow them); syncs of this project's importing folders are listed.
+- **Where it goes by itself** also counts folders that import it and environments based on it
+  (previews), and theirs in turn, as reads follow them (up to 8 steps and 256 folders; `truncated`
+  says when there were more). A read crosses into another project once, from here to the project
+  it's shared with (while it's shared), and never on into a third; that project is named only as
+  `project prj_…`, never its environments. Syncs of this project's importing folders are listed.
 - **Who did**: everyone who revealed, exported, resolved or synced it in the last 30 days, with
   how often and when last (the audit log), here or through those folders (`operator (through
   staging:/)`); another project's readers are named by the project, not their tokens. Reads through
@@ -1529,7 +1531,7 @@ type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: strin
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
 type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
-type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string }; // untrusted: checks, sandboxes and previews may read it (not protected)
+type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string }; // untrusted: checks, sandboxes and previews may read it (not protected)
 type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */ };

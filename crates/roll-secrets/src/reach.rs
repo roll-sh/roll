@@ -29,9 +29,11 @@ pub struct Reach {
     pub syncs: Vec<SyncReach>,
     /// Other projects this folder is shared with (their importing folders read it).
     pub projects: Vec<String>,
-    /// Folders that import it (`env:/path`, another project's as `prj_…/env:/path`) and
-    /// environments based on it: their readers read it too, and are counted below.
+    /// Folders that import it (`env:/path`) and environments based on it, and theirs; another
+    /// project's only as `project prj_…`. Their readers read it too, and are counted below.
     pub imported_by: Vec<String>,
+    /// The walk stopped at [`SOURCES_MAX`] folders: there are more.
+    pub truncated: bool,
     /// Who read its values in the last [`READ_DAYS`] days, most recent first: here, through a folder
     /// that imports it, or an environment based on it. Reads through a `${…}` or `roll://` reference
     /// in another key are recorded where they were read, and aren't counted ([`UNCOUNTED`]).
@@ -41,6 +43,8 @@ pub struct Reach {
 
 /// How many steps away a reading folder is followed (an importer's importer is two).
 const SOURCE_DEPTH: usize = 8;
+/// The most reading folders followed: each costs a few queries.
+const SOURCES_MAX: usize = 256;
 
 /// What `readers` doesn't count.
 pub const UNCOUNTED: &str = "reads through a ${…} or roll:// reference in another key or file";
@@ -109,12 +113,15 @@ impl Secrets {
         // shared with) and environments based on it (previews). Reads are recorded where they
         // happen, so each of those is looked at too.
         type Source = (String, String, String);
-        let (env, sources, reads) = self.db.read(|c| {
+        let (env, sources, reads, truncated) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             // As reads resolve them: an importer's importers, an environment based on one, and so
-            // on, up to SOURCE_DEPTH steps. Another project's import counts only while the folder
-            // is still shared with it.
+            // on, up to SOURCE_DEPTH steps and SOURCES_MAX folders. A read crosses into another
+            // project once, from this project's folder to the one it's shared with (while it's
+            // shared): that project's own imports and environments go on from there, but never into
+            // a third project (another project's import reads only the folder's own values).
             let mut sources: Vec<Source> = vec![];
+            let mut truncated = false;
             let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::from([(env.id.clone(), path.clone())]);
             let mut frontier = vec![(env.id.clone(), project.to_string(), path.clone())];
             for _ in 0..SOURCE_DEPTH {
@@ -126,8 +133,12 @@ impl Secrets {
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                     )?;
                     for (iid, ipid, islug, ipath) in importers {
-                        if ipid != eproject && !crate::exports::exported(c, &eid, &at, &ipid)? {
+                        if ipid != eproject && (eproject != project || !crate::exports::exported(c, &eid, &at, &ipid)?) {
                             continue;
+                        }
+                        if sources.len() >= SOURCES_MAX {
+                            truncated = true;
+                            break;
                         }
                         if seen.insert((iid.clone(), ipath.clone())) {
                             sources.push((ipid.clone(), islug, ipath.clone()));
@@ -136,6 +147,10 @@ impl Secrets {
                     }
                     let derived: Vec<(String, String)> = c.query("SELECT id, slug FROM environments WHERE project_id = ? AND base_id = ? ORDER BY slug", params![eproject, eid], |r| Ok((r.get(0)?, r.get(1)?)))?;
                     for (did, dslug) in derived {
+                        if sources.len() >= SOURCES_MAX {
+                            truncated = true;
+                            break;
+                        }
                         if seen.insert((did.clone(), at.clone())) {
                             sources.push((eproject.clone(), dslug, at.clone()));
                             next.push((did, eproject.clone(), at.clone()));
@@ -153,7 +168,7 @@ impl Secrets {
                 )?;
                 reads.extend(rows.into_iter().map(|(a, at, k)| (src.clone(), a, at, k)));
             }
-            Ok::<_, Error>((env, sources, reads))
+            Ok::<_, Error>((env, sources, reads, truncated))
         })?;
         let here = |e: &str, p: &str| (e == slug && p == path) || sources.iter().any(|(sp, se, spath)| sp == project && se == e && spath == p);
         let syncs = self
@@ -162,7 +177,14 @@ impl Secrets {
             .filter(|s| here(&s.environment, &s.path) && key.is_none_or(|k| s.keys.as_ref().is_none_or(|ks| ks.iter().any(|x| x == k))))
             .map(|s| SyncReach { id: s.id, kind: s.kind, target: s.target, last_synced_at: s.last_synced_at })
             .collect();
-        let imported_by: Vec<String> = sources.iter().map(|(p, e, at)| if p == project { format!("{e}:{at}") } else { format!("{p}/{e}:{at}") }).collect();
+        // Another project's folders and environments are its own: named by the project only.
+        let mut imported_by: Vec<String> = vec![];
+        for (p, e, at) in &sources {
+            let name = if p == project { format!("{e}:{at}") } else { format!("project {p}") };
+            if !imported_by.contains(&name) {
+                imported_by.push(name);
+            }
+        }
         let mut readers: BTreeMap<String, Reader> = BTreeMap::new();
         for ((sp, se, spath), actor, at, keys) in reads {
             if key.is_some_and(|k| !from_json::<Vec<String>>(&keys).iter().any(|x| x == k)) {
@@ -182,6 +204,6 @@ impl Secrets {
         }
         let mut readers: Vec<Reader> = readers.into_values().collect();
         readers.sort_by_key(|r| std::cmp::Reverse(r.last_at));
-        Ok(Reach { environment: slug.to_string(), path, key: key.map(String::from), protected: env.protected, untrusted: !env.protected, tokens, identities, syncs, projects, imported_by, readers, uncounted: UNCOUNTED })
+        Ok(Reach { environment: slug.to_string(), path, key: key.map(String::from), protected: env.protected, untrusted: !env.protected, tokens, identities, syncs, projects, imported_by, truncated, readers, uncounted: UNCOUNTED })
     }
 }

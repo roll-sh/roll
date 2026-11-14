@@ -124,7 +124,7 @@ export type KeyInsight = { key: string; version: number; updated_at: number; upd
 /** A token or identity that reaches a folder, with what it may do there. */
 export type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };
 /** `GET …/reach` (a project admin's): every way a folder's (or one key's) values can leave roll. Names only. */
-export type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string };
+export type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string };
 export type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: KeyInsight[] };
 
 export type ChangeRequest = {

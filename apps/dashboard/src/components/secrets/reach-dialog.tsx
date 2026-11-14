@@ -24,7 +24,7 @@ function Body({ env, path, keyName }: { env: Environment; path: string; keyName:
   const r = reach.data;
   if (reach.error) return <ErrorNote error={reach.error} />;
   if (!r) return <p className="text-[12px] text-subtle">Looking…</p>;
-  const flows = [...r.syncs.map((s) => `${s.kind} ${summary(s.target)}`), ...r.projects.map((p) => `shared with project ${p}`), ...r.imported_by.map((f) => `imported by ${f}`)];
+  const flows = [...r.syncs.map((s) => `${s.kind} ${summary(s.target)}`), ...r.projects.map((p) => `shared with project ${p}`), ...r.imported_by.map((f) => `imported by ${f}`), ...(r.truncated ? ["and more folders than were followed (256)"] : [])];
   return (
     <div className="space-y-4 text-[12.5px]">
       <p className="flex items-start gap-2 text-muted">
