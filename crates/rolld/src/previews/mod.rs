@@ -98,6 +98,10 @@ pub fn start(
         let c = cluster.clone();
         Box::new(move || !clustered || c.singleton("previews")) as Box<dyn Fn() -> bool + Send + Sync>
     };
+    // roll apps takes `feedback` on an environment, and adds the button itself.
+    let mut roll_apps = RollApps::new(api.clone());
+    roll_apps.feedback = apps.is_some();
+    let apps_for_notes = apps.clone();
     let engine = roll_previews::Engine::new(
         roll_previews::engine::Config { domain, port: Some(args.api.port()), ..Default::default() },
         store,
@@ -108,7 +112,7 @@ pub fn start(
         // On one node only for now: on a fleet an instance runs on its service's holder, which
         // needn't be the preview's.
         Arc::new(Services {
-            apps: RollApps::new(api.clone()),
+            apps: roll_apps,
             runtime: runtime.clone(),
             reach: apps.filter(|_| !clustered).map(|a| Arc::new(services::AppsReach(a)) as Arc<dyn services::Reach>),
         }),
@@ -116,6 +120,10 @@ pub fn start(
         leader,
     );
     runtime.attach(&engine);
+    // roll apps' proxy lists a preview page's notes from the engine (`Engine::notes_for`).
+    if let Some(a) = &apps_for_notes {
+        a.set_feedback_notes(Arc::new(services::Notes(Arc::downgrade(&engine))));
+    }
     if clustered {
         let _ = engine.cluster.set(cluster.clone());
     }

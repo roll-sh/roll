@@ -256,6 +256,22 @@ pub trait Reach: Send + Sync {
     async fn reach(&self, service: &str, env: &str) -> anyhow::Result<Option<Reached>>;
 }
 
+/// roll previews' notes for roll apps' feedback button, by the preview's environment name.
+pub struct Notes(pub std::sync::Weak<roll_previews::Engine>);
+
+#[async_trait]
+impl apps_control::integrations::FeedbackNotes for Notes {
+    async fn notes(&self, env: &str, path: &str) -> anyhow::Result<Vec<apps_control::integrations::Note>> {
+        let Some(engine) = self.0.upgrade() else { return Ok(Vec::new()) };
+        Ok(engine
+            .notes_for(env, path)
+            .await?
+            .into_iter()
+            .map(|n| apps_control::integrations::Note { path: n.path, selector: n.selector, note: n.note, by: n.by, at: n.at })
+            .collect())
+    }
+}
+
 /// roll apps' own (`Apps::reachable`): the instance's container and port, its lease held.
 pub struct AppsReach(pub Arc<apps_control::Apps>);
 

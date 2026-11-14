@@ -138,6 +138,26 @@ for _ in $(seq 1 600); do
 done
 [ -n "$BASE" ] || { echo "main's baseline on roll apps should be compared with the change"; api GET "/v1/previews?project=$PRJ" | jq_ "[(p['branch'], p['state'], p.get('screenshot_at')) for p in d]"; exit 1; }
 api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":false}}' >/dev/null
+
+say "the feedback button on the roll apps environment, for a visitor through roll (link access)"
+api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
+for _ in $(seq 1 240); do
+  [ "$(api GET "/v1/apps/services/$SVC/environments/$ENV" | jq_ "d.get('feedback')")" = True ] && break
+  sleep 1
+done
+[ "$(api GET "/v1/apps/services/$SVC/environments/$ENV" | jq_ "d.get('feedback')")" = True ] || { echo "the preview should ask roll apps for the feedback button"; exit 1; }
+SHARE=$(api GET "/v1/previews/$PV" | jq_ "d['services'][0]['share_url']")
+JAR="$H/apps-cookies"
+FB_BODY=""
+for _ in $(seq 1 120); do
+  FB_BODY=$(curl -sS -L -c "$JAR" -b "$JAR" -H "Host: $HOSTPART" -H "Sec-Fetch-Dest: document" "http://127.0.0.1:${PORTS}080/?${SHARE#*\?}" --max-time 60)
+  case "$FB_BODY" in *"/__roll/feedback.js"*) break;; esac
+  sleep 1
+done
+case "$FB_BODY" in *"/__roll/feedback.js"*) ;; *) echo "a visitor through roll should get the feedback button: $FB_BODY"; exit 1;; esac
+NOTES=$(curl -sS -b "$JAR" -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/__roll/feedback.json?path=%2F")
+case "$NOTES" in "["*) ;; *) echo "the page's notes should come from roll previews: $NOTES"; exit 1;; esac
+api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"public"}' >/dev/null
 BRANCH=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='redis'][0]")
 say "land"
 api POST "/v1/code/changes/$CHG/land" '{}' >/dev/null
@@ -148,6 +168,7 @@ cat <<EOF
 | --- | --- |
 | Change opened → preview ready (Redis branched, roll apps environment made, deploy queued) | $((T1 - T0)) ms |
 | The roll apps service's screenshot (its instance's network) / load / against main's baseline on roll apps | $SHOT / $LOAD ms / $BASE |
+| The feedback button on the roll apps environment (a visitor through roll) / its notes | tagged / $NOTES |
 | … → its deploy active (a Docker build of the change's commit) | $((T2 - T0)) ms |
 | First request through roll apps (cold) | $((T4 - T3)) ms |
 | Body / the Redis host the service saw / the preview's Redis branch | $BODY / $WHERE / $BRANCH |
