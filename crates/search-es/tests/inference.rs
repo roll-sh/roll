@@ -306,6 +306,13 @@ async fn semantic_text_is_embedded_in_batches_and_searchable_by_a_writer_without
     assert_eq!(ids, vec!["2", "1"]);
     assert_eq!(seen(&log).len(), 1);
 
+    // `_msearch` embeds each search's query too.
+    let msearch = "{\"index\":\"docs\"}\n{\"query\":{\"semantic\":{\"field\":\"body\",\"query\":\"ab\"}}}\n";
+    let (s, v, _) = call_as(&c, w, "POST", "/_msearch", msearch).await;
+    let top = v.pointer(&["responses"]).and_then(Value::as_array).and_then(|r| r.first()).and_then(|r| r.pointer(&["hits", "hits"])).and_then(Value::as_array).and_then(|h| h.first()).and_then(|h| h.get("_id")).map(Value::to_es_string);
+    assert_eq!((s, top.as_deref()), (200, Some("1")), "{v:?}");
+    seen(&log);
+
     // An update that keeps the text keeps its embeddings; one that changes it re-embeds.
     assert_eq!(call_as(&c, w, "POST", "/docs/_update/1", r#"{"doc":{"tag":"z"}}"#).await.0, 200);
     assert!(seen(&log).is_empty());

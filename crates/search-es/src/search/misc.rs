@@ -206,6 +206,7 @@ pub async fn search_template(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let explain = body.get("explain").and_then(Value::as_bool);
     let profile = body.get("profile").and_then(Value::as_bool);
     let mut req = super::parse_request(ctx, Some(&rendered), None)?;
+    crate::xpack::inference::query::rewrite_request(ctx, &mut req).await?;
     if let Some(e) = explain {
         req.source.explain = Some(e);
     }
@@ -226,7 +227,7 @@ pub async fn msearch_template(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut responses = Vec::new();
     for pair in lines.chunks(2) {
         let [h, b] = pair else { break };
-        let r = (|| -> EsResult<Value> {
+        let parsed = (|| -> EsResult<SearchRequest> {
             let header = match crate::json::parse(h)? {
                 Some(Value::Obj(m)) => m,
                 _ => Map::new(),
@@ -246,13 +247,21 @@ pub async fn msearch_template(ctx: &Ctx<'_>) -> EsResult<Reply> {
             if let Some(n) = crate::xpack::security::authorize_search(ctx, &req.indices, &req.opts)? {
                 req.indices = n;
             }
-            let out = run(ctx, req.clone())?;
-            let mut v = render(&out, &req);
-            if let Value::Obj(m) = &mut v {
-                m.insert("status".into(), Value::from(200i64));
-            }
-            Ok(v)
+            Ok(req)
         })();
+        let r = match parsed {
+            Ok(mut req) => match crate::xpack::inference::query::rewrite_request(ctx, &mut req).await {
+                Ok(()) => run(ctx, req.clone()).map(|out| {
+                    let mut v = render(&out, &req);
+                    if let Value::Obj(m) = &mut v {
+                        m.insert("status".into(), Value::from(200i64));
+                    }
+                    v
+                }),
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        };
         responses.push(match r {
             Ok(v) => v,
             Err(e) => obj! { "error" => e.to_value_with_root(false), "status" => e.status as i64 },
