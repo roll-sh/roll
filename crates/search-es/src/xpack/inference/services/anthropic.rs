@@ -76,7 +76,7 @@ async fn send(cluster: &Cluster, ep: &Endpoint, body: Value, timeout: Duration) 
     }
     headers.push(("anthropic-version".into(), "2023-06-01".into()));
     let url = format!("{}/v1/messages", base_url(cluster, "anthropic", HOST));
-    let call = Call { inference_id: &ep.id, url: url.clone(), headers, body: body.to_json().into_bytes(), timeout, retry: |s| matches!(s, 429 | 500 | 503 | 529) };
+    let call = Call { inference_id: &ep.id, url: url.clone(), headers, body: body.to_json().into_bytes(), timeout, retry: |s| matches!(s, 429 | 500 | 503 | 529), per_minute: ep.requests_per_minute() };
     let answer = http::post(cluster, &call).await?;
     http::check(&ep.id, &url, &answer)?;
     Ok(answer)

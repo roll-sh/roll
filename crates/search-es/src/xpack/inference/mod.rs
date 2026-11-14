@@ -20,6 +20,7 @@
 pub mod chunking;
 pub mod http;
 pub mod query;
+pub mod rate;
 pub mod region;
 pub mod results;
 pub mod semantic;
@@ -160,6 +161,11 @@ impl Endpoint {
     }
 
     /// A secret in the clear, for a request about to be sent.
+    /// `rate_limit.requests_per_minute`, which [`rate`] enforces.
+    pub fn requests_per_minute(&self) -> Option<i64> {
+        self.service_settings.get("rate_limit").and_then(|r| r.get("requests_per_minute")).and_then(Value::as_i64)
+    }
+
     pub fn secret(&self, cluster: &Cluster, key: &str) -> EsResult<Option<String>> {
         match self.secrets.get(key).and_then(Value::as_str) {
             Some(s) => crate::seal::open(cluster, SECRET_KIND, s).map(Some),

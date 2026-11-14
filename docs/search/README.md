@@ -224,8 +224,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    test clusters) and `semantic_text` fields (embedded at index time in batches, chunked, stored
    as `_inference_fields`; `semantic`, `match`, `knn` and `sparse_vector` on them; new
    `sparse_vector` queries). Left: highlighting chunks, the retrievers' simplified
-   `query`/`fields` form, `copy_to` into `semantic_text` and multi-fields under it, the rewrite in
-   `_msearch`, search templates and async search, `index_options` validation, the `embedding`
+   `query`/`fields` form, `copy_to` into `semantic_text` and multi-fields under it, `index_options` validation, the `embedding`
    task type and `semantic` field type, the `random_reranker` and `text_similarity_reranker`
    retrievers. A delegate, `wip/search-inference`.
 2. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's

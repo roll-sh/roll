@@ -902,8 +902,10 @@ parsed as untrusted data: shapes are checked (a rerank index outside the inputs,
 or a wrong embedding count fail the call).
 
 Differences: streamed answers are read whole before they're sent (the same events, all at the
-end); `rate_limit` is stored and printed but not enforced (requests go out at once, and the
-service's own 429s are retried at most twice); `max_input_tokens` doesn't truncate inputs;
+end); `rate_limit.requests_per_minute` is enforced per node as Elasticsearch enforces it (a
+one-token bucket per cluster and endpoint, requests waiting their turn, timing out when the wait
+would outlast them; a cluster runs on one node at a time, so it is the cluster's limit), and the
+service's own 429s are retried at most twice; `max_input_tokens` doesn't truncate inputs;
 Cohere's settings are read with roll's settings reader, so a malformed one fails with
 `validation_exception` instead of Cohere's object parser's `x_content_parse_exception`.
 
@@ -960,7 +962,7 @@ Not yet: highlighting chunks (the `semantic` highlighter), the retrievers' simpl
 `query`/`fields` form, `copy_to` into `semantic_text` fields and multi-fields under them,
 validation of `index_options` (kept as given), the multimodal `embedding` task type and the new
 `semantic` field type, the `random_reranker` and `text_similarity_reranker` retrievers, and the
-rewrite outside `_search` (`_msearch`, search templates and async search don't embed queries).
+rewrite in `_render/template` previews (`_msearch`, search templates and async search embed queries).
 
 ## Per area
 

@@ -34,6 +34,8 @@ pub struct Call<'a> {
     pub timeout: Duration,
     /// Which statuses to send again.
     pub retry: fn(u16) -> bool,
+    /// The endpoint's `requests_per_minute` ([`super::rate`]).
+    pub per_minute: Option<i64>,
 }
 
 /// What came back.
@@ -97,6 +99,7 @@ pub async fn post(cluster: &Cluster, call: &Call<'_>) -> EsResult<Answer> {
     }
     let client = b.build().map_err(|e| EsError::illegal_state(e.to_string()))?;
     let deadline = Instant::now() + call.timeout;
+    super::rate::acquire(&cluster.config.name, call.inference_id, call.per_minute, call.timeout).await?;
     let mut attempt = 0;
     loop {
         let mut rb = client.post(url.clone());
