@@ -969,8 +969,6 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             } else {
                 std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?
             };
-            // Polled before the first read when watching: a write during it is a change.
-            let before = if watch && out.is_some() { digests(&c, &[format!("{env}/digest?{}", c.q())]).await? } else { Digests::new() };
             let (text, leases, follow) = render_env(&c, &env, &file, &tpl).await?;
             let Some(out) = out else {
                 print!("{text}");
@@ -978,7 +976,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             };
             replace_private(&out, &text)?;
             if watch {
-                render_watch(&c, &env, &file, &tpl, &out, text, leases, follow, before, interval, exec.as_deref()).await?;
+                render_watch(&c, &env, &file, &tpl, &out, text, leases, follow, interval, exec.as_deref()).await?;
             }
         }
         Secrets::Health { all: false, code } => {
@@ -2052,7 +2050,7 @@ async fn setup_dir(api: &Api, args: &AtArgs, show: bool, clear: bool) -> anyhow:
 }
 
 /// The template filled from the environment, and the leases of the dynamic credentials in it.
-async fn render_env(c: &Client<'_>, env: &str, file: &str, tpl: &str) -> anyhow::Result<(String, Vec<String>, Vec<String>)> {
+async fn render_env(c: &Client<'_>, env: &str, file: &str, tpl: &str) -> anyhow::Result<(String, Vec<String>, Digests)> {
     let v = c.call(Method::GET, &format!("{env}/values?{}", c.q()), None).await?;
     let unresolved: std::collections::BTreeMap<String, String> = v["problems"].as_array().into_iter().flatten().map(|p| (s(&p["key"]), s(&p["problem"]))).collect();
     // `roll://…` references are resolved where they stand; `${KEY}` is filled only around them,
@@ -2076,9 +2074,7 @@ async fn render_env(c: &Client<'_>, env: &str, file: &str, tpl: &str) -> anyhow:
     }
     text.push_str(&fill(&tpl[at..])?);
     leases.extend(v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(|l| format!("{}/leases/{}", c.base(), enc(l)))));
-    follow.push(format!("{env}/digest?{}", c.q()));
-    follow.sort();
-    follow.dedup();
+    follow.insert(format!("{env}/digest?{}", c.q()), answered(&v));
     Ok((text, leases, follow))
 }
 
@@ -2104,10 +2100,11 @@ fn replace_private(path: &str, text: &str) -> anyhow::Result<()> {
 /// `roll secrets render --watch`: write the file again when the environment's digest changes and
 /// the text with it, then run `exec`; renew dynamic credentials' leases every 10 minutes.
 #[allow(clippy::too_many_arguments)]
-async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &str, mut text: String, mut leases: Vec<String>, mut follow: Vec<String>, before: Digests, interval: u64, exec: Option<&str>) -> anyhow::Result<()> {
-    // The environment's digest, and every one its references read (from the first render: a
-    // second one would read and issue everything again).
-    let mut last = digests_since(c, &before, &follow).await;
+async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &str, mut text: String, mut leases: Vec<String>, follow: Digests, interval: u64, exec: Option<&str>) -> anyhow::Result<()> {
+    // The environment's digest, and every one its references read, as the first render's answers
+    // gave them (a second render would read and issue everything again).
+    let mut last = digests_since(c, &Digests::new(), &follow).await;
+    let mut follow: Vec<String> = follow.into_keys().collect();
     let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
     loop {
         tokio::select! {
@@ -2131,24 +2128,25 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
                 if now == last {
                     continue;
                 }
+                let which = moved(c, &last, &now);
                 last = now.clone();
                 let (next, next_leases, next_follow) = match render_env(c, env, file, tpl).await {
                     Ok(r) => r,
                     Err(e) => {
-                        eprintln!("roll secrets render: {} changed, but {e}; {out} stays as it is", c.at.env);
+                        eprintln!("roll secrets render: {which} changed, but {e}; {out} stays as it is");
                         continue;
                     }
                 };
                 leases = next_leases;
-                // As polled before this read; references may have changed.
+                // As this read's answers gave them; references may have changed.
                 last = digests_since(c, &now, &next_follow).await;
-                follow = next_follow;
+                follow = next_follow.into_keys().collect();
                 if next == text {
                     continue;
                 }
                 replace_private(out, &next)?;
                 text = next;
-                eprintln!("roll secrets render: {}:{} changed, wrote {out}", c.at.env, c.at.path);
+                eprintln!("roll secrets render: {which} changed, wrote {out}");
                 if let Some(cmd) = exec {
                     match tokio::process::Command::new("sh").arg("-c").arg(cmd).status().await {
                         Ok(st) if st.success() => {}
@@ -2387,7 +2385,7 @@ fn render(tpl: &str, get: impl Fn(&str) -> Option<String>) -> Result<String, Vec
 
 /// The variables `roll run` adds: the environment's resolved values, minus the ones the shell
 /// already sets (unless `--override`). Fails on a problem unless `--allow-unresolved`.
-async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(String, String)>, Vec<String>, Vec<String>)> {
+async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(String, String)>, Vec<String>, Digests)> {
     let v = c.call(Method::GET, &format!("{}/values?{}", c.env(&at.env), c.q()), None).await?;
     let problems: Vec<String> = v["problems"].as_array().into_iter().flatten().map(|p| format!("{}: {}", s(&p["key"]), s(&p["problem"]))).collect();
     if !problems.is_empty() && !r.allow_unresolved {
@@ -2395,7 +2393,7 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(Strin
     }
     let mut env: Vec<(String, String)> = v["values"].as_object().into_iter().flatten().map(|(k, val)| (k.clone(), val.as_str().unwrap_or_default().to_string())).collect();
     let mut leases: Vec<String> = v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(|l| format!("{}/leases/{}", c.base(), enc(l)))).collect();
-    let mut follow = vec![format!("{}/digest?{}", c.env(&at.env), c.q())];
+    let mut follow = Digests::from([(format!("{}/digest?{}", c.env(&at.env), c.q()), answered(&v))]);
     // Env files: plain values as written, references resolved; theirs win over the environment's.
     for file in &r.env_files {
         let text = std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
@@ -2414,20 +2412,18 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(Strin
         }
     }
     env.retain(|(k, _)| r.override_env || std::env::var_os(k).is_none());
-    follow.sort();
-    follow.dedup();
     Ok((env, leases, follow))
 }
 
 /// Resolve `roll://` references: one read per project, environment and folder. Their values,
 /// the leases those hold (each as its renew route, at its own project), and the digests to follow
 /// (`--watch`).
-async fn resolve_refs(c: &Client<'_>, refs: &[crate::secret_refs::Ref]) -> anyhow::Result<(std::collections::HashMap<crate::secret_refs::Ref, String>, Vec<String>, Vec<String>)> {
+async fn resolve_refs(c: &Client<'_>, refs: &[crate::secret_refs::Ref]) -> anyhow::Result<(std::collections::HashMap<crate::secret_refs::Ref, String>, Vec<String>, Digests)> {
     let mut groups: std::collections::BTreeMap<(Option<String>, String, String), Vec<&crate::secret_refs::Ref>> = Default::default();
     for rf in refs {
         groups.entry((rf.project.clone(), rf.env.clone(), rf.path.clone())).or_default().push(rf);
     }
-    let (mut values, mut leases, mut follow) = (std::collections::HashMap::new(), vec![], vec![]);
+    let (mut values, mut leases, mut follow) = (std::collections::HashMap::new(), vec![], Digests::new());
     for ((named, env, path), group) in groups {
         let id = match &named {
             None => c.project.clone(),
@@ -2444,12 +2440,11 @@ async fn resolve_refs(c: &Client<'_>, refs: &[crate::secret_refs::Ref]) -> anyho
         }
         // A lease is renewed where it was issued: its project's own route.
         leases.extend(v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(|l| format!("/v1/secrets/projects/{}/leases/{}", enc(&id), enc(l)))));
-        follow.push(format!("{base}/digest?path={}", enc(&path)));
+        follow.insert(format!("{base}/digest?path={}", enc(&path)), answered(&v));
     }
     Ok((values, leases, follow))
 }
 
-/// Every followed digest, as one: any of them moving moves it.
 /// The digest at each of `follow`'s paths.
 async fn digests(c: &Client<'_>, follow: &[String]) -> anyhow::Result<Digests> {
     let mut all = Digests::new();
@@ -2461,16 +2456,37 @@ async fn digests(c: &Client<'_>, follow: &[String]) -> anyhow::Result<Digests> {
 
 type Digests = std::collections::BTreeMap<String, String>;
 
-/// What a watch compares from now on, after a read that follows `follow`: each path's digest as
-/// polled before that read (`before`), so a write that lands during the read still counts as a
-/// change. Only a path the read newly references is polled now; one that can't be is left empty,
-/// which the next poll sees as a change.
-async fn digests_since(c: &Client<'_>, before: &Digests, follow: &[String]) -> Digests {
+/// Which followed folders moved between two polls, as `env:/path` (another project's as
+/// `prj_…@env:/path`), for a watch's message.
+fn moved(c: &Client<'_>, last: &Digests, now: &Digests) -> String {
+    let label = |p: &str| -> String {
+        let (Some(rest), Some(q)) = (p.strip_prefix("/v1/secrets/projects/"), p.split_once("/digest?path=").map(|(_, q)| q)) else { return p.to_string() };
+        let mut parts = rest.split('/');
+        let (project, env) = (parts.next().unwrap_or_default(), parts.nth(1).unwrap_or_default());
+        let path = urlencoding::decode(q).map(|p| p.into_owned()).unwrap_or_else(|_| q.to_string());
+        let env = urlencoding::decode(env).map(|e| e.into_owned()).unwrap_or_else(|_| env.to_string());
+        if urlencoding::decode(project).is_ok_and(|p| p == c.project) { format!("{env}:{path}") } else { format!("{project}@{env}:{path}") }
+    };
+    let list: Vec<String> = now.iter().filter(|(p, d)| last.get(*p) != Some(*d)).map(|(p, _)| label(p)).collect();
+    if list.is_empty() { "the environment".into() } else { list.join(", ") }
+}
+
+/// A values answer's digest: the folder's, taken by the server just before it read them.
+fn answered(v: &Value) -> String {
+    v["digest"].as_str().unwrap_or_default().to_string()
+}
+
+/// What a watch compares from now on, after a read whose answers gave `follow` (each followed
+/// path's digest, taken just before it was read: a write after that is a change). A server that
+/// doesn't send one: the digest polled before the read (`before`), else polled now; one that
+/// can't be is left empty, which the next poll sees as a change.
+async fn digests_since(c: &Client<'_>, before: &Digests, follow: &Digests) -> Digests {
     let mut out = Digests::new();
-    for p in follow {
-        let d = match before.get(p) {
-            Some(d) => d.clone(),
-            None => c.call(Method::GET, p, None).await.map(|v| s(&v["digest"])).unwrap_or_default(),
+    for (p, answered) in follow {
+        let d = match (answered.is_empty(), before.get(p)) {
+            (false, _) => answered.clone(),
+            (true, Some(d)) => d.clone(),
+            (true, None) => c.call(Method::GET, p, None).await.map(|v| s(&v["digest"])).unwrap_or_default(),
         };
         out.insert(p.clone(), d);
     }
@@ -2483,11 +2499,9 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     let at = r.at.resolve();
     let project = project(api, at.project.as_deref()).await?;
     let c = Client { project, api, at: at.clone() };
-    // Polled before the first read when watching: a write during it is a change.
-    let before = if r.watch { digests(&c, &[format!("{}/digest?{}", c.env(&at.env), c.q())]).await? } else { Digests::new() };
     let (env, leases, follow) = run_env(&c, &at, &r).await?;
     if r.watch {
-        return watch(&c, &at, &r, env, leases, follow, before).await;
+        return watch(&c, &at, &r, env, leases, follow).await;
     }
     let mut cmd = std::process::Command::new(&r.command[0]);
     cmd.args(&r.command[1..]).envs(env);
@@ -2507,10 +2521,11 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
 /// `roll run --watch`: the command as a child, restarted (SIGTERM, then SIGKILL after 10 s) when
 /// the environment changes. A change that doesn't resolve keeps the running command. Exits with
 /// the command's own code when it exits by itself.
-#[allow(clippy::too_many_arguments)]
-async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>, mut leases: Vec<String>, mut follow: Vec<String>, before: Digests) -> anyhow::Result<()> {
-    // The environment's digest, and every referenced one's (an env file's `roll://…`).
-    let mut last = digests_since(c, &before, &follow).await;
+async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>, mut leases: Vec<String>, follow: Digests) -> anyhow::Result<()> {
+    // The environment's digest, and every referenced one's (an env file's `roll://…`), as the
+    // first read's answers gave them.
+    let mut last = digests_since(c, &Digests::new(), &follow).await;
+    let mut follow: Vec<String> = follow.into_keys().collect();
     let every = std::time::Duration::from_secs(r.interval.max(1));
     // Dynamic credentials outlive their first lease: renewed every 10 minutes while it runs.
     let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
@@ -2541,19 +2556,20 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>,
                     if now == last {
                         continue;
                     }
+                    let which = moved(c, &last, &now);
                     last = now.clone();
                     match run_env(c, at, r).await {
                         Ok((next, next_leases, next_follow)) => {
-                            eprintln!("roll run: {}:{} changed, restarting {}", at.env, at.path, r.command[0]);
+                            eprintln!("roll run: {which} changed, restarting {}", r.command[0]);
                             env = next;
                             leases = next_leases;
-                            // As polled before this read; references may have changed.
+                            // As this read's answers gave them; references may have changed.
                             last = digests_since(c, &now, &next_follow).await;
-                            follow = next_follow;
+                            follow = next_follow.into_keys().collect();
                             stop(&mut child).await;
                             break;
                         }
-                        Err(e) => eprintln!("roll run: {} changed, but {e}; keeping the running command", at.env),
+                        Err(e) => eprintln!("roll run: {which} changed, but {e}; keeping the running command"),
                     }
                 }
             }

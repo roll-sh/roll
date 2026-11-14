@@ -368,6 +368,8 @@ async fn references_imports_and_personal_values_resolve_and_cycles_are_reported(
     assert_eq!(v["values"]["LITERAL"], "${HOME}");
     // What a reference reaches moves the digest (roll run --watch, syncs), in another environment too.
     let before = api.ok(Method::GET, "/environments/development/digest", None).await["digest"].clone();
+    // A values answer carries the same digest, taken before its read: a watch compares from it.
+    assert_eq!(api.values("development", "/").await["digest"], before);
     api.set("production", "DB_HOST", "prod2.db").await;
     assert_ne!(api.ok(Method::GET, "/environments/development/digest", None).await["digest"], before);
     api.set("production", "DB_HOST", "prod.db").await;
