@@ -2711,43 +2711,50 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-0. **A Secrets Store CSI Driver provider** (building, on #32): secrets mounted into a pod as files,
-   never a Kubernetes Secret in etcd, as Vault's, AWS', Azure's, GCP's and Infisical's providers
-   do. Each pod logs in with its own service account token through a workload identity (pinned
-   keys, #57, for clusters roll can't reach); strict reads, so a value that doesn't resolve fails
-   the mount instead of writing a partial file.
-1. **Land the stack**: `feature/roll-secrets-landing` is #20 with all 31 pull requests stacked on
-   it (#31–#61) merged in order, conflicts resolved and the suites run (see "Landing" below). #30
-   isn't in it: it targets `main` and carries roll MCP's #24/#25, which are still moving. Merging
-   the landing branch is the user's call.
-2. **#30 onto the landing branch, once #25 is on `main`**: roll-access's tokens replace `rlst_`,
-   and the stack's later token users move with it: renewed logins (#56) and pinned keys (#57) mint
-   workload tokens, reach (#61) lists roll-access grants, `Caller` keeps `runtime` (#46). Write
-   `NewGrant { name, rules, ip_allow, ..Default::default() }` (#24 derives `Default`).
-3. **A workload identity a person creates asks roll-access's policy** (roll MCP's review, after #25):
-   an identity hands its maker's reach to every login, so a non-admin's identity is held, issuing
-   no logins, until an admin approves when `access.policy_now().needs_approval(&scope, false)` says
-   so, as that person's own tokens are (admins told through `Access::tell_admins`, which #25 makes
-   public when this needs it).
-4. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
-   and outside databases (#33), and transit in the Go and Python clients (#32).
-5. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
-   tools are ready), a live check of OpenSearch links (#29 and #51 in one build), and splitting the
-   CLI's `secrets.rs` (3,900 lines on the landing branch) by command once the stack has landed.
-6. *Waits on #31 and #46 landing:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive`
-   (apps already seals such variables; deploys already get sensitive values, as a runtime).
-7. *Waits on #38 and #43 landing:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with
-   roll's own token; the trust policy pins `sub`, as GCP's and Azure's do).
-8. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
-   notice.
-9. *Waits on #30 meeting #24/#25:* the Access tab shows roll-access tokens waiting for an admin's
-   approval (`pending`) and rotations that keep the old secret working (`keep_old_for_s`).
-10. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
-   installs list Slack user ids and act as the owner's automation; a review must count as the
-   person who pressed the button (their permissions, the request's gates), never as the app.
-11. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
-   project can link their own databases, buckets and streams.
-12. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+1. **The Secrets Store CSI Driver provider** (on #62, its own pull request next): secrets mounted
+   into a pod as files, never a Kubernetes Secret in etcd, as Vault's, AWS', Azure's, GCP's and
+   Infisical's providers do; each pod logs in with its own service account. Checked live against
+   the driver v1.6.2 on k3s (mount, no Secret, another account refused, rotation in about 20 s, a
+   key that stops resolving keeps the files).
+2. **`roll login` for people**: a browser sign-in (roll-access's OAuth with a loopback redirect)
+   whose token sits in the OS keychain and acts as the person, as `doppler login`, `infisical
+   login` and `op signin` do; today a person mints a project token per project and pastes it.
+3. **Conditional reads and caching in the SDKs**: `ETag` (the digest) on `…/values` and
+   `…/resolve`, a 304 that decrypts nothing and writes no audit row, and a TTL cache in the
+   TypeScript, Go and Python clients (AWS' caching clients, Vault Agent, Infisical's `cacheTtl`).
+4. **Terraform without values in state**: an `ephemeral "roll_secrets_values"` resource and a
+   write-only `value_wo` (Vault's, AWS', Infisical's providers have both); resources for CAs, SSH
+   CAs, encryption keys and outside databases; transit in the Go and Python clients (the
+   TypeScript one has it).
+5. **AWS through roll's own issuer** (`AssumeRoleWithWebIdentity` with roll's token, the trust
+   policy pinning `sub`, as GCP and Azure already work): no roll credential in AWS at all.
+6. **The operator restarts what reads a Secret** when it changes (`spec.rolloutRestart`, as
+   Infisical's reload annotation and Vault Secrets Operator's `rolloutRestartTargets`).
+7. **Audit sinks SIEMs take**: headers, and Splunk HEC and Datadog presets (Doppler, Infisical),
+   plus a sink into roll search.
+8. **A live rotation that keeps the old password a while** where the resource can (Redis ACL users
+   hold two passwords), as managed rotation's grace already does.
+9. **More dynamic credentials**: GitHub App installation tokens (one repository, narrowed
+   permissions), Kubernetes service account tokens, Snowflake.
+10. **A gateway into private networks**: an agent in the customer's network that connects out and
+   carries rotation and per-lease logins to private databases (Infisical's and Akeyless'
+   gateways).
+11. **ACME on project CAs**, starting with external account binding (Vault PKI, step-ca).
+12. *The user's call:* land the stack (#62).
+13. *Waits on roll MCP's #25 on `main`:* #30 onto #62 (roll-access's tokens replace `rlst_`;
+   renewed logins and pinned keys mint workload tokens; reach lists grants; `Caller` keeps
+   `runtime`; `NewGrant { …, ..Default::default() }`), then a workload identity a person creates
+   asks roll-access's policy (held until an admin approves, `policy_now().needs_approval(&scope,
+   false)`, admins told through `Access::tell_admins`), and the Access tab shows tokens waiting
+   for approval and rotations that keep the old secret (`keep_old_for_s`).
+14. *Waits on other threads:* transit keys scoped by name (#24/#25 with #47), roll search echoing a
+   key's `access` (then a key that doesn't say `data` is refused), previews resolving with
+   `dynamic: false`, a live check of OpenSearch links (#29 with #51), splitting the CLI's
+   `secrets.rs` once the stack has landed.
+15. *Waits on linking chat users to roll accounts:* approving change requests from Slack.
+16. *Waits on products serving signed-in people:* a person's project linking their own databases,
+   buckets and streams.
+17. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
    environment).
 
 ### Landing
@@ -2768,6 +2775,18 @@ Merging the stack in order (2026-11-14) found what no single pull request could:
   registries a forgotten project drops lost `cloud_accounts` (#43). Every pull request's added lines
   were checked against the landing branch afterwards; everything else is there or extended.
 - Additive everywhere else: routes, catalogue rows, `Options` fields, types and this document.
+
+A fifteenth independent review (2026-11-14, against Doppler, Infisical, Vault, 1Password, AWS
+Secrets Manager and Akeyless, and the other threads' heads) found two high-severity issues, both
+fixed: roll apps showed sensitive values to whoever could reveal (`ForApps` never set
+`sensitive`), and the operator logged every RollSecret in as itself, so creating one in a
+namespace could reach the operator's identity or another team's (now a namespace's own service
+account outside the operator's namespaces). Also fixed: client addresses taken from the
+client-written `X-Forwarded-For` entry (and MCP's calls audited without one), live rotations
+the digest didn't see, resolves that couldn't refuse dynamic credentials (previews), search
+keys a build made admin, a sync sweep that could outlast its interval, failed pushes audited as
+if nothing went out. The rest of its ranking is above; the other threads have its findings on
+their side.
 
 A fourteenth independent review (2026-11-14, of the landing merges) found no lost behaviour in the
 store, the providers, the values route or the catalogue; it found where features meet: a workload
