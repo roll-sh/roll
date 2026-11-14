@@ -896,9 +896,11 @@ async fn a_persons_token_past_the_policy_waits_for_an_admin() {
     assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{plain_id}/deny"), None).await.0, StatusCode::OK);
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{plain_id}"), None).await;
     assert_eq!(g["revoked_why"].as_str(), Some("an admin denied it"), "{g}");
+    // Mail goes out on its own tasks: wait for the last ones this checks.
     let mails = || d.people.1.lock().unwrap().clone();
     for _ in 0..50 {
-        if mails().len() >= 4 {
+        let got = mails();
+        if got.iter().any(|m| m.contains("\"reader\" was denied")) && got.iter().any(|m| m.contains("waits for your approval: \"reader\"")) {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
