@@ -1,5 +1,6 @@
 import { Boxes, Check, Copy, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Smartphone, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { appsApi } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
@@ -174,6 +175,7 @@ export function PreviewSheet({
             ) : (
               <p className="text-[11.5px] text-subtle">No services: a repo in this project runs here once its roll.toml has a [preview] section.</p>
             )}
+            {(p.state === "ready" || p.state === "sleeping") && <Promote preview={p} />}
             {!!p.earlier?.length && (
               <>
                 <Label>Earlier pushes</Label>
@@ -886,6 +888,73 @@ export function TextAgainst({ diff, branch, what = "words" }: { diff: TextDiff; 
         ))}
       </ul>
       {more > 0 && <p className="mt-0.5 text-subtle">and {more} more lines</p>}
+    </div>
+  );
+}
+
+/** A roll apps service's build promoted to production (Vercel's promote): the preview
+ * environment's live image deployed to production as is (no rebuild), with production's
+ * variables (roll apps' `…/environments/production/promote`). It's the person's own call to roll
+ * apps, which decides who may deploy production; previews holds no power of its own here. */
+function Promote({ preview: p }: { preview: Preview }) {
+  const [services, setServices] = useState<{ id: string; name: string }[]>([]);
+  const [asking, setAsking] = useState<{ id: string; name: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const names = p.services.map((s) => s.name).join(",");
+  useEffect(() => {
+    let live = true;
+    appsApi.services(p.project).then(
+      (all) => live && setServices(all.filter((s) => names.split(",").includes(s.name)).map((s) => ({ id: s.id, name: s.name }))),
+      () => live && setServices([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, [p.project, names]);
+  if (!services.length) return null;
+  const env = `pv-${p.id.replace(/^pv_/, "")}`;
+  return (
+    <div className="mt-1.5 text-[11.5px]">
+      {done && <p className="text-subtle">Promoting {done} to production: its build, not built again (roll apps).</p>}
+      {error && <p className="break-words text-danger">{error}</p>}
+      <div className="flex flex-wrap gap-1.5">
+        {services.map((s) => (
+          <button
+            key={s.id}
+            type="button"
+            onClick={() => setAsking(s)}
+            className="h-6 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05]"
+            title="Deploy this preview's build of it to production as is, with production's variables"
+          >
+            Promote {s.name} to production
+          </button>
+        ))}
+      </div>
+      {asking && (
+        <Confirm
+          word={asking.name}
+          action="Promote to production"
+          busy={busy}
+          onCancel={() => setAsking(null)}
+          onConfirm={async () => {
+            setBusy(true);
+            setError(null);
+            try {
+              await appsApi.promote(asking.id, "production", env);
+              setDone(asking.name);
+              setAsking(null);
+            } catch (e) {
+              setError(errorText(e));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          Production gets the image this preview runs for {asking.name}, with production's own variables and data; nothing is built again.
+        </Confirm>
+      )}
     </div>
   );
 }

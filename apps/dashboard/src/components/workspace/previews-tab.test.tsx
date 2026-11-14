@@ -2,6 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MarkStateProvider } from "@/components/mark-state";
+import { appsApi } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { previewsApi, type Preview, type PreviewSettings } from "@/lib/previews-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
@@ -11,6 +12,11 @@ vi.mock("@/lib/previews-api", async (orig) => {
   const real = await orig<typeof import("@/lib/previews-api")>();
   const fns = Object.fromEntries(Object.keys(real.previewsApi).map((k) => [k, vi.fn()]));
   return { ...real, previewsApi: fns };
+});
+
+vi.mock("@/lib/apps-api", async (orig) => {
+  const real = await orig<typeof import("@/lib/apps-api")>();
+  return { ...real, appsApi: { ...real.appsApi, services: vi.fn(), promote: vi.fn() } };
 });
 
 vi.mock("@/lib/code-api", async (orig) => {
@@ -74,6 +80,7 @@ beforeEach(() => {
   api.mail.mockResolvedValue({ mail: [] });
   // The sheet's full view: the list's item stands in where a test doesn't give one.
   api.get.mockRejectedValue(new Error("not in this test"));
+  vi.mocked(appsApi.services).mockResolvedValue([]);
 });
 
 const view = () =>
@@ -104,6 +111,22 @@ describe("the Previews tab", () => {
     await u.click(confirm);
     expect(api.remove).toHaveBeenCalledWith("pv_abc");
     expect(await within(list).findByRole("button", { name: "Checkout redesign: Deleting" })).toBeInTheDocument();
+  });
+
+  it("promotes a roll apps service's build to production after its name is typed", async () => {
+    const u = userEvent.setup({ delay: null });
+    vi.mocked(appsApi.services).mockResolvedValue([{ id: "svc_web", project: "prj_shop", name: "web" }] as never);
+    vi.mocked(appsApi.promote).mockResolvedValue({} as never);
+    view();
+    const list = await screen.findByRole("list", { name: "Previews" });
+    await u.click(within(list).getByRole("button", { name: "Checkout redesign: Ready" }));
+    await u.click(await screen.findByRole("button", { name: "Promote web to production" }));
+    const confirm = screen.getByRole("button", { name: "Promote to production" });
+    expect(confirm).toBeDisabled();
+    await u.type(screen.getByRole("textbox", { name: /to confirm/ }), "web");
+    await u.click(confirm);
+    expect(appsApi.promote).toHaveBeenCalledWith("svc_web", "production", "pv-abc");
+    expect(await screen.findByText(/Promoting web to production/)).toBeInTheDocument();
   });
 
   it("lists the previews waiting for a visual review first, tagged", async () => {
