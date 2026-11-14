@@ -504,7 +504,7 @@ pub enum Requests {
 pub enum DatabasesCmd {
     #[command(alias = "list")]
     Ls,
-    /// Register a database: its admin URL (postgres://admin:…@host:5432/db, mysql://… or sqlserver://…) on stdin; two login
+    /// Register a database: its admin URL (postgres://admin:…@host:5432/db, mysql://…, sqlserver://… or clickhouse://…) on stdin; two login
     /// roles that take turns (managed links), a group dynamic logins join, or both.
     Add {
         name: String,
@@ -1204,7 +1204,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             DatabasesCmd::Add { name, roles, group, ca } => {
                 // The admin URL holds a password: never an argument.
                 if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-                    eprint!("Admin URL (postgres://admin:…@host:5432/db, mysql://… or sqlserver://…), then Enter and Ctrl-D: ");
+                    eprint!("Admin URL (postgres://admin:…@host:5432/db, mysql://…, sqlserver://… or clickhouse://…), then Enter and Ctrl-D: ");
                 }
                 let mut url = String::new();
                 std::io::stdin().read_to_string(&mut url).context("reading the admin URL from stdin")?;
