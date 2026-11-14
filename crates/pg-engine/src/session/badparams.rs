@@ -701,7 +701,7 @@ impl Walk<'_> {
                 return Ty::Other;
             }
             if bare(PASS_FIRST) && !ts.is_empty() {
-                for t in ts[1..].to_vec() {
+                for &t in &ts[1..] {
                     self.note(t, LOOKUP, f.location);
                 }
                 return ts[0];

@@ -833,10 +833,13 @@ impl Session {
     /// execution needs it, `PlanUses::uncosted`). `fresh`: the Bind right after a Parse that
     /// found the binding to be its custom plan (`PlanUses::fresh_generic`).
     pub(super) fn param_custom(&mut self, p: &Prepared, params: &[Value], fresh: bool) -> Option<(Arc<BoundQuery>, Option<f64>)> {
-        if procs_run(p) {
+        let (unnamed, procs) = {
+            let plans = p.plans.lock();
+            (plans.unnamed, plans.procs)
+        };
+        if procs {
             return None;
         }
-        let unnamed = p.plans.lock().unnamed;
         let oids = self.param_custom_key(p, params)?;
         if fresh
             && unnamed
@@ -912,12 +915,9 @@ impl Session {
     /// whose sizes read the same, its scan's path chosen again for these values
     /// (`Analyzed::rechosen`, planning's result) instead (not for EXPLAIN EXECUTE).
     pub(super) fn values_custom(&mut self, p: &Prepared, stmt: &Node, params: &[Value], reuse: bool) -> Option<Arc<BoundQuery>> {
-        if procs_run(p) {
-            return None;
-        }
         let oids = {
             let plans = p.plans.lock();
-            if !plans.param_oids.is_empty() {
+            if plans.procs || !plans.param_oids.is_empty() {
                 return None;
             }
             plans.parse_oids.clone()?
@@ -992,11 +992,6 @@ impl Session {
 
 /// Whether every parameter of `stmt` (planned as `planned`) is one whose value can't change
 /// its plan (`candidates`), with no sub-select or window function.
-/// Whether planning `p` runs PL/pgSQL calls (`Procs`): each custom plan is bound afresh.
-fn procs_run(p: &Prepared) -> bool {
-    p.bound.lock().as_ref().is_some_and(|b| b.3.procs.folded || b.3.procs.deferred)
-}
-
 fn params_free(s: &Session, stmt: &Node, planned: &BoundQuery) -> bool {
     let Some((cat, table)) = planned_table(s, planned) else { return false };
     let Some(cands) = candidates(stmt, &cat, &table) else { return false };

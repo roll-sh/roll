@@ -588,10 +588,8 @@ fn chr(a: &[Value], _: &FnCtx) -> Result<Value> {
         bail!(PROGRAM_LIMIT_EXCEEDED, "null character not permitted");
     }
     let enc = db_enc();
-    if enc != crate::types::mbconv::UTF8 && n > 127 {
-        if crate::types::mbconv::max_length(enc) > 1 || n > 255 {
-            bail!(PROGRAM_LIMIT_EXCEEDED, "requested character too large for encoding: {n}");
-        }
+    if enc != crate::types::mbconv::UTF8 && n > 127 && (crate::types::mbconv::max_length(enc) > 1 || n > 255) {
+        bail!(PROGRAM_LIMIT_EXCEEDED, "requested character too large for encoding: {n}");
     }
     let c = u32::try_from(n)
         .ok()

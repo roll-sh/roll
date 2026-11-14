@@ -12376,3 +12376,115 @@ RUST_MIN_STACK=16 MiB. The first train (on `65b3617ee`) found transactions.sql's
 (AND CHAIN after an error in a chained transaction or a savepoint), fixed by `7fed6f2da`; its
 debug step's wire big_bytea_values_go_out_in_linear_time took 21 s against its 20 s limit
 under load (alone 14-15 s, as a debug build of the head without these commits: 15-16 s).
+
+## Behaviour gaps closed by agent 233 (2026-11-14)
+
+Recorded against a private PostgreSQL 18.6 (the reference image `postgres@sha256:77f58511...`,
+`select version()` 18.6). Every kept case is in the wire test `protocol_cases`
+(`tests/data/protocol_cases.out`, recorded with `PROTOCOL_RECORD`); its compact form now also
+carries an error's or notice's position (`P`) and CONTEXT (`W`), and the file was recorded again
+with them. The exploratory probes (raw protocol, Python: 774 cases, 461 differing on the base and 25 now) are in
+`~/.cache/a233/probe` (`run.py cases.py host port`, `cmp.py pg.out roll.out`).
+
+- **Immutable PL/pgSQL calls are evaluated while planning** (`Binder::user_call`,
+  `fold::proc_call`, `binder::Procs`). An immutable PL/pgSQL function returning neither a set
+  nor a record (nor a domain) over constants runs as the statement is planned, as
+  evaluate_function does: its value is a constant of the plan (EXPLAIN VERBOSE shows it), its
+  NOTICEs come before RowDescription, once (not once a row), and its error fails the statement
+  before any row: where no row reaches the call (an empty table, `WHERE false`, a CASE arm), at
+  plan time all the same (the error stays pending, `fold_failed`, and `fold::first_error`
+  raises it where planning reaches it, so a CASE arm whose condition folds false or an unread
+  output doesn't fail). In the extended protocol the planning is the Bind's: a Parse or
+  Describe binding only analyzes (`Session::defer_procs`, `Binder::defer_procs`), leaves the
+  calls and marks the binding (`Procs::deferred`); Bind plans such a statement then
+  (`bind_inner`), and the generic plan it makes is the statement's (one NOTICE for any number
+  of Binds of a named statement; PREPARE / EXECUTE the same). A call over parameters is
+  folded by each custom plan (`fold::param_folds` now sees PL/pgSQL calls: the Bind plans) and
+  not by the generic plan five custom plans later choose, whose call runs per row at Execute,
+  as PostgreSQL's. Not folded, as in PostgreSQL: stable or volatile functions, set-returning
+  ones, RECORD results (several OUT parameters), a strict call with a NULL argument (NULL).
+  Statements whose planning ran a call aren't kept as templates (`lit_learn`) nor have custom
+  plans made from their analysis (`litplan::procs_run`): each plan runs the calls again. The
+  body of a SQL function the planner evaluates is bound with its PL/pgSQL calls left
+  (`Binder::skip_procs`): they run once, when the function runs (its custom plan folds them),
+  as they do in PostgreSQL (two NOTICEs before). CREATE / ALTER TABLE's CHECK is analyzed
+  without running them (they ran at CREATE TABLE). A FROM function call that fails stays in the
+  plan for planning to raise (it was run twice at bind and again by the scan).
+  Still differs: a CTE nothing reads and an output of a view or sub-select nothing reads are
+  bound, so their calls run (a NOTICE PostgreSQL doesn't raise; no error, the pending error is
+  dropped with them); a catalog change unrelated to the statement replans a named statement,
+  running its calls again (PostgreSQL's invalidation is by dependency).
+- **Unknown parameter type oids, every statement shape** (`session/badparams.rs` rewritten):
+  the model now follows INSERT (VALUES rows, a source query, ON CONFLICT, RETURNING), UPDATE
+  (FROM, WHERE, RETURNING before SET), DELETE (USING, WHERE, RETURNING), MERGE (source, ON,
+  RETURNING, then each WHEN's condition and action), set operations (leaves left to right, a
+  column's sides' common type, then its grouping operators unless UNION ALL, then ORDER BY and
+  LIMIT), window functions (arguments with the target list, PARTITION BY / ORDER BY /
+  frame offsets after LIMIT, the WINDOW clause's before those written in OVER; lag, lead,
+  first_value, last_value, nth_value pass their first argument's type on, count takes any),
+  and column references through FROM sub-selects, CTEs, VALUES lists, aliases, joins (USING's
+  coercion) and LATERAL, a whole-row reference looking nothing up. Two parameters of one
+  missing oid are one type. Errors carry PostgreSQL's position where it reports one (sort,
+  group and set-operation keys, a function's argument coercion). 157 shapes in
+  `~/.cache/a233/probe/bp*.py` match PostgreSQL (80 differed on the base); the fallback rule remains only
+  for what the model marks unmodelled (grouping sets, recursive CTEs, locking clauses, ...).
+- **Error locations of arithmetic, casts and math** (`error_location.rs`): integer operators
+  name PostgreSQL's function for the operands' types (`ops::int_op_error`: int4pl, int24mi,
+  int84mul, int48div, int4mod, ...; unary minus and abs; division's overflow line apart from
+  its zero line), casts theirs (`cast::cast_routine`: i4toi2, int82, int84, dtoi2/4/8,
+  ftoi2/4/8, numeric_int2/4/8), float division by zero float_zero_divide_error, overflow and
+  underflow float_overflow_error / float_underflow_error, dsqrt, dlog1, dlog10, dpow, the trig
+  functions' "input is out of range", numeric's div_var, sqrt_var, numeric_sqrt, ln_var,
+  numeric_power, power_var, make_result_opt_error, exp_var, numeric_in, gcd / lcm, width_bucket,
+  folded or not. Messages several routines raise are matched only by the routine an error names
+  (`BY_ROUTINE`); an error can name the line too (`Error::routine_at`: COMMIT's warning outside
+  a block, 4073 in an implicit block, 4152 alone). Besides, by message: constraint and domain
+  errors (domain check / not null, exclusion, partition routing, generated and identity
+  columns, bpchar length, numeric typmod), operator / column / type lookups, the transaction,
+  cursor, sequence, prepared-statement, PL/pgSQL (no RETURN, STRICT INTO, ASSERT, unknown
+  variable), DDL (dependent objects, duplicate column / function, DROP of a missing table or
+  index and its NOTICE, CREATE ... IF NOT EXISTS's NOTICE, ALTER TYPE's cast), COPY (missing /
+  extra data, unterminated CSV, binary signature, bad format, ON_ERROR's NOTICEs and
+  REJECT_LIMIT), statement timeout, syntax error at end of input. 
+- **Messages and fields a probe found differing**: `chr(-1)` is 22023 "character number must be
+  positive" in every encoding (it was "requested character too large"); a jsonb number cast to
+  a type is "cannot cast jsonb numeric" (cannotCastJsonbValue's word); an enum's bad input
+  names the type as format_type_be does (qualified off the search path); "procedure e2.pr()
+  does not exist" and "e2.pr(integer) is a procedure" name the function as written; "each
+  UNION query must have the same number of columns", "UNION types ... cannot be matched" and
+  "VALUES lists must all be the same length" carry their positions.
+- **COPY FROM**: COPY FREEZE's refusals come after CopyInResponse (CopyFrom's checks), the
+  data that follows ignored, as PostgreSQL's; CopyFail's error has its CONTEXT "COPY t, line N"
+  (the line being read).
+
+Probed and matching already (no change): portal suspension with row limits (named, unnamed,
+across Sync, Describe in between, DML RETURNING, FETCH, errors mid-portal), NOTICE ordering
+in multi-statement queries and PL/pgSQL, client_min_messages, ParameterStatus for SET / RESET /
+SET LOCAL / function SET clauses / set_config / failed transactions, COPY TO formats and
+COPY FROM errors' CONTEXT lines, cancel requests (simple and extended), statement_timeout,
+lock_timeout, idle_in_transaction / transaction / idle_session timeouts' FATALs, a222's 221
+raw-protocol cases (only GSSENCRequest differs, by decision).
+
+Still differing (not done): an unterminated CSV quote at the end of the data reports the line
+it ends on (PostgreSQL: the line it starts on, `copy_in_csv_quote`); `select * from t0,
+fset(0)` with an empty t0 (PostgreSQL's plan runs the function scan, the engine's doesn't);
+the two "savepoint does not exist" and three "column ... of relation ... does not exist"
+routines aren't told apart (pg-engine location); date / timestamp / interval overflow
+routines (date_pli, timestamp_pl_interval, ... many sites).
+
+- **Scroll cursors after page splits**: not built; the design note is sharper. The model
+  already counts its page allocations: `Btree::sizes` (`SizeGen`) is bumped by every split
+  (`alloc`) and page deletion. A scroll cursor that records it at its first FETCH, and the
+  first FETCH that sees it change, knows at a turn whether any page the scan read can have
+  split since: unchanged (nearly always), today's placement is exact and nothing more is done.
+  Changed, it needs the pages as read; a bounded per-index split log (block split, new right
+  block, the first key moved right: one push per split, which already moves half a page of
+  items, so well under 1% of a split and nothing for an insert that doesn't split) lets the
+  turn map each row's current page back to the page it was on when its FETCH ran (rows on a
+  right half created after that FETCH were on its left page, recursively), falling back to
+  today's placement when the log has wrapped. Its cost to ordinary scans is zero (only scroll
+  cursors read the counter), to FETCH one load, to inserts one push per split. Not built
+  because the case (a scroll cursor turning after the same transaction split the pages it
+  read) is rare and the placement per load epoch needs the turn's page order rebuilt for
+  several epochs at once; measure a modelled-insert run (`bulk` lane C) before and after the
+  push if it is built.
