@@ -1077,6 +1077,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             for r in v["readers"].as_array().into_iter().flatten() {
                 println!("  read       by {:<32} {} reads, last {}", s(&r["actor"]), r["reads"], ago(r["last_at"].as_i64().unwrap_or_default()));
             }
+            eprintln!("Not counted: {}.", s(&v["uncounted"]));
         }
         Secrets::Export { format, name, namespace, change, at } => {
             let at = at.as_deref().map(when).transpose()?;

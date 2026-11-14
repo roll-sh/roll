@@ -29,11 +29,18 @@ pub struct Reach {
     pub syncs: Vec<SyncReach>,
     /// Other projects this folder is shared with (their importing folders read it).
     pub projects: Vec<String>,
-    /// This project's folders that import it (`env:/path`): their readers read it too.
+    /// Folders that import it (`env:/path`, another project's as `prj_…/env:/path`) and
+    /// environments based on it: their readers read it too, and are counted below.
     pub imported_by: Vec<String>,
-    /// Who read its values in the last [`READ_DAYS`] days, most recent first.
+    /// Who read its values in the last [`READ_DAYS`] days, most recent first: here, through a folder
+    /// that imports it, or an environment based on it. Reads through a `${…}` or `roll://` reference
+    /// in another key are recorded where they were read, and aren't counted ([`UNCOUNTED`]).
     pub readers: Vec<Reader>,
+    pub uncounted: &'static str,
 }
+
+/// What `readers` doesn't count.
+pub const UNCOUNTED: &str = "reads through a ${…} or roll:// reference in another key or file";
 
 /// A token or identity that reaches the folder, with what it may do there.
 #[derive(Debug, Serialize)]
@@ -94,38 +101,58 @@ impl Secrets {
                 (!actions.is_empty()).then_some(Holder { id: i.id, name: format!("{} ({} {})", i.name, i.issuer, i.subject), actions, expires_at: None, last_used_at: i.last_used_at, created_by: i.created_by })
             })
             .collect();
+        let projects = self.exports(project, slug, &path, caller)?.into_iter().map(|e| e.project).collect();
+        // Where its values are read besides here: folders that import it (in any project it's
+        // shared with) and environments based on it (previews). Reads are recorded where they
+        // happen, so each of those is looked at too.
+        type Source = (String, String, String);
+        let (env, sources, reads) = self.db.read(|c| {
+            let env = envs::by_slug(c, project, slug)?;
+            let mut sources: Vec<Source> = c.query(
+                "SELECT e.project_id, e.slug, i.path FROM imports i JOIN environments e ON e.id = i.env_id WHERE i.from_env_id = ? AND i.from_path = ? ORDER BY e.project_id, e.slug, i.path",
+                params![env.id, path],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            let derived: Vec<String> = c.query("SELECT slug FROM environments WHERE project_id = ? AND base_id = ? ORDER BY slug", params![project, env.id], |r| r.get(0))?;
+            sources.extend(derived.into_iter().map(|d| (project.to_string(), d, path.clone())));
+            let mut reads: Vec<(Source, String, i64, String)> = vec![];
+            for src in std::iter::once((project.to_string(), slug.to_string(), path.clone())).chain(sources.iter().cloned()) {
+                let rows: Vec<(String, i64, String)> = c.query(
+                    "SELECT actor, at, keys FROM audit WHERE project_id = ? AND env = ? AND path = ? AND at >= ? AND action IN ('secrets.reveal', 'secrets.export', 'secrets.resolve', 'sync.push') ORDER BY id DESC LIMIT ?",
+                    params![src.0, src.1, src.2, now - READ_DAYS * 86_400_000, READS_MAX],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?;
+                reads.extend(rows.into_iter().map(|(a, at, k)| (src.clone(), a, at, k)));
+            }
+            Ok::<_, Error>((env, sources, reads))
+        })?;
+        let here = |e: &str, p: &str| (e == slug && p == path) || sources.iter().any(|(sp, se, spath)| sp == project && se == e && spath == p);
         let syncs = self
             .list_syncs(project, caller)?
             .into_iter()
-            .filter(|s| s.environment == slug && s.path == path && key.is_none_or(|k| s.keys.as_ref().is_none_or(|ks| ks.iter().any(|x| x == k))))
+            .filter(|s| here(&s.environment, &s.path) && key.is_none_or(|k| s.keys.as_ref().is_none_or(|ks| ks.iter().any(|x| x == k))))
             .map(|s| SyncReach { id: s.id, kind: s.kind, target: s.target, last_synced_at: s.last_synced_at })
             .collect();
-        let projects = self.exports(project, slug, &path, caller)?.into_iter().map(|e| e.project).collect();
-        let (env, imported_by, reads) = self.db.read(|c| {
-            let env = envs::by_slug(c, project, slug)?;
-            let imported_by: Vec<String> = c.query(
-                "SELECT e.slug, i.path FROM imports i JOIN environments e ON e.id = i.env_id WHERE i.from_env_id = ? AND i.from_path = ? AND e.project_id = ? ORDER BY e.slug, i.path",
-                params![env.id, path, project],
-                |r| Ok(format!("{}:{}", r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-            )?;
-            let reads: Vec<(String, i64, String)> = c.query(
-                "SELECT actor, at, keys FROM audit WHERE project_id = ? AND env = ? AND path = ? AND at >= ? AND action IN ('secrets.reveal', 'secrets.export', 'secrets.resolve', 'sync.push') ORDER BY id DESC LIMIT ?",
-                params![project, slug, path, now - READ_DAYS * 86_400_000, READS_MAX],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?;
-            Ok::<_, Error>((env, imported_by, reads))
-        })?;
+        let imported_by: Vec<String> = sources.iter().map(|(p, e, at)| if p == project { format!("{e}:{at}") } else { format!("{p}/{e}:{at}") }).collect();
         let mut readers: BTreeMap<String, Reader> = BTreeMap::new();
-        for (actor, at, keys) in reads {
+        for ((sp, se, spath), actor, at, keys) in reads {
             if key.is_some_and(|k| !from_json::<Vec<String>>(&keys).iter().any(|x| x == k)) {
                 continue;
             }
-            let r = readers.entry(actor.clone()).or_insert(Reader { actor, last_at: at, reads: 0 });
+            // Another project's readers are its own: named by the project, not their tokens.
+            let who = if sp != project {
+                format!("project {sp}")
+            } else if se == slug && spath == path {
+                actor
+            } else {
+                format!("{actor} (through {se}:{spath})")
+            };
+            let r = readers.entry(who.clone()).or_insert(Reader { actor: who, last_at: at, reads: 0 });
             r.last_at = r.last_at.max(at);
             r.reads += 1;
         }
         let mut readers: Vec<Reader> = readers.into_values().collect();
         readers.sort_by_key(|r| std::cmp::Reverse(r.last_at));
-        Ok(Reach { environment: slug.to_string(), path, key: key.map(String::from), protected: env.protected, untrusted: !env.protected, tokens, identities, syncs, projects, imported_by, readers })
+        Ok(Reach { environment: slug.to_string(), path, key: key.map(String::from), protected: env.protected, untrusted: !env.protected, tokens, identities, syncs, projects, imported_by, readers, uncounted: UNCOUNTED })
     }
 }

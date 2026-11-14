@@ -48,7 +48,7 @@ function Body({ env, path, keyName }: { env: Environment; path: string; keyName:
           </li>
         ))}
       </Part>
-      <Part title="Read in the last 30 days" empty="Nobody read it in 30 days.">
+      <Part title="Read in the last 30 days" empty="Nobody read it in 30 days." note={`Not counted: ${r.uncounted}.`}>
         {r.readers.map((x) => (
           <li key={x.actor} className="flex items-center justify-between gap-3 px-3 py-2">
             <ActorMark who={x.actor} />
@@ -62,11 +62,12 @@ function Body({ env, path, keyName }: { env: Environment; path: string; keyName:
   );
 }
 
-function Part({ title, empty, children }: { title: string; empty: string; children: ReactNode[] }) {
+function Part({ title, empty, note, children }: { title: string; empty: string; note?: string; children: ReactNode[] }) {
   return (
     <section>
       <h3 className="mb-1.5 text-[11px] font-medium text-subtle">{title}</h3>
       {children.length ? <ul className="divide-y divide-line overflow-hidden rounded-lg border border-line-2 bg-panel">{children}</ul> : <p className="text-[12px] text-faint">{empty}</p>}
+      {note && <p className="mt-1.5 text-[11px] text-faint">{note}</p>}
     </section>
   );
 }
