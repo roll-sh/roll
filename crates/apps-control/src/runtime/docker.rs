@@ -147,17 +147,25 @@ impl Docker {
         if let Some(k) = self.known.lock().containers.get(name).cloned() {
             return Ok(k);
         }
-        // Made by an earlier process of this node: ask docker.
+        // Made by an earlier process of this node: ask docker. An instance in a sandbox
+        // publishes nothing itself; its port is the sandbox's.
+        let (id, mut port, cpu) = self.inspect_known(name).await?;
+        if port.is_none() {
+            port = self.inspect_known(&sandbox_name(name)).await.ok().and_then(|(_, p, _)| p);
+        }
+        self.known.lock().containers.insert(name.to_string(), (id.clone(), port, cpu));
+        Ok((id, port, cpu))
+    }
+
+    async fn inspect_known(&self, name: &str) -> anyhow::Result<(String, Option<u16>, Option<i64>)> {
         if let Some(e) = &self.engine {
             let i = e.inspect(name).await?;
-            self.known.lock().containers.insert(name.to_string(), (i.id.clone(), i.host_port, i.cpu_nanos));
             return Ok((i.id, i.host_port, i.cpu_nanos));
         }
         let id = docker(&["inspect", "-f", "{{.Id}}", name]).await?;
         let ports = docker(&["inspect", "-f", "{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}} {{end}}{{end}}", name]).await?;
         let port = ports.split_whitespace().next().and_then(|p| p.parse().ok());
         let cpu = docker(&["inspect", "-f", "{{index .Config.Labels \"sh.roll.apps.cpu\"}}", name]).await.ok().and_then(|c| c.parse().ok());
-        self.known.lock().containers.insert(name.to_string(), (id.clone(), port, cpu));
         Ok((id, port, cpu))
     }
 

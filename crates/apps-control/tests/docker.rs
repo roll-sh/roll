@@ -48,6 +48,35 @@ struct World {
     api: axum::Router,
     public: axum::Router,
     project: String,
+    db: code_sql::Db,
+    ws: Arc<roll_workspace::Workspace>,
+}
+
+impl World {
+    /// roll apps again on the same store and home, a new process (nothing in memory): the old
+    /// one's loops stop, its containers don't.
+    async fn restart(&mut self) {
+        self.apps.shutdown().await;
+        let store = Store::new(self.db.clone(), Sealer::new("0123456789abcdef0123456789abcdef").unwrap()).unwrap();
+        let cluster = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::solo()), roll_cluster::ClusterConfig::new("n1", "http://127.0.0.1:1", b"0123456789abcdef".to_vec())).unwrap();
+        let mut cfg = AppsConfig::new(self._dir.path().to_path_buf());
+        cfg.live.probe_every = Duration::from_millis(5);
+        let deps = Deps {
+            runtime: Arc::new(Docker::new(self._dir.path().join("scratch"))),
+            builder: Arc::new(DockerBuilder::new(2)),
+            sources: None,
+            secrets: Arc::new(NoSecrets),
+            resources: Arc::new(NoResources),
+            resolver: Arc::new(StaticDns::default()),
+            tls: Arc::new(apps_control::integrations::NoTls),
+            objects: None,
+            cluster,
+            workspace: Some(self.ws.clone()),
+        };
+        let apps = Apps::new(cfg, store, deps);
+        apps.start();
+        (self.api, self.public, self.apps) = (apps_control::api::router(apps.clone()), apps_control::public::router(apps.clone()), apps);
+    }
 }
 
 /// roll apps on this host's Docker, or None when the Docker tests aren't asked for.
@@ -68,7 +97,7 @@ async fn docker_world_with(netns: Option<bool>, setup: impl FnOnce(&mut AppsConf
     let ws = Arc::new(roll_workspace::Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
     let project = ws.create("", "measure", "", None).unwrap().id;
     let db = code_sql::Db::open_sqlite(&dir.path().join("apps.db"), code_sql::SqliteOptions { readers: 2, cache_kib: 1024 }).unwrap();
-    let store = Store::new(db, Sealer::new("0123456789abcdef0123456789abcdef").unwrap()).unwrap();
+    let store = Store::new(db.clone(), Sealer::new("0123456789abcdef0123456789abcdef").unwrap()).unwrap();
     let cluster = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::solo()), roll_cluster::ClusterConfig::new("n1", "http://127.0.0.1:1", b"0123456789abcdef".to_vec())).unwrap();
     let mut cfg = AppsConfig::new(dir.path().to_path_buf());
     cfg.live.probe_every = Duration::from_millis(5);
@@ -90,18 +119,18 @@ async fn docker_world_with(netns: Option<bool>, setup: impl FnOnce(&mut AppsConf
         tls: Arc::new(apps_control::integrations::NoTls),
         objects: None,
         cluster,
-        workspace: Some(ws),
+        workspace: Some(ws.clone()),
     };
     let apps = Apps::new(cfg, store, deps);
     apps.start();
     let api = apps_control::api::router(apps.clone());
     let public = apps_control::public::router(apps.clone());
-    Some(World { _dir: dir, apps, api, public, project })
+    Some(World { _dir: dir, apps, api, public, project, db, ws })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_static_site_builds_and_its_cold_starts_are_measured() {
-    let Some(World { _dir, apps, api, public, project }) = docker_world().await else { return };
+    let Some(World { _dir, apps, api, public, project, .. }) = docker_world().await else { return };
     // A pull through the Engine API with a login header (an empty one is anonymous): what a
     // private registry's pull runs, its progress read off the stream.
     {
@@ -594,3 +623,43 @@ async fn a_busy_instance_brings_another_on_its_cpu() {
     w.apps.shutdown().await;
 }
 
+
+/// rolld starting again (an upgrade, a crash) keeps the container the last process ran: the
+/// next visitor gets the same container, not started again (its start time unchanged), and
+/// one that was frozen is thawed. The instance's port is its network sandbox's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_keeps_the_running_container() {
+    let Some(mut w) = docker_world().await else { return };
+    let (id, host) = deploy_container(&w, "kept").await;
+    assert_eq!(get(&w.public, &host).await.0, StatusCode::OK);
+    let short = id.trim_start_matches("svc_");
+    let started = |name: String| async move { apps_control::runtime::docker::docker(&["inspect", "-f", "{{.State.StartedAt}}", &name]).await.unwrap() };
+    let names = apps_control::runtime::docker::docker(&["ps", "--filter", &format!("label=sh.roll.apps={id}"), "--format", "{{.Names}}"]).await.unwrap();
+    let name = names.lines().find(|n| n.starts_with(&format!("roll-apps-{short}-production-")) && !n.ends_with("-net") && !n.ends_with("-wake")).unwrap_or_else(|| panic!("{names}")).to_string();
+    let before = started(name.clone()).await;
+    w.restart().await;
+    assert_eq!(get(&w.public, &host).await.0, StatusCode::OK);
+    assert_eq!(started(name.clone()).await, before, "{name} kept running, not started again");
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
+    assert!(env["instances"].as_array().unwrap().iter().any(|i| i["id"] == name.as_str()), "{env}");
+    // Frozen when the process goes: still frozen, then thawed by the next visit.
+    let live = w.apps.live(&id, "production");
+    live.backdate(Duration::from_secs(31));
+    live.tick().await;
+    let paused = || async { apps_control::runtime::docker::docker(&["inspect", "-f", "{{.State.Paused}}", &name]).await };
+    assert_eq!(paused().await.unwrap(), "true");
+    w.restart().await;
+    let mut env = Value::Null;
+    for _ in 0..100 {
+        env = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await.1;
+        if env["state"] == "suspended" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(env["state"], "suspended", "{env}");
+    assert_eq!(get(&w.public, &host).await.0, StatusCode::OK);
+    assert_eq!(paused().await.unwrap(), "false");
+    assert_eq!(started(name.clone()).await, before, "thawed, not started again");
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+}
