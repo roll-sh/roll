@@ -72,36 +72,71 @@ export function isDotenvFile(fileName: string): boolean {
   return /(^|[\\/])\.env(\.[A-Za-z0-9_.-]+)?$/.test(fileName);
 }
 
-/** One `KEY=value` line of a dotenv file, offsets within the line; the value without its quotes. */
-export type DotenvLine = { line: number; key: string; keyStart: number; value: string; valueStart: number; valueEnd: number; reference: boolean };
+/**
+ * One `KEY=value` entry of a dotenv file, read as the CLI and the server read it (roll-secrets'
+ * `dotenv::parse`): a double-quoted value may run over several lines and unescapes `\n`, `\r`,
+ * `\t` and `\"`, with anything after its closing quote ignored; a single-quoted one is as written;
+ * an unquoted one ends at ` #`. It spans `line`:`from` (its opening quote, or its first character)
+ * to `endLine`:`to` (after its closing quote): replacing that range replaces all of it.
+ */
+export type DotenvLine = { line: number; endLine: number; key: string; value: string; from: number; to: number; reference: boolean };
 
-/** A dotenv file's entries (`export KEY=value`, quoted or not); comments and blank lines skipped. */
+/** Where a double-quoted value closes in `s` (an unescaped `"`), or -1. */
+function closing(s: string): number {
+  let escaped = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "\\" && !escaped) escaped = true;
+    else if (c === '"' && !escaped) return i;
+    else escaped = false;
+  }
+  return -1;
+}
+
+function unescape(s: string): string {
+  const named: Record<string, string> = { n: "\n", r: "\r", t: "\t" };
+  return s.replace(/\\(.?)/gs, (_, c: string) => named[c] ?? (c === "" ? "\\" : c));
+}
+
+/** A dotenv file's entries; one it can't read (an unclosed quote) ends the list, as the CLI refuses it. */
 export function dotenvLines(text: string): DotenvLine[] {
   const out: DotenvLine[] = [];
-  text.split(/\r?\n/).forEach((raw, line) => {
-    const m = /^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*/.exec(raw);
-    if (!m || raw.trimStart().startsWith("#")) return;
-    const keyStart = m[1].length;
-    let valueStart = m[0].length;
-    let value = raw.slice(valueStart).trimEnd();
-    let valueEnd = valueStart + value.length;
-    const quote = value[0];
-    if ((quote === '"' || quote === "'") && value.length >= 2 && value.endsWith(quote)) {
-      value = value.slice(1, -1);
-      valueStart += 1;
-      valueEnd -= 1;
-      // As the CLI reads it: double quotes unescape `\n`, `\"` and `\\`; single quotes are as written.
-      if (quote === '"') value = value.replace(/\\([n"\\])/g, (_, c: string) => (c === "n" ? "\n" : c));
-    } else {
-      // An unquoted value ends at a ` #` comment.
-      const hash = value.search(/\s#/);
-      if (hash >= 0) {
-        value = value.slice(0, hash);
-        valueEnd = valueStart + value.length;
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    if (raw.trimStart().startsWith("#")) continue;
+    const m = /^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)\s*=[ \t]*/.exec(raw);
+    if (!m) continue;
+    const from = m[0].length;
+    const rest = raw.slice(from);
+    const line = i;
+    if (rest.startsWith('"')) {
+      let cur = rest.slice(1);
+      let acc = "";
+      let end = closing(cur);
+      while (end < 0 && i + 1 < lines.length) {
+        acc += `${cur}\n`;
+        cur = lines[++i];
+        end = closing(cur);
       }
+      if (end < 0) break;
+      acc += cur.slice(0, end);
+      const to = (i === line ? from + 1 : 0) + end + 1;
+      const value = unescape(acc);
+      out.push({ line, endLine: i, key: m[2], value, from, to, reference: value.startsWith("roll://") });
+    } else if (rest.startsWith("'")) {
+      const end = rest.indexOf("'", 1);
+      if (end < 0) break;
+      const value = rest.slice(1, end);
+      out.push({ line, endLine: line, key: m[2], value, from, to: from + end + 1, reference: value.startsWith("roll://") });
+    } else {
+      const cut = rest.indexOf(" #");
+      const body = cut >= 0 ? rest.slice(0, cut) : rest;
+      const value = body.trim();
+      const start = from + (body.length - body.trimStart().length);
+      out.push({ line, endLine: line, key: m[2], value, from: start, to: start + value.length, reference: value.startsWith("roll://") });
     }
-    out.push({ line, key: m[2], keyStart, value, valueStart, valueEnd, reference: value.startsWith("roll://") });
-  });
+  }
   return out;
 }
 

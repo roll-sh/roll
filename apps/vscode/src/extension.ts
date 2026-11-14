@@ -38,12 +38,17 @@ export function activate(context: vscode.ExtensionContext) {
     const folder = (uri && vscode.workspace.getWorkspaceFolder(uri)) ?? vscode.workspace.workspaceFolders?.[0];
     const cfg = vscode.workspace.getConfiguration("roll", folder);
     const setup = folder ? nearestSetup(setups(), folder.uri.fsPath) : undefined;
-    const project = cfg.get<string>("project") || setup?.project;
+    // Your own settings only (machine scope, and read so): a repository's .vscode/settings.json
+    // mustn't choose where your token goes or which project "Move to roll" writes to.
+    const own = (key: string) => vscode.workspace.getConfiguration("roll").inspect<string>(key)?.globalValue || undefined;
+    const project = own("project") || setup?.project;
     const token = (await context.secrets.get(TOKEN)) || process.env.ROLL_TOKEN;
     if (!project || !token) return null;
     const env = context.workspaceState.get<string>("roll.environment") || cfg.get<string>("environment") || setup?.env || "development";
-    const api = cfg.get<string>("apiUrl") || process.env.ROLL_API_URL || "http://127.0.0.1:7070";
-    return { conn: { api, token, project }, name: setup?.name ?? project, env, path: cfg.get<string>("path") || setup?.path || "/" };
+    const api = own("apiUrl") || process.env.ROLL_API_URL || "http://127.0.0.1:7070";
+    // The name only when it's the setup's own project: confirmations name what's written to.
+    const name = setup && setup.project === project ? `${setup.name} (${project})` : project;
+    return { conn: { api, token, project }, name, env, path: cfg.get<string>("path") || setup?.path || "/" };
   }
 
   /** The folder's grid, kept a minute (names and presence only). */
@@ -137,13 +142,13 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.languages.registerCodeActionsProvider(dotenv, {
       async provideCodeActions(doc, range) {
         if (!isDotenvFile(doc.fileName)) return;
-        const line = dotenvLines(doc.getText()).find((l) => l.line === range.start.line);
+        const line = dotenvLines(doc.getText()).find((l) => l.line <= range.start.line && range.start.line <= l.endLine);
         if (!line || line.reference || !line.value) return;
         const at = await current(doc.uri);
         if (!at) return;
         const ref = rollRef(at.w.env, at.w.path, line.key);
         if (!ref) return;
-        const span = new vscode.Range(line.line, line.valueStart, line.line, line.valueEnd);
+        const span = new vscode.Range(line.line, line.from, line.endLine, line.to);
         const actions: vscode.CodeAction[] = [];
         if (presence(at.grid, line.key).set.includes(at.w.env)) {
           const a = new vscode.CodeAction(`Replace with ${ref}`, vscode.CodeActionKind.RefactorRewrite);
@@ -201,8 +206,15 @@ export function activate(context: vscode.ExtensionContext) {
         void vscode.window.showErrorMessage(`roll secrets: ${line.key} wasn't moved (${why}).`);
         return;
       }
+      // As the file is now: an edit made while roll answered must not be written over.
+      const now = dotenvLines(doc.getText()).find((l) => l.key === line.key && l.value === line.value);
+      if (!now) {
+        void vscode.window.showWarningMessage(`roll secrets: ${line.key} is in ${at.w.env}, but the line changed meanwhile: replace its value with ${ref} yourself.`);
+        await refreshAll(true);
+        return;
+      }
       const edit = new vscode.WorkspaceEdit();
-      edit.replace(uri, new vscode.Range(line.line, line.valueStart, line.line, line.valueEnd), ref);
+      edit.replace(uri, new vscode.Range(now.line, now.from, now.endLine, now.to), ref);
       await vscode.workspace.applyEdit(edit);
       void vscode.window.showInformationMessage(`roll secrets: ${line.key} is in ${at.w.env}; this file now holds ${ref}. Save it, and run with roll run --env-file ${path.basename(doc.fileName)}.`);
       // What the open files read has changed: their warnings too.

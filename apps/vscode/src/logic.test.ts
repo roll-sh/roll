@@ -39,17 +39,35 @@ describe("the code's environment reads", () => {
 });
 
 describe("dotenv files", () => {
-  it("give each entry's value and where it is, quotes and comments aside", () => {
+  it("are read as the CLI reads them, and each entry's range covers all of it", () => {
     expect(isDotenvFile("/w/app/.env.local") && isDotenvFile(".env") && !isDotenvFile("/w/env.ts")).toBe(true);
-    const lines = dotenvLines(`# db\nexport DATABASE_URL="postgres://u:p@h/db"\nSTRIPE_KEY=sk_test_1 # test key\nREF=roll://staging/STRIPE_KEY\n`);
-    expect(lines.map((l) => [l.line, l.key, l.value, l.reference])).toEqual([
-      [1, "DATABASE_URL", "postgres://u:p@h/db", false],
-      [2, "STRIPE_KEY", "sk_test_1", false],
-      [3, "REF", "roll://staging/STRIPE_KEY", true],
+    const text = [
+      "# db",
+      'export DATABASE_URL="postgres://u:p@h/db" # the main one',
+      "STRIPE_KEY=sk_test_1 # test key",
+      "TABBED=a\t#b",
+      'PEM="-----BEGIN KEY-----',
+      "MIIBVgIBADAN",
+      '-----END KEY-----"',
+      "REF=roll://staging/STRIPE_KEY",
+      "ESC=\"a\\nb \\\"c\\\"\"",
+    ].join("\n");
+    const lines = dotenvLines(text);
+    expect(lines.map((l) => [l.line, l.endLine, l.key, l.value, l.reference])).toEqual([
+      [1, 1, "DATABASE_URL", "postgres://u:p@h/db", false],
+      [2, 2, "STRIPE_KEY", "sk_test_1", false],
+      [3, 3, "TABBED", "a\t#b", false],
+      [4, 6, "PEM", "-----BEGIN KEY-----\nMIIBVgIBADAN\n-----END KEY-----", false],
+      [7, 7, "REF", "roll://staging/STRIPE_KEY", true],
+      [8, 8, "ESC", 'a\nb "c"', false],
     ]);
+    // Replacing an entry's range replaces all of it: the quotes, every line of a multi-line one.
+    const rows = text.split("\n");
+    const pem = lines[3];
+    const replaced = [...rows.slice(0, pem.line), rows[pem.line].slice(0, pem.from) + "roll://x/PEM" + rows[pem.endLine].slice(pem.to), ...rows.slice(pem.endLine + 1)];
+    expect(replaced.slice(4, 6)).toEqual(["PEM=roll://x/PEM", "REF=roll://staging/STRIPE_KEY"]);
     const db = lines[0];
-    expect(`export DATABASE_URL="postgres://u:p@h/db"`.slice(db.valueStart, db.valueEnd)).toBe(db.value);
-    expect(dotenvLines(`PEM="a\\nb \\"c\\""`)[0].value).toBe('a\nb "c"');
+    expect(rows[1].slice(db.from, db.to)).toBe('"postgres://u:p@h/db"');
     expect(rollRef("staging", "/payments", "STRIPE_KEY")).toBe("roll://staging/payments/STRIPE_KEY");
   });
 });
