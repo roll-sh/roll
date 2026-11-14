@@ -585,6 +585,14 @@ struct ResolveBody {
     /// an ephemeral environment's base.
     #[serde(default)]
     untrusted: bool,
+    /// `false`: a consumer that can't renew a lease (a preview's service, a job) gets no dynamic
+    /// credential; such keys are left out and named in `dynamic`.
+    #[serde(default = "yes")]
+    dynamic: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// Runtime resolve for services (roll apps, previews, sandboxes, tasks).
@@ -597,10 +605,10 @@ async fn resolve(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
     }
     let path = r.path.unwrap_or_else(|| "/".into());
     let (p, e, cons) = (project.clone(), env.clone(), consumer.clone());
-    let untrusted = r.untrusted;
+    let (untrusted, dynamic) = (r.untrusted, r.dynamic);
     let v = blocking(s, move |s| {
         let c = if untrusted { s.untrusted(&p, &c)? } else { c };
-        s.values(&p, &e, &path, true, Some(&cons), &c)
+        s.values_for(&p, &e, &path, true, Some(&cons), dynamic, &c)
     })
     .await?;
     let out = match r.seal_to {

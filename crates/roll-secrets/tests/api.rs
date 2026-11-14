@@ -836,6 +836,10 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     let pulled = api.ok(Method::GET, "/environments/staging/values?dynamic=false&strict=1", None).await;
     assert!(pulled["values"].get("TEMP_KEY").is_none() && pulled["dynamic"] == json!(["TEMP_KEY"]), "{pulled}");
     assert_eq!((pulled["leases"].as_array().map(Vec::len), api.fake.live_keys.lock().unwrap().len()), (Some(0), 3));
+    // So does a service's resolve that can't renew (a preview's): no credential, no lease.
+    let preview = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "preview:pr-7", "dynamic": false }))).await;
+    assert!(preview["values"].get("TEMP_KEY").is_none() && preview["dynamic"] == json!(["TEMP_KEY"]) && preview["leases"] == json!([]), "{preview}");
+    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
     api.set("staging", "BROKEN", "${NOPE}").await;
     let (s, e) = api.call(Method::GET, "/environments/staging/values?dynamic=false&strict=1", None).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("unresolved")), "{e}");
