@@ -147,23 +147,26 @@ pub enum Error {
 pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
     // A Procfile (Heroku's; Nixpacks and Railpack read it too) names the start command when
     // the service doesn't, unless the tree's own Dockerfile has its CMD.
+    // A static site stays one (its files served, nothing running) whatever a Procfile says.
     let procfile = procfile(tree);
     let own_dockerfile = overrides.builder == Builder::Dockerfile || tree.read("Dockerfile").is_some();
-    let mut o = overrides.clone();
-    let from_procfile = match (&o.process, o.start.as_deref().map(str::trim).filter(|s| !s.is_empty())) {
-        (Some(process), None) if !own_dockerfile => procfile.get(process.as_str()).map(|cmd| (process.clone(), cmd.clone())),
+    let mut p = detect(tree, overrides)?;
+    let from_procfile = match (&overrides.process, overrides.start.as_deref().map(str::trim).filter(|s| !s.is_empty())) {
+        (Some(process), None) if !own_dockerfile && p.provider != Provider::Static => procfile.get(process.as_str()).map(|cmd| (process.clone(), cmd.clone())),
         _ => None,
     };
-    if let Some((_, cmd)) = &from_procfile {
-        o.start = Some(cmd.clone());
-    }
-    let mut p = detect(tree, &o)?;
-    if let Some((process, cmd)) = from_procfile {
+    if let Some((process, cmd)) = &from_procfile {
+        p = detect(tree, &Overrides { start: Some(cmd.clone()), ..overrides.clone() })?;
         let said = format!("start is set in the service: {cmd}");
         p.notes.retain(|n| *n != said);
         p.notes.push(format!("start: the Procfile's {process}: {cmd}"));
     }
-    if !own_dockerfile && let Some(cmd) = procfile.get("release") {
+    // Heroku's release phase runs once per app: for its web service, not its workers or crons.
+    if !own_dockerfile
+        && p.provider != Provider::Static
+        && overrides.process.as_deref() == Some("web")
+        && let Some(cmd) = procfile.get("release")
+    {
         p.release = Some(cmd.clone());
         p.notes.push(format!("pre-deploy: the Procfile's release: {cmd}"));
     }

@@ -170,9 +170,11 @@ every deployment is immutable with instant rollback.
 - **One queue per service and environment.** A new deploy waits for the one in flight; a newer
   push supersedes queued ones that haven't started (`superseded`), as on Railway, and stops a
   push's build that's still running (`superseded`, "a newer push replaced it": its build minutes
-  saved, the newer one next). The build's owner looks for one every 3 s, whichever node queued
-  it; a deploy already rolling out finishes, and a deploy someone asked for (not a push) is
-  never stopped. Different environments deploy in parallel.
+  saved, the newer one next). Newer is by landing (a push whose checks passed late never stops a
+  later push's build), else by when it was queued. The build's owner looks for one every 3 s,
+  whichever node queued it, and a build that lost its status while it ran never rolls out; a
+  deploy already rolling out finishes, and a deploy someone asked for (not a push) is never
+  stopped. Different environments deploy in parallel.
 - **States**: `queued → building → deploying → active`, or `failed`, `canceled`, `superseded`;
   an active deployment becomes `inactive` when another replaces it. The dashboard maps them onto
   the shared mark states through `MarkStateProvider` (`deploying` while building or rolling out,
@@ -881,7 +883,8 @@ proxy answers from the tar directly: an index of its regular files (name → off
 read once per node, byte ranges read per request. Nothing is extracted, so a tenant's archive
 can't place a symlink or a `..` path anywhere: anything that isn't a regular file with plain
 path components is left out of the index. GET and HEAD; a file, a directory's `index.html`, a page's `<path>.html` (`/about` answers
-`about.html`, as Next's static export and Astro's `build.format: "file"` write pages), a
+`about.html`, as Next's static export and Astro's `build.format: "file"` write pages, and counts
+as there for `_redirects`; `/about/` doesn't, its relative links would point inside it), a
 single-page app's index for a page path, or the site's `404.html` with a 404; ETags (304s),
 `no-cache` on HTML, a year (`immutable`) on fingerprinted files and five minutes on the rest,
 `nosniff`. A file is fingerprinted when its name changes with its bytes: in a build's asset
@@ -915,10 +918,15 @@ encoding has its own ETag, and `Vary: Accept-Encoding` goes on every such file.
 
 A page loaded before a deploy keeps working after it (Vercel's skew protection, for static
 sites): a fingerprinted file the live site doesn't have, which is what a lazy-loaded chunk of the
-old build is, is served from the environment's last three static deployments before it
-(`Apps::earlier_site_file`), where Vite's "failed to fetch dynamically imported module" would
-otherwise follow every deploy. Only fingerprinted names, so a page or file the new build removed
-is gone at once.
+old build is, is served from the environment's last three static deployments before the live one
+(`Apps::earlier_site_file`) for a day after it went live, where Vite's "failed to fetch
+dynamically imported module" would otherwise follow every deploy. It's looked for where the live
+site would answer a 404 or a rewrite (a single-page app's `/* /index.html 200` included), never
+past a `_redirects` rule that hides the path (a 404 rule) or redirects it; never from a deployment
+rolled back from; cached five minutes, not a year; each earlier site loaded once at a time (the
+others wait for it), and one that doesn't load is tried again after a minute. Fingerprinted means
+a bundler's kind of file (scripts, styles, maps, WebAssembly, JSON, fonts, images), so a document
+or a download with digits in its name is never one.
 
 A file sent as it is takes one byte range (`Range: bytes=…`, `Accept-Ranges: bytes`), so Safari
 plays a site's video and a download resumes: a 206 with `Content-Range`, a 416 past the end,
@@ -1271,9 +1279,10 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   another port, through its last `EXPOSE`.
 - A **Procfile** (Heroku's; Nixpacks and Railpack read it too) moves a Heroku app over unchanged:
   `web:` is a web service's start command and `worker:` a worker's when the service names
-  none, and `release:` is the deployment's pre-deploy command (Heroku's release phase) when the
-  service sets none; the plan's notes say which. A tree's own Dockerfile keeps its `CMD` and
-  reads no Procfile.
+  none, and `release:` is a web service's pre-deploy command (Heroku's release phase, once per
+  app: never a worker's or a cron's) when the service sets none; the plan's notes say which. A
+  tree's own Dockerfile keeps its `CMD` and reads no Procfile, a static site stays one, and a
+  package of a JS workspace built from the repo's root doesn't take the root's Procfile.
 - Builds on one node's Docker share one BuildKit, and two things in it were shared by every
   service: cache mounts (`RUN --mount=type=cache`: npm's, pip's, Go's and Cargo's caches,
   `.next/cache`), keyed by their id (the target path by default), and the layer cache, whose key

@@ -63,6 +63,8 @@ describe("pasted .env text", () => {
     const vars = { URL: "postgres://u:p@h:5432/db?ssl=true", SPACED: " a b ", QUOTE: `it's "x"`, PEM: "-----BEGIN-----\nabc\\n\t\r\n-----END-----", EMPTY: "", HASH: "a #b", DOLLAR: "$HOME" };
     expect(parseEnv(toEnv(vars))).toEqual({ vars, errors: [] });
     expect(toEnv({ A: "plain", B: "two words" })).toBe("A=plain\nB='two words'\n");
+    const odd = parseEnv("__proto__=x\ntoString=y\n").vars;
+    expect([Object.keys(odd), odd.__proto__, Object.hasOwn(odd, "constructor")]).toEqual([["__proto__", "toString"], "x", false]);
   });
 });
 

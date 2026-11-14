@@ -209,7 +209,9 @@ pub struct Apps {
     /// Static sites' file indexes, by image digest, as this node read them.
     sites: Mutex<HashMap<String, Arc<sites::Site>>>,
     /// Per environment, for the live site's key: its earlier static deployments' site keys.
-    earlier_sites: Mutex<HashMap<String, (String, Vec<String>)>>,
+    earlier_sites: Mutex<HashMap<String, sites::EarlierSites>>,
+    /// A site being loaded, per key: one load at a time (the rest wait for it).
+    site_loads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Environments in a crash loop whose event is written (one per loop).
     looping: Mutex<std::collections::HashSet<String>>,
     /// For notification targets: public addresses only, no redirects.
@@ -306,6 +308,7 @@ impl Apps {
             scaling: std::sync::atomic::AtomicBool::new(false),
             sites: Mutex::new(HashMap::new()),
             earlier_sites: Mutex::new(HashMap::new()),
+            site_loads: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             ws_shells: Mutex::new(HashMap::new()),
             tunnels: Mutex::new(HashMap::new()),

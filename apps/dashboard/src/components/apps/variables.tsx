@@ -98,16 +98,21 @@ export function VariablesTab({
 
   const editRaw = async () => {
     if (raw) return setRaw(null);
-    const own = (vars?.vars ?? []).filter((v) => (v.source === "service" || v.source === "reference") && !v.sealed);
+    // The list as it is now (another person may have changed it), then the values.
+    const fresh = await runner.run("reveal", () => appsApi.variables(service, env.name));
+    if (!fresh) return;
+    setVars(fresh);
+    const own = fresh.vars.filter((v) => (v.source === "service" || v.source === "reference") && !v.sealed);
     const v = own.some((x) => !x.reference) ? await runner.run("reveal", () => appsApi.reveal(service, env.name)) : {};
     if (!v) return;
-    const base = Object.fromEntries(own.map((x) => [x.name, x.reference ?? v[x.name] ?? ""]));
+    // Only what both answers have: one sealed or removed in between isn't in the text.
+    const base = Object.fromEntries(own.filter((x) => x.reference !== undefined || Object.hasOwn(v, x.name)).map((x) => [x.name, x.reference ?? v[x.name]]));
     setRaw({ base, text: toEnv(base) });
   };
   const saveRaw = async () => {
     if (!raw || !rawParsed || rawParsed.errors.length) return;
-    const set = Object.fromEntries(Object.entries(rawParsed.vars).filter(([k, v]) => raw.base[k] !== v));
-    const unset = Object.keys(raw.base).filter((k) => !(k in rawParsed.vars));
+    const set = Object.fromEntries(Object.entries(rawParsed.vars).filter(([k, v]) => !Object.hasOwn(raw.base, k) || raw.base[k] !== v));
+    const unset = Object.keys(raw.base).filter((k) => !Object.hasOwn(rawParsed.vars, k));
     const out = await runner.run("variables", () => appsApi.setVariables(service, env.name, { set, unset }));
     if (out) {
       setVars(out);

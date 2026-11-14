@@ -415,14 +415,16 @@ async fn a_newer_push_stops_the_build_of_an_older_one() {
     let id = svc["id"].as_str().unwrap().to_string();
     settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
     let pkg = ("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#);
+    let builds = Fake::count(&w.fake.counts.builds);
     w.code.push("b2b2b2b2b2b2", "slow", &[pkg, ("SLOW_BUILD", "30000")]);
     let deploys = |w: &World| {
         let (api, id) = (w.api.clone(), id.clone());
         async move { call(&api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys"), None).await.1 }
     };
     let by_rev = |all: &Value, rev: &str| all.as_array().unwrap().iter().find(|d| d["revision"] == rev).cloned();
+    // Its build has begun (its tree read: the fake's checkout is whatever was pushed last).
     for _ in 0..500 {
-        if by_rev(&deploys(&w).await, "b2b2b2b2b2b2").is_some_and(|d| d["status"] == "building") {
+        if by_rev(&deploys(&w).await, "b2b2b2b2b2b2").is_some_and(|d| d["status"] == "building") && Fake::count(&w.fake.counts.builds) > builds {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;

@@ -689,7 +689,10 @@ fn a_procfile_names_the_start_command_and_the_release_phase() {
     assert_eq!(web.release.as_deref(), Some("npx prisma migrate deploy"));
     assert!(web.notes.iter().any(|n| n == "start: the Procfile's web: node server.js --port $PORT") && !web.notes.iter().any(|n| n.starts_with("start is set")), "{:?}", web.notes);
     let worker = plan(&tree(&files), &Overrides { process: Some("worker".into()), ..Default::default() }).unwrap();
-    assert_eq!(worker.start.as_deref(), Some("node jobs.js"));
+    assert_eq!((worker.start.as_deref(), worker.release), (Some("node jobs.js"), None), "a worker runs no release phase");
+    // A static site stays one.
+    let site = plan(&tree(&[("index.html", "<h1>hi</h1>"), ("Procfile", "web: npx serve .\nrelease: x\n")]), &Overrides { process: Some("web".into()), ..Default::default() }).unwrap();
+    assert_eq!((site.provider, site.release), (Provider::Static, None));
     // The service's own start wins, and a tree's Dockerfile keeps its CMD.
     let set = plan(&tree(&files), &Overrides { process: Some("web".into()), start: Some("node other.js".into()), ..Default::default() }).unwrap();
     assert_eq!(set.start.as_deref(), Some("node other.js"));

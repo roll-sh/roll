@@ -41,8 +41,11 @@ pub fn isolate_caches(dockerfile: &[u8], ns: &str) -> Vec<u8> {
             continue;
         }
         let word_end = (i..d.len()).find(|&j| !d[j].is_ascii_alphabetic()).unwrap_or(d.len());
-        let run = d[i..word_end].eq_ignore_ascii_case(b"RUN");
-        let from = d[i..word_end].eq_ignore_ascii_case(b"FROM");
+        let word = &d[i..word_end];
+        let run = word.eq_ignore_ascii_case(b"RUN");
+        let from = word.eq_ignore_ascii_case(b"FROM");
+        // Only these take heredocs.
+        let heredocs = run || word.eq_ignore_ascii_case(b"COPY") || word.eq_ignore_ascii_case(b"ADD");
         let mut at = word_end;
         if run {
             // Its flags, each `--…` up to unquoted whitespace.
@@ -59,7 +62,7 @@ pub fn isolate_caches(dockerfile: &[u8], ns: &str) -> Vec<u8> {
                 at = end;
             }
         }
-        i = instruction_end(d, at, escape);
+        i = instruction_end(d, at, escape, heredocs);
         if from {
             let nl = if i > 0 && d[i - 1] != b'\n' { "\n" } else { "" };
             inserts.push((i, format!("{nl}ARG {LAYERS_ARG}\n")));
@@ -184,9 +187,11 @@ fn is_cache_mount(flag: &[u8]) -> bool {
     })
 }
 
-/// Where the instruction from `i` ends: its continuations, and a heredoc's body (`<<EOF`,
-/// `<<-"EOF"`) after it.
-fn instruction_end(d: &[u8], mut i: usize, escape: u8) -> usize {
+/// Where the instruction from `i` ends: its continuations, and (`heredocs`: `RUN`, `COPY`, `ADD`)
+/// the body of each heredoc it opens after it. A heredoc is a word of its own, outside quotes,
+/// that starts `<<` (`<<EOF`, `<<-"EOF"`), as BuildKit reads them; one whose end word never comes
+/// skips nothing (BuildKit refuses the file anyway).
+fn instruction_end(d: &[u8], mut i: usize, escape: u8, heredocs: bool) -> usize {
     let start = i;
     while i < d.len() {
         if let Some(j) = continuation(d, i, escape) {
@@ -199,32 +204,47 @@ fn instruction_end(d: &[u8], mut i: usize, escape: u8) -> usize {
         }
         i += 1;
     }
-    // Every heredoc the instruction opens, in order, each ended by its word on a line of its own.
-    let text = String::from_utf8_lossy(&d[start..i]).into_owned();
-    let mut words = Vec::new();
-    let mut rest = text.as_str();
-    while let Some(p) = rest.find("<<") {
-        let mut w = &rest[p + 2..];
-        let dash = w.starts_with('-');
-        if dash {
-            w = &w[1..];
+    if !heredocs {
+        return i;
+    }
+    // Its words, outside quotes.
+    let mut words: Vec<(String, bool)> = Vec::new();
+    let mut at = start;
+    while at < i {
+        at = skip_space(d, at, escape);
+        if at >= i || d[at] == b'\n' {
+            break;
         }
-        let w = w.trim_start_matches(['"', '\'']);
-        let word: String = w.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-        if !word.is_empty() {
-            words.push((word, dash));
+        let first = d[at];
+        let (end, value) = token(d, at, escape);
+        if first == b'<' && value.starts_with(b"<<") {
+            let mut w = &value[2..];
+            let dash = w.first() == Some(&b'-');
+            if dash {
+                w = &w[1..];
+            }
+            if !w.is_empty() && w.iter().all(|b| b.is_ascii_graphic() && *b != b'<') {
+                words.push((String::from_utf8_lossy(w).into_owned(), dash));
+            }
         }
-        rest = &rest[p + 2..];
+        at = end.max(at + 1);
     }
     for (word, dash) in words {
-        while i < d.len() {
-            let end = line_end(d, i);
-            let line = String::from_utf8_lossy(&d[i..end]);
+        let mut j = i;
+        let mut ended = None;
+        while j < d.len() {
+            let end = line_end(d, j);
+            let line = String::from_utf8_lossy(&d[j..end]);
             let line = line.trim_end_matches(['\n', '\r']);
-            i = end;
+            j = end;
             if (if dash { line.trim_start_matches('\t') } else { line }) == word {
+                ended = Some(j);
                 break;
             }
+        }
+        match ended {
+            Some(e) => i = e,
+            None => break,
         }
     }
     i
@@ -270,6 +290,11 @@ mod tests {
         assert!(count("RUN echo '--mount=type=cache,target=/y'\n") == 0);
         assert!(count("RUN <<EOF\nRUN --mount=type=cache,target=/z x\nEOF\nCOPY --mount=type=cache,target=/w . .\n") == 0);
         assert_eq!(count("RUN <<-EOT\n\tx\n\tEOT\nRUN --mount=type=cache,target=/after true\n"), 1, "after a heredoc, the next instruction");
+        // `<<` that isn't a heredoc: a shift, inside quotes, another instruction; an end word with `-`.
+        for not_one in ["RUN echo $((1<<20))\n", "RUN python -c \"print(1<<3)\"\n", "LABEL x=\"a<<b\"\n", "RUN cat <<EOF\n"] {
+            assert_eq!(count(&format!("{not_one}RUN --mount=type=cache,target=/next true\n")), 1, "{not_one}");
+        }
+        assert_eq!(count("RUN <<END-OF\nRUN --mount=type=cache,target=/in x\nEND-OF\nRUN --mount=type=cache,target=/out y\n"), 1, "an end word with a dash");
         // Bytes that aren't UTF-8 stay as they are.
         let latin1 = b"# caf\xe9\nRUN --mount=type=cache,target=/x echo \xe9\n";
         let out = isolate_caches(latin1, "NS");

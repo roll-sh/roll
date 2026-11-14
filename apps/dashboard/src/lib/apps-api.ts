@@ -139,7 +139,8 @@ export interface NewService {
  * as Compose's env files read them). Lines it can't read are named in `errors` (1-based).
  */
 export function parseEnv(text: string): { vars: Record<string, string>; errors: number[] } {
-  const vars: Record<string, string> = {};
+  // No prototype: `__proto__` and `toString` are names like any other.
+  const vars: Record<string, string> = Object.create(null);
   const errors: number[] = [];
   text.split(/\r?\n/).forEach((raw, i) => {
     const line = raw.trim().replace(/^export\s+/, "");

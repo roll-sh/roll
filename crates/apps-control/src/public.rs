@@ -271,7 +271,11 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
         done(404, 0);
         return not_found();
     }
-    let resolved = match site.rules.redirect(&path, req.query.as_deref(), crate::sites::exists(&site, &path)) {
+    let own = crate::sites::exists(&site, &path);
+    // A rule that hides a path (a 404 rule) or sends it elsewhere decides it; a rewrite or no
+    // rule at all leaves a missing fingerprinted file to the site's earlier deployments.
+    let mut skew_ok = !own;
+    let resolved = match site.rules.redirect(&path, req.query.as_deref(), own) {
         Some(crate::site_rules::Outcome::Redirect(status, to)) => {
             done(status, 0);
             let mut r = Response::new(Body::empty());
@@ -281,26 +285,32 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
             }
             return r;
         }
-        Some(crate::site_rules::Outcome::Serve(status, to)) => crate::sites::resolve(&site, &to, false).filter(|(_, s)| *s == 200).map(|(n, _)| (n, status)),
+        Some(crate::site_rules::Outcome::Serve(status, to)) => {
+            skew_ok &= status == 200;
+            crate::sites::resolve(&site, &to, false).filter(|(_, s)| *s == 200).map(|(n, _)| (n, status))
+        }
         None => crate::sites::resolve(&site, &path, tpl.spa),
     };
     // A fingerprinted file the live site doesn't have may be an earlier deployment's, asked for by
-    // a page loaded before the deploy (a lazy-loaded chunk): served from there (skew protection).
+    // a page loaded before the deploy (a lazy-loaded chunk): served from there (skew protection),
+    // even where a single-page app's rewrite would answer its index.
     let resolved = resolved.map(|(n, s)| (n.to_string(), s));
-    let (site, key, name, status) = match resolved {
-        Some((n, 200)) => (site, key, n, 200),
-        other => match apps.earlier_site_file(service, env, &key, &path).await {
-            Some((s, k, n)) => (s, k, n, 200),
-            None => match other {
-                Some((n, s)) => (site, key, n, s),
-                None => {
-                    done(404, 0);
-                    return not_found();
-                }
-            },
-        },
+    let earlier = match skew_ok {
+        true => apps.earlier_site_file(service, env, &key, &path).await,
+        false => None,
+    };
+    let skewed = earlier.is_some();
+    let (site, key, name, status) = match (earlier, resolved) {
+        (Some((s, k, n)), _) => (s, k, n, 200),
+        (None, Some((n, s))) => (site, key, n, s),
+        (None, None) => {
+            done(404, 0);
+            return not_found();
+        }
     };
     let name = name.as_str();
+    // The site's own `_headers` for the path, on a 304 as on the answer (a cache takes a 304's).
+    let site_headers = site.rules.headers(&path);
     let ctype = crate::sites::content_type(name);
     // Compressed as Render's and Vercel's static sites are: the build's own `.br` or `.gz` of the
     // file, else gzipped here (once: a site never changes), for text-like files the client takes
@@ -328,12 +338,15 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
     };
     let cache = match () {
         _ if ctype.starts_with("text/html") => "no-cache",
-        // Its name changes whenever its bytes do.
-        _ if status == 200 && crate::sites::fingerprinted(name) => "public, max-age=31536000, immutable",
+        // The URL asked for names its bytes (never a rewrite's stable name, nor an earlier
+        // deployment's file, which a rule could hide tomorrow).
+        _ if status == 200 && !skewed && name == path.trim_matches('/') && crate::sites::fingerprinted(name) => "public, max-age=31536000, immutable",
         _ => "public, max-age=300",
     };
     let etag = etag_of(encoding);
-    if status == 200 && req.if_none_match.as_deref().is_some_and(|v| v.split(',').any(|t| t.trim() == etag)) {
+    // Weak comparison (a CDN that compresses weakens the tag: `W/"…"`), and `*`.
+    let matches = |v: &str| v.split(',').map(|t| t.trim()).any(|t| t == "*" || t.strip_prefix("W/").unwrap_or(t) == etag);
+    if status == 200 && req.if_none_match.as_deref().is_some_and(matches) {
         done(304, 0);
         let mut r = StatusCode::NOT_MODIFIED.into_response();
         let h = r.headers_mut();
@@ -342,6 +355,7 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
         if compress {
             h.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
         }
+        own_headers(h, &site_headers, compress);
         return r;
     }
     // The bytes: the build's own compressed file, ours, or the file (when ours can't be had now).
@@ -429,11 +443,17 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
     h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("ascii"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     h.insert(HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff"));
-    // Its own `_headers` over roll's (each checked when the file was read).
+    own_headers(h, &site_headers, compress);
+    r
+}
+
+/// A site's own `_headers` over roll's (each checked when the file was read): the first a block
+/// sets replaces roll's, more of one name add to it. Its own `Vary` never drops what the encoding
+/// varies on (a cache would hand gzip to a client that can't read it).
+fn own_headers(h: &mut axum::http::HeaderMap, headers: &[(String, String)], compress: bool) {
     let mut set = std::collections::HashSet::new();
-    for (n, v) in site.rules.headers(&path) {
-        if let (Ok(n), Ok(v)) = (HeaderName::from_bytes(n.as_bytes()), HeaderValue::from_str(&v)) {
-            // The first a block sets replaces roll's; more of one name add to it.
+    for (n, v) in headers {
+        if let (Ok(n), Ok(v)) = (HeaderName::from_bytes(n.as_bytes()), HeaderValue::from_str(v)) {
             if set.insert(n.clone()) {
                 h.insert(n, v);
             } else {
@@ -441,13 +461,10 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
             }
         }
     }
-    // A site's own `Vary` never drops what the encoding varies on (a cache would hand gzip to
-    // a client that can't read it).
     let varies = h.get_all(header::VARY).iter().any(|v| v.to_str().is_ok_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("accept-encoding") || t.trim() == "*")));
     if compress && !varies {
         h.append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
     }
-    r
 }
 
 /// How much `accept` (an `Accept-Encoding`) wants `coding`: its own q, else `*`'s, else none

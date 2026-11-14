@@ -470,8 +470,8 @@ impl Apps {
                     _ = tokio::time::sleep(this.cfg.supersede_every) => {}
                     _ = done.cancelled() => return,
                 }
-                let (sid, e, after) = (d.service.clone(), d.environment.clone(), d.created_at);
-                match this.db(move |s| s.newer_push_queued(&sid, &e, after)).await {
+                let (sid, e, own, after) = (d.service.clone(), d.environment.clone(), d.id.clone(), d.created_at);
+                match this.db(move |s| s.newer_push_queued(&sid, &e, &own, after)).await {
                     Ok(true) => {}
                     Ok(false) => continue,
                     Err(err) => {
@@ -542,8 +542,12 @@ impl Apps {
         if cancel.is_cancelled() {
             anyhow::bail!("canceled");
         }
+        // Canceled or superseded while it built (the status is the truth, whoever changed it).
         let id = d.id.clone();
-        self.db(move |s| s.set_status(&id, &[DeployStatus::Building, DeployStatus::Deploying], DeployStatus::Deploying, None)).await?;
+        if !self.db(move |s| s.set_status(&id, &[DeployStatus::Building, DeployStatus::Deploying], DeployStatus::Deploying, None)).await? {
+            cancel.cancel();
+            anyhow::bail!("canceled");
+        }
         let mut dep = d.clone();
         dep.image = Some(image);
         dep.run = run;
@@ -857,6 +861,7 @@ impl Apps {
         }
         // A root directory inside a JS workspace builds from the repo's root (the lockfile and the
         // workspace's packages are there), unless it brings its own Dockerfile.
+        let mut from_root = false;
         if let Some(r) = &root
             && build_cfg.builder == Builder::Auto
             && std::fs::symlink_metadata(context.join("Dockerfile")).is_err()
@@ -871,6 +876,8 @@ impl Apps {
                     build_cfg.start = ws.start;
                 }
                 context = tree.clone();
+                // The repo root's Procfile is the repo's, not this package's.
+                from_root = true;
             }
         }
         // The variables the build's steps see: the environment's, as its instances will.
@@ -895,6 +902,7 @@ impl Apps {
         overrides.build_env = build_env.iter().map(|(k, _)| k.clone()).collect();
         // A Procfile's command for what this service runs (a cron's command is its own).
         overrides.process = match run.kind {
+            _ if from_root => None,
             RunType::Web => Some("web".into()),
             RunType::Worker => Some("worker".into()),
             RunType::Cron => None,

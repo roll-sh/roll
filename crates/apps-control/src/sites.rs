@@ -28,14 +28,37 @@ pub struct Site {
     /// Its own `_redirects` and `_headers` ([`crate::site_rules`]).
     pub rules: crate::site_rules::SiteRules,
     /// Its files gzipped once asked for (a site never changes), and how many bytes those hold.
-    pub gzipped: parking_lot::Mutex<(usize, HashMap<String, bytes::Bytes>)>,
+    pub gzipped: parking_lot::Mutex<Gzipped>,
     /// When a request last read it (unix seconds): a site nobody asks for leaves memory.
     pub used: std::sync::atomic::AtomicU64,
+}
+
+/// A site's gzipped copies: how many bytes they hold, the copies, and the files that didn't fit
+/// (sent as they are from then on, never gzipped again).
+#[derive(Default)]
+pub struct Gzipped {
+    bytes: usize,
+    files: HashMap<String, bytes::Bytes>,
+    too_big: std::collections::HashSet<String>,
 }
 
 /// How many of an environment's earlier static deployments still answer for their fingerprinted
 /// files ([`Apps::earlier_site_file`]).
 pub const EARLIER_SITES: usize = 3;
+
+/// How long after a deploy its environment's earlier deployments still answer for their
+/// fingerprinted files.
+pub const SKEW_WINDOW_MS: i64 = 24 * 3600 * 1000;
+
+/// An environment's earlier static deployments, as worked out for its live site.
+pub struct EarlierSites {
+    live: String,
+    /// Until when (unix ms) they answer.
+    until: i64,
+    keys: Vec<String>,
+    /// Those that didn't load, and when.
+    failed: HashMap<String, std::time::Instant>,
+}
 
 /// How long a site nobody asks for stays loaded (its index and gzipped copies).
 const IDLE: u64 = 15 * 60;
@@ -65,6 +88,12 @@ pub fn fingerprinted(name: &str) -> bool {
         return false;
     }
     let file = name.rsplit('/').next().unwrap_or(name);
+    // What a bundler names by its content: code, styles, maps, fonts and images (never a
+    // document or a download that happens to have digits in its name).
+    let ext = file.rsplit('.').next().unwrap_or("");
+    if !["js", "mjs", "cjs", "css", "map", "wasm", "json", "woff", "woff2", "ttf", "otf", "eot", "svg", "png", "jpg", "jpeg", "gif", "webp", "avif", "ico"].contains(&ext) {
+        return false;
+    }
     let stem = file.split_once('.').map_or(file, |(s, _)| s);
     // The hash is a segment of its own, after `-` or `.`: 8 to 64 letters and digits, both.
     let rest = &file[stem.len()..];
@@ -85,15 +114,18 @@ impl Site {
     /// it is. A file is gzipped at most once (but by two requests racing), so asking costs nothing
     /// once a site's budget is spent.
     pub fn gzipped(&self, name: &str) -> Option<bytes::Bytes> {
-        self.gzipped.lock().1.get(name).cloned()
+        self.gzipped.lock().files.get(name).cloned()
     }
 
     pub async fn gzip(self: &std::sync::Arc<Self>, name: &str) -> Option<bytes::Bytes> {
-        if let Some(b) = self.gzipped(name) {
-            return Some(b);
-        }
-        if self.gzipped.lock().0 >= GZIP_KEPT {
-            return None;
+        {
+            let g = self.gzipped.lock();
+            if let Some(b) = g.files.get(name) {
+                return Some(b.clone());
+            }
+            if g.bytes >= GZIP_KEPT || g.too_big.contains(name) {
+                return None;
+            }
         }
         let _permit = GZIPPING.try_acquire().ok()?;
         self.compress(name).await.ok()
@@ -116,9 +148,13 @@ impl Site {
         .map_err(std::io::Error::other)??;
         let gz = bytes::Bytes::from(gz);
         let mut c = self.gzipped.lock();
-        if c.0 + gz.len() <= GZIP_KEPT && !c.1.contains_key(name) {
-            c.0 += gz.len();
-            c.1.insert(name.to_string(), gz.clone());
+        if !c.files.contains_key(name) {
+            if c.bytes + gz.len() <= GZIP_KEPT {
+                c.bytes += gz.len();
+                c.files.insert(name.to_string(), gz.clone());
+            } else {
+                c.too_big.insert(name.to_string());
+            }
         }
         Ok(gz)
     }
@@ -144,7 +180,13 @@ fn rules(tar: &std::path::Path, files: &HashMap<String, (u64, u64)>) -> std::io:
 /// any single-page or 404 fallback.
 pub fn exists(site: &Site, path: &str) -> bool {
     let p = path.trim_matches('/');
-    (!p.is_empty() && site.files.contains_key(p)) || site.files.contains_key(&if p.is_empty() { "index.html".to_string() } else { format!("{p}/index.html") })
+    (!p.is_empty() && site.files.contains_key(p)) || site.files.contains_key(&if p.is_empty() { "index.html".to_string() } else { format!("{p}/index.html") }) || clean(site, path).is_some()
+}
+
+/// `/about`'s `about.html` (not `/about/`'s: its relative links would point inside it).
+fn clean<'a>(site: &'a Site, path: &str) -> Option<&'a str> {
+    let p = path.trim_start_matches('/');
+    (!p.is_empty() && !p.ends_with('/')).then(|| site.files.get_key_value(&format!("{p}.html")).map(|(k, _)| k.as_str())).flatten()
 }
 
 /// A site's key: its image's digest (hex, no `sha256:`), or for an image built here and named
@@ -234,22 +276,27 @@ impl Apps {
     }
 
     /// `path`'s file from one of the environment's last [`EARLIER_SITES`] static deployments
-    /// before the live one (`live`: its site), when it's fingerprinted ([`fingerprinted`]): a page
-    /// loaded before a deploy still gets the chunks it asks for. The site, its key and the file.
+    /// before the live one (`live`: its site), when it's fingerprinted ([`fingerprinted`]) and the
+    /// live one went live less than [`SKEW_WINDOW_MS`] ago: a page loaded before a deploy still
+    /// gets the chunks it asks for, for a day. The site, its key and the file.
     pub(crate) async fn earlier_site_file(self: &Arc<Self>, service: &str, env: &str, live: &str, path: &str) -> Option<(Arc<Site>, String, String)> {
         let name = path.trim_matches('/');
         if !fingerprinted(name) {
             return None;
         }
         let ek = crate::env_key(service, env);
-        let cached = self.earlier_sites.lock().get(&ek).filter(|(l, _)| l == live).map(|(_, k)| k.clone());
-        let keys = match cached {
-            Some(k) => k,
+        let cached = self.earlier_sites.lock().get(&ek).filter(|c| c.live == live).map(|c| (c.until, c.keys.clone()));
+        let (until, keys) = match cached {
+            Some(c) => c,
             None => {
                 let (sid, e) = (service.to_string(), env.to_string());
                 let deps = self.db(move |s| s.deployments(&sid, &e, 20)).await.ok()?;
+                let active = deps.iter().find(|d| d.status == crate::model::DeployStatus::Active);
+                let until = active.and_then(|a| a.finished_at).map_or(0, |at| at + SKEW_WINDOW_MS);
                 let mut keys: Vec<String> = Vec::new();
-                for d in deps.iter().filter(|d| d.status == crate::model::DeployStatus::Inactive && d.plan.as_ref().is_some_and(|p| p["start"] == apps_build::STATIC_START)) {
+                // Before the live one: never a deployment rolled back from.
+                let before = active.map_or(i64::MIN, |a| a.created_at);
+                for d in deps.iter().filter(|d| d.status == crate::model::DeployStatus::Inactive && d.created_at < before && d.plan.as_ref().is_some_and(|p| p["start"] == apps_build::STATIC_START)) {
                     if let Some(k) = d.image.as_deref().and_then(key).filter(|k| k != live && !keys.contains(k)) {
                         keys.push(k);
                     }
@@ -257,18 +304,25 @@ impl Apps {
                         break;
                     }
                 }
-                self.earlier_sites.lock().insert(ek.clone(), (live.to_string(), keys.clone()));
-                keys
+                self.earlier_sites.lock().insert(ek.clone(), EarlierSites { live: live.to_string(), until, keys: keys.clone(), failed: HashMap::new() });
+                (until, keys)
             }
         };
+        if code_sql::now_ms() > until {
+            return None;
+        }
         for k in keys {
+            // One that didn't load is tried again after a minute, not on every request.
+            let failed = self.earlier_sites.lock().get(&ek).and_then(|c| c.failed.get(&k).copied());
+            if failed.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(60)) {
+                continue;
+            }
             match self.site(&k).await {
                 Ok(site) if site.files.contains_key(name) => return Some((site, k, name.to_string())),
                 Ok(_) => {}
-                // Gone (its image removed): not looked for again.
                 Err(_) => {
-                    if let Some((_, ks)) = self.earlier_sites.lock().get_mut(&ek) {
-                        ks.retain(|x| *x != k);
+                    if let Some(c) = self.earlier_sites.lock().get_mut(&ek) {
+                        c.failed.insert(k, std::time::Instant::now());
                     }
                 }
             }
@@ -296,6 +350,12 @@ impl Apps {
             s.used.store(now, std::sync::atomic::Ordering::Relaxed);
             return Ok(s.clone());
         }
+        // One load per site at a time: the others wait for it, then find it.
+        let lock = self.site_loads.lock().entry(key.to_string()).or_default().clone();
+        let _loading = lock.lock().await;
+        if let Some(s) = self.sites.lock().get(key) {
+            return Ok(s.clone());
+        }
         // Loading another: those nobody asked for a while go (a request still reading one keeps it).
         self.sites.lock().retain(|_, s| now.saturating_sub(s.used.load(std::sync::atomic::Ordering::Relaxed)) < IDLE);
         let path = self.site_path(key);
@@ -318,6 +378,7 @@ impl Apps {
         .map_err(|e| Error::Internal(e.to_string()))?;
         let site = Arc::new(Site { tar: path, files, rules, gzipped: Default::default(), used: now.into() });
         self.sites.lock().insert(key.to_string(), site.clone());
+        self.site_loads.lock().remove(key);
         Ok(site)
     }
 }
@@ -368,9 +429,7 @@ pub fn resolve<'a>(site: &'a Site, path: &str, spa: bool) -> Option<(&'a str, u1
     }
     // A page written as `about.html` (Next's static export, Astro's `build.format: "file"`,
     // Hugo's ugly URLs) answers at `/about`, as Netlify, Cloudflare Pages and Vercel serve it.
-    if !p.is_empty()
-        && let Some(k) = found(&format!("{p}.html"))
-    {
+    if let Some(k) = clean(site, path) {
         return Some((k, 200));
     }
     let last = p.rsplit('/').next().unwrap_or("");
@@ -389,7 +448,7 @@ mod tests {
         for yes in ["assets/index-BxR2a9Kd.js", "assets/logo-a1b2c3d4.svg", "_astro/index.DjX3kL9p.css", "static/js/main.8f3a2b1c.js", "static/media/font.5e6f7a8b9c.woff2", "_next/static/chunks/app.js", "_next/static/abc/_buildManifest.js"] {
             assert!(fingerprinted(yes), "{yes}");
         }
-        for no in ["index.html", "assets/app.js", "assets/jquery-3.7.1.min.js", "assets/report-20240101.pdf", "img/photo-a1b2c3d4.png", "assets/polyfills-legacy.js", "static/robots.txt"] {
+        for no in ["index.html", "assets/app.js", "assets/jquery-3.7.1.min.js", "assets/report-20240101.pdf", "img/photo-a1b2c3d4.png", "assets/polyfills-legacy.js", "static/robots.txt", "assets/customers-export2024q1.csv"] {
             assert!(!fingerprinted(no), "{no}");
         }
     }
@@ -432,7 +491,8 @@ mod tests {
         assert_eq!(resolve(&site, "/settings/profile", false), None);
         assert_eq!(resolve(&site, "/logo.png", true), None, "a missing file stays missing");
         site.files.insert("about.html".into(), (0, 1));
-        assert_eq!((resolve(&site, "/about", false), resolve(&site, "/about/", false)), (Some(("about.html", 200)), Some(("about.html", 200))), "a clean URL");
+        assert_eq!((resolve(&site, "/about", false), resolve(&site, "/about/", false)), (Some(("about.html", 200)), None), "a clean URL");
+        assert!(exists(&site, "/about"), "so a rewrite never hides it");
         assert_eq!(key(&format!("nginx@sha256:{}", "A".repeat(64))), Some("a".repeat(64)));
     }
 }

@@ -183,7 +183,10 @@ async fn plan(State(apps): S, b: Bytes) -> R {
             build.start = build.start.or(ws.start);
             context = dir.clone();
         }
-        let o = apps_build::Overrides { process: Some("web".into()), ..build.overrides() };
+        // As a new web service would build (a Procfile's `web:`), but from a workspace's root: its
+        // Procfile is the repo's.
+        let process = (context == root).then(|| "web".to_string());
+        let o = apps_build::Overrides { process, ..build.overrides() };
         let p = tokio::task::spawn_blocking(move || apps_build::plan(&apps_build::DirTree::new(context), &o)).await.map_err(|e| Error::Internal(e.to_string()))?;
         p.map(|mut p| {
             p.notes.splice(0..0, said);
