@@ -621,6 +621,12 @@ impl Secrets {
             if env.protected && !force {
                 return Err(Error::Conflict("approval_required", format!("{} is protected: open a change request", env.slug)));
             }
+            if !force {
+                let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
+                if let Some(p) = crate::folder_policy::covering(c, &env.id, &paths)?.first() {
+                    return Err(Error::Conflict("approval_required", format!("changes to {} in {} need approval: open a change request", p.path, env.slug)));
+                }
+            }
             if let Some(s) = if_seq
                 && last_seq(c, &env.id)? > s
             {

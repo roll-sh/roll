@@ -37,6 +37,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/environments/order"), put(order))
         .route(E, get(environment).put(ensure_environment).patch(update_environment).delete(delete_environment))
         .route(&format!("{E}/policy"), put(policy))
+        .route(&format!("{E}/folder-policies"), get(folder_policies).put(set_folder_policy).delete(delete_folder_policy))
         .route(&format!("{E}/folders"), get(folders).post(create_folder).delete(delete_folder))
         .route(&format!("{E}/imports"), get(imports).put(set_imports))
         .route(&format!("{E}/exports"), get(exports).put(set_exports))
@@ -285,6 +286,20 @@ async fn update_environment(State(s): S, Who(c): Who, Path((project, env)): Path
 
 async fn delete_environment(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_environment(&project, &env, q.get("confirm").map(String::as_str), &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn folder_policies(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.folder_policies(&project, &env, &c)).await?))
+}
+
+async fn set_folder_policy(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q, b: Bytes) -> crate::Result<Response> {
+    let p: crate::folder_policy::SetFolderPolicy = if b.is_empty() { crate::folder_policy::SetFolderPolicy { approvals: None, approvers: None } } else { body(&b)? };
+    Ok(ok(blocking(s, move |s| s.set_folder_policy(&project, &env, &path_of(&q), p, &c)).await?))
+}
+
+async fn delete_folder_policy(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_folder_policy(&project, &env, &path_of(&q), &c)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -1295,6 +1295,21 @@ client opens a **change request** with the same operations (`POST …/requests`)
 Rotation of a managed link and dynamic leases on a protected environment don't need approval: they
 don't change what the secret is, only its credential.
 
+**Change policies per folder**, as Infisical's approval policies on secret paths: a folder of an
+environment that isn't protected as a whole can still take changes only through approved requests.
+`PUT …/environments/{env}/folder-policies?path=/payments {approvals?, approvers?}` (admin;
+`approvals` 1–10, 1 by default; 200 per environment, never on an ephemeral one; `roll secrets envs
+protect staging --folder /payments [--approver …]`, `unprotect --folder`; the folder bar's "Require
+approval" in the dashboard) covers the folder
+and every folder under it; `GET` lists them and `DELETE ?path=` removes one. A write that touches a
+covered key answers 409 `approval_required`, naming the folder, and the rest of the environment
+takes writes as before. A request's **gates** are the environment's policy (when it's protected)
+and every folder policy covering a key it changes; each needs its own approvals from its own
+approvers (`gates: [{path?, approvals, approvers?, approved}]` on the request), a reviewer must be
+an approver of at least one of them, and applying checks the gates as they are then (a policy added
+after the approvals still has to be met). Only who may change what is per folder: reading
+(untrusted readers, exposure in health) stays the environment's.
+
 ### Audit log
 
 Every read of values and every write is recorded: time, principal (`operator`, `token:tok_…`,
@@ -1347,6 +1362,9 @@ isn't in the workspace is 404.
 | `PATCH /environments/{env}` | `{slug?, name?, expires_at?, max_age_days?}` | `Environment` |
 | `DELETE /environments/{env}?confirm=` | | 204 |
 | `PUT /environments/{env}/policy` | `{protected, approvals?, approvers?, notify_url?}` | `Environment` |
+| `GET /environments/{env}/folder-policies` | | `FolderPolicy[]` |
+| `PUT /environments/{env}/folder-policies?path=` | `{approvals?, approvers?}` | `FolderPolicy` (`admin`) |
+| `DELETE /environments/{env}/folder-policies?path=` | | 204; 404 when the folder has none (`admin`) |
 | `GET /environments/{env}/folders?path=` | | `{path, folders: Folder[]}` |
 | `POST /environments/{env}/folders` | `{path}` | 201 `Folder` |
 | `DELETE /environments/{env}/folders?path=` | | `{change: Change \| null}` |
@@ -1479,7 +1497,8 @@ type Rotator = { id: string; name: string; host: string; created_at: number; cre
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };
 type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to"; from: number | null; to: number | null }[] };
-type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number }[]; approvals: number; approvals_needed: number; applied_seq: number | null };
+type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number }[]; approvals: number; approvals_needed: number; gates: { path?: string; approvals: number; approvers?: string[]; approved: number }[]; applied_seq: number | null };
+type FolderPolicy = { path: string; approvals: number; approvers: string[]; created_at: number; created_by: string };
 type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
 type Lease = { id: string; environment: string; path: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
 type Identity = { id: string; name: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null; allowed_ips: string[] | null };

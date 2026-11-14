@@ -533,6 +533,19 @@ async fn protected_environments_take_change_requests_that_another_principal_appr
     assert_eq!((p["change"].clone(), p["request"]["state"].as_str()), (Value::Null, Some("open")));
     api.ok(Method::POST, &format!("/environments/production/requests/{}/apply", p["request"]["id"].as_str().unwrap()), Some(json!({ "bypass": true }))).await;
     assert_eq!(api.values("production", "/").await["values"]["KEY"], "from-staging");
+    // A folder's own change policy, in an environment that isn't protected: its keys change only
+    // through approved requests; the rest of the environment as before.
+    api.ok(Method::PUT, "/environments/staging/folder-policies?path=/payments", Some(json!({ "approvals": 1 }))).await;
+    let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/STRIPE?path=/payments/eu", Some(json!({ "value": "sk_1" }))).await;
+    assert!(s == StatusCode::CONFLICT && e["code"] == "approval_required" && e["error"].as_str().unwrap().contains("/payments"), "{e}");
+    api.ok(Method::PUT, "/environments/staging/secrets/OTHER", Some(json!({ "value": "free" }))).await;
+    let r = api.ok(Method::POST, "/environments/staging/requests", Some(json!({ "path": "/payments/eu", "ops": [{ "op": "set", "key": "STRIPE", "value": "sk_1" }] }))).await;
+    assert_eq!(r["gates"], json!([{ "path": "/payments", "approvals": 1, "approved": 0 }]));
+    let id = r["id"].as_str().unwrap();
+    let (s, r) = api.req(Method::POST, &format!("/environments/staging/requests/{id}/review"), Some(json!({ "verdict": "approve" })), reviewer["token"].as_str()).await;
+    assert_eq!((s, r["state"].as_str()), (StatusCode::OK, Some("approved")));
+    api.ok(Method::POST, &format!("/environments/staging/requests/{id}/apply"), None).await;
+    assert_eq!(api.values("staging", "/payments/eu").await["values"]["STRIPE"], "sk_1");
 }
 
 #[tokio::test]

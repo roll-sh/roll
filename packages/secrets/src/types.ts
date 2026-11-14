@@ -135,8 +135,12 @@ export type ChangeRequest = {
   reviews: Review[];
   approvals: number;
   approvals_needed: number;
+  /** What it must pass: the environment's policy (no `path`) and each folder policy covering a key it changes. */
+  gates: { path?: string; approvals: number; approvers?: string[]; approved: number }[];
   applied_seq: number | null;
 };
+/** A folder's own change policy: its keys change only through approved requests. */
+export type FolderPolicy = { path: string; approvals: number; approvers: string[]; created_at: number; created_by: string };
 export type LinkField = { field: string; label: string; modes: LinkMode[]; secret: boolean; suggest: string; credential?: string };
 export type LinkTarget = { kind: string; ref: string; name: string; fields: LinkField[] };
 export type Lease = {

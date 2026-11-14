@@ -48,7 +48,17 @@ pub struct Request {
     pub reviews: Vec<Review>,
     pub approvals: i64,
     pub approvals_needed: i64,
+    /// What it must pass: the environment's policy and the folder policies covering its keys, each
+    /// with the approvals it has.
+    pub gates: Vec<GateView>,
     pub applied_seq: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GateView {
+    #[serde(flatten)]
+    pub gate: crate::folder_policy::Gate,
+    pub approved: i64,
 }
 
 /// One item of a request with its values (`…/requests/{id}/values`).
@@ -118,11 +128,15 @@ fn approvals(reviews: &[Review], author: &str) -> i64 {
     by.len() as i64
 }
 
-fn view(env: &EnvRow, r: RequestRow) -> Request {
+fn view(c: &Conn<'_>, env: &EnvRow, r: RequestRow) -> Result<Request> {
     let reviews: Vec<Review> = from_json(&r.reviews);
-    Request {
+    let gates = request_gates(c, env, &r)?;
+    let needed = gates.iter().map(|g| g.approvals).max().unwrap_or(1);
+    let views: Vec<GateView> = gates.into_iter().map(|g| GateView { approved: crate::folder_policy::counted(&g, &reviews, &r.by), gate: g }).collect();
+    Ok(Request {
         approvals: approvals(&reviews, &r.by),
-        approvals_needed: env.approvals.max(1),
+        approvals_needed: needed,
+        gates: views,
         id: r.id,
         environment: env.slug.clone(),
         path: r.path,
@@ -133,7 +147,14 @@ fn view(env: &EnvRow, r: RequestRow) -> Request {
         items: from_json(&r.items),
         reviews,
         applied_seq: r.applied_seq,
-    }
+    })
+}
+
+/// A request's gates, from the folders of the keys it changes.
+fn request_gates(c: &Conn<'_>, env: &EnvRow, r: &RequestRow) -> Result<Vec<crate::folder_policy::Gate>> {
+    let items: Vec<ItemDiff> = from_json(&r.items);
+    let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
+    crate::folder_policy::gates(c, env, &paths)
 }
 
 fn load(c: &Conn<'_>, env: &EnvRow, id: &str) -> Result<RequestRow> {
@@ -198,7 +219,7 @@ impl Secrets {
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             let rows = c.query(&format!("SELECT {COLUMNS} FROM requests WHERE env_id = ? ORDER BY at DESC LIMIT 200"), [&env.id], request_row)?;
-            Ok(rows.into_iter().filter(|r| state.is_none_or(|s| r.state == s) && caller.allows(Action::Read, &Scope::at(project, slug, &r.path))).map(|r| view(&env, r)).collect())
+            rows.into_iter().filter(|r| state.is_none_or(|s| r.state == s) && caller.allows(Action::Read, &Scope::at(project, slug, &r.path))).map(|r| view(c, &env, r)).collect::<Result<_>>()
         })
     }
 
@@ -250,7 +271,7 @@ impl Secrets {
         self.project(project)?;
         let r = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            Ok::<_, Error>(view(&env, load(c, &env, id)?))
+            view(c, &env, load(c, &env, id)?)
         })?;
         caller.need(Action::Read, &Scope::at(project, slug, &r.path))?;
         Ok(r)
@@ -319,7 +340,7 @@ impl Secrets {
                 let link = self.web_url.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?env={slug}", w.trim_end_matches('/')));
                 crate::notices::queue(c, project, &env.id, slug, &id, &caller.principal, &message, &keys, link, now)?;
             }
-            Ok(view(&env, load(c, &env, &id)?))
+            view(c, &env, load(c, &env, &id)?)
         })
     }
 
@@ -340,22 +361,23 @@ impl Secrets {
             if r.by == caller.principal {
                 return Err(Error::Forbidden("the author of a request can't review it (an admin can apply it with bypass)".into()));
             }
-            if !env.approvers.is_empty() && !env.approvers.contains(&caller.principal) {
-                return Err(Error::Forbidden(format!("{} isn't an approver of {slug}", caller.principal)));
+            let gates = request_gates(c, &env, &r)?;
+            if !crate::folder_policy::may_review(&gates, &caller.principal) {
+                return Err(Error::Forbidden(format!("{} isn't an approver of what {id} changes", caller.principal)));
             }
             let mut reviews: Vec<Review> = from_json(&r.reviews);
             reviews.retain(|x| x.by != caller.principal);
             reviews.push(Review { by: caller.principal.clone(), verdict: v.verdict.clone(), comment: v.comment.clone(), at: now });
             let state = if reviews.iter().any(|x| x.verdict == "reject") {
                 "rejected"
-            } else if approvals(&reviews, &r.by) >= env.approvals.max(1) {
+            } else if crate::folder_policy::satisfied(&gates, &reviews, &r.by) {
                 "approved"
             } else {
                 "open"
             };
             c.execute("UPDATE requests SET reviews = ?, state = ? WHERE id = ?", params![json(&reviews), state, id])?;
             audit::record(c, project, caller, &format!("request.{}", v.verdict), Some(slug), Some(&r.path), &[], &format!("{}d {id}", v.verdict.trim_end_matches('e')), now)?;
-            Ok(view(&env, load(c, &env, id)?))
+            view(c, &env, load(c, &env, id)?)
         })
     }
 
@@ -366,15 +388,17 @@ impl Secrets {
             caller.need(Action::Admin, &Scope::env(project, slug))?;
         }
         let dek = self.project(project)?;
-        let (env, r) = self.db.read(|c| {
+        let (_, r, met) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             let r = load(c, &env, id)?;
-            Ok::<_, Error>((env, r))
+            // As the policies are now: one added after the approvals still has to be met.
+            let met = crate::folder_policy::satisfied(&request_gates(c, &env, &r)?, &from_json::<Vec<Review>>(&r.reviews), &r.by);
+            Ok::<_, Error>((env, r, met))
         })?;
         match r.state.as_str() {
-            "approved" => {}
+            "approved" if met || bypass => {}
             "open" if bypass => {}
-            "open" => return Err(Error::Conflict("approval_required", format!("{id} has {} of {} approvals", approvals(&from_json::<Vec<Review>>(&r.reviews), &r.by), env.approvals.max(1)))),
+            "approved" | "open" => return Err(Error::Conflict("approval_required", format!("{id} doesn't have the approvals what it changes needs ({} so far)", approvals(&from_json::<Vec<Review>>(&r.reviews), &r.by)))),
             s => return Err(Error::Conflict("conflict", format!("{id} is {s}"))),
         }
         let ops: Vec<StoredOp> = serde_json::from_slice(&r.ops).map_err(|_| Error::Internal("a request's operations aren't JSON".into()))?;
@@ -445,7 +469,7 @@ impl Secrets {
             }
             c.execute("UPDATE requests SET state = 'closed' WHERE id = ?", [id])?;
             audit::record(c, project, caller, "request.close", Some(slug), Some(&r.path), &[], &format!("closed {id}"), now)?;
-            Ok(view(&env, load(c, &env, id)?))
+            view(c, &env, load(c, &env, id)?)
         })
     }
 }

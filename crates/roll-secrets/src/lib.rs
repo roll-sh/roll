@@ -10,6 +10,7 @@
 //! closure that only touches the database; providers (issuing and revoking credentials) are
 //! called outside it. [`api::router`] serves it under `/v1/secrets`.
 
+pub mod folder_policy;
 pub mod access;
 mod alerts;
 pub mod api;
@@ -350,6 +351,7 @@ impl Secrets {
         db.ensure_schema(shares::SCHEMA)?;
         db.ensure_schema(syncs::SCHEMA)?;
         db.ensure_schema(sinks::SCHEMA)?;
+        db.ensure_schema(folder_policy::SCHEMA)?;
         // The references in a value (`staging.DB_URL`), so listings decrypt nothing; NULL for rows
         // written before it, which are decrypted to find them.
         db.add_column("secrets", "refs", "TEXT")?;
