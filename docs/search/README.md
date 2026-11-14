@@ -236,8 +236,9 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    Elasticsearch (51.8 against 34.6 µs on the ECS log). BP reordering at merge is about a quarter
    of it and stays: measured off, it saves 32% of indexing CPU on the ECS log but makes
    `@timestamp` descending sorts 24x slower, and the cheaper variants cost `so`'s text queries
-   20-55% (docs/benchmarks/search.md). Next are arrays of objects in the direct parser and the
-   request path's allocations. Queries: roll ahead of both engines on
+   20-55% (docs/benchmarks/search.md). The direct parser now takes arrays of objects too (an ECS
+   log with arrays: 36k → 57-73k docs/s); next is the request path's allocations (malloc/free
+   are ~10% of the bulk threads). Queries: roll ahead of both engines on
    every Rally measure but `autohisto_agg` (now counted from the points tree: 27.8 → 3.0 ms in an
    A/B; Rally rerun pending) and `terms_enum`; a full rerun of every Rally track with variance;
    one allocator policy (rolld's against search-dev's purge governor); `terms_enum`'s per-request
