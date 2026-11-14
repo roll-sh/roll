@@ -313,6 +313,10 @@ pub struct PageHealth {
     pub first_error: Option<String>,
     pub failed: u32,
     pub first_failed: Option<String>,
+    /// Two captures of it a second apart differ: it moves by itself (a clock, a carousel), so a
+    /// visual change on it may be only that.
+    #[serde(default)]
+    pub unstable: bool,
 }
 
 impl PageHealth {
@@ -328,13 +332,15 @@ impl PageHealth {
         struct Raw {
             errors: Vec<String>,
             failed: Vec<String>,
+            #[serde(default)]
+            unstable: bool,
         }
         let r: Raw = serde_json::from_str(json.trim()).ok()?;
         let line = |s: &String| -> String {
             let one: String = s.lines().next().unwrap_or("").chars().filter(|c| !c.is_control() && *c != '`').take(200).collect();
             one.trim().to_string()
         };
-        Some(PageHealth { errors: r.errors.len().min(50) as u32, first_error: r.errors.first().map(line), failed: r.failed.len().min(50) as u32, first_failed: r.failed.first().map(line) })
+        Some(PageHealth { errors: r.errors.len().min(50) as u32, first_error: r.errors.first().map(line), failed: r.failed.len().min(50) as u32, first_failed: r.failed.first().map(line), unstable: r.unstable })
     }
 }
 
@@ -552,6 +558,9 @@ pub struct PageCheck {
     pub links: Option<PageLinks>,
     /// Against main's page at the same path.
     pub against: Option<PageAgainst>,
+    /// It moves by itself (two captures a second apart differ).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unstable: bool,
 }
 
 /// What a page's session found besides its picture: the first page's checks, for another page.
@@ -560,6 +569,9 @@ pub struct PageReport {
     pub a11y: Option<PageA11y>,
     pub links: Option<PageLinks>,
     pub text: Option<String>,
+    /// It moves by itself (two captures a second apart differ).
+    #[serde(default)]
+    pub unstable: bool,
 }
 
 /// A page's checks against main's page at the same path.
@@ -610,6 +622,9 @@ pub struct PageReview {
     pub percent: f64,
     pub by: Option<String>,
     pub at: Option<i64>,
+    /// It moves by itself: the difference may be only that (`github.hide` names what moves).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unstable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -956,7 +971,7 @@ mod tests {
         assert_eq!(s.problems(), ["no meta description", "more than one h1", "noindex in its markup"]);
         let main_seo = PageSeo { description: false, viewport: true, h1: 1, noindex: false };
         assert_eq!(s.added_since(&main_seo), 2);
-        let health = |errors, failed| PageHealth { errors, first_error: None, failed, first_failed: None };
+        let health = |errors, failed| PageHealth { errors, first_error: None, failed, first_failed: None, unstable: false };
         assert_eq!((health(3, 1).added_since(&health(2, 4)), health(0, 0).added_since(&health(5, 5))), (1, 0));
         assert_eq!(PageSpeed::parse(""), None);
         // Its own broken links: paths only, printable, bounded; against main's, only the new.

@@ -988,6 +988,14 @@ type Settings = {
     change page and folded in the comment as a diff block nothing on the page can close ("text +1
     −1 against main"). It's the page's own text, shown as text (live: the change's line in,
     `main` out).
+    A page that moves by itself (Argos's and Chromatic's flake detection): after each page's
+    capture the session waits a second and captures it again, stilled as before; Chrome encodes
+    the same pixels the same way, so different data is a page that changed with nobody touching
+    it (a clock, a carousel, an animation `github.hide` didn't name). Its visual review's page
+    says so (`unstable`), and the comment and the sheet say "moves by itself, so the difference
+    may be only that", pointing at `github.hide`. The page still counts as changed: what moves
+    could hide a real change (checked by hand in the screenshot image: a page with a ticking
+    clock moves, a still one doesn't).
     Its API too (Optic's and Bump's API diff), when the project names its OpenAPI document
     (`github.openapi`, a JSON path of the first service's: `/openapi.json`, `/v3/api-docs`): the
     same session fetches it from the page's own origin (at most 4 MB, 5 s) in the checks' world and
@@ -1198,6 +1206,9 @@ Ranked by what a person notices first. Done so far:
 - a look at the sheet from screenshots of a live preview with today's checks (desktop and phone):
   the data branch rows kept their names whole and their notes in word groups;
 - caught mail bounded by bytes (10 MiB a preview) as well as count;
+- pages that move by themselves told apart (Argos's and Chromatic's flake detection): each
+  page captured twice a second apart in its session, and one whose captures differ said to
+  "move by itself" in its visual review, the comment and the sheet (its change still reviewed);
 - breaking changes inside the operations a change keeps (oasdiff's rules): a parameter or field
   that becomes required, a type that changes, a request value no longer taken, a response field
   that goes;
@@ -1329,6 +1340,12 @@ Ranked by what a person notices first. Done so far:
    (today), `"roll"` (only roll's own products and the preview's branches) or a list of hosts;
    roll's runtime puts the containers on a network that allows only that (Docker's internal
    networks plus a small forwarding proxy), and what was refused is said in the activity.
+   A second look (2026-11-14): roll's runtime makes service containers through `code-preview`'s
+   Docker isolation (shared with roll code's checks), publishes each one's port on 127.0.0.1 for
+   its proxy, and every data branch is reached at `host.docker.internal`. An internal network
+   can't publish ports, and cuts the host off, so it means the proxy reaching containers by their
+   address on that network and a forwarder for each product port: a change to the isolation
+   roll code shares, not to previews alone.
    Ranked down after a look: enforcement needs either per-container firewall rules (not on a
    host whose firewall roll mustn't touch) or an internal network with a forwarding sidecar for
    every product port (an image of its own, and roll code's runner changed); on the cloud fleet

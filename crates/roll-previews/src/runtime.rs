@@ -1050,6 +1050,8 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
         links: Option<serde_json::Value>,
         #[serde(default)]
         text: Option<String>,
+        #[serde(default)]
+        unstable: bool,
     }
     let said: Vec<Said> = serde_json::from_str(said.trim()).unwrap_or_default();
     let mut out: Vec<crate::ports::PageShot> = Vec::new();
@@ -1061,6 +1063,7 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
                 a11y: s.a11y.and_then(|a| crate::PageA11y::parse(&serde_json::json!({ "a11y": a, "seo": s.seo }).to_string())),
                 links: s.links.and_then(|l| crate::PageLinks::parse(&serde_json::json!({ "links": l }).to_string())),
                 text: s.text.and_then(|t| crate::page_text(&serde_json::json!({ "text": t }).to_string())),
+                unstable: s.unstable,
             };
             out.push(crate::ports::PageShot { path: s.path, png, errors: s.errors.min(10_000), report });
         }

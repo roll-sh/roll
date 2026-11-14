@@ -382,6 +382,9 @@ pub struct PreviewPageReview {
     pub path: String,
     pub percent: f64,
     pub by: Option<String>,
+    /// It moves by itself (two captures a second apart differ): the difference may be only that.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unstable: bool,
 }
 
 impl PreviewVisualReview {

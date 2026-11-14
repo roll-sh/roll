@@ -309,6 +309,7 @@ export function PreviewSheet({
                   <li key={pg.path} className="flex min-w-0 items-center gap-2">
                     <span className="truncate font-mono text-[11px] text-muted">{pageLabel(pg.path)}</span>
                     <span className="shrink-0 font-mono text-[11px] tabular-nums text-subtle">{Math.max(pg.percent, 0.1).toFixed(1)}%</span>
+                    {pg.unstable && <span className="shrink-0 text-subtle" title="Two captures a second apart differ: the difference may be only that">moves by itself</span>}
                     {pg.by ? (
                       <span className="ml-auto shrink-0 text-subtle">accepted by {pg.by}</span>
                     ) : (
@@ -324,6 +325,15 @@ export function PreviewSheet({
                   </li>
                 ))}
               </ul>
+            )}
+            {p.visual_review?.state === "changed" && p.visual_review.pages.some((pg) => pg.unstable && !pg.by) && (
+              <p className="mt-1 text-[11.5px] text-subtle">
+                {p.visual_review.pages
+                  .filter((pg) => pg.unstable && !pg.by)
+                  .map((pg) => pageLabel(pg.path))
+                  .join(", ")}{" "}
+                moves by itself (two captures a second apart differ), so the difference may be only that: Hide in the rules can blank what moves.
+              </p>
             )}
             {(p.page_health || p.page_links || p.page_a11y || p.page_speed) && <ChecksHeading p={p} />}
             {p.page_health && (p.page_health.errors > 0 || p.page_health.failed > 0) && (

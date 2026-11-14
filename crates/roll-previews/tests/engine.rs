@@ -273,6 +273,11 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     e.engine.store.set_page_shots(&chg.id, "cs_1e", &pricing(255), &["/pricing".into()]).unwrap();
     e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
     assert_eq!(review().map(|v| (v.state, v.percent)), Some((VisualState::Changed, 6.25)), "one pixel in 16");
+    // A page that moves by itself (its two captures differ) is said to, its change still to review.
+    let moving = roll_previews::PageHealth { errors: 0, first_error: None, failed: 0, first_failed: None, unstable: true };
+    e.engine.store.set_page_report(&chg.id, Some(&moving), None, None, None, None).unwrap();
+    let r = review().unwrap();
+    assert!(r.state == VisualState::Changed && r.pages.iter().any(|p| p.path.is_empty() && p.unstable), "{r:?}");
     let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "github": { "visual_threshold": 10.0 } })).unwrap();
     e.engine.store.put_settings(&e.project, &s).unwrap();
     assert_eq!(review().map(|v| v.state), Some(VisualState::Unchanged));

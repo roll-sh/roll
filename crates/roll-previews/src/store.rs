@@ -1417,6 +1417,7 @@ impl Store {
                 a11y: report.a11y,
                 links: report.links,
                 against,
+                unstable: report.unstable,
             })
             .collect())
     }
@@ -1482,7 +1483,9 @@ impl Store {
     /// The visual review of a change's preview (`github.visual_review`), once its pages were
     /// compared with the baseline's: each page that differs, who accepted it at this head, and
     /// the change accepted once every one of them is.
-    fn visual_review(&self, r: &Row, rule: crate::settings::VisualReviewRule, threshold: f64, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck], shot: Option<String>) -> Result<Option<crate::VisualReview>> {
+    /// `first_unstable`: the first page moves by itself (its review says so).
+    #[allow(clippy::too_many_arguments)]
+    fn visual_review(&self, r: &Row, rule: crate::settings::VisualReviewRule, threshold: f64, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck], first_unstable: bool, shot: Option<String>) -> Result<Option<crate::VisualReview>> {
         if r.change_id.is_none() || rule == crate::settings::VisualReviewRule::Off {
             return Ok(None);
         }
@@ -1496,7 +1499,8 @@ impl Store {
             .iter()
             .map(|(path, percent)| {
                 let a = accepted(path);
-                crate::PageReview { path: path.clone(), percent: *percent, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at) }
+                let unstable = if path.is_empty() { first_unstable } else { pages.iter().any(|p| p.path == *path && p.unstable) };
+                crate::PageReview { path: path.clone(), percent: *percent, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at), unstable }
             })
             .collect();
         let percent = changed.iter().map(|(_, p)| *p).fold(0.0_f64, f64::max);
@@ -1972,7 +1976,8 @@ impl Store {
             api: b.api,
             api_breaking: b.api_breaking,
         });
-        let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, f.head)?;
+        let first_unstable = page_health.as_ref().is_some_and(|h| h.unstable);
+        let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, first_unstable, f.head)?;
         let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
         let screenshot_link = screenshot_at.map(|at| self.link_at(&r.id, at, None)).transpose()?;
         let diff_link = match screenshot_at.filter(|_| base_differs) {
