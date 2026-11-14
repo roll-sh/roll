@@ -365,6 +365,8 @@ previews are listed once those products are on.
 | `secrets_promote` | Copy another environment's secrets in (a change request into a protected one). | `POST …/environments/{env}/promote` |
 | `secrets_list_requests` | An environment's change requests. | `GET …/environments/{env}/requests` |
 | `secrets_propose` | Propose changes for a person to review and apply: the way to change a protected environment. | `POST …/environments/{env}/requests` |
+| `secrets_list_rotations` | A project's secret rotations: what rotated and what's due. | `GET /v1/secrets/projects/{project}/rotations` |
+| `secrets_ca_certificates` | The certificates a project's CA has issued (never a key). | `GET /v1/secrets/projects/{project}/cas/{ca}/certificates` |
 | `secrets_health` | What needs fixing in a project's secrets, by name, in the environments you may read (`code`: keys no repository mentions). | `GET /v1/secrets/projects/{project}/health` |
 | `secrets_findings` | Every project's secrets health findings you may read. | `GET /v1/secrets/findings` |
 | `secrets_find` | Where a key is set across the projects you may read. | `GET /v1/secrets/search` |
@@ -456,20 +458,21 @@ start and pre-deploy commands, schedule, kind, port, volume and `run.public`, ar
 a day or less); workload tokens (`Access::mint_workload`: minutes, within an identity's scope, owned
 by its maker, out of the list and caps) for secrets' identity logins; a person's own tokens' news is
 mailed to them (an approval waiting on them, used from a new network, revoked as leaked, about to
-expire; only their own, never a secret); `tools/list` 11% smaller with every product on (183 tools,
-150 → 134 KB: the approval argument's description shortened, the title not repeated in annotations);
-apps' plan, activity, deploys, links, cron runs and limits as MCP tools (apps-next #26; the shell,
-tunnel, hooks and webhook notifications stay out); secrets' history and workflow as MCP tools
-(changes, versions, compare, rotate, promote, change requests and proposing one: how an agent
-changes a protected environment); `previews_revoke_share` and `previews_settings` (previews-next
-#28); `apps_pending` and `apps_deploy_commits` (what the next deploy changes, what a deploy brought;
-apps-next #26), and `debug_failing_service` uses them; `roll token tools <id>` (what an agent sees,
-from the CLI); roll code's stream and device-login caps take the client the trusted proxy saw (the
-right-most `X-Forwarded-For` entry that isn't the proxy, over every line, only an address), not the
-left-most a client wrote; apps-next's head passes the per-method check with #25; the thirteenth
-review (X-Forwarded-For only from listed proxies, every line, a bad entry stopping the walk,
-IPv4-mapped addresses matched; nothing listed, the header counts for nothing; MCP tool calls carry
-the gate's address; unconsented client ids good for 90 days and kept ids small enough for Postgres);
+expire; only their own, never a secret); `secrets_list_rotations` and `secrets_ca_certificates`
+(secrets #48, #44); `tools/list` 11% smaller with every product on (183 tools, 150 → 134 KB: the
+approval argument's description shortened, the title not repeated in annotations); apps' plan,
+activity, deploys, links, cron runs and limits as MCP tools (apps-next #26; the shell, tunnel, hooks
+and webhook notifications stay out); secrets' history and workflow as MCP tools (changes, versions,
+compare, rotate, promote, change requests and proposing one: how an agent changes a protected
+environment); `previews_revoke_share` and `previews_settings` (previews-next #28); `apps_pending`
+and `apps_deploy_commits` (what the next deploy changes, what a deploy brought; apps-next #26), and
+`debug_failing_service` uses them; `roll token tools <id>` (what an agent sees, from the CLI); roll
+code's stream and device-login caps take the client the trusted proxy saw (the right-most
+`X-Forwarded-For` entry that isn't the proxy, over every line, only an address), not the left-most a
+client wrote; apps-next's head passes the per-method check with #25; the thirteenth review
+(X-Forwarded-For only from listed proxies, every line, a bad entry stopping the walk, IPv4-mapped
+addresses matched; nothing listed, the header counts for nothing; MCP tool calls carry the gate's
+address; unconsented client ids good for 90 days and kept ids small enough for Postgres);
 `ROLL_TRUSTED_PROXIES` (X-Forwarded-For only from the edge's addresses, the client the right-most
 entry that isn't one: a direct request can't name its own address for IP allowlists or
 registration's limit); sealed apps variables explained to agents (apps-next #26); the prefix check
