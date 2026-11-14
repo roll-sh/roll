@@ -546,6 +546,9 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                             None => s(&n["path"]),
                         };
                         println!("{}  {}  by {}: {}", s(&n["id"]), on, s(&n["by"]), s(&n["note"]));
+                        for r in n["replies"].as_array().into_iter().flatten() {
+                            println!("    ↳ {}: {}", s(&r["by"]), s(&r["note"]));
+                        }
                     }),
                     _ => println!("no open notes"),
                 }

@@ -36,6 +36,8 @@ textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8p
 .note{padding:8px;border-radius:8px}
 .note:hover{background:rgba(255,255,255,.05)}
 .note p{margin:4px 0 0;white-space:pre-wrap;word-break:break-word}
+.reply{margin:6px 0 0 8px;padding-left:8px;border-left:1px solid rgba(255,255,255,.14)}
+.acts{display:flex;gap:6px;margin-top:6px}
 .box{position:fixed;pointer-events:none;border:2px solid #4c8dff;border-radius:4px;background:rgba(76,141,255,.08);display:none}
 @media (prefers-reduced-motion:no-preference){.box{transition:all .12s ease-out}}
 </style>
@@ -142,14 +144,35 @@ textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8p
         meta.textContent = `${n.by} · ${ago(n.at)}${n.selector ? ` · ${n.selector}` : ""}`;
         const text = document.createElement("p");
         text.textContent = n.note;
-        // Resolved in roll, by someone who may (a writer, or whoever left it): it folds away here.
-        const done = document.createElement("button");
-        done.type = "button";
-        done.className = "resolve";
-        done.textContent = "Resolve";
-        done.addEventListener("click", () => window.open(`${TARGET}&${new URLSearchParams({ fb_resolve: String(n.id || "") })}`, "_blank", "noopener"));
         item.append(meta, text);
-        if (n.id) item.append(done);
+        // Its replies, oldest first, as text only.
+        for (const r of Array.isArray(n.replies) ? n.replies : []) {
+          const reply = document.createElement("div");
+          reply.className = "reply";
+          const who = document.createElement("div");
+          who.className = "muted";
+          who.textContent = `${r.by} · ${ago(r.at)}`;
+          const said = document.createElement("p");
+          said.textContent = r.note;
+          reply.append(who, said);
+          item.append(reply);
+        }
+        // Replied to and resolved in roll, by someone who may (a writer, or whoever left it; the
+        // page holds no credential): resolved, it folds away here.
+        const act = (label, key) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "resolve";
+          b.textContent = label;
+          b.addEventListener("click", () => window.open(`${TARGET}&${new URLSearchParams({ [key]: String(n.id || "") })}`, "_blank", "noopener"));
+          return b;
+        };
+        if (n.id) {
+          const acts = document.createElement("div");
+          acts.className = "acts";
+          acts.append(act("Reply", "fb_reply"), act("Resolve", "fb_resolve"));
+          item.append(acts);
+        }
         item.addEventListener("mouseenter", () => {
           let el = null;
           try { el = n.selector ? document.querySelector(n.selector) : null; } catch { el = null; }

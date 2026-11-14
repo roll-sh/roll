@@ -291,17 +291,14 @@ impl Source for CodeSource {
     }
 
     async fn feedback(&self, change: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
-        Ok(self
+        let comments = self
             .code
             .db
             .reviews(change)?
             .into_iter()
             .filter(|r| !r.dismissed && r.verdict == code_control::review::Verdict::Comment)
-            .filter_map(|r| {
-                let (path, selector, note) = crate::notes::parse(&r.body)?;
-                Some(crate::notes::Note { id: r.id, path, selector, note, by: r.reviewer.name, at: r.created_at })
-            })
-            .collect())
+            .map(|r| crate::notes::Comment { id: r.id, body: r.body, by: r.reviewer.name, at: r.created_at });
+        Ok(crate::notes::thread(comments))
     }
 
     async fn git_commit(&self, repo: &str, revision: &str) -> anyhow::Result<Option<String>> {

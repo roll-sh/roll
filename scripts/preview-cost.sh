@@ -306,6 +306,10 @@ echo "$NOTES" | grep -q "The heading is cut off" || { echo "the page's notes sho
 NOTE_ID=$(echo "$NOTES" | jq_ "d[0]['id']")
 [ "$(api GET "/v1/previews/$PV/notes" | jq_ "[n['id'] for n in d['notes']]")" = "['$NOTE_ID']" ] || { echo "the preview's open notes should list the page's, with its id"; exit 1; }
 ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview notes "$PV" | grep -q "^$NOTE_ID  / body > h1  by .*: The heading is cut off" || { echo "roll preview notes should list it: $(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview notes "$PV")"; exit 1; }
+# A reply to it (the sheet's Reply: a comment review naming the note) is listed under it on the page.
+api POST "/v1/code/changes/$CHG/reviews" "{\"verdict\":\"comment\",\"body\":\"**Reply on the preview** · \`$NOTE_ID\`\\n\\nWhich width?\"}" >/dev/null
+REPLIES=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F" | jq_ "[r['note'] for n in d for r in n.get('replies', [])]")
+[ "$REPLIES" = "['Which width?']" ] || { echo "the note's reply should be listed under it on the page: $REPLIES"; exit 1; }
 [ "$(api POST "/v1/previews/$PV/notes/$NOTE_ID/resolve" '{}' | jq_ "d.get('resolved')")" = "$NOTE_ID" ] || { echo "resolving the page's note should answer with it"; exit 1; }
 RESOLVED=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F" | jq_ "len(d)")
 [ "$RESOLVED" = 0 ] && [ "$(api GET "/v1/previews/$PV/notes" | jq_ "len(d['notes'])")" = 0 ] || { echo "a resolved note should fold away on the page and from the open notes: $RESOLVED left"; exit 1; }
@@ -666,6 +670,7 @@ cat <<EOF
 | The release's time on the preview's data (at its head) / on the change | $RELEASE / $CHG_RELEASE ms |
 | The preview's link as a QR code (PNG, no-store) | $QR |
 | Mail: the provider's key in the service / sent as the preview, caught | gone / $MAIL |
+| A page's note: its reply, listed under it on the page | $REPLIES |
 | A page's note resolved in roll: notes the page lists after | $RESOLVED |
 | \`roll preview connect --kind postgres\`: the branch's own role | $(role "$CONNECT") |
 | Postgres users.email in the branch / in the parent | $PG_MASKED / $PG_PARENT |

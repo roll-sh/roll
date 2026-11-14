@@ -837,7 +837,7 @@ async fn a_pages_notes_by_its_environment_name() {
     e.code.open(change("chg_n", 4));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_n").unwrap().unwrap();
-    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1 };
+    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1, replies: Vec::new() };
     e.code.feedback.lock().insert("chg_n".into(), vec![note("/", "Too big"), note("/about", "Typo")]);
     let env_name = roll_previews::branch_name(&p.id);
     let got = e.engine.notes_for(&env_name, "/").await.unwrap();

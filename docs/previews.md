@@ -689,6 +689,13 @@ land on the change.
   dismissed; from a terminal `roll preview notes` lists the open ones and `--resolve <id>`
   resolves one), so the button stops listing it. The page holds no credential for this either
   (live: a resolved note folds away).
+- A note is a thread (Vercel Comments' replies): its Reply opens roll (`?fb_reply=<review id>`)
+  on the same view, the note with its replies, a reply box and Resolve. A reply is a `comment`
+  review on the change starting "**Reply on the preview** · `<the note's id>`"
+  (`roll_previews::notes::thread` reads them back, the latest 20 per note, oldest first; one
+  naming any other review joins nothing), so it reaches the pull request as a GitHub review like
+  the note did. The page lists the replies under their note, as text, and `roll preview notes`
+  under each note too (live: a reply listed under its note).
 - Previews deployed on roll apps go through apps' own proxy, which doesn't add it yet.
 - Public previews don't get it (anyone could see the button), and a branch's preview has no
   change to post on.
@@ -755,7 +762,7 @@ and admins see every project.
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each) | `{vars}`: the preview's own variables; its services redeploy with them |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
-| `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500) |
+| `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}]}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500) |
 | `POST /v1/previews/{id}/notes/{note}/resolve` | | `{resolved}`: a note on the preview's page (its review's id) resolved, so the page stops listing it; 404 for a note that isn't the change's |
 | `GET /v1/previews/{id}/mail` | | `{mail: [{id, at, from, to, subject, size}]}`: what its services sent, caught (newest first, the last 50) |
 | `GET /v1/previews/{id}/mail/{mail}` | | One caught message as sent, as `text/plain` (never rendered) |
@@ -1157,6 +1164,8 @@ Ranked by what a person notices first. Done so far:
 - a look at the sheet from screenshots of a live preview with today's checks (desktop and phone):
   the data branch rows kept their names whole and their notes in word groups;
 - caught mail bounded by bytes (10 MiB a preview) as well as count;
+- replies on a page's notes (Vercel Comments' threads): comment reviews naming the note, listed
+  under it on the page, in the sheet (with a reply box) and by `roll preview notes`;
 - a teardown's failure told to the change: the `preview` event's `teardown`, and the pull
   request comment's "deleted. Its teardown failed:" with the job's output fenced;
 - the page's checks (speed, Core Web Vitals, accessibility, SEO, links, words) in a world of
@@ -1266,12 +1275,7 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Replies on a page's notes** (Vercel Comments' threads): a note is one comment today; a
-   reply from the page or the sheet joins it, and the note's author hears of it through roll's
-   notifications, resolved as one thread. roll code's threads have replies, resolving and the
-   GitHub mirror already, but a thread sits on a file's lines (`ThreadInput.path`/`line`); a
-   note would be a thread on a page, which roll code's reviews would have to allow first.
-2. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
+1. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
    a preview reaches real people, but its code can still call any API (a payment provider's
    sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
    (today), `"roll"` (only roll's own products and the preview's branches) or a list of hosts;
@@ -1281,19 +1285,19 @@ Ranked by what a person notices first. Done so far:
    host whose firewall roll mustn't touch) or an internal network with a forwarding sidecar for
    every product port (an image of its own, and roll code's runner changed); on the cloud fleet
    it's security groups, with the cloud thread.
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+3. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-5. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+4. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+5. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1306,12 +1310,12 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-7. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+6. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
    Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
    minutes even with the parent's history reporting `end` past it, where pg-control's own test
    (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
    old; the live script will check it once this is understood.
-8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.
