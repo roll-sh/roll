@@ -440,6 +440,9 @@ previews are listed once those products are on.
 | `apps_get_deploy` | One deploy. | `GET …/environments/{env}/deploys/{deploy}` |
 | `apps_list_links` | What a service is linked to. | `GET /v1/apps/services/{service}/links` |
 | `apps_list_cron_runs` | A cron service's runs. | `GET …/environments/{env}/runs` |
+| `apps_get_cron_run` | One cron run: status, exit code, times. | `GET /v1/apps/services/{id}/environments/{env}/runs/{run}` |
+| `apps_cron_run_logs` | A cron run's output (reveal). | `GET /v1/apps/services/{id}/environments/{env}/runs/{run}/logs` |
+| `apps_cancel_cron_run` | Stop a running cron run (production: deploy). | `POST /v1/apps/services/{id}/environments/{env}/runs/{run}/cancel` |
 | `apps_run_cron` | Run a cron job now (deploy in production). | `POST …/environments/{env}/runs` |
 | `apps_limits` | A project's apps spend limits. | `GET /v1/apps/projects/{project}/limits` |
 | `apps_pending` | What the next deploy changes: variables (names), run settings, project secrets. | `GET /v1/apps/services/{service}/environments/{env}/pending` |
@@ -520,7 +523,8 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); a preview's caught mail as
+revoked as leaked, about to expire; only their own, never a secret); apps-next's cron runs as tools
+(`apps_get_cron_run`, `apps_cron_run_logs`, `apps_cancel_cron_run`); a preview's caught mail as
 reveal, with `previews_list_mail` and `previews_read_mail` (previews-next); the connect panel says
 what a choice of toolsets costs (tools and context tokens, from `GET /v1/mcp/toolsets`) and warns
 past a client's limit (VS Code refuses more than 128 tools a request; with every product on roll
