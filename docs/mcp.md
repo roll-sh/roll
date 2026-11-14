@@ -335,6 +335,8 @@ previews are listed once those products are on.
 | `search_get_cluster` | A cluster's settings, state, indices, size, URL and branches. | `GET /v1/search/clusters/{cluster}` |
 | `search_create_cluster` | A new cluster, or a branch of one (its password once, to tokens that may reveal). | `POST /v1/search/clusters` |
 | `search_branch_cluster` | A copy-on-write branch of a cluster. | `POST /v1/search/clusters/{cluster}/branches` |
+| `search_update_cluster` | A cluster's idle timeout, request limits, flavor. | `PATCH /v1/search/clusters/{id}` |
+| `search_delete_cluster` | Delete a cluster (its branches keep working). | `DELETE /v1/search/clusters/{id}` |
 | `search_usage` | A cluster's metering and cost against Elastic Cloud and Amazon OpenSearch. | `GET /v1/search/clusters/{cluster}/usage` |
 | `search_get_index` | An index's mappings, settings and aliases. | `GET /v1/search/clusters/{cluster}/indices/{index}` |
 | `search_create_index` | Create an index with mappings and settings. | `PUT /v1/search/clusters/{cluster}/indices/{index}` |
@@ -375,6 +377,9 @@ previews are listed once those products are on.
 | `secrets_transit_sign` | An Ed25519 signature by a project's signing key. | `POST /v1/secrets/projects/{project}/transit/{name}/sign` |
 | `secrets_transit_verify` | Whether a signature is the key's. | `POST /v1/secrets/projects/{project}/transit/{name}/verify` |
 | `secrets_transit_public_key` | A signing key's public keys (raw, PEM, JWK). | `GET /v1/secrets/projects/{project}/transit/{name}/public` |
+| `secrets_list_rotators` | Which secrets roll rotates, how often. | `GET /v1/secrets/projects/{project}/rotators` |
+| `secrets_list_syncs` | Where a project's environments are pushed. | `GET /v1/secrets/projects/{project}/syncs` |
+| `secrets_diff` | A local .env against an environment, by fingerprint (names only). | `POST /v1/secrets/projects/{project}/environments/{env}/diff` |
 | `secrets_list_rotations` | A project's secret rotations: what rotated and what's due. | `GET /v1/secrets/projects/{project}/rotations` |
 | `secrets_ca_certificates` | The certificates a project's CA has issued (never a key). | `GET /v1/secrets/projects/{project}/cas/{ca}/certificates` |
 | `secrets_health` | What needs fixing in a project's secrets, by name, in the environments you may read (`code`: keys no repository mentions). | `GET /v1/secrets/projects/{project}/health` |
@@ -488,24 +493,27 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); apps' missing everyday tools
-(`apps_create_service` takes links and run settings, an environment's state, linking and unlinking
-resources, checking a domain, volume backups and restoring one; all on main); a tool any token may
-call (`apps_plan`) is listed only where its product runs (it showed with apps off); previews' tools
-listed (they never were: roll previews runs with roll code and has no product switch, so MCP's
-product list left it out; rolld's auth test now fails on any product it serves with no tools
-listed); the token builder offers only the products this rolld runs (and any a token's rules name
-already), not all sixteen; checked live on #25's build (both official SDKs end to end, progress
-during an approval, URL elicitation; `serverInfo.icons` answered), which found roll code's fronted
-tools still carrying the approval argument for the operator (37 of 78): they drop it too now; the
-fourteenth review (key-scoped rules, before any row uses them): secrets' key names are literal (a
-key named `_all` is only that key; a list or a `*` in a request names none) and an approval
-remembers only a request that named one key; a pending answer says the call finds its approval
-without the argument too; the approval argument only where a person can be asked (a model reads
-every tool's schema: 92 → 73 KB for the operator and for tokens that only allow, every product on;
-`tools/list` 140 → 120 KB, 190 tools); the builder lists a secrets project's encryption keys to tick
-(one picker with search's indices; secrets' projects come from the workspace); encryption keys as
-MCP tools (`secrets_transit_encrypt`, `_decrypt`, `_sign`, `_verify`, `_public_key`; secrets #47:
+revoked as leaked, about to expire; only their own, never a secret); each product's routes compared
+with its tools (`tool-gaps.py`): `search_update_cluster`, `search_delete_cluster`,
+`secrets_list_rotators`, `secrets_list_syncs` and `secrets_diff` added; previews' bypass, search's
+keys, password and console, and secrets' bulk values, reviews and settings stay a person's; apps'
+missing everyday tools (`apps_create_service` takes links and run settings, an environment's state,
+linking and unlinking resources, checking a domain, volume backups and restoring one; all on main);
+a tool any token may call (`apps_plan`) is listed only where its product runs (it showed with apps
+off); previews' tools listed (they never were: roll previews runs with roll code and has no product
+switch, so MCP's product list left it out; rolld's auth test now fails on any product it serves with
+no tools listed); the token builder offers only the products this rolld runs (and any a token's
+rules name already), not all sixteen; checked live on #25's build (both official SDKs end to end,
+progress during an approval, URL elicitation; `serverInfo.icons` answered), which found roll code's
+fronted tools still carrying the approval argument for the operator (37 of 78): they drop it too
+now; the fourteenth review (key-scoped rules, before any row uses them): secrets' key names are
+literal (a key named `_all` is only that key; a list or a `*` in a request names none) and an
+approval remembers only a request that named one key; a pending answer says the call finds its
+approval without the argument too; the approval argument only where a person can be asked (a model
+reads every tool's schema: 92 → 73 KB for the operator and for tokens that only allow, every product
+on; `tools/list` 140 → 120 KB, 190 tools); the builder lists a secrets project's encryption keys to
+tick (one picker with search's indices; secrets' projects come from the workspace); encryption keys
+as MCP tools (`secrets_transit_encrypt`, `_decrypt`, `_sign`, `_verify`, `_public_key`; secrets #47:
 their rows narrow to one key); roll's mark as the server's icon (`serverInfo.icons`); a rule can
 narrow a secrets project to some of its encryption keys (`{id, index}`, as search's indices: signing
 with one key needn't be write on the project; secrets' transit rows add `.index("name")`);
