@@ -562,7 +562,8 @@ has its logins rotated by roll itself, with no rotator to write, as Infisical's 
 does, and issues a login per lease, as Vault's database engine does. A project registers it
 (`POST …/outside-databases {name, url, roles?, group?, ca?}`, `admin`; `roll secrets databases add
 NAME --role a --role b --group g`, the URL on stdin): `url` is an admin connection
-(`postgres://admin:…@host:5432/db` or `mysql://admin:…@host:3306/db`, a user that may alter both
+(`postgres://admin:…@host:5432/db`, `mysql://admin:…@host:3306/db` or
+`sqlserver://admin:…@host:1433/db`, a user that may alter both
 roles and create roles in the group), sealed with the project's data key like a rotator's (only `host:port` is shown); `roles` are
 two login roles that take turns (managed links); `group` is a role whose grants dynamic logins get;
 one or both. `ca` is the server's CA certificates (PEM) when the system's don't cover it (RDS).
@@ -610,6 +611,22 @@ out of its logs), and a dynamic login is `CREATE USER`, `GRANT <group>` and `SET
 <group>`. MySQL has no `VALID UNTIL`, so a dynamic login lasts until roll ends its lease (renewing
 changes nothing on the server); ending it kills its sessions where the admin may
 (`CONNECTION_ADMIN`) and drops the account.
+
+**SQL Server** (and Azure SQL Managed Instance) too, as Vault's MSSQL engine (`sqlserver://…`; the
+URL may set `encrypt=true` and nothing else). Everything is encrypted and the certificate verified
+against the URL's host (TDS 7.4 with `Encrypt=Required`; nothing in plain text, even where private
+addresses are allowed; TDS 8 `strict` isn't offered: SQL Server 2022 on Linux refused it in testing),
+and a redirect to another server (Azure's gateway) is refused, since roll connects only to the
+address it checked. Rotation is `ALTER LOGIN [name] WITH PASSWORD` on two SQL logins that take
+turns; a dynamic login is `CREATE LOGIN`, then `CREATE USER … FOR LOGIN` and `ALTER ROLE <group> ADD
+MEMBER` in the URL's database (the group is a database role). It has no `VALID UNTIL` either:
+ending a lease kills the login's sessions where the admin may (`ALTER ANY CONNECTION`), then drops
+the user and the login. A conversation reads at most 4 MiB from the server, on top of the
+driver's own bounds. Checked against SQL Server 2022 in Docker with a certificate from a private CA:
+rotation (the rotated login signs in), a dynamic login that signs in with the group's rights and
+can't once dropped, and an untrusted certificate refused. With TLS 1.3 enabled on the server as
+well (`tlsprotocols = 1.2,1.3`), SQL Server 2022 on Linux refused TDS 7.4 logins, Microsoft's own
+`sqlcmd` included: such a server needs TLS 1.2 allowed.
 
 ## Consumption
 
@@ -1739,7 +1756,7 @@ Open pull requests after this one:
   signature checked.
 - **#41, Redis outside roll** (after #39): two ACL users take turns (`#<sha256>` passwords), or a
   user per lease copying a template user's rules; the tenant's replies read by a bounded parser.
-- **#39, Postgres and MySQL outside roll** (after #20): two login roles take turns (rotation), or a
+- **#39, Postgres, MySQL and SQL Server outside roll** (after #20): two login roles take turns (rotation), or a
   login per lease in a group role (dynamic), over verified TLS to a public address rolld resolved
   itself (Postgres gets a SCRAM verifier, never the password).
 

@@ -34,6 +34,8 @@ libmimalloc-sys.workspace = true
 mimalloc.workspace = true
 mq-amqp.workspace = true
 mysql_async.workspace = true
+tiberius.workspace = true
+tokio-util = { workspace = true, features = ["compat"] }
 mq-amqp10.workspace = true
 mq-cluster.workspace = true
 mq-control.workspace = true

@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS outside_dbs (
 
 pub(crate) const KIND: &str = "outside_database";
 
-/// A Postgres or MySQL server outside roll, by the URL's scheme (rolld: TLS to a public address it
+/// A Postgres, MySQL or SQL Server outside roll, by the URL's scheme (rolld: TLS to a public address it
 /// resolved itself). Calls block; errors never carry a password.
 /// `ca` is the server's CA certificates (PEM), trusted as well as the system's.
 pub trait OutsideDb: Send + Sync {
@@ -83,7 +83,8 @@ pub struct OutsideDatabase {
 #[serde(deny_unknown_fields)]
 pub struct NewOutsideDatabase {
     pub name: String,
-    /// `postgres://admin:…@host:5432/db` or `mysql://admin:…@host:3306/db`: a user that may alter
+    /// `postgres://admin:…@host:5432/db`, `mysql://admin:…@host:3306/db` or
+    /// `sqlserver://admin:…@host:1433/db`: a user that may alter
     /// the roles and create logins in the group.
     pub url: String,
     /// Two login roles that take turns (managed links), or none.
@@ -374,8 +375,8 @@ impl Secrets {
             return Err(Error::BadRequest("the group role isn't one of the two that take turns".into()));
         }
         let host = authority_host(&n.url)?;
-        if !["postgres://", "postgresql://", "mysql://"].iter().any(|p| n.url.starts_with(p)) || host.is_empty() || n.url.len() > 2048 {
-            return Err(Error::BadRequest("the URL is postgres://user:password@host:5432/db or mysql://user:password@host:3306/db".into()));
+        if !["postgres://", "postgresql://", "mysql://", "sqlserver://"].iter().any(|p| n.url.starts_with(p)) || host.is_empty() || n.url.len() > 2048 {
+            return Err(Error::BadRequest("the URL is postgres://user:password@host:5432/db, mysql://user:password@host:3306/db or sqlserver://user:password@host:1433/db".into()));
         }
         let ca = n.ca.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
         if ca.as_ref().is_some_and(|c| c.len() > 64 * 1024 || !c.contains("-----BEGIN CERTIFICATE-----")) {
