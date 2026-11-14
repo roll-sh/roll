@@ -133,10 +133,87 @@ pub fn entry_kind(a: &AppEntry) -> &'static str {
     }
 }
 
+/// The most nodes a Compose file may expand to, its aliases' copies included.
+pub const COMPOSE_NODES: usize = 100_000;
+
+/// Its nodes counted as a reader would see them (aliases replayed), without building any:
+/// an error past [`COMPOSE_NODES`].
+fn count_nodes(text: &str) -> Result<(), ProjectError> {
+    use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
+    use std::cell::Cell;
+    #[derive(Clone, Copy)]
+    struct Count<'a>(&'a Cell<usize>);
+    impl Count<'_> {
+        fn one<E: serde::de::Error>(self) -> Result<(), E> {
+            let n = self.0.get() + 1;
+            self.0.set(n);
+            if n > COMPOSE_NODES { Err(E::custom(format!("it expands past {COMPOSE_NODES} nodes (YAML aliases)"))) } else { Ok(()) }
+        }
+    }
+    impl<'de> DeserializeSeed<'de> for Count<'_> {
+        type Value = ();
+        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            d.deserialize_any(self)
+        }
+    }
+    impl<'de> Visitor<'de> for Count<'_> {
+        type Value = ();
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("YAML")
+        }
+        fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
+            self.one()
+        }
+        fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<(), E> {
+            self.one()
+        }
+        fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<(), E> {
+            self.one()
+        }
+        fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<(), E> {
+            self.one()
+        }
+        fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<(), E> {
+            self.one()
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
+            self.one()
+        }
+        fn visit_none<E: serde::de::Error>(self) -> Result<(), E> {
+            self.one()
+        }
+        fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            d.deserialize_any(self)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> Result<(), A::Error> {
+            self.one()?;
+            while a.next_element_seed(self)?.is_some() {}
+            Ok(())
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<(), A::Error> {
+            self.one()?;
+            while a.next_key_seed(self)?.is_some() {
+                a.next_value_seed(self)?;
+            }
+            Ok(())
+        }
+        fn visit_enum<A: serde::de::EnumAccess<'de>>(self, a: A) -> Result<(), A::Error> {
+            use serde::de::VariantAccess;
+            let ((), v) = a.variant_seed(self)?;
+            v.newtype_variant_seed(self)
+        }
+    }
+    let n = Cell::new(0);
+    Count(&n).deserialize(serde_yaml_ng::Deserializer::from_str(text)).map_err(|e| err(format!("the Compose file isn't one roll reads: {e}")))
+}
+
 /// A Compose file as roll.toml text: image and build services as `[apps.<name>]`, Postgres and
 /// Redis containers as roll's own `[databases.<name>]` (linked from what depends on them), and
 /// notes on what isn't carried over (volumes, networks, commands, health checks).
 pub fn compose_to_toml(text: &str) -> Result<(String, Vec<String>), ProjectError> {
+    // Aliases expand as the file is read (a "billion laughs" file of a few KB is gigabytes): its
+    // nodes are counted first, stopping at the budget, before any value is built.
+    count_nodes(text)?;
     let mut v: serde_yaml_ng::Value = serde_yaml_ng::from_str(text).map_err(|e| err(format!("the Compose file isn't YAML: {e}")))?;
     // `<<: *defaults`, as Compose files share settings.
     v.apply_merge().map_err(|e| err(format!("the Compose file's merge keys: {e}")))?;
@@ -265,5 +342,9 @@ mod tests {
         assert!(notes.iter().any(|n| n.starts_with("web: not carried over: volumes")), "{notes:?}");
         assert!(!web.variables.contains_key("DATABASE_URL") && notes.iter().any(|n| n.contains("DATABASE_URL left out")), "the link sets it: {notes:?}");
         assert!(compose_to_toml("services:\n  web_1:\n    image: a\n  web-1:\n    image: b\n").is_err(), "two services, one name");
+        // A few KB that aliases make gigabytes stops at the budget, before anything is built.
+        let bomb = format!("x: &a [{}]\ny: [{}]\nservices: {{}}\n", vec!["1"; 2000].join(","), vec!["*a"; 2000].join(","));
+        let e = compose_to_toml(&bomb).unwrap_err().to_string();
+        assert!(e.contains("expands past"), "{e}");
     }
 }

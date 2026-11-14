@@ -253,7 +253,7 @@ type EnvironmentSummary = {
 type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
 
 type Patch<T> = { [K in keyof T]?: T[K] | null }; // null: back to the default
-type NewService = { project: string; name: string; source: Source; build?: Patch<Build>; run?: Patch<Run>; variables?: { [name: string]: string } /* production, before its first deploy */; registry?: { username: string; password: string; server?: string } /* an image's login, before its first pull (as PUT …/registry) */; links?: { kind: LinkKind; ref: string; prefix?: string }[] /* at most 20, made before the first deploy (as PUT …/links); one that doesn't resolve makes no service */; x?: number; y?: number };
+type NewService = { project: string; name: string; source: Source; build?: Patch<Build>; run?: Patch<Run>; variables?: { [name: string]: string } /* production, before its first deploy */; registry?: { username: string; password: string; server?: string } /* an image's login, before its first pull (as PUT …/registry) */; links?: { kind: LinkKind; ref: string; prefix?: string }[] /* at most 20, made before the first deploy (as PUT …/links); one that doesn't resolve makes no service */; branch?: string /* a repo source: production follows it, its first deploy that branch's head (default: the repo's default branch); 400 when the repo has no such branch */; x?: number; y?: number };
 type ServicePatch = { name?: string; source?: Source; build?: Patch<Build>; run?: Patch<Run> };
 
 type EnvironmentPut = {

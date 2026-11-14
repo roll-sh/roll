@@ -1,11 +1,12 @@
 import { Trash2 } from "lucide-react";
 import { useReducedMotion } from "@roll/brand";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { appsApi, SERVICE_NAME, type Build, type Environment, type Prices, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
 import { Field, Segmented } from "../redis/shared";
 import { btn, Confirm, danger, input, Panel, primary } from "../ui";
 import { ActivityPanel } from "./activity";
 import { DrainsPanel } from "./drains";
+import { DuplicatePanel } from "./duplicate";
 import { EnvironmentPanel, InstancesPanel } from "./environment";
 import { NotificationsPanel } from "./notifications";
 import { SpendPanel } from "./spend";
@@ -625,6 +626,10 @@ export function SettingsTab({
           <ActivityPanel service={service.id} />
         </Anchor>
 
+        <Anchor id="duplicate">
+          <DuplicatePanel service={service} runner={runner} />
+        </Anchor>
+
         <Section id="danger" title="Danger zone">
           <div className="p-5">
             {deleting ? (
@@ -675,9 +680,11 @@ function Section({ id, title, children }: { id: string; title: string; children:
  *  narrow one; the project's own panels apart, under its name. */
 function SectionNav({ sections, project }: { sections: [string, string][]; project: [string, string][] }) {
   const reduced = useReducedMotion();
-  const all = [...sections, ...project, ["activity", "Activity"], ["danger", "Danger zone"]] as [string, string][];
+  const all = [...sections, ...project, ["activity", "Activity"], ["duplicate", "Duplicate"], ["danger", "Danger zone"]] as [string, string][];
   const ids = all.map(([id]) => id).join(" ");
   const [current, setCurrent] = useState(all[0][0]);
+  // Until then, the observer doesn't move the mark off a section just clicked.
+  const hold = useRef(0);
   useEffect(() => {
     if (typeof IntersectionObserver === "undefined") return;
     const shown = new Set<string>();
@@ -690,7 +697,7 @@ function SectionNav({ sections, project }: { sections: [string, string][]; proje
           else shown.delete(id);
         }
         const first = order.find((id) => shown.has(id));
-        if (first) setCurrent(first);
+        if (first && Date.now() > hold.current) setCurrent(first);
       },
       // The band a reader's eye is on: the top third of the screen.
       { rootMargin: "-64px 0px -60% 0px" },
@@ -703,18 +710,21 @@ function SectionNav({ sections, project }: { sections: [string, string][]; proje
   }, [ids]);
   const go = (id: string) => {
     document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
+    hold.current = Date.now() + 1000;
     setCurrent(id);
   };
+  // A section the form no longer has (the type changed) hands the mark to the first.
+  const marked = all.some(([id]) => id === current) ? current : all[0][0];
   const link = ([id, label]: [string, string]) => (
     <li key={id} className="shrink-0">
       <a
         href={`#settings-${id}`}
-        aria-current={current === id ? "location" : undefined}
+        aria-current={marked === id ? "location" : undefined}
         onClick={(e) => {
           e.preventDefault();
           go(id);
         }}
-        className={`block whitespace-nowrap rounded-md px-2 py-1 text-[13px] transition-colors duration-150 ${current === id ? "bg-white/[0.05] text-fg" : "text-muted hover:text-fg"}`}
+        className={`block whitespace-nowrap rounded-md px-2 py-1 text-[13px] transition-colors duration-150 ${marked === id ? "bg-white/[0.05] text-fg" : "text-muted hover:text-fg"}`}
       >
         {label}
       </a>
@@ -728,6 +738,7 @@ function SectionNav({ sections, project }: { sections: [string, string][]; proje
       <ul className="contents lg:mt-0.5 lg:flex lg:flex-col lg:gap-0.5">{project.map(link)}</ul>
       <ul className="contents lg:mt-3 lg:flex lg:flex-col lg:gap-0.5">
         {link(["activity", "Activity"])}
+        {link(["duplicate", "Duplicate"])}
         {link(["danger", "Danger zone"])}
       </ul>
     </nav>

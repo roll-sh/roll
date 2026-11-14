@@ -3151,3 +3151,26 @@ async fn a_compose_file_is_read_as_a_project_without_making_anything() {
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
     assert!(v["error"].as_str().unwrap().contains("app web"), "{v}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_service_is_made_again_from_its_own_settings() {
+    // The dashboard's Duplicate sends a service's build and run back as GET gave them.
+    let w = world().await;
+    let run = json!({ "port": 80, "min_instances": 1, "health_path": "/healthz", "alerts": { "memory_pct": 80, "error_pct": 5, "p95_ms": 900, "log_match": "panic", "log_count": 3 }, "rollout": { "steps": [10, 50], "step_s": 60, "error_pct": 5 }, "affinity": true });
+    let (a, _) = image_service(&w, "web", run).await;
+    let (st, b) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "web-copy", "source": a["source"], "build": a["build"], "run": a["run"] }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{b}");
+    assert_eq!((&b["run"], &b["build"]), (&a["run"], &a["build"]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_repo_service_made_with_a_branch_follows_it_from_the_first_deploy() {
+    // A project file's `branch` (roll up --all, the dashboard's import): set as it's made, never after.
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"}, "branch": "release" }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap()), None).await;
+    assert_eq!(env["branch"], "release", "{env}");
+    let (st, v) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "img", "source": {"kind": "image", "image": "nginx:1.27"}, "branch": "main" }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "a branch is a repo's: {v}");
+}

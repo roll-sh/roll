@@ -28,7 +28,7 @@ describe("importing a project's file", () => {
     expect(planImport(imp, have).map((s) => { const l = stepLine(s); return `${l.mark} ${l.text}`; })).toEqual([
       "= postgres database db",
       "+ redis database cache",
-      "= service web (image ghcr.io/acme/web:2)",
+      "= service web (image ghcr.io/acme/web:1)",
       "~ settings web (min_instances)",
       "↑ deploy web",
       "+ service jobs (from jobs): `roll up --all` uploads its code",

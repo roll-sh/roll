@@ -205,7 +205,8 @@ pub enum AppsCmd {
         /// A new name (part of its URLs).
         #[arg(long)]
         name: Option<String>,
-        /// Build from this roll code repo (`owner/name`) from now on.
+        /// Build from this roll code repo (`owner/name`) from now on: the whole source is
+        /// replaced, so a subdirectory goes with `--root` (none: the repo's root).
         #[arg(long, conflicts_with_all = ["image", "upload"])]
         repo: Option<String>,
         /// With `--repo`: the subdirectory to build.
@@ -1452,6 +1453,10 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                 };
                 let made_links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": f.databases[l].kind, "ref": dbs[&(f.databases[l].kind.clone(), l.clone())] })).collect();
                 let mut body = json!({ "project": project, "name": n, "source": source, "links": made_links });
+                // Production follows it from the first deploy (not the default branch's head first).
+                if let Some(b) = &a.branch {
+                    body["branch"] = json!(b);
+                }
                 let run = entry_run(a);
                 if !run.is_empty() {
                     body["run"] = Value::Object(run);
@@ -1461,9 +1466,6 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                 }
                 let svc = api.post("/v1/apps/services", body).await?;
                 eprintln!("made service {n}");
-                if let Some(b) = &a.branch {
-                    api.call(reqwest::Method::PUT, &env_path(&svc, &u.target.env), Some(json!({ "branch": b }))).await?;
-                }
                 svc
             }
         };

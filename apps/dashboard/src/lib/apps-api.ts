@@ -152,6 +152,8 @@ export interface NewService {
   registry?: { username: string; password: string; server?: string };
   /** Resources to link before the first deploy (their variables are in it). */
   links?: { kind: LinkKind; ref: string; prefix?: string }[];
+  /** A repo source: production follows it (default: the repo's default branch). */
+  branch?: string;
   x?: number;
   y?: number;
 }

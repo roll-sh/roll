@@ -56,6 +56,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
     if (t) {
       setUrl("");
       setEnvs("");
+      setOnly([]);
       setSecret(t.secret ?? null);
       void load();
     }

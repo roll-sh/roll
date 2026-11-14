@@ -2,8 +2,10 @@ import { FileUp } from "lucide-react";
 import { useRef, useState } from "react";
 import { appsApi, type Link, type ProjectImport, type Service } from "@/lib/apps-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
-import { freeSpot, resourceKey, service as serviceView } from "@/lib/workspace-resources";
-import { PlaceError, refreshInventory, useWorkspace, workspace } from "@/lib/workspace-store";
+import { redisApi } from "@/lib/redis-api";
+import { api } from "@/lib/roll-api";
+import { freeSpot, service as serviceView } from "@/lib/workspace-resources";
+import { PlaceError, refreshInventory, workspace } from "@/lib/workspace-store";
 import { Label } from "../workspace/inspector";
 
 type Db = "postgres" | "redis";
@@ -18,7 +20,8 @@ export type ImportStep =
   | { op: "link"; service: string; db: string }
   | { op: "settings"; service: string; keys: string[] }
   | { op: "deploy"; service: string }
-  | { op: "conflict"; service: string; text: string };
+  | { op: "conflict"; service: string; text: string }
+  | { op: "note"; service: string; text: string };
 
 /** What's there: the project's services by name (with their links), its databases by kind and name. */
 export interface ImportHave {
@@ -39,10 +42,10 @@ function same(a: unknown, b: unknown): boolean {
   return ka.length === kb.length && ka.every((k) => same((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
 }
 
-function fromLabel(source: ProjectImport["apps"][string]["source"]) {
+function fromLabel(source: ProjectImport["apps"][string]["source"] | Service["source"]) {
   if (source.kind === "repo") return `repo ${source.repo}${source.root ? ` at ${source.root}` : ""}`;
   if (source.kind === "image") return `image ${source.image}`;
-  return `from ${source.root}`;
+  return "root" in source ? `from ${source.root}` : "uploaded";
 }
 
 /** What importing `imp` into a project that has `have` does, in order: databases, then each
@@ -63,7 +66,10 @@ export function planImport(imp: ProjectImport, have: ImportHave): ImportStep[] {
       out.push({ op: "conflict", service: name, text: `${name} has ${an(there.service.source.kind)} source; the file makes it ${an(a.source.kind)} one: rename one of them` });
       continue;
     }
-    out.push({ op: "have-service", name, from });
+    out.push({ op: "have-service", name, from: fromLabel(there.service.source) });
+    // A repo or root that differs isn't changed by an import (Settings changes it): said, not done.
+    if (a.source.kind === "repo" && there.service.source.kind === "repo" && (a.source.repo !== there.service.source.repo || (a.source.root ?? "") !== (there.service.source.root ?? "")))
+      out.push({ op: "note", service: name, text: `the file says ${from}; its source stays (Settings changes it)` });
     for (const l of a.links) {
       const ref = have.dbs.get(dbKey(l.kind, l.name));
       if (!ref || !there.links.some((x) => x.kind === l.kind && x.ref === ref)) out.push({ op: "link", service: name, db: l.name });
@@ -94,6 +100,8 @@ export function stepLine(s: ImportStep): { mark: string; text: string } {
       return { mark: "↑", text: `deploy ${s.service}` };
     case "conflict":
       return { mark: "!", text: s.text };
+    case "note":
+      return { mark: "·", text: `${s.service}: ${s.text}` };
   }
 }
 
@@ -101,7 +109,7 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** A roll.toml (with `[apps]`) or a Compose file, read by rolld; nothing about it decides here. */
 function fileOf(text: string, filename: string): { roll_toml: string } | { compose: string } {
-  if (/\.toml$/i.test(filename) || (!/\.ya?ml$/i.test(filename) && /^\s*\[(apps|databases)\./m.test(text))) return { roll_toml: text };
+  if (/\.toml$/i.test(filename) || (!/\.ya?ml$/i.test(filename) && /^\s*\[(apps|databases)[.\]]/m.test(text))) return { roll_toml: text };
   return { compose: text };
 }
 
@@ -111,7 +119,6 @@ function fileOf(text: string, filename: string): { roll_toml: string } | { compo
  * databases made and placed first, so their variables are in the services' first deploys.
  */
 export function ImportPane({ project, spot, onDone }: { project: WorkspaceProject; spot: { x: number; y: number }; onDone: (made: Service[]) => void }) {
-  const ws = useWorkspace();
   const [text, setText] = useState("");
   const [filename, setFilename] = useState("");
   const [read, setRead] = useState<{ imp: ProjectImport; have: ImportHave; steps: ImportStep[] } | null>(null);
@@ -119,26 +126,36 @@ export function ImportPane({ project, spot, onDone }: { project: WorkspaceProjec
   const [step, setStep] = useState("");
   const [error, setError] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
+  // Bumped on every change to the text: a read that answers after it is dropped.
+  const gen = useRef(0);
 
   const look = async () => {
+    const g = gen.current;
     setBusy("reading");
     setError(null);
     try {
       const imp = await appsApi.importProject(fileOf(text, filename));
       const services = new Map<string, { service: Service; links: Link[] }>();
-      for (const s of await appsApi.services(project.id)) services.set(s.name, { service: s, links: await appsApi.links(s.id).catch(() => []) });
-      // Its databases are the ones on its canvas: another project's `db` is never this one's.
+      for (const s of await appsApi.services(project.id)) services.set(s.name, { service: s, links: await appsApi.links(s.id) });
+      // Its databases are the ones on its canvas (another project's `db` is never this one's),
+      // named by their products: a listing that fails stops here rather than reading as none,
+      // which would make a second `db`.
+      const kinds = new Set(Object.values(imp.databases).map((d) => d.kind));
+      const names = new Map<string, string>();
+      if (kinds.has("postgres")) for (const p of await api.projects()) names.set(`postgres:${p.id}`, p.name);
+      if (kinds.has("redis")) for (const d of await redisApi.list()) names.set(`redis:${d.id}`, d.name);
       const dbs = new Map<string, string>();
       for (const r of project.resources) {
-        if (r.kind !== "postgres" && r.kind !== "redis") continue;
-        const v = ws.inventory.get(resourceKey(r));
-        if (v) dbs.set(dbKey(r.kind, v.name), r.ref);
+        const n = names.get(`${r.kind}:${r.ref}`);
+        if (n) dbs.set(dbKey(r.kind, n), r.ref);
       }
       const have = { services, dbs };
-      setRead({ imp, have, steps: planImport(imp, have) });
+      if (g === gen.current) setRead({ imp, have, steps: planImport(imp, have) });
     } catch (e) {
-      setRead(null);
-      setError(message(e));
+      if (g === gen.current) {
+        setRead(null);
+        setError(message(e));
+      }
     } finally {
       setBusy("");
     }
@@ -172,9 +189,8 @@ export function ImportPane({ project, spot, onDone }: { project: WorkspaceProjec
           const at = taken.length === project.resources.length + 1 ? spot : freeSpot(taken);
           taken.push(at);
           const source = a.source.kind === "repo" ? { kind: "repo" as const, repo: a.source.repo, ...(a.source.root ? { root: a.source.root } : {}) } : a.source.kind === "image" ? { kind: "image" as const, image: a.source.image } : { kind: "upload" as const };
-          const s = await appsApi.create({ project: project.id, name, source, ...(Object.keys(a.run).length ? { run: a.run } : {}), ...(Object.keys(a.variables).length ? { variables: a.variables } : {}), ...(links.length ? { links } : {}), ...at });
+          const s = await appsApi.create({ project: project.id, name, source, ...(Object.keys(a.run).length ? { run: a.run } : {}), ...(Object.keys(a.variables).length ? { variables: a.variables } : {}), ...(links.length ? { links } : {}), ...(a.branch ? { branch: a.branch } : {}), ...at });
           workspace.added(project.id, serviceView(s), at.x, at.y);
-          if (a.branch) await appsApi.putEnvironment(s.id, "production", { branch: a.branch });
           made.push(s);
           continue;
         }
@@ -187,9 +203,11 @@ export function ImportPane({ project, spot, onDone }: { project: WorkspaceProjec
         }
         for (const l of links) if (!there.links.some((x) => x.kind === l.kind && x.ref === l.ref)) await appsApi.link(id, l.kind, l.ref);
         if (a.source.kind === "image" && there.service.source.kind === "image" && there.service.source.image !== a.source.image) {
+          // Deployed first, then made the service's image: a deploy that's refused leaves the
+          // service as it was, so reading the file again still shows the deploy to do.
           setStep(`Deploying ${name}…`);
+          await appsApi.deploy(id, "production", { image: a.source.image });
           await appsApi.update(id, { source: { kind: "image", image: a.source.image } });
-          await appsApi.deploy(id, "production");
         }
       }
       void refreshInventory();
@@ -206,7 +224,7 @@ export function ImportPane({ project, spot, onDone }: { project: WorkspaceProjec
   };
 
   const stops = read?.steps.some((s) => s.op === "conflict") ?? false;
-  const todo = read?.steps.filter((s) => s.op !== "have-db" && s.op !== "have-service").length ?? 0;
+  const todo = read?.steps.filter((s) => s.op !== "have-db" && s.op !== "have-service" && s.op !== "note").length ?? 0;
 
   return (
     <>
@@ -217,7 +235,10 @@ export function ImportPane({ project, spot, onDone }: { project: WorkspaceProjec
         value={text}
         onChange={(e) => {
           setText(e.target.value);
+          // Typed or pasted over: what it is comes from the text now, not the file opened before.
+          setFilename("");
           setRead(null);
+          gen.current++;
         }}
         placeholder={'[apps.web]\nimage = "ghcr.io/acme/web:1"\nlinks = ["db"]\n[databases.db]\nkind = "postgres"'}
         spellCheck={false}
@@ -237,6 +258,7 @@ export function ImportPane({ project, spot, onDone }: { project: WorkspaceProjec
             setFilename(f.name);
             setText(await f.text());
             setRead(null);
+            gen.current++;
             e.target.value = "";
           }}
         />

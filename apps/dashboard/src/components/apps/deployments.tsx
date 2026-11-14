@@ -67,10 +67,21 @@ export function Deployments({
     setOlder([]);
     setMore("idle");
   }, [service, env.name]);
+  // Once older pages are open, a deployment that new ones push out of the newest 100 stays (kept
+  // here), so the list has no gap between the two.
+  useEffect(() => {
+    if (!deploys || !older.length) return;
+    setOlder((o) => {
+      const have = new Set(o.map((d) => d.id));
+      const fell = deploys.filter((d) => !have.has(d.id));
+      return fell.length ? [...o, ...fell] : o;
+    });
+  }, [deploys, older.length]);
   const list = useMemo(() => {
     if (!deploys) return null;
-    const seen = new Set(deploys.map((d) => d.id));
-    return [...deploys, ...older.filter((d) => !seen.has(d.id))];
+    const fresh = new Map(deploys.map((d) => [d.id, d]));
+    const all = [...deploys, ...older.filter((d) => !fresh.has(d.id))];
+    return all.sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? 1 : -1));
   }, [deploys, older]);
   const loadOlder = async () => {
     const last = list?.at(-1);

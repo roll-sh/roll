@@ -141,7 +141,6 @@ async fn overview(State(apps): S) -> R {
     ok(o)
 }
 
-/// `POST /v1/apps/plan`: what a build would detect, for a repo at a revision or for files.
 /// A project in one file, read (no service made): a roll.toml's `[apps]` and `[databases]`, or
 /// a Compose file turned into them, checked as `roll up --all` checks them. The dashboard's import
 /// plans against the project with it and makes what's missing through the usual routes.
@@ -154,7 +153,11 @@ async fn import(b: Bytes) -> R {
     }
     let (toml_text, notes) = match (text("roll_toml"), text("compose")) {
         (Some(t), None) => (t.to_string(), Vec::new()),
-        (None, Some(c)) => compose_to_toml(c).map_err(|e| Error::BadRequest(e.to_string()))?,
+        // Off the runtime's threads: a large file is a few hundred milliseconds of parsing.
+        (None, Some(c)) => {
+            let c = c.to_string();
+            tokio::task::spawn_blocking(move || compose_to_toml(&c)).await.map_err(|e| Error::Internal(e.to_string()))?.map_err(|e| Error::BadRequest(e.to_string()))?
+        }
         _ => return Err(Error::BadRequest("give roll_toml or compose".into())),
     };
     let f = parse_project(&toml_text).map_err(|e| Error::BadRequest(e.to_string()))?;
@@ -174,6 +177,7 @@ async fn import(b: Bytes) -> R {
     ok(json!({ "roll_toml": toml_text, "notes": notes, "apps": apps, "databases": f.databases }))
 }
 
+/// `POST /v1/apps/plan`: what a build would detect, for a repo at a revision or for files.
 async fn plan(State(apps): S, b: Bytes) -> R {
     let v = body(&b)?;
     let overrides: crate::model::Build = crate::model::merge(&Default::default(), v.get("build"), "build")?;

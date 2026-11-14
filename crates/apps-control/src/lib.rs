@@ -386,7 +386,7 @@ impl Apps {
     pub async fn create_service(self: &Arc<Self>, body: Value, actor: Option<String>) -> Result<Service> {
         let o = body.as_object().ok_or_else(|| Error::BadRequest("the body is an object".into()))?;
         for k in o.keys() {
-            if !["project", "name", "source", "build", "run", "variables", "registry", "links", "x", "y"].contains(&k.as_str()) {
+            if !["project", "name", "source", "build", "run", "variables", "registry", "links", "branch", "x", "y"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -445,11 +445,20 @@ impl Apps {
             let p = project.clone();
             tokio::task::spawn_blocking(move || this.project_name(&p)).await.map_err(|e| Error::Internal(e.to_string()))??
         };
-        // A repo's production environment follows its default branch.
+        // A repo's production environment follows its default branch, or the one named (its
+        // first deploy is that branch's head, not the default's).
+        let named = match o.get("branch") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(b)) if matches!(source, Source::Repo { .. }) && !b.is_empty() && b.len() <= 255 => Some(b.clone()),
+            Some(_) => return Err(Error::BadRequest("branch is a repo source's branch name".into())),
+        };
         let branch = match (&source, &self.deps.sources) {
             (Source::Repo { repo, .. }, Some(src)) => {
-                let _ = src.resolve(repo, None).await.map_err(|e| Error::BadRequest(format!("repo {repo}: {e}")))?;
-                Some(self.default_branch(repo).await)
+                let _ = src.resolve(repo, named.as_deref()).await.map_err(|e| Error::BadRequest(format!("repo {repo}: {e}")))?;
+                Some(match named {
+                    Some(b) => b,
+                    None => self.default_branch(repo).await,
+                })
             }
             (Source::Repo { repo, .. }, None) => return Err(Error::BadRequest(format!("roll code isn't on this node, so {repo} can't be a source"))),
             _ => None,

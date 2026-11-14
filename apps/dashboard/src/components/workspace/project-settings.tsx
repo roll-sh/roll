@@ -31,9 +31,19 @@ export function ProjectSettings({ project, open, onClose }: { project: Workspace
           {(["general", "apps"] as const).map((t) => (
             <button
               key={t}
+              id={`project-tab-${t}`}
               role="tab"
               aria-selected={shown === t}
+              aria-controls="project-tabpanel"
+              tabIndex={shown === t ? 0 : -1}
               onClick={() => setTab(t)}
+              onKeyDown={(e) => {
+                if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+                e.preventDefault();
+                const next = t === "general" ? "apps" : "general";
+                setTab(next);
+                document.getElementById(`project-tab-${next}`)?.focus();
+              }}
               className={`h-7 rounded-md px-2.5 text-[12px] transition-colors duration-150 ${shown === t ? "bg-fg/[0.07] text-fg" : "text-muted hover:bg-fg/[0.04] hover:text-fg"}`}
             >
               {t === "general" ? "General" : "Services"}
@@ -41,7 +51,9 @@ export function ProjectSettings({ project, open, onClose }: { project: Workspace
           ))}
         </div>
       )}
-      {shown === "apps" ? <ProjectApps key={key} project={project.id} projectName={project.name} /> : <Form key={key} project={project} onDone={onClose} />}
+      <div id="project-tabpanel" role={apps ? "tabpanel" : undefined} aria-labelledby={apps ? `project-tab-${shown}` : undefined}>
+        {shown === "apps" ? <ProjectApps key={key} project={project.id} projectName={project.name} /> : <Form key={key} project={project} onDone={onClose} />}
+      </div>
     </Dialog>
   );
 }
