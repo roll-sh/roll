@@ -20,6 +20,9 @@ pub enum Token {
     List,
     /// Show a token's rules, expiry and last use.
     Show { id: String },
+    /// What an agent connected with a token is offered over MCP: its tools (those that change
+    /// things marked), prompts, and what the list costs an agent's context.
+    Tools { id: String },
     /// Revoke a token or connection: every request with it fails from now on.
     Revoke { id: String },
     /// A new secret for a token, with the same rules; the old one stops working at once.
@@ -408,6 +411,24 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 println!("{}", serde_json::to_string_pretty(&g)?);
             } else {
                 println!("revoked {} ({})", s(&g["id"]), s(&g["name"]));
+            }
+        }
+        Token::Tools { id } => {
+            let seen = api.get(&format!("/v1/access/tokens/{}/tools", urlencoding::encode(&id))).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&seen)?);
+                return Ok(());
+            }
+            let tools = seen["tools"].as_array().cloned().unwrap_or_default();
+            let changes = tools.iter().filter(|t| t["read_only"] != true).count();
+            println!("{} tools ({changes} that change things), ~{} tokens of an agent's context", tools.len(), seen["context_tokens"].as_u64().unwrap_or(0));
+            for t in &tools {
+                let mark = if t["destructive"] == true { "!" } else if t["read_only"] == true { " " } else { "*" };
+                println!("  {mark} {}", s(&t["name"]));
+            }
+            let prompts: Vec<String> = seen["prompts"].as_array().into_iter().flatten().map(|p| s(&p["name"])).collect();
+            if !prompts.is_empty() {
+                println!("prompts: {}", prompts.join(", "));
             }
         }
         Token::Tighten { id, days, apply } => {
