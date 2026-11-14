@@ -280,8 +280,11 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    or the ILM policy that manages the stream), and a profiled console search (`"profile": true`)
    drawn as Kibana's Search Profiler draws it (per shard: the query tree, collectors,
    aggregations and fetch with times and shares), and an Index templates panel (what each matches,
-   its priority and what it sets; the built-in ones on request). Next: saved console requests,
-   ISM policies on OpenSearch-flavor clusters' data streams. Signed-in users who aren't admins follow
+   its priority and what it sets; the built-in ones on request). On OpenSearch-flavor clusters a
+   data stream's retention is set in the same place, as an ISM policy roll keeps for the stream
+   (`roll-retention-<stream>`: roll over, then delete each backing index once it has been rolled
+   over for the retention, so the write index is never deleted; new backing indices join through
+   its `ism_template`). Next: saved console requests. Signed-in users who aren't admins follow
    accounts' phase 2: today every product but code, agents and projects answers them 403
    (docs/accounts.md), search included.
 4. **Compatibility gaps** from the extended suites (4,956 of the 5,541 Elasticsearch passes),
