@@ -1669,6 +1669,12 @@ looking one step away and at unshared importers (#61), a write's warning naming 
 kind without reveal (#60), and `.env` corner cases and a repository choosing the environment (#58):
 all fixed.
 
+A thirteenth review (2026-11-14, narrow: the twelfth review's fixes) found reach naming another
+project's internal environments and walking past where reads go (#61: one hop into a shared
+project, named only as a project, capped at 256 folders), reference warnings shown without reveal
+(#20), `.env` files over roll's limits (#58) and a background login outliving a 401 (#56): all
+fixed. The pinned-keys, relogin and masking fixes it checked were correct.
+
 Then (2026-11-14, latest): `roll run` masks values in what the command prints when it isn't a
 terminal (#54), as 1Password's `op run` and GitHub Actions do; pulling into Kubernetes with External
 Secrets Operator (#55: its webhook provider, checked against ESO 2.15 on k3s) and
@@ -1775,8 +1781,8 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A thirteenth independent review**, narrow: the twelfth review's fixes (#54, #56, #57, #58,
-   #60, #61) only.
+1. **Measure reach** on a project with many importers and previews (the walk's queries, against
+   the 256-folder cap), and the grid with #60's per-row check, against the Performance table.
 2. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
    #49 and #54 meet, `watch` keeps both (answered digests, streams and signals).
 3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
