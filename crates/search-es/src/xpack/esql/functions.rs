@@ -1767,16 +1767,18 @@ fn round_whole(x: i64, digits: i64) -> i64 {
 /// (no overlap), the `n` chunks that score best for the query's terms (BM25 over the chunks,
 /// terms lowercased Unicode words), best first; `null` when no chunk holds a query term.
 fn top_snippets(values: &[String], query: &str, n: usize, words: i64) -> V {
-    use crate::xpack::inference::chunking::{Chunking, substring};
+    use crate::xpack::inference::chunking::Chunking;
     fn terms(t: &str) -> Vec<String> {
         use unicode_segmentation::UnicodeSegmentation;
         t.unicode_words().map(str::to_lowercase).collect()
     }
     let chunking = Chunking::Sentence { max_chunk_size: words, sentence_overlap: 0 };
-    let chunks: Vec<String> = values.iter().flat_map(|v| chunking.chunk(v).into_iter().map(|s| substring(v, s))).filter(|c| !c.trim().is_empty()).collect();
+    let chunks: Vec<&str> = values.iter().flat_map(|v| chunking.pieces(v).into_iter().map(|(_, t)| t)).filter(|c| !c.trim().is_empty()).collect();
     let tokens: Vec<Vec<String>> = chunks.iter().map(|c| terms(c)).collect();
     let mut qterms = terms(query);
     qterms.dedup();
+    // Each term's document frequency once (per chunk and term would be quadratic in chunks).
+    let df: Vec<f64> = qterms.iter().map(|q| tokens.iter().filter(|t| t.contains(q)).count() as f64).collect();
     let (count, avg) = (tokens.len() as f64, tokens.iter().map(Vec::len).sum::<usize>() as f64 / tokens.len().max(1) as f64);
     let (k1, b) = (1.2f64, 0.75f64);
     let mut scored: Vec<(f64, usize)> = tokens
@@ -1785,12 +1787,12 @@ fn top_snippets(values: &[String], query: &str, n: usize, words: i64) -> V {
         .map(|(i, toks)| {
             let score = qterms
                 .iter()
-                .map(|q| {
+                .zip(&df)
+                .map(|(q, &df)| {
                     let tf = toks.iter().filter(|t| *t == q).count() as f64;
                     if tf == 0.0 {
                         return 0.0;
                     }
-                    let df = tokens.iter().filter(|t| t.contains(q)).count() as f64;
                     let idf = (1.0 + (count - df + 0.5) / (df + 0.5)).ln();
                     idf * tf * (k1 + 1.0) / (tf + k1 * (1.0 - b + b * toks.len() as f64 / avg.max(1.0)))
                 })
@@ -1800,7 +1802,7 @@ fn top_snippets(values: &[String], query: &str, n: usize, words: i64) -> V {
         .filter(|(s, _)| *s > 0.0)
         .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-    let mut out: Vec<V> = scored.into_iter().take(n).map(|(_, i)| V::Str(chunks[i].clone())).collect();
+    let mut out: Vec<V> = scored.into_iter().take(n).map(|(_, i)| V::Str(chunks[i].to_string())).collect();
     match out.len() {
         0 => V::Null,
         1 => out.pop().unwrap_or(V::Null),
@@ -1965,6 +1967,11 @@ mod tests {
         let v = top_snippets(&["The quick brown fox. Rust is fast. Search ranks text.".into()], "search ranks rust", 1, 5);
         assert_eq!(v, V::Str("Search ranks text.".into()));
         assert_eq!(top_snippets(&["Nothing here.".into()], "search", 5, 300), V::Null);
+        // A long text of one-word chunks, every one holding the term: linear, not quadratic.
+        let started = std::time::Instant::now();
+        let long = "rust. ".repeat(40_000);
+        assert!(matches!(top_snippets(&[long], "rust", 3, 1), V::Multi(v) if v.len() == 3));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
     }
 
 }

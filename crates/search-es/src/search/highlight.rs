@@ -287,7 +287,9 @@ pub fn highlight_hit(
                     let fragments = usize_of(get(&fs.opts, &spec.global, "number_of_fragments"), 5);
                     let by_score = get(&fs.opts, &spec.global, "order").and_then(Value::as_str) == Some("score");
                     let similarity = settings.similarity.as_deref().unwrap_or("dot_product");
-                    if let Some(snippets) = crate::xpack::inference::highlight::highlight(src, &name, probe, similarity, fragments, by_score) {
+                    if let Some(snippets) = crate::xpack::inference::highlight::highlight(src, &name, probe, similarity, fragments, by_score, &|f| {
+                        qctx.table.source_filter.as_ref().is_none_or(|fls| fls.searchable(f))
+                    }) {
                         out.insert(name.clone(), Value::Arr(snippets.into_iter().map(Value::from).collect()));
                     }
                 }

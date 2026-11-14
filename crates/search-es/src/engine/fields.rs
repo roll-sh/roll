@@ -446,9 +446,21 @@ impl FieldTable {
 
     /// The table a reader under field level security sees (`FieldSubsetReader`): the fields
     /// `visible` refuses are unmapped, and so are aliases to them and their internal
-    /// sub-fields (`title._index_prefix` follows `title`). Engine field numbers are kept.
+    /// sub-fields (`title._index_prefix` follows `title`, and a `semantic_text` field's hidden
+    /// chunk embeddings `body.inference.chunks.embeddings` follow `body`). Engine field numbers
+    /// are kept.
     pub fn filtered(&self, visible: impl Fn(&str) -> bool) -> FieldTable {
-        let shown = |k: &str| visible(k.split("._").next().unwrap_or(k));
+        let semantic_owner = |k: &str| -> Option<String> {
+            let p = k.strip_suffix(".inference.chunks.embeddings")?;
+            matches!(self.mapping.lookup(p), Some(crate::mapping::MapperRef::Field(f)) if f.ty == "semantic_text").then(|| p.to_string())
+        };
+        let shown = |k: &str| {
+            let base = k.split("._").next().unwrap_or(k);
+            match semantic_owner(base) {
+                Some(owner) => visible(&owner),
+                None => visible(base),
+            }
+        };
         FieldTable {
             schema: self.schema.clone(),
             fields: self.fields.iter().filter(|(k, _)| shown(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),

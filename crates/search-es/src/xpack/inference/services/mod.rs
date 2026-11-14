@@ -89,7 +89,7 @@ pub fn api_key_secret(cluster: &Cluster, ss: &mut Map, errors: &mut Vec<String>)
     let mut out = Map::new();
     match ss.shift_remove("api_key") {
         Some(Value::Str(k)) if !k.is_empty() => {
-            out.insert("api_key".into(), crate::seal::seal(cluster, super::SECRET_KIND, &k).into());
+            out.insert("api_key".into(), crate::seal::seal_given(cluster, super::SECRET_KIND, &k).into());
         }
         Some(Value::Str(_)) => errors.push("[secret_settings] Invalid value empty string. [api_key] must be a non-empty string".into()),
         Some(other) => errors.push(format!("field [api_key] is not of the expected type. The value [{}] cannot be converted to a [String]", java_string(&other))),
@@ -102,7 +102,7 @@ pub fn api_key_secret(cluster: &Cluster, ss: &mut Map, errors: &mut Vec<String>)
 pub fn updated_api_key(cluster: &Cluster, ss: &mut Map) -> EsResult<Option<String>> {
     match ss.shift_remove("api_key") {
         None => Ok(None),
-        Some(Value::Str(k)) if !k.is_empty() => Ok(Some(crate::seal::seal(cluster, super::SECRET_KIND, &k))),
+        Some(Value::Str(k)) if !k.is_empty() => Ok(Some(crate::seal::seal_given(cluster, super::SECRET_KIND, &k))),
         Some(Value::Str(_)) => Err(super::settings::validation(&["[secret_settings] Invalid value empty string. [api_key] must be a non-empty string".into()])),
         Some(other) => Err(super::settings::validation(&[format!(
             "field [api_key] is not of the expected type. The value [{}] cannot be converted to a [String]",

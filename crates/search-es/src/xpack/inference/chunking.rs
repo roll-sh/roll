@@ -354,15 +354,38 @@ fn recursive_chunks(text: &str, start: usize, end: usize, max: usize, separators
     }
 }
 
-/// UTF-16 length of `text[..byte]`.
-fn utf16_at(text: &str, byte: usize) -> usize {
-    text[..byte].encode_utf16().count()
+/// Byte spans as UTF-16 spans, in one pass over the text (a text has many chunks: counting
+/// from its start for each would be quadratic).
+fn utf16_spans(text: &str, bytes: &[(usize, usize)]) -> Vec<Span> {
+    let mut points: Vec<usize> = bytes.iter().flat_map(|&(s, e)| [s, e]).collect();
+    points.sort_unstable();
+    points.dedup();
+    let mut units = Vec::with_capacity(points.len());
+    let (mut byte, mut count) = (0usize, 0usize);
+    for &p in &points {
+        count += text.get(byte..p).map_or(0, |t| t.encode_utf16().count());
+        byte = p;
+        units.push(count);
+    }
+    let at = |b: usize| points.binary_search(&b).map_or(0, |i| units[i]);
+    bytes.iter().map(|&(s, e)| Span { start: at(s), end: at(e) }).collect()
 }
 
 impl Chunking {
     /// The chunks of `text` (`Chunker.chunk`), as UTF-16 offsets.
     pub fn chunk(&self, text: &str) -> Vec<Span> {
-        let bytes: Vec<(usize, usize)> = match self {
+        self.pieces(text).into_iter().map(|(s, _)| s).collect()
+    }
+
+    /// The chunks of `text`: each one's UTF-16 span and its text.
+    pub fn pieces<'t>(&self, text: &'t str) -> Vec<(Span, &'t str)> {
+        let bytes = self.byte_spans(text);
+        let spans = utf16_spans(text, &bytes);
+        spans.into_iter().zip(&bytes).map(|(span, &(s, e))| (span, text.get(s..e).unwrap_or_default())).collect()
+    }
+
+    fn byte_spans(&self, text: &str) -> Vec<(usize, usize)> {
+        match self {
             Chunking::None => vec![(0, text.len())],
             Chunking::Word { max_chunk_size, overlap } => word_chunks(text, (*max_chunk_size).max(1) as usize, *overlap as usize).into_iter().map(|(s, e, _)| (s, e)).collect(),
             Chunking::Sentence { max_chunk_size, sentence_overlap } => sentence_chunks(text, (*max_chunk_size).max(1) as usize, *sentence_overlap > 0),
@@ -371,15 +394,15 @@ impl Chunking {
                 recursive_chunks(text, 0, text.len(), (*max_chunk_size).max(1) as usize, separators, &mut out);
                 out
             }
-        };
-        bytes.into_iter().map(|(s, e)| Span { start: utf16_at(text, s), end: utf16_at(text, e) }).collect()
+        }
     }
 }
 
 /// The text of a chunk (`String.substring` over UTF-16 offsets).
 pub fn substring(text: &str, span: Span) -> String {
     let units: Vec<u16> = text.encode_utf16().collect();
-    String::from_utf16_lossy(&units[span.start.min(units.len())..span.end.min(units.len())])
+    let end = span.end.min(units.len());
+    String::from_utf16_lossy(&units[span.start.min(end)..end])
 }
 
 #[cfg(test)]
@@ -423,5 +446,18 @@ mod chunker_tests {
         let parts: Vec<String> = s.iter().map(|x| substring(text, *x)).collect();
         assert_eq!(parts, vec!["These are not the droids. ", "He's free to go. ", "Move along."]);
         assert_eq!(Chunking::None.chunk("é😀"), vec![Span { start: 0, end: 3 }]);
+    }
+
+    /// A long text (here 512 KiB, tens of thousands of chunks) chunks in time linear in its
+    /// length: `semantic_text` chunks writers' documents on a shared node.
+    #[test]
+    fn long_texts_chunk_in_linear_time() {
+        let text = "Ab cd é😀 gh. ".repeat(32_000);
+        let started = std::time::Instant::now();
+        let pieces = Chunking::Sentence { max_chunk_size: 20, sentence_overlap: 1 }.pieces(&text);
+        assert!(pieces.len() > 5_000, "{}", pieces.len());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+        let (span, piece) = pieces[1];
+        assert_eq!(substring(&text, span), piece);
     }
 }

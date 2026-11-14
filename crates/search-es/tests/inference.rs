@@ -360,3 +360,56 @@ async fn the_simplified_rrf_form_and_the_text_similarity_reranker() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].body.get("query").map(Value::to_es_string).as_deref(), Some("owl"));
 }
+
+/// Field level security covers `semantic_text` fields: a role whose grant leaves a field out
+/// can't query its chunks semantically or read them through the `semantic` highlighter, and a
+/// field it may read doesn't show the text of a `copy_to` source it may not.
+#[tokio::test]
+async fn field_level_security_hides_semantic_text_from_queries_and_highlights() {
+    let (m, _log) = mock().await;
+    let c = cluster(&m, &[]).await;
+    let put = format!(r#"{{"service":"openai","service_settings":{{"api_key":"sk","model_id":"emb","url":"{m}/v1/embeddings"}}}}"#);
+    assert_eq!(call(&c, "PUT", "/_inference/text_embedding/emb", &put).await.0, 200);
+    let mapping = r#"{"mappings":{"properties":{"body":{"type":"semantic_text","inference_id":"emb"},"secret":{"type":"text","copy_to":"body"},"tag":{"type":"keyword"}}}}"#;
+    assert_eq!(call(&c, "PUT", "/docs", mapping).await.0, 200);
+    assert_eq!(call(&c, "PUT", "/docs/_doc/1?refresh=true", r#"{"body":"public words","secret":"launch codes","tag":"x"}"#).await.0, 201);
+    for (role, fls) in [("no_body", r#"{"grant":["*"],"except":["body","secret"]}"#), ("no_secret", r#"{"grant":["body","tag"]}"#)] {
+        let r = format!(r#"{{"indices":[{{"names":["docs"],"privileges":["read"],"field_security":{fls}}}]}}"#);
+        assert_eq!(call(&c, "PUT", &format!("/_security/role/{role}"), &r).await.0, 200);
+        assert_eq!(call(&c, "PUT", &format!("/_security/user/{role}"), &format!(r#"{{"password":"reader-pass-1","roles":["{role}"]}}"#)).await.0, 200);
+    }
+    let hits = |v: &Value| v.pointer(&["hits", "hits"]).and_then(Value::as_array).cloned().unwrap_or_default();
+
+    // Without `body`: its chunks match nothing and aren't highlighted.
+    let (s, v, _) = call_as(&c, "no_body:reader-pass-1", "POST", "/docs/_search", r#"{"query":{"semantic":{"field":"body","query":"words"}}}"#).await;
+    assert_eq!((s, hits(&v).len()), (200, 0), "{v:?}");
+    let hl = r#"{"query":{"match_all":{}},"highlight":{"fields":{"body":{}}}}"#;
+    let (s, v, _) = call_as(&c, "no_body:reader-pass-1", "POST", "/docs/_search", hl).await;
+    assert_eq!(s, 200, "{v:?}");
+    assert!(hits(&v)[0].get("highlight").is_none(), "{v:?}");
+
+    // With `body` but not `secret`: body's own chunks, never the secret's text.
+    let (s, v, _) = call_as(&c, "no_secret:reader-pass-1", "POST", "/docs/_search", r#"{"query":{"semantic":{"field":"body","query":"words"}}}"#).await;
+    assert_eq!((s, hits(&v).len()), (200, 1), "{v:?}");
+    let (s, v, text) = call_as(&c, "no_secret:reader-pass-1", "POST", "/docs/_search", hl).await;
+    assert_eq!(s, 200, "{v:?}");
+    assert!(!text.contains("launch codes"), "{text}");
+    assert_eq!(hits(&v)[0].pointer(&["highlight", "body"]).map(Value::to_json).as_deref(), Some(r#"["public words"]"#), "{v:?}");
+}
+
+/// An `api_key` that looks sealed is sealed again, never kept as given: a client that copied a
+/// sealed key (from a snapshot, from another cluster on the node) can't plant it in an endpoint
+/// pointing at its own server for the node to open and send there.
+#[tokio::test]
+async fn a_planted_sealed_key_is_not_opened_for_the_client() {
+    let (m, log) = mock().await;
+    let c = cluster(&m, &[]).await;
+    let planted = search_es::seal::seal(&c, "inference api key", "sk-victim");
+    let put = format!(r#"{{"service":"openai","service_settings":{{"api_key":"{planted}","model_id":"emb","url":"{m}/v1/embeddings"}}}}"#);
+    assert_eq!(call(&c, "PUT", "/_inference/text_embedding/thief", &put).await.0, 200);
+    let calls = seen(&log);
+    assert!(!calls.is_empty());
+    for s in calls {
+        assert_ne!(s.header("authorization"), Some("Bearer sk-victim"));
+    }
+}

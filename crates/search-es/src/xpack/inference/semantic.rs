@@ -496,12 +496,12 @@ pub async fn infer_documents(cluster: &crate::cluster::Cluster, docs: &[(&Mappin
         for v in &need.values {
             let len = v.encode_utf16().count();
             if !v.trim().is_empty() {
-                let spans = match &chunking {
-                    Some(c) => c.chunk(v),
-                    None => vec![super::chunking::Span { start: 0, end: len }],
+                let pieces = match &chunking {
+                    Some(c) => c.pieces(v),
+                    None => vec![(super::chunking::Span { start: 0, end: len }, v.as_str())],
                 };
-                for span in spans {
-                    inputs.push(Input { need: n, span, adjust, text: super::chunking::substring(v, span) });
+                for (span, text) in pieces {
+                    inputs.push(Input { need: n, span, adjust, text: text.to_string() });
                 }
             }
             adjust += len + 1;

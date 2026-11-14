@@ -64,6 +64,17 @@ impl Sealer {
     }
 }
 
+/// A secret a client just gave, as the cluster stores it: sealed when the node has a key, even
+/// when it looks sealed already. Unlike [`seal`], nothing given is kept as a sealed value: a
+/// client must not plant one (copied from a snapshot, or another cluster on the node) for the
+/// node to open and send where the client chooses.
+pub fn seal_given(cluster: &Cluster, kind: &str, plain: &str) -> String {
+    match &cluster.config.sealer {
+        Some(s) => s.seal(kind, plain),
+        None => plain.to_string(),
+    }
+}
+
 /// Whether `v` is a sealed value.
 pub fn is_sealed(v: &str) -> bool {
     v.starts_with(PREFIX)

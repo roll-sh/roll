@@ -90,7 +90,7 @@ impl Kind {
         let mut secrets = Map::new();
         match ss.shift_remove("api_key") {
             Some(Value::Str(k)) => {
-                secrets.insert("api_key".into(), crate::seal::seal(cluster, crate::xpack::inference::SECRET_KIND, &k).into());
+                secrets.insert("api_key".into(), crate::seal::seal_given(cluster, crate::xpack::inference::SECRET_KIND, &k).into());
             }
             _ => return Err(validation(&["missing api_key".into()])),
         }

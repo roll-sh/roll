@@ -69,7 +69,7 @@ pub fn parse(cluster: &Cluster, task: TaskType, cfg: &mut Config) -> EsResult<(M
     let secrets = match rest.shift_remove("api_key") {
         Some(Value::Str(k)) if !k.is_empty() => {
             let mut m = Map::new();
-            m.insert("api_key".into(), crate::seal::seal(cluster, crate::xpack::inference::SECRET_KIND, &k).into());
+            m.insert("api_key".into(), crate::seal::seal_given(cluster, crate::xpack::inference::SECRET_KIND, &k).into());
             m
         }
         Some(Value::Str(_)) => return Err(validation(&["[secret_settings] Invalid value empty string. [api_key] must be a non-empty string".into()])),

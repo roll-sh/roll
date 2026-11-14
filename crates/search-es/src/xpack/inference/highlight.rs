@@ -76,14 +76,25 @@ fn score(probe: &Probe, emb: &Value, similarity: &str) -> Option<f64> {
 }
 
 /// The highlight of a `semantic_text` field in one hit, from its stored `_inference_fields`.
-/// Without a probe (no semantic query on the field), the first chunks in text order.
-pub fn highlight(src: &Map, field: &str, probe: Option<&Probe>, similarity: &str, fragments: usize, by_score: bool) -> Option<Vec<String>> {
+/// Without a probe (no semantic query on the field), the first chunks in text order. Chunks of
+/// a source field (the field itself, or one that copies into it) that `visible` refuses are
+/// left out, as field level security leaves that field's text out of `_source`.
+pub fn highlight(src: &Map, field: &str, probe: Option<&Probe>, similarity: &str, fragments: usize, by_score: bool, visible: &dyn Fn(&str) -> bool) -> Option<Vec<String>> {
+    if !visible(field) {
+        return None;
+    }
     let entry = super::semantic::inference_entries(src).into_iter().find(|(f, _, _)| f == field).map(|(_, e, _)| e)?;
     let chunks = entry.pointer(&["inference", "chunks"])?.as_object()?;
     // Offsets index each source field's values joined by one separator.
-    let mut scored: Vec<(usize, f64, super::chunking::Span, String)> = Vec::new();
+    // Each source's text once, as UTF-16 units (the offsets'); chunks name their source by index.
+    let mut texts: Vec<Vec<u16>> = Vec::new();
+    let mut scored: Vec<(usize, f64, super::chunking::Span, usize)> = Vec::new();
     for (source, list) in chunks {
-        let text: String = super::semantic::texts_at(src, source).unwrap_or_default().join("\n");
+        if !visible(source) {
+            continue;
+        }
+        texts.push(super::semantic::texts_at(src, source).unwrap_or_default().join("\n").encode_utf16().collect());
+        let text = texts.len() - 1;
         for c in list.as_array().into_iter().flatten() {
             let (Some(s), Some(e)) = (c.get("start_offset").and_then(Value::as_i64), c.get("end_offset").and_then(Value::as_i64)) else { continue };
             let sc = match probe {
@@ -93,7 +104,7 @@ pub fn highlight(src: &Map, field: &str, probe: Option<&Probe>, similarity: &str
                 },
                 None => 0.0,
             };
-            scored.push((scored.len(), sc, super::chunking::Span { start: s.max(0) as usize, end: e.max(0) as usize }, text.clone()));
+            scored.push((scored.len(), sc, super::chunking::Span { start: s.max(0) as usize, end: e.max(0) as usize }, text));
         }
     }
     if scored.is_empty() {
@@ -101,9 +112,17 @@ pub fn highlight(src: &Map, field: &str, probe: Option<&Probe>, similarity: &str
     }
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     let n = if fragments == 0 { 1 } else { fragments }.min(scored.len());
-    let mut best: Vec<(usize, f64, super::chunking::Span, String)> = scored.into_iter().take(n).collect();
+    let mut best: Vec<(usize, f64, super::chunking::Span, usize)> = scored.into_iter().take(n).collect();
     if !by_score {
         best.sort_by_key(|c| c.0);
     }
-    Some(best.into_iter().map(|(_, _, span, text)| super::chunking::substring(&text, span)).collect())
+    Some(
+        best.into_iter()
+            .map(|(_, _, span, text)| {
+                let units = &texts[text];
+                let end = span.end.min(units.len());
+                String::from_utf16_lossy(&units[span.start.min(end)..end])
+            })
+            .collect(),
+    )
 }
