@@ -765,8 +765,9 @@ Every route rolld serves is in the catalogue, or deliberately left to its own cr
 startup rolld logs each route with its access and its classification
 (`RUST_LOG=rolld::auth=debug`: `route=/v1/projects scoped=postgres access=operator`), and
 `crates/rolld/tests/auth.rs` fails on any route that no grant could be classified for, outside
-the list below. It also fails on a route decided only by a prefix row (`/v1/previews/{id}/`, by
-method) that isn't in `crates/roll-access/src/prefix-reviewed.txt`: such a route takes the prefix's
+the list below. It also fails on a method decided only by a prefix row (`/v1/previews/{id}/`, by
+method: no row of the route's own names that method; rolld logs each route's methods) that isn't
+in `crates/roll-access/src/prefix-reviewed.txt` as `METHOD route`: such a route takes the prefix's
 action whatever it answers (a preview's variables, with their values, were a read until they got
 a row of their own), so each new one is either given its own row or looked at and listed. The
 operator's routes (public routes, which anyone may call without a token, aren't a grant's to
