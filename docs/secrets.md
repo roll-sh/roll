@@ -1588,6 +1588,14 @@ Done and in PR #20:
 
 Then change policies per folder (#53), as Infisical's approval policies on secret paths.
 
+A ninth independent review (2026-11-14, of `roll run`'s masking and the eighth review's fixes)
+found no high-severity issue; it found a held tail flushed on a timer (a block-buffered program
+pausing mid-value leaked it in halves), masking on by default for data written to files and pipes,
+background processes holding roll open, `--watch` dropping SIGTERM, a SIGINT judged by stdin (#54),
+a folder's admin counting toward a protected environment's own gate and an import guard outside its
+transaction (#53), a Vault refusal told by an error's text (#52), and a write during a watch's
+re-read going unnoticed (#49): all fixed and checked live, tested where a test guards behaviour.
+
 Then (2026-11-14, latest): `roll run` masks values in what the command prints when it isn't a
 terminal (#54), as 1Password's `op run` and GitHub Actions do; pulling into Kubernetes with External
 Secrets Operator (#55: its webhook provider, checked against ESO 2.15 on k3s) and
@@ -1694,10 +1702,12 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A ninth independent review** of `roll run`'s masking (#54) and the eighth review's fixes
-   (running), and its fixes.
-2. **When #56 and #57 meet**: the identities section of this doc keeps both (renewal and pinned
-   keys), and the pod example shows both env and keys.
+1. **A tenth independent review** of ESO (#55), renewing identity logins (#56), pinned issuer keys
+   (#57) and the ninth review's fixes, and its fixes.
+2. **`…/values` answers each followed digest from the same read**, so a watch that newly follows an
+   environment (a reference added) compares from that read, not a poll just after it (#49 now
+   polls every known environment before reading; only a newly referenced one is polled after).
+   **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys).
 3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
 4. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
