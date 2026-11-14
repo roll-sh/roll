@@ -555,6 +555,29 @@ only the host is shown. An answer is read once, never logged, and never part of 
 a key still links to can't be deleted, nor one with a retired credential still waiting out its
 grace period (its revocation goes through the rotator).
 
+### Certificates
+
+A project's own certificate authority, as Vault's PKI engine and Infisical's PKI give: short-lived
+TLS certificates for services (mTLS between them), with no CA to run.
+
+- `POST …/cas {name, domains, allow_ip?, max_days?}` (admin; `roll secrets cas add NAME --domain
+  svc.internal`, the Integrations tab) makes an ECDSA P-256 key and a self-signed certificate for ten
+  years. The key is sealed with the project's data key, bound to the CA, and never leaves roll; the
+  certificate (`GET …/cas`, `roll secrets cas cert NAME`) is what clients trust. It carries name
+  constraints: only its domains, and IP addresses only where allowed (otherwise excluded), so a
+  client that trusts it trusts nothing else.
+- The link kind `pki` has `certificate`, `private_key` and `ca` (one credential, PEM), with the
+  certificate's names in `options.names` (a list, or comma-separated; the dashboard's Link dialog
+  asks): DNS names under the CA's domains, a wildcard one level under one, or IP addresses where
+  allowed; anything else is refused, naming the domains. `dynamic` gives each lease its own
+  certificate for the lease's TTL plus five minutes; `managed` stores one and rotates it, valid for
+  twice `rotate_days` (30 by default) so a rotation always comes first; both at most `max_days`
+  (90 by default, 397 at most). Certificates are for servers and clients both (`serverAuth`,
+  `clientAuth`), with a random 128-bit serial.
+- A certificate can't be taken back: there are no revocation lists, so lifetimes stay short, and a
+  lease that ends leaves its certificate valid until it expires. A CA a key links to can't be
+  deleted; deleting one leaves what it signed valid until it expires.
+
 ## Consumption
 
 ### `roll secrets` and `roll run`
@@ -583,6 +606,7 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
+roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | rm ID
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -1419,6 +1443,9 @@ isn't in the workspace is 404.
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
+| `POST /cas` | `{name, domains, allow_ip?, max_days?}` | 201 `Ca` (`admin`) |
+| `DELETE /cas/{id}` | | 204; 409 while a key links to it (`admin`) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
 

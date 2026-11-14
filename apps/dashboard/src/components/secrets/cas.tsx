@@ -1,0 +1,135 @@
+import { Check, Copy, Plus, ShieldCheck, Trash2 } from "lucide-react";
+import { useState } from "react";
+import type { Ca } from "@/lib/secrets-api";
+import { useSecrets } from "./secrets-page";
+import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, useLoad } from "./ui";
+
+const DOMAIN = /^(?!-)[a-z0-9-]{1,63}(\.(?!-)[a-z0-9-]{1,63})*$/;
+
+/**
+ * Certificate authorities (docs/secrets.md, "Certificates"): a CA of the project's own that signs
+ * short-lived TLS certificates for its domains, for mTLS between services. Its key never leaves
+ * roll; link TLS_CERT, TLS_KEY and TLS_CA to it (Link a resource) with the names a certificate is for.
+ */
+export function Cas() {
+  const { api } = useSecrets();
+  const list = useLoad(() => api.cas(), [api]);
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const [domains, setDomains] = useState("");
+  const [allowIp, setAllowIp] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const list_ = domains.split(",").map((d) => d.trim().toLowerCase()).filter(Boolean);
+  const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name) && list_.length > 0 && list_.every((d) => DOMAIN.test(d));
+
+  const add = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.addCa({ name, domains: list_, allow_ip: allowIp });
+      setAdding(false);
+      setName("");
+      setDomains("");
+      setAllowIp(false);
+      list.reload();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const del = (c: Ca) =>
+    api.deleteCa(c.id).then(
+      () => (setDeleting(null), list.reload()),
+      (e) => (setDeleting(null), setError(errorText(e))),
+    );
+  const copy = (c: Ca) => {
+    void navigator.clipboard?.writeText(c.certificate);
+    setCopied(c.id);
+    setTimeout(() => setCopied(null), 1200);
+  };
+
+  return (
+    <Section
+      title="Certificate authorities"
+      aside={
+        <button className={button} onClick={() => setAdding((a) => !a)}>
+          <Plus className="size-3.5" /> Add a CA
+        </button>
+      }
+    >
+      <p className="mb-2 text-[11.5px] text-muted">
+        Short-lived TLS certificates for services, signed by a CA of this project&apos;s own whose key never leaves roll. Link <span className="font-mono">TLS_CERT</span>,{" "}
+        <span className="font-mono">TLS_KEY</span> and <span className="font-mono">TLS_CA</span> to it with the names a certificate is for: dynamic gives each lease its own, managed rotates one.
+        Clients trust the CA&apos;s certificate, which is limited to its domains.
+      </p>
+      <ErrorNote error={error ?? list.error} onDismiss={error ? () => setError(null) : undefined} className="mb-2" />
+      {adding && (
+        <form
+          className="rise mb-3 flex flex-wrap items-end gap-2 rounded-xl border border-line-2 bg-panel p-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (ok && !busy) void add();
+          }}
+        >
+          <label className="w-40">
+            <span className="mb-1 block text-[11px] font-medium text-subtle">Name</span>
+            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="internal" spellCheck={false} className={`${field} font-mono text-[12px]`} />
+          </label>
+          <label className="min-w-56 flex-1">
+            <span className="mb-1 block text-[11px] font-medium text-subtle">Domains it signs for (comma-separated)</span>
+            <input value={domains} onChange={(e) => setDomains(e.target.value)} placeholder="svc.internal" spellCheck={false} className={`${field} font-mono text-[12px]`} />
+          </label>
+          <label className="flex h-8 items-center gap-1.5 text-[12px] text-muted">
+            <input type="checkbox" checked={allowIp} onChange={(e) => setAllowIp(e.target.checked)} /> IP addresses too
+          </label>
+          <button type="submit" className={primary} disabled={!ok || busy}>
+            {busy ? "Making it…" : "Make CA"}
+          </button>
+          <button type="button" className={ghost} onClick={() => setAdding(false)}>
+            Cancel
+          </button>
+        </form>
+      )}
+      {list.data && list.data.length === 0 && !adding ? (
+        <p className="rounded-xl border border-dashed border-line-2 px-3 py-4 text-[12px] text-muted">No certificate authorities. Make one to give services TLS certificates without running a CA.</p>
+      ) : (
+        list.data && (
+          <div className={`${card} divide-y divide-line`}>
+            {list.data.map((c) => (
+              <div key={c.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
+                <ShieldCheck className="size-3.5 text-muted" />
+                <span className="font-mono text-[12px]">{c.name}</span>
+                <span className="min-w-0 truncate font-mono text-[11.5px] text-subtle">{c.domains.join(", ")}{c.allow_ip ? " · IPs" : ""}</span>
+                <span className="text-[11px] text-subtle">up to {c.max_days} days</span>
+                <span className="ml-auto text-[11px] text-subtle">
+                  made {ago(c.created_at)} · <ActorMark who={c.created_by} />
+                </span>
+                <button className={ghost} onClick={() => copy(c)} aria-label={`Copy ${c.name}'s certificate`} title="Copy the CA's certificate (PEM) for clients to trust">
+                  {copied === c.id ? <Check className="size-3.5 text-ok" /> : <Copy className="size-3.5" />}
+                </button>
+                {deleting === c.id ? (
+                  <span className="flex gap-1">
+                    <button className={dangerButton} onClick={() => del(c)}>
+                      Delete
+                    </button>
+                    <button className={ghost} onClick={() => setDeleting(null)}>
+                      Keep
+                    </button>
+                  </span>
+                ) : (
+                  <button className={ghost} onClick={() => setDeleting(c.id)} aria-label={`Delete the CA ${c.name}`}>
+                    <Trash2 className="size-3.5" />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )
+      )}
+    </Section>
+  );
+}

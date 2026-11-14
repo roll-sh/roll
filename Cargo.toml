@@ -71,6 +71,8 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rustls-pemfile = "2"
 rdkafka = { version = "0.39", features = ["cmake-build", "ssl-vendored", "zstd"] }
 rcgen = "0.14"
+# roll secrets: certificate lifetimes (rcgen takes time's dates).
+time = "0.3"
 x509-parser = "0.18"
 pg-control = { path = "crates/pg-control" }
 pg-storage = { path = "crates/pg-storage" }

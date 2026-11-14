@@ -28,6 +28,7 @@ pub mod insights;
 pub mod leaks;
 pub mod links;
 pub mod names;
+pub mod pki;
 mod oidc;
 mod read;
 pub mod refs;
@@ -388,10 +389,15 @@ impl Secrets {
         db.ensure_schema(notices::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
+        db.ensure_schema(pki::SCHEMA)?;
         // Rotators are a link kind of roll secrets' own: they call out through rolld.
         let mut links = opts.links;
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
             links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), deliver: deliver.clone() }));
+        }
+        // A project's CAs are roll secrets' own: nothing to reach outside.
+        if let Ok(keys) = &opts.keyring {
+            links.register(Arc::new(pki::Provider { db: db.clone(), keys: keys.clone() }));
         }
         Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
     }
@@ -498,7 +504,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators"];
+const REGISTRIES: &[&str] = &["rotators", "cas"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked.
 fn forget_if_done(c: &code_sql::Conn<'_>, project: &str) -> Result<()> {

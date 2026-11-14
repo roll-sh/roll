@@ -282,6 +282,9 @@ pub enum Secrets {
     Tokens(Tokens),
     /// Where a key is set, in every project you can read (`STRIPE_*` for a prefix). Never values.
     Find { key: String },
+    /// The project's certificate authorities: list, add, print one's certificate, remove.
+    #[command(subcommand)]
+    Cas(CasCmd),
     /// A key pair for backups: the secret key written to a file only you can read, the public key
     /// printed (give it to `backup --to`).
     Keygen {
@@ -494,6 +497,27 @@ pub enum Requests {
         bypass: bool,
     },
     Close { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum CasCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Make a CA that signs for these domains (and every name under them).
+    Add {
+        name: String,
+        #[arg(long = "domain", required = true)]
+        domains: Vec<String>,
+        /// IP addresses too.
+        #[arg(long)]
+        allow_ip: bool,
+        /// The longest a certificate lives (days, 397 at most; 90 by default).
+        #[arg(long)]
+        max_days: Option<u32>,
+    },
+    /// Print a CA's certificate (PEM), for clients to trust.
+    Cert { id: String },
+    Rm { id: String },
 }
 
 #[derive(Subcommand)]
@@ -1165,6 +1189,38 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             println!("{} is {}", s(&v["id"]), s(&v["state"]));
         }
+        Secrets::Cas(cmd) => match cmd {
+            CasCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/cas", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for a in v.as_array().into_iter().flatten() {
+                    let domains: Vec<&str> = a["domains"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    println!("{}  {:<16} {}{}  up to {} days", s(&a["id"]), s(&a["name"]), domains.join(","), if a["allow_ip"] == true { " +IPs" } else { "" }, a["max_days"]);
+                }
+            }
+            CasCmd::Add { name, domains, allow_ip, max_days } => {
+                let mut body = json!({ "name": name, "domains": domains, "allow_ip": allow_ip });
+                if let Some(d) = max_days {
+                    body["max_days"] = json!(d);
+                }
+                let v = c.call(Method::POST, &format!("{}/cas", c.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Made {} ({}): link TLS_CERT, TLS_KEY and TLS_CA to it with options.names; `roll secrets cas cert {}` prints what clients trust.", s(&v["name"]), s(&v["id"]), s(&v["id"]));
+            }
+            CasCmd::Cert { id } => {
+                let v = c.call(Method::GET, &format!("{}/cas", c.base()), None).await?;
+                let ca = v.as_array().into_iter().flatten().find(|a| a["id"] == id.as_str() || a["name"] == id.as_str()).ok_or_else(|| anyhow::anyhow!("no CA {id}"))?;
+                print!("{}", s(&ca["certificate"]));
+            }
+            CasCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/cas/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
         Secrets::Tokens(t) => match t {
             Tokens::Ls => {
                 let v = c.call(Method::GET, &format!("{}/tokens", c.base()), None).await?;

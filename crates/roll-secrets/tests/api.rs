@@ -1007,6 +1007,45 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
 }
 
 #[tokio::test]
+async fn a_projects_ca_signs_short_lived_certificates_for_its_names_only() {
+    use x509_parser::prelude::*;
+    let api = Api::new().await;
+    let ca = api.ok(Method::POST, "/cas", Some(json!({ "name": "internal", "domains": ["svc.internal"] }))).await;
+    let ca_pem = ca["certificate"].as_str().unwrap().to_string();
+    let link = |field: &str, mode: &str, names: Value| json!({ "kind": "pki", "ref": ca["id"], "field": field, "mode": mode, "options": { "names": names, "ttl_minutes": 60, "rotate_days": 7 } });
+    // Each resolve gets a certificate of its own, signed by the CA, for the link's names.
+    let names = json!(["api.svc.internal"]);
+    let ops: Vec<Value> = [("certificate", "TLS_CERT"), ("private_key", "TLS_KEY"), ("ca", "TLS_CA")].iter().map(|(f, k)| json!({ "op": "set", "key": k, "link": link(f, "dynamic", names.clone()) })).collect();
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": ops }))).await;
+    let r = api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "app:api" }))).await;
+    let (cert, key, chain) = (r["values"]["TLS_CERT"].as_str().unwrap(), r["values"]["TLS_KEY"].as_str().unwrap(), r["values"]["TLS_CA"].as_str().unwrap());
+    assert!(key.starts_with("-----BEGIN PRIVATE KEY-----") && chain == ca_pem);
+    let (_, ca_der) = parse_x509_pem(ca_pem.as_bytes()).unwrap();
+    let (_, ca_cert) = parse_x509_certificate(&ca_der.contents).unwrap();
+    let (_, der) = parse_x509_pem(cert.as_bytes()).unwrap();
+    let (_, leaf) = parse_x509_certificate(&der.contents).unwrap();
+    leaf.verify_signature(Some(ca_cert.public_key())).expect("signed by the project's CA");
+    let sans: Vec<String> = leaf.subject_alternative_name().unwrap().unwrap().value.general_names.iter().map(|n| format!("{n}")).collect();
+    assert_eq!(sans, ["DNSName(api.svc.internal)"]);
+    let life = leaf.validity().not_after.timestamp() - leaf.validity().not_before.timestamp();
+    assert!((3900..=4000).contains(&life), "the lease's TTL plus five minutes: {life}");
+    // The CA is limited to its domains and no IP addresses, so trusting it trusts nothing else.
+    let nc = ca_cert.name_constraints().unwrap().unwrap().value;
+    assert_eq!(nc.permitted_subtrees.as_ref().map(Vec::len), Some(1));
+    assert_eq!(nc.excluded_subtrees.as_ref().map(Vec::len), Some(2));
+    // A name outside its domains is refused; managed certificates live twice their rotation.
+    let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/WEB_CERT", Some(json!({ "link": link("certificate", "managed", json!("web.example.com")) }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("doesn't sign for web.example.com"), "{e}");
+    api.ok(Method::PUT, "/environments/staging/secrets/WEB_CERT", Some(json!({ "link": link("certificate", "managed", json!("web.svc.internal, *.web.svc.internal")) }))).await;
+    let stored = api.values("staging", "/").await["values"]["WEB_CERT"].as_str().unwrap().to_string();
+    let (_, der) = parse_x509_pem(stored.as_bytes()).unwrap();
+    let (_, managed) = parse_x509_certificate(&der.contents).unwrap();
+    assert_eq!((managed.validity().not_after.timestamp() - managed.validity().not_before.timestamp()) / 86_400, 14);
+    // A CA a key links to stays.
+    assert_eq!(api.call(Method::DELETE, &format!("/cas/{}", ca["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn reads_unlike_the_reader_are_alerted() {
     let api = Api::new().await;
     api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
