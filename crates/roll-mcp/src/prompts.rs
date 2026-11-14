@@ -116,10 +116,12 @@ const PROMPTS: &[Prompt] = &[
             Arg { name: "service", description: "App service id", required: true },
             Arg { name: "env", description: "Environment (production, staging, …)", required: true },
         ],
-        needs: &["apps_list_deploys", "apps_deploy_logs", "apps_logs", "apps_metrics"],
+        needs: &["apps_get_environment", "apps_activity", "apps_list_deploys", "apps_deploy_logs", "apps_logs", "apps_metrics"],
         text: |a| {
             format!(
-                "Service {} in {} is failing. Call apps_list_deploys to see what changed and when (apps_deploy_commits for what the newest deploy brought); apps_deploy_logs \
+                "Service {} in {} is failing. Start with apps_get_environment: its attention says what roll already \
+                 knows (a crash loop, a spend cap, maintenance, a failed deploy with its error_detail). Then \
+                 apps_activity with all for the timeline (deploys, failures, crash loops, alerts). Call apps_list_deploys to see what changed and when (apps_deploy_commits for what the newest deploy brought); apps_deploy_logs \
                  for the newest deploy if it failed; apps_logs with http and a status of 500 for the failing \
                  requests, and without http for errors; apps_metrics for CPU and memory. Tell me the most likely \
                  cause with the evidence. If the newest deploy caused it, offer apps_rollback_previous; it puts back \
