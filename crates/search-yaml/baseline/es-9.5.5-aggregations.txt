@@ -1,0 +1,643 @@
+# Tests of Elasticsearch 9.5.5's `aggregations` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+aggregations:aggregations/adjacency_matrix/Filters intersections
+aggregations:aggregations/adjacency_matrix/Terms lookup
+aggregations:aggregations/auto_date_histogram/Auto date histogram on two indices with same field but different date type
+aggregations:aggregations/auto_date_histogram/avg_bucket
+aggregations:aggregations/auto_date_histogram/basic
+aggregations:aggregations/auto_date_histogram/profile at top level
+aggregations:aggregations/avg_bucket/bad path
+aggregations:aggregations/avg_bucket/basic
+aggregations:aggregations/avg_bucket/dotted name
+aggregations:aggregations/avg_bucket/dotted value
+aggregations:aggregations/avg_bucket/format
+aggregations:aggregations/avg_bucket/gap_policy=insert_zeros
+aggregations:aggregations/avg_bucket/gap_policy=keep_value
+aggregations:aggregations/avg_bucket/gap_policy=skip
+aggregations:aggregations/avg_bucket/no results
+aggregations:aggregations/avg_metric/Aggregating wrong datatype test
+aggregations:aggregations/avg_metric/Basic test
+aggregations:aggregations/avg_metric/Filtered test
+aggregations:aggregations/avg_metric/Metadata test
+aggregations:aggregations/avg_metric/Missing field with missing param
+aggregations:aggregations/avg_metric/Missing field without missing param
+aggregations:aggregations/avg_metric/Only aggs test
+aggregations:aggregations/avg_metric/Partially unmapped
+aggregations:aggregations/avg_metric/Partially unmapped with missing
+aggregations:aggregations/bucket_script/bad script
+aggregations:aggregations/bucket_script/calculate
+aggregations:aggregations/bucket_script/default gap_policy is skip
+aggregations:aggregations/bucket_script/format
+aggregations:aggregations/bucket_script/gap_policy is insert_zeros
+aggregations:aggregations/bucket_script/gap_policy is keep_values
+aggregations:aggregations/bucket_script/gap_policy is skip
+aggregations:aggregations/bucket_script/input is unmapped avg
+aggregations:aggregations/bucket_script/input is unmapped sum
+aggregations:aggregations/bucket_script/invalid parent aggregation
+aggregations:aggregations/bucket_script/invalid path
+aggregations:aggregations/bucket_script/params
+aggregations:aggregations/bucket_script/top level fails
+aggregations:aggregations/bucket_selector/bad script
+aggregations:aggregations/bucket_selector/default gap_policy is skip
+aggregations:aggregations/bucket_selector/gap_policy is insert_zeros
+aggregations:aggregations/bucket_selector/gap_policy is keep_values
+aggregations:aggregations/bucket_selector/gap_policy is skip
+aggregations:aggregations/bucket_selector/input is unmapped avg
+aggregations:aggregations/bucket_selector/input is unmapped sum
+aggregations:aggregations/bucket_selector/invalid parent aggregation
+aggregations:aggregations/bucket_selector/invalid path
+aggregations:aggregations/bucket_selector/params
+aggregations:aggregations/bucket_selector/prune all buckets
+aggregations:aggregations/bucket_selector/prune no buckets
+aggregations:aggregations/bucket_selector/prune some buckets
+aggregations:aggregations/bucket_selector/top level fails
+aggregations:aggregations/bucket_sort/default gap_policy is skip
+aggregations:aggregations/bucket_sort/gap_policy=insert_zeros
+aggregations:aggregations/bucket_sort/gap_policy=keep_values
+aggregations:aggregations/bucket_sort/gap_policy=skip
+aggregations:aggregations/bucket_sort/gap_policy=skip and primary and secondary have gaps
+aggregations:aggregations/bucket_sort/gap_policy=skip and primary has gaps but secondary doesn't
+aggregations:aggregations/bucket_sort/gap_policy=skip and secondary has gaps but primary doesn't
+aggregations:aggregations/bucket_sort/gap_policy=skip and size
+aggregations:aggregations/bucket_sort/invalid parent aggregation
+aggregations:aggregations/bucket_sort/invalid path fails
+aggregations:aggregations/bucket_sort/just limit size
+aggregations:aggregations/bucket_sort/just offset
+aggregations:aggregations/bucket_sort/limit size and offset
+aggregations:aggregations/bucket_sort/missing bucket key at runtime applies gap_policy=insert_zeros
+aggregations:aggregations/bucket_sort/missing bucket key at runtime applies gap_policy=skip
+aggregations:aggregations/bucket_sort/no action fails
+aggregations:aggregations/bucket_sort/no matches
+aggregations:aggregations/bucket_sort/single sort
+aggregations:aggregations/bucket_sort/sort date_histogram on _key
+aggregations:aggregations/bucket_sort/sort is stable
+aggregations:aggregations/bucket_sort/sort terms on _count
+aggregations:aggregations/bucket_sort/sort terms on _count with secondary sort
+aggregations:aggregations/bucket_sort/sort terms on _key
+aggregations:aggregations/bucket_sort/top level fails
+aggregations:aggregations/bucket_sort/two sorts
+aggregations:aggregations/cardinality_metric/Basic test
+aggregations:aggregations/cardinality_metric/Filtered test
+aggregations:aggregations/cardinality_metric/Invalid Precision test
+aggregations:aggregations/cardinality_metric/Metadata test
+aggregations:aggregations/cardinality_metric/Missing field with missing param
+aggregations:aggregations/cardinality_metric/Missing field without missing param
+aggregations:aggregations/cardinality_metric/Only aggs test
+aggregations:aggregations/cardinality_metric/Partially unmapped
+aggregations:aggregations/cardinality_metric/Partially unmapped with missing
+aggregations:aggregations/cardinality_metric/invalid execution hint throws
+aggregations:aggregations/cardinality_metric/profiler double
+aggregations:aggregations/cardinality_metric/profiler int
+aggregations:aggregations/cardinality_metric/profiler string
+aggregations:aggregations/cardinality_metric/profiler string direct hint
+aggregations:aggregations/cardinality_metric/profiler string global ords hint
+aggregations:aggregations/cardinality_metric/profiler string save memory hint
+aggregations:aggregations/cardinality_metric/profiler string save time hint
+aggregations:aggregations/cardinality_metric/profiler string segment ords hint
+aggregations:aggregations/composite/Aggregate After
+aggregations:aggregations/composite/Aggregate After Missing
+aggregations:aggregations/composite/Basic numeric histogram
+aggregations:aggregations/composite/Basic numeric histogram with missing bucket
+aggregations:aggregations/composite/Basic numeric histogram with missing bucket order desc
+aggregations:aggregations/composite/Composite aggregation and array size
+aggregations:aggregations/composite/Composite aggregation with after_key in the response
+aggregations:aggregations/composite/Composite aggregation with date_histogram offset
+aggregations:aggregations/composite/Composite aggregation with format and calendar_interval
+aggregations:aggregations/composite/Composite aggregation with invalid format
+aggregations:aggregations/composite/Composite aggregation with lossy format
+aggregations:aggregations/composite/Composite aggregation with multiple terms sources
+aggregations:aggregations/composite/Composite aggregation with unmapped field
+aggregations:aggregations/composite/Composite with date histogram on two indices with same field but different date type
+aggregations:aggregations/composite/Duplicate sources
+aggregations:aggregations/composite/Filter without nesting
+aggregations:aggregations/composite/Invalid Composite aggregation
+aggregations:aggregations/composite/Missing source
+aggregations:aggregations/composite/Mixed ip and unmapped fields
+aggregations:aggregations/composite/Nested Composite aggregation with missing_order
+aggregations:aggregations/composite/Nested as parent
+aggregations:aggregations/composite/Nested parent with compound key
+aggregations:aggregations/composite/Nested then filter then nested then terms
+aggregations:aggregations/composite/Nested with a nested sub aggregation
+aggregations:aggregations/composite/Simple Composite aggregation
+aggregations:aggregations/composite/Simple Composite aggregation with GeoTile grid
+aggregations:aggregations/composite/Simple Composite aggregation with geotile grid add aggregate after
+aggregations:aggregations/composite/Simple Composite aggregation with missing_bucket
+aggregations:aggregations/composite/Simple Composite aggregation with missing_order
+aggregations:aggregations/composite/Terms source from part of sorted
+aggregations:aggregations/composite/Terms source from sorted
+aggregations:aggregations/composite/date_histogram and date_histogram_composite timezone
+aggregations:aggregations/composite/date_histogram on date_nanos
+aggregations:aggregations/composite/date_histogram with time_zone
+aggregations:aggregations/composite/date_histogram with time_zone epoch format
+aggregations:aggregations/composite/missing_order with missing_bucket = false
+aggregations:aggregations/composite/missing_order without missing_bucket
+aggregations:aggregations/composite_sorted/one source - first page
+aggregations:aggregations/composite_sorted/one source - second page
+aggregations:aggregations/composite_sorted/two sources - first page
+aggregations:aggregations/composite_sorted/two sources - second page
+aggregations:aggregations/cumulative_sum/bad path
+aggregations:aggregations/cumulative_sum/basic
+aggregations:aggregations/cumulative_sum/format
+aggregations:aggregations/cumulative_sum/invalid parent aggregation
+aggregations:aggregations/cumulative_sum/no results
+aggregations:aggregations/date_histogram/Date histogram on two indices with same field but different date type
+aggregations:aggregations/date_histogram/Date histogram with contradicting filters
+aggregations:aggregations/date_histogram/Daylight with offset date_histogram test
+aggregations:aggregations/date_histogram/Daylight without offset date_histogram test
+aggregations:aggregations/date_histogram/Multi-value date histogram
+aggregations:aggregations/date_histogram/Multi-value date histogram docvalues only
+aggregations:aggregations/date_histogram/date_histogram and date_histogram_composite timezone
+aggregations:aggregations/date_histogram/date_histogram on date_nanos with timezone calendar interval
+aggregations:aggregations/date_histogram/date_histogram on date_nanos with timezone fixed interval
+aggregations:aggregations/date_histogram/date_histogram on date_nanos without timezone calendar interval
+aggregations:aggregations/date_histogram/date_histogram on date_nanos without timezone fixed interval
+aggregations:aggregations/date_histogram/date_histogram on range with hard bounds
+aggregations:aggregations/date_histogram/date_histogram with hard_bounds outside data under a parent agg
+aggregations:aggregations/date_range/Date Range Missing
+aggregations:aggregations/date_range/Date range
+aggregations:aggregations/date_range/Date range unmapped with children
+aggregations:aggregations/derivative/Not under date_histo
+aggregations:aggregations/derivative/bad path
+aggregations:aggregations/derivative/dotted name
+aggregations:aggregations/derivative/dotted value
+aggregations:aggregations/derivative/format
+aggregations:aggregations/derivative/gap_policy=insert_zeros
+aggregations:aggregations/derivative/gap_policy=keep_values
+aggregations:aggregations/derivative/gap_policy=skip
+aggregations:aggregations/derivative/in date_histogram
+aggregations:aggregations/derivative/in histogram
+aggregations:aggregations/derivative/invalid parent aggregation
+aggregations:aggregations/derivative/no results
+aggregations:aggregations/derivative/partially mapped
+aggregations:aggregations/diversified_sampler/defaults
+aggregations:aggregations/diversified_sampler/enable hash mode mode
+aggregations:aggregations/diversified_sampler/force global ordinals mode
+aggregations:aggregations/diversified_sampler/force map mode
+aggregations:aggregations/diversified_sampler/override max_docs_per_value
+aggregations:aggregations/diversified_sampler/run on number
+aggregations:aggregations/diversified_sampler/small shard_size
+aggregations:aggregations/doc_count_field/Filters agg with doc_count
+aggregations:aggregations/doc_count_field/Single bucket filters agg with doc_count
+aggregations:aggregations/doc_count_field/Test composite num_terms agg with doc_count
+aggregations:aggregations/doc_count_field/Test composite str_terms agg with doc_count
+aggregations:aggregations/doc_count_field/Test keyword terms agg with doc_count
+aggregations:aggregations/doc_count_field/Test numeric terms agg with doc_count
+aggregations:aggregations/doc_count_field/Test unmapped string terms agg with doc_count
+aggregations:aggregations/empty_field_metric/Basic test
+aggregations:aggregations/extended_stats_bucket/basic
+aggregations:aggregations/extended_stats_bucket/format
+aggregations:aggregations/extended_stats_bucket/gap_policy=insert_zeros
+aggregations:aggregations/extended_stats_bucket/gap_policy=keep_value
+aggregations:aggregations/extended_stats_bucket/gap_policy=skip
+aggregations:aggregations/extended_stats_metric/Bad sigma test
+aggregations:aggregations/extended_stats_metric/Basic test
+aggregations:aggregations/extended_stats_metric/Filtered test
+aggregations:aggregations/extended_stats_metric/Metadata test
+aggregations:aggregations/extended_stats_metric/Missing field with missing param
+aggregations:aggregations/extended_stats_metric/Missing field without missing param
+aggregations:aggregations/extended_stats_metric/Only aggs test
+aggregations:aggregations/extended_stats_metric/Sigma test
+aggregations:aggregations/filter/As a child of terms
+aggregations:aggregations/filter/Sorting terms
+aggregations:aggregations/filter/Standard queries get cached
+aggregations:aggregations/filter/Terms lookup gets cached
+aggregations:aggregations/filters_bucket/Anonymous filters test
+aggregations:aggregations/filters_bucket/Bad params
+aggregations:aggregations/filters_bucket/Basic test
+aggregations:aggregations/filters_bucket/Filtered test
+aggregations:aggregations/filters_bucket/Metadata test
+aggregations:aggregations/filters_bucket/Only aggs test
+aggregations:aggregations/filters_bucket/cache busting
+aggregations:aggregations/filters_bucket/cache hits
+aggregations:aggregations/filters_bucket/empty meta
+aggregations:aggregations/filters_bucket/named filters with bucket sort test
+aggregations:aggregations/filters_bucket/nested
+aggregations:aggregations/filters_bucket/no meta
+aggregations:aggregations/filters_bucket/null meta
+aggregations:aggregations/geo_bounds_centroid/Basic test
+aggregations:aggregations/geo_distance/avg_bucket
+aggregations:aggregations/geo_distance/basic
+aggregations:aggregations/geohash_grid/Test geohash_grid on geo_shape field with bounds
+aggregations:aggregations/geohash_grid/Test geohash_grid on geo_shape field with defaults
+aggregations:aggregations/geohash_grid/Test geohash_grid on geo_shape field with precision
+aggregations:aggregations/geohash_grid/Test geohash_grid on geo_shape field with shard_size
+aggregations:aggregations/geohash_grid/Test geohash_grid on geo_shape field with size
+aggregations:aggregations/geotile_grid/Test geotile_grid on geo_shape field with bounds
+aggregations:aggregations/geotile_grid/Test geotile_grid on geo_shape field with defaults
+aggregations:aggregations/geotile_grid/Test geotile_grid on geo_shape field with precision
+aggregations:aggregations/geotile_grid/Test geotile_grid on geo_shape field with shard_size
+aggregations:aggregations/geotile_grid/Test geotile_grid on geo_shape field with size
+aggregations:aggregations/global/profile
+aggregations:aggregations/global/simple
+aggregations:aggregations/global_with_aliases/global agg with a terms filtered alias
+aggregations:aggregations/histogram/Basic test
+aggregations:aggregations/histogram/Format test
+aggregations:aggregations/histogram/Show empty intervals
+aggregations:aggregations/histogram/Tiny tiny tiny date_range
+aggregations:aggregations/histogram/Tiny tiny tiny range
+aggregations:aggregations/histogram/date_histogram
+aggregations:aggregations/histogram/date_histogram on range
+aggregations:aggregations/histogram/date_histogram on range with offset
+aggregations:aggregations/histogram/date_histogram profiler
+aggregations:aggregations/histogram/date_histogram with extended_bounds and offset and unmapped
+aggregations:aggregations/histogram/date_histogram with offset
+aggregations:aggregations/histogram/date_histogram with pre-epoch daylight savings time transition
+aggregations:aggregations/histogram/histogram profiler
+aggregations:aggregations/histogram/histogram with extended_bounds
+aggregations:aggregations/histogram/histogram with hard bounds
+aggregations:aggregations/histogram/histogram with min_doc_count
+aggregations:aggregations/histogram/histogram with missing field with missing param
+aggregations:aggregations/histogram/histogram with missing field without missing param
+aggregations:aggregations/histogram/histogram with offset and unmapped
+aggregations:aggregations/ignored_metadata_field/cardinality aggregation on _ignored metadata field
+aggregations:aggregations/ignored_metadata_field/date histogram aggregation with terms on _ignored metadata field
+aggregations:aggregations/ignored_metadata_field/date range aggregation with terms on _ignored metadata field
+aggregations:aggregations/ignored_metadata_field/filter aggregation on _ignored metadata field
+aggregations:aggregations/ignored_metadata_field/random sampler aggregation with terms on _ignored metadata field
+aggregations:aggregations/ignored_metadata_field/terms aggregation on _ignored metadata field
+aggregations:aggregations/ignored_metadata_field/terms aggregation on _ignored metadata field with top hits
+aggregations:aggregations/ignored_metadata_field/value count aggregation on _ignored metadata field
+aggregations:aggregations/ip_prefix/IPv4 prefix
+aggregations:aggregations/ip_prefix/IPv4 prefix appended
+aggregations:aggregations/ip_prefix/IPv4 prefix sub aggregation
+aggregations:aggregations/ip_prefix/IPv4 prefix with incorrect is_ipv6
+aggregations:aggregations/ip_prefix/IPv4 short prefix
+aggregations:aggregations/ip_prefix/IPv6 prefix
+aggregations:aggregations/ip_prefix/IPv6 prefix appended
+aggregations:aggregations/ip_prefix/IPv6 prefix metric sub aggregation
+aggregations:aggregations/ip_prefix/IPv6 prefix sub aggregation
+aggregations:aggregations/ip_prefix/IPv6 prefix with incorrect is_ipv6
+aggregations:aggregations/ip_prefix/Invalid IPv4 prefix
+aggregations:aggregations/ip_prefix/Invalid IPv6 prefix
+aggregations:aggregations/ip_prefix/Mixed IPv4 and IPv6 with is_ipv6 false
+aggregations:aggregations/ip_prefix/Mixed IPv4 and IPv6 with is_ipv6 true
+aggregations:aggregations/ip_range/IP Range Key Generation
+aggregations:aggregations/ip_range/IP Range avg_bucket
+aggregations:aggregations/ip_range/IP range
+aggregations:aggregations/matrix_stats/Empty Bucket Aggregation
+aggregations:aggregations/matrix_stats_multi_value_field/Multi value field Max
+aggregations:aggregations/matrix_stats_multi_value_field/Multi value field Min
+aggregations:aggregations/matrix_stats_multi_value_field/Partially unmapped
+aggregations:aggregations/matrix_stats_multi_value_field/Partially unmapped with missing defaults
+aggregations:aggregations/matrix_stats_multi_value_field/Unmapped
+aggregations:aggregations/matrix_stats_multi_value_field/With script
+aggregations:aggregations/matrix_stats_multi_value_field/With script params
+aggregations:aggregations/matrix_stats_single_value_field/Partially unmapped
+aggregations:aggregations/matrix_stats_single_value_field/Partially unmapped with missing default
+aggregations:aggregations/matrix_stats_single_value_field/Single value field
+aggregations:aggregations/matrix_stats_single_value_field/Unmapped
+aggregations:aggregations/matrix_stats_single_value_field/With script
+aggregations:aggregations/matrix_stats_single_value_field/With script params
+aggregations:aggregations/max_bucket/bad path
+aggregations:aggregations/max_bucket/basic
+aggregations:aggregations/max_bucket/dotted name
+aggregations:aggregations/max_bucket/dotted value
+aggregations:aggregations/max_bucket/format
+aggregations:aggregations/max_bucket/gap_policy=insert_zeros
+aggregations:aggregations/max_bucket/gap_policy=keep_value
+aggregations:aggregations/max_bucket/gap_policy=skip
+aggregations:aggregations/max_bucket/no results
+aggregations:aggregations/max_buckets/Max bucket
+aggregations:aggregations/max_metric/Aggregating wrong datatype test
+aggregations:aggregations/max_metric/Basic test
+aggregations:aggregations/max_metric/Counter field
+aggregations:aggregations/max_metric/Filtered test
+aggregations:aggregations/max_metric/Merging results with unmapped fields
+aggregations:aggregations/max_metric/Metadata test
+aggregations:aggregations/max_metric/Missing field with missing param
+aggregations:aggregations/max_metric/Missing field without missing param
+aggregations:aggregations/max_metric/Only aggs test
+aggregations:aggregations/max_metric/Partially unmapped
+aggregations:aggregations/max_metric/Partially unmapped with missing
+aggregations:aggregations/median_absolute_deviation_metric/bad arguments
+aggregations:aggregations/median_absolute_deviation_metric/basic test
+aggregations:aggregations/median_absolute_deviation_metric/missing value
+aggregations:aggregations/median_absolute_deviation_metric/no documents
+aggregations:aggregations/median_absolute_deviation_metric/with execution hint
+aggregations:aggregations/median_absolute_deviation_metric/with setting compression
+aggregations:aggregations/min_bucket/bad path
+aggregations:aggregations/min_bucket/basic
+aggregations:aggregations/min_bucket/dotted name
+aggregations:aggregations/min_bucket/dotted value
+aggregations:aggregations/min_bucket/format
+aggregations:aggregations/min_bucket/gap_policy=insert_zeros
+aggregations:aggregations/min_bucket/gap_policy=keep_value
+aggregations:aggregations/min_bucket/gap_policy=skip
+aggregations:aggregations/min_bucket/no results
+aggregations:aggregations/min_metric/Aggregating wrong datatype test
+aggregations:aggregations/min_metric/Basic test
+aggregations:aggregations/min_metric/Counter field
+aggregations:aggregations/min_metric/Filtered test
+aggregations:aggregations/min_metric/Metadata test
+aggregations:aggregations/min_metric/Missing field with missing param
+aggregations:aggregations/min_metric/Missing field without missing param
+aggregations:aggregations/min_metric/Only aggs test
+aggregations:aggregations/min_metric/Partially unmapped
+aggregations:aggregations/min_metric/Partially unmapped with missing
+aggregations:aggregations/missing/match all
+aggregations:aggregations/missing/match none
+aggregations:aggregations/missing/match some
+aggregations:aggregations/missing/missing param
+aggregations:aggregations/moving_fn/Bad window
+aggregations:aggregations/moving_fn/Not under date_histo
+aggregations:aggregations/moving_fn/bad path
+aggregations:aggregations/moving_fn/dotted name
+aggregations:aggregations/moving_fn/dotted value
+aggregations:aggregations/moving_fn/ewma
+aggregations:aggregations/moving_fn/format
+aggregations:aggregations/moving_fn/gap_policy=insert_zeros
+aggregations:aggregations/moving_fn/gap_policy=keep_value
+aggregations:aggregations/moving_fn/gap_policy=skip
+aggregations:aggregations/moving_fn/holt
+aggregations:aggregations/moving_fn/holtWinters
+aggregations:aggregations/moving_fn/in date_histogram
+aggregations:aggregations/moving_fn/in histogram
+aggregations:aggregations/moving_fn/invalid parent aggregation
+aggregations:aggregations/moving_fn/linearWeightedAvg
+aggregations:aggregations/moving_fn/math on results
+aggregations:aggregations/moving_fn/max
+aggregations:aggregations/moving_fn/min
+aggregations:aggregations/moving_fn/not results
+aggregations:aggregations/moving_fn/shift
+aggregations:aggregations/moving_fn/stdDev
+aggregations:aggregations/moving_fn/sum
+aggregations:aggregations/moving_fn/unweightedAvg
+aggregations:aggregations/nested/Compound nested key
+aggregations:aggregations/nested/Illegal reverse nested aggregation to a child nested object
+aggregations:aggregations/nested/Nested then filter then nested then reverse nested
+aggregations:aggregations/nested/Nested then filter then nested then terms
+aggregations:aggregations/nested/Nested with a nested sub aggregation
+aggregations:aggregations/nested/Single Level Nested with Terms
+aggregations:aggregations/painless_execute/MovingFunctions are available in the default context
+aggregations:aggregations/percentile_ranks_hdr_metric/basic
+aggregations:aggregations/percentile_ranks_hdr_metric/filtered
+aggregations:aggregations/percentile_ranks_hdr_metric/invalid params
+aggregations:aggregations/percentile_ranks_hdr_metric/missing field with missing param
+aggregations:aggregations/percentile_ranks_hdr_metric/missing field without missing param
+aggregations:aggregations/percentile_ranks_hdr_metric/non-keyed
+aggregations:aggregations/percentile_ranks_hdr_metric/set significant digits
+aggregations:aggregations/percentile_ranks_tdigest_metric/basic
+aggregations:aggregations/percentile_ranks_tdigest_metric/filtered
+aggregations:aggregations/percentile_ranks_tdigest_metric/invalid params
+aggregations:aggregations/percentile_ranks_tdigest_metric/missing field with missing param
+aggregations:aggregations/percentile_ranks_tdigest_metric/missing field without missing param
+aggregations:aggregations/percentile_ranks_tdigest_metric/non-keyed test
+aggregations:aggregations/percentile_ranks_tdigest_metric/with compression
+aggregations:aggregations/percentile_ranks_tdigest_metric/with execution hint
+aggregations:aggregations/percentiles_bucket/bad path
+aggregations:aggregations/percentiles_bucket/basic
+aggregations:aggregations/percentiles_bucket/dotted name
+aggregations:aggregations/percentiles_bucket/dotted value
+aggregations:aggregations/percentiles_bucket/format
+aggregations:aggregations/percentiles_bucket/gap_policy=insert_zeros
+aggregations:aggregations/percentiles_bucket/gap_policy=keep_value
+aggregations:aggregations/percentiles_bucket/gap_policy=skip
+aggregations:aggregations/percentiles_bucket/no results
+aggregations:aggregations/percentiles_hdr_metric/Basic test
+aggregations:aggregations/percentiles_hdr_metric/Explicit Percents test
+aggregations:aggregations/percentiles_hdr_metric/Filtered test
+aggregations:aggregations/percentiles_hdr_metric/Invalid params test
+aggregations:aggregations/percentiles_hdr_metric/Metadata test
+aggregations:aggregations/percentiles_hdr_metric/Missing field with missing param
+aggregations:aggregations/percentiles_hdr_metric/Missing field without missing param
+aggregations:aggregations/percentiles_hdr_metric/Negative values test
+aggregations:aggregations/percentiles_hdr_metric/Non-keyed test
+aggregations:aggregations/percentiles_hdr_metric/Only aggs test
+aggregations:aggregations/percentiles_tdigest_metric/Basic test
+aggregations:aggregations/percentiles_tdigest_metric/Basic test - approximate
+aggregations:aggregations/percentiles_tdigest_metric/Execution hint
+aggregations:aggregations/percentiles_tdigest_metric/Explicit Percents test
+aggregations:aggregations/percentiles_tdigest_metric/Filtered test
+aggregations:aggregations/percentiles_tdigest_metric/Invalid params test
+aggregations:aggregations/percentiles_tdigest_metric/Metadata test
+aggregations:aggregations/percentiles_tdigest_metric/Missing field with missing param
+aggregations:aggregations/percentiles_tdigest_metric/Missing field without missing param
+aggregations:aggregations/percentiles_tdigest_metric/Non-keyed test
+aggregations:aggregations/percentiles_tdigest_metric/Only aggs test
+aggregations:aggregations/pipeline/Max pipeline on percentiles hdr agg with single percent metric field
+aggregations:aggregations/pipeline/Max pipeline on percentiles hdr agg with single percent metric value
+aggregations:aggregations/pipeline/Max pipeline on percentiles hdr agg without specifying percent
+aggregations:aggregations/pipeline/Max pipeline on percentiles tdigest agg with single percent metric field
+aggregations:aggregations/pipeline/Max pipeline on percentiles tdigest agg with single percent metric value
+aggregations:aggregations/pipeline/Max pipeline on percentiles tdigest agg without specifying percent
+aggregations:aggregations/pipeline/Max pipeline on percentiles with incorrect name
+aggregations:aggregations/pipeline/Max pipeline on terms agg
+aggregations:aggregations/pipeline/Max pipeline through terms agg
+aggregations:aggregations/pipeline/deep cumulative sum
+aggregations:aggregations/random_sampler/Test random_sampler aggregation with filter
+aggregations:aggregations/random_sampler/Test random_sampler aggregation with no filter
+aggregations:aggregations/random_sampler/Test random_sampler aggregation with poor settings
+aggregations:aggregations/random_sampler/Test random_sampler aggregation with scored subagg
+aggregations:aggregations/range/Double range
+aggregations:aggregations/range/Double range default keyed response
+aggregations:aggregations/range/Double range no decimal
+aggregations:aggregations/range/Double range on long field
+aggregations:aggregations/range/Double range with missing value
+aggregations:aggregations/range/Float Endpoint Exclusive
+aggregations:aggregations/range/Float range
+aggregations:aggregations/range/Half Float Endpoint Exclusive
+aggregations:aggregations/range/Min and max long range bounds
+aggregations:aggregations/range/Null to and from
+aggregations:aggregations/range/Range agg on long field
+aggregations:aggregations/range/Range aggregation on date field
+aggregations:aggregations/range_timezone_bug/offsets and timezones play nicely together
+aggregations:aggregations/range_timezone_bug/respect offsets in range bounds
+aggregations:aggregations/rare_terms/Basic test
+aggregations:aggregations/rare_terms/Boolean test
+aggregations:aggregations/rare_terms/Date test
+aggregations:aggregations/rare_terms/IP test
+aggregations:aggregations/rare_terms/Integer test
+aggregations:aggregations/rare_terms/Unmapped booleans
+aggregations:aggregations/rare_terms/Unmapped dates
+aggregations:aggregations/rare_terms/Unmapped longs
+aggregations:aggregations/rare_terms/Unmapped strings
+aggregations:aggregations/rare_terms/avg_bucket
+aggregations:aggregations/rare_terms/sub aggs
+aggregations:aggregations/sampler/default shard size
+aggregations:aggregations/sampler/small shard_size
+aggregations:aggregations/scripted_metric/scripted transaction sum
+aggregations:aggregations/scripted_metric/scripted with params
+aggregations:aggregations/scripted_metric_allow_list/all scripts allowed by default
+aggregations:aggregations/scripted_metric_allow_list/allowed inline scripts do not affect allowed stored scripts
+aggregations:aggregations/scripted_metric_allow_list/allowed stored scripts do not affect allowed inline scripts
+aggregations:aggregations/scripted_metric_allow_list/disallow all for empty allow lists
+aggregations:aggregations/scripted_metric_allow_list/explicitly allowed inline scripts work
+aggregations:aggregations/scripted_metric_allow_list/explicitly allowed stored scripts work
+aggregations:aggregations/scripted_metric_allow_list/inline combine_script must be allowed
+aggregations:aggregations/scripted_metric_allow_list/inline init_script must be allowed
+aggregations:aggregations/scripted_metric_allow_list/inline map_script must be allowed
+aggregations:aggregations/scripted_metric_allow_list/inline reduce_script must be allowed
+aggregations:aggregations/scripted_metric_allow_list/stored combine_script must be allowed
+aggregations:aggregations/scripted_metric_allow_list/stored init_script must be allowed
+aggregations:aggregations/scripted_metric_allow_list/stored map_script must be allowed
+aggregations:aggregations/scripted_metric_allow_list/stored reduce_script must be allowed
+aggregations:aggregations/serial_diff/basic
+aggregations:aggregations/serial_diff/invalid parent aggregation
+aggregations:aggregations/serial_diff/lag
+aggregations:aggregations/serial_diff/parent has gap
+aggregations:aggregations/serial_diff/parent has min_doc_count
+aggregations:aggregations/sig_terms/Default index
+aggregations:aggregations/sig_terms/IP test
+aggregations:aggregations/sig_terms/Misspelled fields get "did you mean"
+aggregations:aggregations/sig_terms/Test alias background filter
+aggregations:aggregations/sig_terms/Test background filter count
+aggregations:aggregations/sig_terms/Test background filter count as sub - global ords
+aggregations:aggregations/sig_terms/Test background filter count as sub - map
+aggregations:aggregations/sig_terms_nested/Data checks
+aggregations:aggregations/sig_terms_nested/Doubly nested fields
+aggregations:aggregations/sig_terms_nested/Nested fields
+aggregations:aggregations/sig_terms_nested/Nested fields with background filter
+aggregations:aggregations/sig_terms_nested/Nested fields with neutral background filter
+aggregations:aggregations/sig_terms_nested/Normal fields
+aggregations:aggregations/sig_terms_nested/Normal fields with background filter
+aggregations:aggregations/sig_terms_nested/Normal fields with neutral background filter
+aggregations:aggregations/significant_text/Dedup noise
+aggregations:aggregations/significant_text/background_filter
+aggregations:aggregations/significant_text/copy_to
+aggregations:aggregations/significant_text/exclude
+aggregations:aggregations/significant_text/include
+aggregations:aggregations/significant_text/min_doc_count
+aggregations:aggregations/significant_text/profile
+aggregations:aggregations/significant_text/shard_size
+aggregations:aggregations/significant_text/significance_heuristics
+aggregations:aggregations/significant_text/simple
+aggregations:aggregations/significant_text/size
+aggregations:aggregations/significant_texts/significant_texts all terms
+aggregations:aggregations/significant_texts/significant_texts limited size
+aggregations:aggregations/significant_texts/significant_texts with exclude
+aggregations:aggregations/significant_texts/significant_texts with include
+aggregations:aggregations/significant_texts/significant_texts with min_doc_count
+aggregations:aggregations/stats_bucket/basic
+aggregations:aggregations/stats_bucket/format
+aggregations:aggregations/stats_bucket/gap_policy=insert_zeros
+aggregations:aggregations/stats_bucket/gap_policy=keep_value
+aggregations:aggregations/stats_bucket/gap_policy=skip
+aggregations:aggregations/stats_metric/Basic test
+aggregations:aggregations/stats_metric/Filtered test
+aggregations:aggregations/stats_metric/Metadata test
+aggregations:aggregations/stats_metric/Missing field with missing param
+aggregations:aggregations/stats_metric/Missing field without missing param
+aggregations:aggregations/stats_metric/Only aggs test
+aggregations:aggregations/stats_metric_fail_formatting/fail formatting
+aggregations:aggregations/sum_bucket/bad path
+aggregations:aggregations/sum_bucket/basic
+aggregations:aggregations/sum_bucket/dotted name
+aggregations:aggregations/sum_bucket/dotted value
+aggregations:aggregations/sum_bucket/format
+aggregations:aggregations/sum_bucket/gap_policy=insert_zeros
+aggregations:aggregations/sum_bucket/gap_policy=keep_value
+aggregations:aggregations/sum_bucket/gap_policy=skip
+aggregations:aggregations/sum_bucket/no results
+aggregations:aggregations/sum_metric/Aggregating wrong datatype test
+aggregations:aggregations/sum_metric/Basic test
+aggregations:aggregations/sum_metric/Filtered test
+aggregations:aggregations/sum_metric/Metadata test
+aggregations:aggregations/sum_metric/Missing field with missing param
+aggregations:aggregations/sum_metric/Missing field without missing param
+aggregations:aggregations/sum_metric/Only aggs test
+aggregations:aggregations/sum_metric/Partially unmapped
+aggregations:aggregations/sum_metric/Partially unmapped with missing
+aggregations:aggregations/terms/Basic test
+aggregations:aggregations/terms/Boolean test
+aggregations:aggregations/terms/Date test
+aggregations:aggregations/terms/Double test
+aggregations:aggregations/terms/Global ordinals are loaded with the global_ordinals execution hint
+aggregations:aggregations/terms/Global ordinals are not loaded with the map execution hint
+aggregations:aggregations/terms/IP test
+aggregations:aggregations/terms/Integer test
+aggregations:aggregations/terms/Mixing longs and doubles
+aggregations:aggregations/terms/No field or script
+aggregations:aggregations/terms/Partitioned integer test
+aggregations:aggregations/terms/Partitioned string test
+aggregations:aggregations/terms/Unmapped booleans
+aggregations:aggregations/terms/Unmapped dates
+aggregations:aggregations/terms/Unmapped doubles
+aggregations:aggregations/terms/Unmapped longs
+aggregations:aggregations/terms/Unmapped strings
+aggregations:aggregations/terms/Value type mismatch fails shard
+aggregations:aggregations/terms/Value type mismatch fails shard with no docs
+aggregations:aggregations/terms/huge size
+aggregations:aggregations/terms/min_doc_count
+aggregations:aggregations/terms/numeric profiler
+aggregations:aggregations/terms/order by sub agg
+aggregations:aggregations/terms/order by sub agg containing filter
+aggregations:aggregations/terms/order by sub agg containing nested
+aggregations:aggregations/terms/precise size
+aggregations:aggregations/terms/string profiler via global ordinals filters implementation
+aggregations:aggregations/terms/string profiler via global ordinals native implementation
+aggregations:aggregations/terms/string profiler via map
+aggregations:aggregations/terms_disable_opt/disable optimization
+aggregations:aggregations/terms_disable_opt/enable optimization
+aggregations:aggregations/terms_disable_opt/enabled by default
+aggregations:aggregations/terms_flattened_field/Key does not exist, missing not specified
+aggregations:aggregations/terms_flattened_field/Key does not exist, missing specified
+aggregations:aggregations/terms_flattened_field/Key exists, missing values, missing not specified
+aggregations:aggregations/terms_flattened_field/Key exists, missing values, missing specified
+aggregations:aggregations/terms_flattened_field/Key exists, no missing values
+aggregations:aggregations/terms_text_docvalues/Indexing disabled
+aggregations:aggregations/terms_text_docvalues/Terms aggregation on text field with doc_values
+aggregations:aggregations/terms_text_docvalues/Terms aggregation on text field with doc_values - multi value
+aggregations:aggregations/time_series/Basic test
+aggregations:aggregations/time_series/Basic test profiled
+aggregations:aggregations/time_series/Composite aggregation with nested time series aggregation failure
+aggregations:aggregations/time_series/Global aggregation with nested time series aggregation failure
+aggregations:aggregations/time_series/Multiple indices _tsid vs _tsid hash sorting
+aggregations:aggregations/time_series/Number for keyword routing field
+aggregations:aggregations/time_series/Sampler aggregation with nested time series aggregation failure
+aggregations:aggregations/time_series/Score test filter all
+aggregations:aggregations/time_series/Score test filter some
+aggregations:aggregations/time_series/Size test
+aggregations:aggregations/time_series/auto_date_histogram aggregation with time_series aggregation
+aggregations:aggregations/time_series/rare_terms aggregation with time_series aggregation
+aggregations:aggregations/time_series/variable_width_histogram aggregation with time_series aggregation
+aggregations:aggregations/top_hits/docvalue fields
+aggregations:aggregations/top_hits/explain
+aggregations:aggregations/top_hits/fetch fields
+aggregations:aggregations/top_hits/from
+aggregations:aggregations/top_hits/having
+aggregations:aggregations/top_hits/highlight
+aggregations:aggregations/top_hits/highlight_query
+aggregations:aggregations/top_hits/named queries
+aggregations:aggregations/top_hits/runtime fields
+aggregations:aggregations/top_hits/sequence number and primary term
+aggregations:aggregations/top_hits/size
+aggregations:aggregations/top_hits/source filtering
+aggregations:aggregations/top_hits/stored fields
+aggregations:aggregations/top_hits/synthetic _source
+aggregations:aggregations/top_hits/version
+aggregations:aggregations/top_hits_nested_metric/nested top_hits aggregation with query inner_hits
+aggregations:aggregations/top_hits_nested_metric/top_hits aggregation with nested documents
+aggregations:aggregations/top_hits_nested_metric/top_hits aggregation with nested documents and disabled _source
+aggregations:aggregations/top_hits_nested_metric/top_hits aggregation with sequence numbers
+aggregations:aggregations/typed_keys/Test typed keys parameter for avg aggregation
+aggregations:aggregations/typed_keys/Test typed keys parameter for cardinality aggregation
+aggregations:aggregations/typed_keys/Test typed keys parameter for date_histogram aggregation and max_bucket pipeline aggregation
+aggregations:aggregations/typed_keys/Test typed keys parameter for extended_stats aggregation
+aggregations:aggregations/typed_keys/Test typed keys parameter for max aggregation
+aggregations:aggregations/typed_keys/Test typed keys parameter for min aggregation
+aggregations:aggregations/typed_keys/Test typed keys parameter for percentile_ranks aggregation
+aggregations:aggregations/typed_keys/Test typed keys parameter for percentiles aggregation
+aggregations:aggregations/typed_keys/Test typed keys parameter for stats aggregation
+aggregations:aggregations/typed_keys/Test typed keys parameter for sum aggregation
+aggregations:aggregations/typed_keys/Test typed keys parameter for terms aggregation
+aggregations:aggregations/typed_keys/Test typed keys parameter for terms and top_hits aggregation
+aggregations:aggregations/typed_keys/Test typed keys parameter for value_count aggregation
+aggregations:aggregations/value_count_metric/Basic test
+aggregations:aggregations/value_count_metric/Filtered test
+aggregations:aggregations/value_count_metric/Metadata test
+aggregations:aggregations/value_count_metric/Missing field with missing param
+aggregations:aggregations/value_count_metric/Missing field without missing param
+aggregations:aggregations/value_count_metric/Only aggs test
+aggregations:aggregations/variable_width_histogram/defaults
+aggregations:aggregations/variable_width_histogram/initial_buffer
+aggregations:aggregations/variable_width_histogram/num_buckets
+aggregations:aggregations/variable_width_histogram/shard_size
+aggregations:aggregations/weighted_avg/Basic test
+aggregations:aggregations/weighted_avg/Missing value results in skipping document
+aggregations:aggregations/weighted_avg/Missing weight results in skipping document
+aggregations:aggregations/weighted_avg/Multi value field
+aggregations:aggregations/weighted_avg/Multi weight field not allowed
+aggregations:aggregations/weighted_avg/Sum of weights equal to zero results in null weighted average
+aggregations:aggregations/weighted_avg/Value with explicit missing configuration
+aggregations:aggregations/weighted_avg/Weight with explicit missing configuration

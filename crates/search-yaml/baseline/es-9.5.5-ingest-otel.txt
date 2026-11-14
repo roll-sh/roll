@@ -1,0 +1,16 @@
+# Tests of Elasticsearch 9.5.5's `ingest-otel` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+ingest-otel:ingest-otel/10_normalize_for_stream/Test attributes namespacing
+ingest-otel:ingest-otel/10_normalize_for_stream/Test invalid body field
+ingest-otel:ingest-otel/10_normalize_for_stream/Test rename special keys
+ingest-otel:ingest-otel/10_normalize_for_stream/Test valid OTel document
+ingest-otel:ingest-otel/20_normalize_json_message/Test ECS JSON message normalization
+ingest-otel:ingest-otel/20_normalize_json_message/Test non-ECS JSON message normalization
+ingest-otel:ingest-otel/30_normalize_flexible_access/Test attributes namespacing
+ingest-otel:ingest-otel/30_normalize_flexible_access/Test dots in a valid OTel document
+ingest-otel:ingest-otel/30_normalize_flexible_access/Test invalid body field
+ingest-otel:ingest-otel/30_normalize_flexible_access/Test json message with dotted fields
+ingest-otel:ingest-otel/30_normalize_flexible_access/Test normalized document
+ingest-otel:ingest-otel/30_normalize_flexible_access/Test rename special keys
+ingest-otel:ingest-otel/30_normalize_flexible_access/Test valid OTel document

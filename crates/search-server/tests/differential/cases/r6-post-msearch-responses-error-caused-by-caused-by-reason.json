@@ -1,0 +1,210 @@
+{
+ "found": {
+  "case": 44,
+  "case_seed": 117000395,
+  "seed": 117
+ },
+ "signature": "POST _msearch .responses[].error.caused_by.caused_by.reason",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "bool0": {
+       "type": "boolean"
+      },
+      "byte0": {
+       "type": "byte"
+      },
+      "comp0": {
+       "type": "completion"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dbl0": {
+       "type": "double"
+      },
+      "int0": {
+       "type": "integer"
+      },
+      "irange0": {
+       "type": "integer_range"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "long0": {
+       "type": "long"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "vec0": {
+       "dims": 3,
+       "index_options": {
+        "type": "flat"
+       },
+       "similarity": "l2_norm",
+       "type": "dense_vector"
+      },
+      "wild0": {
+       "type": "wildcard"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 1,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m2-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m2-a"
+  },
+  {
+   "es": {
+    "body": {
+     "responses": [
+      {
+       "error": {
+        "caused_by": {
+         "caused_by": {
+          "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [DiversifiedAggregatorFactory]",
+          "type": "illegal_argument_exception"
+         },
+         "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [DiversifiedAggregatorFactory]",
+         "type": "illegal_argument_exception"
+        },
+        "failed_shards": [
+         {
+          "index": "diff-m2-a",
+          "node": "GTFtKRkMSi-lm0r0R4ztbA",
+          "reason": {
+           "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [DiversifiedAggregatorFactory]",
+           "type": "illegal_argument_exception"
+          },
+          "shard": 0
+         }
+        ],
+        "grouped": true,
+        "phase": "query",
+        "reason": "all shards failed",
+        "root_cause": [
+         {
+          "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [DiversifiedAggregatorFactory]",
+          "type": "illegal_argument_exception"
+         }
+        ],
+        "type": "search_phase_execution_exception"
+       },
+       "status": 400
+      },
+      {
+       "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 1,
+        "total": 1
+       },
+       "hits": {
+        "hits": [],
+        "max_score": null,
+        "total": {
+         "relation": "eq",
+         "value": 0
+        }
+       },
+       "status": 200,
+       "timed_out": false,
+       "took": 0
+      }
+     ],
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": "diff-m2-a"
+    },
+    {
+     "aggs": {
+      "diversified_sampler_6": {
+       "aggs": {
+        "composite_5": {
+         "composite": {
+          "sources": [
+           {
+            "k": {
+             "terms": {}
+            }
+           }
+          ]
+         }
+        }
+       },
+       "diversified_sampler": {
+        "field": "kw1",
+        "shard_size": 8
+       }
+      }
+     }
+    },
+    {
+     "index": "diff-m2-a"
+    },
+    {
+     "from": 5,
+     "query": {
+      "exists": {
+       "field": "wild0"
+      }
+     },
+     "sort": [
+      {
+       "bool0": {
+        "order": "asc"
+       }
+      },
+      {
+       "dbl0": {
+        "missing": "_last",
+        "order": "asc"
+       }
+      }
+     ]
+    }
+   ],
+   "method": "POST",
+   "path": "/_msearch"
+  }
+ ]
+}

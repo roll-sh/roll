@@ -18,6 +18,7 @@ pub struct Products<'a> {
     pub streams: Option<Arc<stream_broker::Broker>>,
     pub code: Option<&'a Arc<code_control::Code>>,
     pub apps: Option<Arc<apps_control::Apps>>,
+    pub search: Option<Arc<search_control::Control>>,
 }
 
 fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Resolvers {
@@ -38,6 +39,10 @@ fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Reso
     }
     if let Some(broker) = p.streams {
         r.by_fn("stream", move |id: &str| broker.find_stream(id).map(|s| s.id.clone()));
+    }
+    if let Some(search) = p.search {
+        // A cluster by its id, also when a path names it.
+        r.by_fn("cluster", move |id: &str| search.store.id_of(id).ok().flatten());
     }
     if let Some(code) = p.code {
         let c = code.clone();

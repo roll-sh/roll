@@ -1,0 +1,1165 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "PUT",
+      "path": "/fzx",
+      "body": {
+        "settings": {
+          "number_of_replicas": 0,
+          "refresh_interval": -1
+        },
+        "mappings": {
+          "properties": {
+            "c": {
+              "type": "completion"
+            },
+            "cc": {
+              "type": "completion",
+              "contexts": [
+                {
+                  "name": "g",
+                  "type": "category"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fzx"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk",
+      "lines": [
+        {
+          "index": {
+            "_index": "fzx",
+            "_id": "1"
+          }
+        },
+        {
+          "c": "score",
+          "cc": {
+            "input": "score",
+            "contexts": {
+              "g": "x"
+            }
+          }
+        },
+        {
+          "index": {
+            "_index": "fzx",
+            "_id": "2"
+          }
+        },
+        {
+          "c": {
+            "input": "cat cat",
+            "weight": 3
+          },
+          "cc": {
+            "input": "cat cat",
+            "contexts": {
+              "g": "y"
+            }
+          }
+        },
+        {
+          "index": {
+            "_index": "fzx",
+            "_id": "3"
+          }
+        },
+        {
+          "c": "stream",
+          "cc": {
+            "input": "stream",
+            "contexts": {
+              "g": "x"
+            }
+          }
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "fzx",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fzx",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fzx",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fzx/_refresh",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fzx/_search",
+      "body": {
+        "_source": false,
+        "suggest": {
+          "s": {
+            "prefix": "st",
+            "completion": {
+              "field": "c",
+              "fuzzy": {
+                "fuzziness": 1
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "st",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "stream",
+                    "_index": "fzx",
+                    "_id": "3",
+                    "_score": 2.0
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fzx/_search",
+      "body": {
+        "_source": false,
+        "suggest": {
+          "s": {
+            "prefix": "ca",
+            "completion": {
+              "field": "c",
+              "fuzzy": {}
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "ca",
+                "offset": 0,
+                "length": 2,
+                "options": [
+                  {
+                    "text": "cat cat",
+                    "_index": "fzx",
+                    "_id": "2",
+                    "_score": 6.0
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fzx/_search",
+      "body": {
+        "_source": false,
+        "suggest": {
+          "s": {
+            "prefix": "sco",
+            "completion": {
+              "field": "c",
+              "fuzzy": {}
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "sco",
+                "offset": 0,
+                "length": 3,
+                "options": [
+                  {
+                    "text": "score",
+                    "_index": "fzx",
+                    "_id": "1",
+                    "_score": 2.0
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fzx/_search",
+      "body": {
+        "_source": false,
+        "suggest": {
+          "s": {
+            "prefix": "scpre",
+            "completion": {
+              "field": "c",
+              "fuzzy": {}
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "scpre",
+                "offset": 0,
+                "length": 5,
+                "options": [
+                  {
+                    "text": "score",
+                    "_index": "fzx",
+                    "_id": "1",
+                    "_score": 2.0
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fzx/_search",
+      "body": {
+        "_source": false,
+        "suggest": {
+          "s": {
+            "prefix": "strx",
+            "completion": {
+              "field": "c",
+              "fuzzy": {
+                "fuzziness": "AUTO"
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "strx",
+                "offset": 0,
+                "length": 4,
+                "options": [
+                  {
+                    "text": "stream",
+                    "_index": "fzx",
+                    "_id": "3",
+                    "_score": 3.0
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fzx/_search",
+      "body": {
+        "_source": false,
+        "suggest": {
+          "s": {
+            "prefix": "sxore",
+            "completion": {
+              "field": "c",
+              "fuzzy": {
+                "fuzziness": 2,
+                "prefix_length": 0
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "sxore",
+                "offset": 0,
+                "length": 5,
+                "options": [
+                  {
+                    "text": "score",
+                    "_index": "fzx",
+                    "_id": "1",
+                    "_score": 1.0
+                  },
+                  {
+                    "text": "stream",
+                    "_index": "fzx",
+                    "_id": "3",
+                    "_score": 1.0
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fzx/_search",
+      "body": {
+        "_source": false,
+        "suggest": {
+          "s": {
+            "prefix": "stre",
+            "completion": {
+              "field": "c",
+              "fuzzy": {
+                "min_length": 5
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "stre",
+                "offset": 0,
+                "length": 4,
+                "options": [
+                  {
+                    "text": "stream",
+                    "_index": "fzx",
+                    "_id": "3",
+                    "_score": 4.0
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fzx/_search",
+      "body": {
+        "_source": false,
+        "suggest": {
+          "s": {
+            "prefix": "sco",
+            "completion": {
+              "field": "cc",
+              "fuzzy": {},
+              "contexts": {
+                "g": [
+                  {
+                    "context": "x",
+                    "boost": 2
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "sco",
+                "offset": 0,
+                "length": 3,
+                "options": [
+                  {
+                    "text": "score",
+                    "_index": "fzx",
+                    "_id": "1",
+                    "_score": 4.0,
+                    "contexts": {
+                      "g": [
+                        "x"
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fzx/_search",
+      "body": {
+        "_source": false,
+        "suggest": {
+          "s": {
+            "prefix": "sxo",
+            "completion": {
+              "field": "cc",
+              "fuzzy": {},
+              "contexts": {
+                "g": [
+                  "x",
+                  "y"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "sxo",
+                "offset": 0,
+                "length": 3,
+                "options": [
+                  {
+                    "text": "score",
+                    "_index": "fzx",
+                    "_id": "1",
+                    "_score": 2.0,
+                    "contexts": {
+                      "g": [
+                        "x"
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/fzx",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/thx-a",
+      "body": {
+        "settings": {
+          "number_of_shards": 3,
+          "number_of_replicas": 0,
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "thx-a"
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/thx-b",
+      "body": {
+        "settings": {
+          "number_of_replicas": 0,
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "thx-b"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk",
+      "lines": [
+        {
+          "index": {
+            "_index": "thx-a",
+            "_id": "9"
+          }
+        },
+        {},
+        {
+          "index": {
+            "_index": "thx-b",
+            "_id": "7"
+          }
+        },
+        {},
+        {
+          "index": {
+            "_index": "thx-a",
+            "_id": "1"
+          }
+        },
+        {
+          "n": 1.1
+        },
+        {
+          "index": {
+            "_index": "thx-b",
+            "_id": "2"
+          }
+        },
+        {
+          "n": 2.2
+        },
+        {
+          "index": {
+            "_index": "thx-a",
+            "_id": "3"
+          }
+        },
+        {
+          "n": 0.3
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "thx-a",
+                "_id": "9",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "thx-b",
+                "_id": "7",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "thx-a",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "thx-b",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "thx-a",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/thx-a,thx-b/_refresh",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 4,
+            "successful": 4,
+            "failed": 0
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/thx-a,thx-b/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "t": {
+            "top_hits": {
+              "size": 5
+            }
+          },
+          "s": {
+            "sum": {
+              "field": "n"
+            }
+          },
+          "a": {
+            "avg": {
+              "field": "n"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 4,
+            "successful": 4,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 5,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "aggregations": {
+            "t": {
+              "hits": {
+                "total": {
+                  "value": 5,
+                  "relation": "eq"
+                },
+                "max_score": 1.0,
+                "hits": [
+                  {
+                    "_index": "thx-b",
+                    "_id": "7",
+                    "_score": 1.0,
+                    "_source": {}
+                  },
+                  {
+                    "_index": "thx-b",
+                    "_id": "2",
+                    "_score": 1.0,
+                    "_source": {
+                      "n": 2.2
+                    }
+                  },
+                  {
+                    "_index": "thx-a",
+                    "_id": "9",
+                    "_score": 1.0,
+                    "_source": {}
+                  },
+                  {
+                    "_index": "thx-a",
+                    "_id": "1",
+                    "_score": 1.0,
+                    "_source": {
+                      "n": 1.1
+                    }
+                  },
+                  {
+                    "_index": "thx-a",
+                    "_id": "3",
+                    "_score": 1.0,
+                    "_source": {
+                      "n": 0.3
+                    }
+                  }
+                ]
+              }
+            },
+            "a": {
+              "value": 1.200000027815501
+            },
+            "s": {
+              "value": 3.6000000834465027
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/thx-a,thx-b/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "t": {
+            "top_hits": {
+              "size": 5,
+              "sort": [
+                {
+                  "_score": "desc"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 4,
+            "successful": 4,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 5,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "aggregations": {
+            "t": {
+              "hits": {
+                "total": {
+                  "value": 5,
+                  "relation": "eq"
+                },
+                "max_score": 1.0,
+                "hits": [
+                  {
+                    "_index": "thx-b",
+                    "_id": "7",
+                    "_score": 1.0,
+                    "_source": {}
+                  },
+                  {
+                    "_index": "thx-b",
+                    "_id": "2",
+                    "_score": 1.0,
+                    "_source": {
+                      "n": 2.2
+                    }
+                  },
+                  {
+                    "_index": "thx-a",
+                    "_id": "9",
+                    "_score": 1.0,
+                    "_source": {}
+                  },
+                  {
+                    "_index": "thx-a",
+                    "_id": "1",
+                    "_score": 1.0,
+                    "_source": {
+                      "n": 1.1
+                    }
+                  },
+                  {
+                    "_index": "thx-a",
+                    "_id": "3",
+                    "_score": 1.0,
+                    "_source": {
+                      "n": 0.3
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/thx-a,thx-b",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

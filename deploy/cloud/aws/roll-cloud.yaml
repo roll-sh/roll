@@ -1122,7 +1122,7 @@ Resources:
             - { Name: ROLL_CODE_FARGATE_SPOT, Value: !If [ChecksSpot, "1", "0"] }
             - { Name: ROLL_CODE_FARGATE_PREVIEW_PORT, Value: !Ref PreviewPort }
             # Every product but Postgres, whose computes need Docker, until it runs in process.
-            - { Name: ROLL_PRODUCTS, Value: "redis,streams,tasks,storage,nosql,queues,code" }
+            - { Name: ROLL_PRODUCTS, Value: "redis,streams,tasks,storage,nosql,queues,code,search" }
             - { Name: ROLL_QUEUES_USER, Value: roll-admin }
             - { Name: ROLL_SYSTEM_DB_CONNECTIONS, Value: !Ref SystemDbConnections }
             # Accounts and sign-in (docs/accounts.md): each method is on once its parameter is.

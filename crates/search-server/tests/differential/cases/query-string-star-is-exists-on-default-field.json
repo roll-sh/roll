@@ -1,0 +1,397 @@
+{
+  "diff": {
+    "es": "39",
+    "path": ".responses[0].hits.hits[0]._id",
+    "roll": "45"
+  },
+  "found": {
+    "case": 38,
+    "case_seed": 13000077,
+    "seed": 13
+  },
+  "roll": {
+    "body": {
+      "responses": [
+        {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 1,
+            "total": 1
+          },
+          "hits": {
+            "hits": [
+              {
+                "_id": "45",
+                "_index": "diff-m0-a",
+                "_score": 1.2,
+                "_source": {
+                  "date0": "2024-10-14T20:00:00Z",
+                  "dbl0": -7.55,
+                  "kw0": "Alpha",
+                  "n": [
+                    {
+                      "kw0": "Alpha",
+                      "long0": 40,
+                      "text0": "fast shard ran query index index"
+                    },
+                    {
+                      "kw0": "x-1",
+                      "text0": "apple and"
+                    },
+                    {
+                      "kw0": "",
+                      "long0": -4
+                    }
+                  ],
+                  "text0": "running"
+                }
+              },
+              {
+                "_id": "39",
+                "_index": "diff-m0-a",
+                "_score": 0.2,
+                "_source": {
+                  "mot0": "Quick banana"
+                }
+              }
+            ],
+            "max_score": 1.2,
+            "total": {
+              "relation": "eq",
+              "value": 2
+            }
+          },
+          "status": 200,
+          "timed_out": false,
+          "took": 1
+        },
+        {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 1,
+            "total": 1
+          },
+          "hits": {
+            "hits": [
+              {
+                "_id": "39",
+                "_index": "diff-m0-a",
+                "_score": 1.0,
+                "_source": {
+                  "mot0": "Quick banana"
+                }
+              },
+              {
+                "_id": "45",
+                "_index": "diff-m0-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": "2024-10-14T20:00:00Z",
+                  "dbl0": -7.55,
+                  "kw0": "Alpha",
+                  "n": [
+                    {
+                      "kw0": "Alpha",
+                      "long0": 40,
+                      "text0": "fast shard ran query index index"
+                    },
+                    {
+                      "kw0": "x-1",
+                      "text0": "apple and"
+                    },
+                    {
+                      "kw0": "",
+                      "long0": -4
+                    }
+                  ],
+                  "text0": "running"
+                }
+              }
+            ],
+            "max_score": 1.0,
+            "total": {
+              "relation": "eq",
+              "value": 2
+            }
+          },
+          "status": 200,
+          "timed_out": false,
+          "took": 0
+        }
+      ],
+      "took": 3
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+  },
+  "signature": "POST _msearch .responses[].hits.hits[]._id",
+  "steps": [
+    {
+      "body": {
+        "settings": {
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m0-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m0-a"
+    },
+    {
+      "es": {
+        "body": {
+          "errors": false,
+          "items": [
+            {
+              "index": {
+                "_id": "39",
+                "_index": "diff-m0-a",
+                "_primary_term": 1,
+                "_seq_no": 0,
+                "_shards": {
+                  "failed": 0,
+                  "successful": 1,
+                  "total": 2
+                },
+                "_version": 1,
+                "result": "created",
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_id": "45",
+                "_index": "diff-m0-a",
+                "_primary_term": 1,
+                "_seq_no": 1,
+                "_shards": {
+                  "failed": 0,
+                  "successful": 1,
+                  "total": 2
+                },
+                "_version": 1,
+                "result": "created",
+                "status": 201
+              }
+            }
+          ],
+          "took": 0
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "lines": [
+        {
+          "index": {
+            "_id": "39",
+            "_index": "diff-m0-a"
+          }
+        },
+        {
+          "mot0": "Quick banana"
+        },
+        {
+          "index": {
+            "_id": "45",
+            "_index": "diff-m0-a"
+          }
+        },
+        {
+          "date0": "2024-10-14T20:00:00Z",
+          "dbl0": -7.55,
+          "kw0": "Alpha",
+          "n": [
+            {
+              "kw0": "Alpha",
+              "long0": 40,
+              "text0": "fast shard ran query index index"
+            },
+            {
+              "kw0": "x-1",
+              "text0": "apple and"
+            },
+            {
+              "kw0": "",
+              "long0": -4
+            }
+          ],
+          "text0": "running"
+        }
+      ],
+      "method": "POST",
+      "path": "/_bulk"
+    },
+    {
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "successful": 1,
+            "total": 2
+          }
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m0-a/_refresh"
+    },
+    {
+      "es": {
+        "body": {
+          "responses": [
+            {
+              "_shards": {
+                "failed": 0,
+                "skipped": 0,
+                "successful": 1,
+                "total": 1
+              },
+              "hits": {
+                "hits": [
+                  {
+                    "_id": "39",
+                    "_index": "diff-m0-a",
+                    "_score": 0.2,
+                    "_source": {
+                      "mot0": "Quick banana"
+                    }
+                  }
+                ],
+                "max_score": 0.2,
+                "total": {
+                  "relation": "eq",
+                  "value": 1
+                }
+              },
+              "status": 200,
+              "timed_out": false,
+              "took": 0
+            },
+            {
+              "_shards": {
+                "failed": 0,
+                "skipped": 0,
+                "successful": 1,
+                "total": 1
+              },
+              "hits": {
+                "hits": [
+                  {
+                    "_id": "39",
+                    "_index": "diff-m0-a",
+                    "_score": 1.0,
+                    "_source": {
+                      "mot0": "Quick banana"
+                    }
+                  },
+                  {
+                    "_id": "45",
+                    "_index": "diff-m0-a",
+                    "_score": 1.0,
+                    "_source": {
+                      "date0": "2024-10-14T20:00:00Z",
+                      "dbl0": -7.55,
+                      "kw0": "Alpha",
+                      "n": [
+                        {
+                          "kw0": "Alpha",
+                          "long0": 40,
+                          "text0": "fast shard ran query index index"
+                        },
+                        {
+                          "kw0": "x-1",
+                          "text0": "apple and"
+                        },
+                        {
+                          "kw0": "",
+                          "long0": -4
+                        }
+                      ],
+                      "text0": "running"
+                    }
+                  }
+                ],
+                "max_score": 1.0,
+                "total": {
+                  "relation": "eq",
+                  "value": 2
+                }
+              },
+              "status": 200,
+              "timed_out": false,
+              "took": 0
+            }
+          ],
+          "took": 0
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "lines": [
+        {
+          "index": "diff-m0-a"
+        },
+        {
+          "query": {
+            "bool": {
+              "must": [
+                {
+                  "boosting": {
+                    "negative": {
+                      "match_all": {}
+                    },
+                    "negative_boost": 0.2,
+                    "positive": {
+                      "query_string": {
+                        "default_field": "mot0",
+                        "query": "of *"
+                      }
+                    }
+                  }
+                }
+              ],
+              "should": [
+                {
+                  "exists": {
+                    "field": "date0"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "index": "diff-m0-a"
+        },
+        {}
+      ],
+      "method": "POST",
+      "path": "/_msearch"
+    }
+  ]
+}

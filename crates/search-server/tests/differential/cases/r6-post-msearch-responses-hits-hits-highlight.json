@@ -1,0 +1,299 @@
+{
+ "found": {
+  "case": 37,
+  "case_seed": 122000403,
+  "seed": 122
+ },
+ "signature": "POST _msearch .responses[].hits.hits[].highlight",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "date0": {
+       "type": "date"
+      }
+     }
+    },
+    "settings": {
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m4-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m4-a"
+  },
+  {
+   "es": {
+    "body": {
+     "errors": false,
+     "items": [
+      {
+       "index": {
+        "_id": "25",
+        "_index": "diff-m4-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 2
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      }
+     ],
+     "took": 200
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": {
+      "_id": "25",
+      "_index": "diff-m4-a"
+     }
+    },
+    {
+     "date0": [
+      1738306800000,
+      1733299200000,
+      "2024-06-05T15:00:00Z"
+     ],
+     "kw0": "x-1",
+     "o": {
+      "int0": [
+       17,
+       133
+      ],
+      "kw0": "delta"
+     },
+     "sayt0": "elastic",
+     "scaled0": 86,
+     "short0": -58,
+     "text0": "engine red"
+    }
+   ],
+   "method": "POST",
+   "path": "/_bulk"
+  },
+  {
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "successful": 1,
+      "total": 2
+     }
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m4-a/_refresh"
+  },
+  {
+   "es": {
+    "body": {
+     "responses": [
+      {
+       "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 1,
+        "total": 1
+       },
+       "hits": {
+        "hits": [
+         {
+          "_id": "25",
+          "_index": "diff-m4-a",
+          "_score": 1.0,
+          "_source": {
+           "date0": [
+            1738306800000,
+            1733299200000,
+            "2024-06-05T15:00:00Z"
+           ],
+           "kw0": "x-1",
+           "o": {
+            "int0": [
+             17,
+             133
+            ],
+            "kw0": "delta"
+           },
+           "sayt0": "elastic",
+           "scaled0": 86,
+           "short0": -58,
+           "text0": "engine red"
+          }
+         }
+        ],
+        "max_score": 1.0,
+        "total": {
+         "relation": "eq",
+         "value": 1
+        }
+       },
+       "status": 200,
+       "timed_out": false,
+       "took": 0
+      },
+      {
+       "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 1,
+        "total": 1
+       },
+       "hits": {
+        "hits": [
+         {
+          "_id": "25",
+          "_index": "diff-m4-a",
+          "_score": 1.0,
+          "_source": {
+           "date0": [
+            1738306800000,
+            1733299200000,
+            "2024-06-05T15:00:00Z"
+           ],
+           "kw0": "x-1",
+           "o": {
+            "int0": [
+             17,
+             133
+            ],
+            "kw0": "delta"
+           },
+           "sayt0": "elastic",
+           "scaled0": 86,
+           "short0": -58,
+           "text0": "engine red"
+          }
+         }
+        ],
+        "max_score": 1.0,
+        "total": {
+         "relation": "eq",
+         "value": 1
+        }
+       },
+       "status": 200,
+       "timed_out": false,
+       "took": 0
+      },
+      {
+       "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 1,
+        "total": 1
+       },
+       "hits": {
+        "hits": [
+         {
+          "_id": "25",
+          "_index": "diff-m4-a",
+          "_score": 1.0,
+          "_source": {
+           "date0": [
+            1738306800000,
+            1733299200000,
+            "2024-06-05T15:00:00Z"
+           ],
+           "kw0": "x-1",
+           "o": {
+            "int0": [
+             17,
+             133
+            ],
+            "kw0": "delta"
+           },
+           "sayt0": "elastic",
+           "scaled0": 86,
+           "short0": -58,
+           "text0": "engine red"
+          }
+         }
+        ],
+        "max_score": 1.0,
+        "total": {
+         "relation": "eq",
+         "value": 1
+        }
+       },
+       "status": 200,
+       "timed_out": false,
+       "took": 0
+      }
+     ],
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": "diff-m4-a"
+    },
+    {},
+    {
+     "index": "diff-m4-a"
+    },
+    {},
+    {
+     "index": "diff-m4-a"
+    },
+    {
+     "highlight": {
+      "fields": {
+       "text0": {
+        "type": "plain"
+       }
+      }
+     },
+     "query": {
+      "constant_score": {
+       "filter": {
+        "intervals": {
+         "text0": {
+          "wildcard": {
+           "pattern": "re*"
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   ],
+   "method": "POST",
+   "path": "/_msearch"
+  }
+ ]
+}

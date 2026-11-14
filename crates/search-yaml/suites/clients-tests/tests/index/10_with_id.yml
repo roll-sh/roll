@@ -1,0 +1,32 @@
+---
+requires:
+  serverless: true
+  stack: true
+---
+"Index with ID":
+
+  - do:
+      index:
+        index: test_serverless_index_10
+        id:    "1"
+        body:  { "foo": "bar" }
+
+  - match: { _index: test_serverless_index_10 }
+  - match: { _id:    "1" }
+  - match: { _version: 1 }
+
+  - do:
+      get:
+        index: test_serverless_index_10
+        id:    "1"
+
+  - match: { _index:   test_serverless_index_10 }
+  - match: { _id:      "1" }
+  - match: { _version: 1 }
+  - match: { _source: { "foo": "bar" }}
+
+---
+teardown:
+  - do:
+      indices.delete:
+        index: test_serverless_index_10

@@ -1,0 +1,182 @@
+{
+ "found": {
+  "case": 27,
+  "case_seed": 104000339,
+  "seed": 104
+ },
+ "signature": "POST _search .error.failed_shards[].reason.caused_by.reason",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dbl0": {
+       "type": "double"
+      },
+      "geo0": {
+       "type": "geo_point"
+      },
+      "irange0": {
+       "type": "integer_range"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "kwl0": {
+       "normalizer": "lowercase",
+       "type": "keyword"
+      },
+      "o": {
+       "properties": {
+        "int0": {
+         "type": "integer"
+        },
+        "kw0": {
+         "type": "keyword"
+        }
+       }
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "text1": {
+       "analyzer": "stop",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "ulong0": {
+       "type": "unsigned_long"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 5,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m5-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m5-a"
+  },
+  {
+   "body": {
+    "query": {
+     "span_near": {
+      "clauses": [
+       {
+        "span_or": {
+         "clauses": [
+          {
+           "span_term": {
+            "text0": "runs"
+           }
+          },
+          {
+           "span_term": {
+            "text1": "stream"
+           }
+          }
+         ]
+        }
+       },
+       {
+        "span_containing": {
+         "big": {
+          "span_near": {
+           "clauses": [
+            {
+             "span_term": {
+              "text1": "banana"
+             }
+            }
+           ]
+          }
+         },
+         "little": {
+          "span_term": {
+           "text1": "cats"
+          }
+         }
+        }
+       }
+      ]
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "error": {
+      "failed_shards": [
+       {
+        "index": "diff-m5-a",
+        "node": "GTFtKRkMSi-lm0r0R4ztbA",
+        "reason": {
+         "caused_by": {
+          "reason": "Clauses must have same field.",
+          "type": "illegal_argument_exception"
+         },
+         "index": "diff-m5-a",
+         "index_uuid": "gQ7oeEcPTFGo_q2CyxqoYg",
+         "reason": "failed to create query: Clauses must have same field.",
+         "type": "query_shard_exception"
+        },
+        "shard": 0
+       }
+      ],
+      "grouped": true,
+      "phase": "query",
+      "reason": "all shards failed",
+      "root_cause": [
+       {
+        "index": "diff-m5-a",
+        "index_uuid": "gQ7oeEcPTFGo_q2CyxqoYg",
+        "reason": "failed to create query: Clauses must have same field.",
+        "type": "query_shard_exception"
+       }
+      ],
+      "type": "search_phase_execution_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "method": "POST",
+   "path": "/diff-m5-a/_search"
+  }
+ ]
+}

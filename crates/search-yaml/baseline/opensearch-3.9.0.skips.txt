@@ -1,0 +1,9 @@
+# Environment skips for running OpenSearch's YAML suite against a real single-node OpenSearch
+# 3.9.0 in Docker (scripts/search-yaml-suites.sh os-baseline). Format: `<glob>  # reason`.
+
+# The release build logs these deprecations but returns no Warning header for them (checked with
+# curl: the deprecation log has the message, the response has no header).
+os:search/10_source_filtering/_source as an empty array  # OpenSearch 3.9.0 sends no Warning header for it
+os:search/10_source_filtering/_source as an empty object  # OpenSearch 3.9.0 sends no Warning header for it
+os:search/10_source_filtering/_source as object with an empty excludes array  # OpenSearch 3.9.0 sends no Warning header for it
+os:search/10_source_filtering/_source as object with an empty includes array  # OpenSearch 3.9.0 sends no Warning header for it

@@ -1,0 +1,3022 @@
+{
+  "description": "Elasticsearch 9.5.5: _id fielddata behind indices.id_field_data.enabled (off by default; when on: sort and aggregations with the deprecation warning, min refusing the _id type, scripts still refused with ProvidedIdFieldMapper's frames), the setting's own deprecation warning, script fields leaving _source out (search and top_hits), top_hits script_fields, and collapse field types (keywords and numbers only). Changes the transient cluster setting indices.id_field_data.enabled (reset at the end): capture against a private Elasticsearch node.",
+  "steps": [
+    {
+      "req": "PUT /esm-id",
+      "body": {
+        "settings": {
+          "number_of_shards": 2,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "n": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-id"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-id/_bulk?refresh=true",
+      "raw": "{\"index\":{\"_id\":\"b\"}}\n{\"n\":1}\n{\"index\":{\"_id\":\"a\"}}\n{\"n\":2}\n{\"index\":{\"_id\":\"c10\"}}\n{\"n\":3}\n{\"index\":{\"_id\":\"c9\"}}\n{\"n\":4}\n{\"index\":{\"_id\":\"Z\"}}\n{\"n\":5}\n\n",
+      "headers": {
+        "content-type": "application/x-ndjson"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "errors": false,
+        "took": 0,
+        "items": [
+          {
+            "index": {
+              "_index": "esm-id",
+              "_id": "b",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 1,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 0,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "esm-id",
+              "_id": "a",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 1,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 0,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "esm-id",
+              "_id": "c10",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 1,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 1,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "esm-id",
+              "_id": "c9",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 1,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 1,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "esm-id",
+              "_id": "Z",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 1,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 2,
+              "_primary_term": 1,
+              "status": 201
+            }
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /_cluster/settings",
+      "body": {
+        "transient": {
+          "indices.id_field_data.enabled": true
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "persistent": {},
+        "transient": {
+          "indices": {
+            "id_field_data": {
+              "enabled": "true"
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json",
+        "warning": [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"[indices.id_field_data.enabled] setting was deprecated in Elasticsearch and will be removed in a future release. See the breaking changes documentation for the next major version.\""
+        ]
+      }
+    },
+    {
+      "req": "GET /esm-id/_search",
+      "body": {
+        "sort": [
+          {
+            "_id": "asc"
+          }
+        ],
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 5,
+        "timed_out": false,
+        "_shards": {
+          "total": 2,
+          "successful": 2,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 5,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "esm-id",
+              "_id": "Z",
+              "_score": null,
+              "sort": [
+                "Z"
+              ]
+            },
+            {
+              "_index": "esm-id",
+              "_id": "a",
+              "_score": null,
+              "sort": [
+                "a"
+              ]
+            },
+            {
+              "_index": "esm-id",
+              "_id": "b",
+              "_score": null,
+              "sort": [
+                "b"
+              ]
+            },
+            {
+              "_index": "esm-id",
+              "_id": "c10",
+              "_score": null,
+              "sort": [
+                "c10"
+              ]
+            },
+            {
+              "_index": "esm-id",
+              "_id": "c9",
+              "_score": null,
+              "sort": [
+                "c9"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json",
+        "warning": [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Loading the fielddata on the _id field is deprecated and will be removed in future versions. If you require sorting or aggregating on this field you should also include the id in the body of your documents, and map this field as a keyword field that has [doc_values] enabled\""
+        ]
+      }
+    },
+    {
+      "req": "GET /esm-id/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "t": {
+            "terms": {
+              "field": "_id"
+            }
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 4,
+        "timed_out": false,
+        "_shards": {
+          "total": 2,
+          "successful": 2,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 5,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": []
+        },
+        "aggregations": {
+          "t": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "Z",
+                "doc_count": 1
+              },
+              {
+                "key": "a",
+                "doc_count": 1
+              },
+              {
+                "key": "b",
+                "doc_count": 1
+              },
+              {
+                "key": "c10",
+                "doc_count": 1
+              },
+              {
+                "key": "c9",
+                "doc_count": 1
+              }
+            ]
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json",
+        "warning": [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Loading the fielddata on the _id field is deprecated and will be removed in future versions. If you require sorting or aggregating on this field you should also include the id in the body of your documents, and map this field as a keyword field that has [doc_values] enabled\""
+        ]
+      }
+    },
+    {
+      "req": "GET /esm-id/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "m": {
+            "min": {
+              "field": "_id"
+            }
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Field [_id] of type [_id] is not supported for aggregation [min]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-id",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "Field [_id] of type [_id] is not supported for aggregation [min]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Field [_id] of type [_id] is not supported for aggregation [min]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Field [_id] of type [_id] is not supported for aggregation [min]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json",
+        "warning": [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Loading the fielddata on the _id field is deprecated and will be removed in future versions. If you require sorting or aggregating on this field you should also include the id in the body of your documents, and map this field as a keyword field that has [doc_values] enabled\""
+        ]
+      }
+    },
+    {
+      "req": "GET /esm-id/_search",
+      "body": {
+        "size": 1,
+        "sort": [
+          "n"
+        ],
+        "script_fields": {
+          "s": {
+            "script": "doc['_id'].value"
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 5,
+        "timed_out": false,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 1,
+          "failures": [
+            {
+              "shard": 1,
+              "index": "esm-id",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "script_exception",
+                "reason": "runtime error",
+                "script_stack": [
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.ProvidedIdFieldMapper$IdFieldType.fielddataBuilder(ProvidedIdFieldMapper.java:164)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.IndexFieldDataService.getForField(IndexFieldDataService.java:92)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.index.IndexService.loadFielddata(IndexService.java:1451)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.index.query.SearchExecutionContext.lambda$setLookupProviders$5(SearchExecutionContext.java:570)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.getForField(SearchLookup.java:160)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:156)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+                  "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+                  "doc['_id'].value",
+                  "    ^---- HERE"
+                ],
+                "script": "doc['_id'].value",
+                "lang": "painless",
+                "position": {
+                  "offset": 4,
+                  "start": 0,
+                  "end": 16
+                },
+                "caused_by": {
+                  "type": "illegal_argument_exception",
+                  "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+                }
+              }
+            }
+          ]
+        },
+        "hits": {
+          "total": {
+            "value": 5,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": []
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-id/_search",
+      "body": {
+        "size": 1,
+        "sort": [
+          "n"
+        ],
+        "docvalue_fields": [
+          "_id"
+        ]
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 5,
+        "timed_out": false,
+        "_shards": {
+          "total": 2,
+          "successful": 2,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 5,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "esm-id",
+              "_id": "b",
+              "_score": null,
+              "_source": {
+                "n": 1
+              },
+              "fields": {
+                "_id": [
+                  "b"
+                ]
+              },
+              "sort": [
+                1
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json",
+        "warning": [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Loading the fielddata on the _id field is deprecated and will be removed in future versions. If you require sorting or aggregating on this field you should also include the id in the body of your documents, and map this field as a keyword field that has [doc_values] enabled\""
+        ]
+      }
+    },
+    {
+      "req": "GET /esm-id/_search",
+      "body": {
+        "collapse": {
+          "field": "_id"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_id] of the type [_id]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-id",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [_id] of the type [_id]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [_id] of the type [_id]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_id] of the type [_id]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /_cluster/settings",
+      "body": {
+        "transient": {
+          "indices.id_field_data.enabled": null
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "persistent": {},
+        "transient": {}
+      },
+      "response_headers": {
+        "content-type": "application/json",
+        "warning": [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"[indices.id_field_data.enabled] setting was deprecated in Elasticsearch and will be removed in a future release. See the breaking changes documentation for the next major version.\""
+        ]
+      }
+    },
+    {
+      "req": "GET /esm-id/_search",
+      "body": {
+        "collapse": {
+          "field": "_id"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_id] of the type [_id]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-id",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [_id] of the type [_id]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [_id] of the type [_id]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_id] of the type [_id]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-id/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "m": {
+            "min": {
+              "field": "_id"
+            }
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-id",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "DELETE /esm-id",
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-sf",
+      "body": {
+        "mappings": {
+          "properties": {
+            "n": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-sf"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-sf/_doc/1?refresh=true",
+      "body": {
+        "n": 1
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 201,
+      "response": {
+        "_index": "esm-sf",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-sf/_search",
+      "body": {
+        "script_fields": {
+          "s": {
+            "script": "doc['n'].value"
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 3,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-sf",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "s": [
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-sf/_search",
+      "body": {
+        "script_fields": {
+          "s": {
+            "script": "doc['n'].value"
+          }
+        },
+        "docvalue_fields": [
+          "n"
+        ]
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 4,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-sf",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "s": [
+                  1
+                ],
+                "n": [
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-sf/_search",
+      "body": {
+        "script_fields": {
+          "s": {
+            "script": "doc['n'].value"
+          }
+        },
+        "stored_fields": [
+          "n"
+        ]
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 3,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-sf",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "s": [
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-sf/_search",
+      "body": {
+        "script_fields": {
+          "s": {
+            "script": "doc['n'].value"
+          }
+        },
+        "_source": true
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 3,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-sf",
+              "_id": "1",
+              "_score": 1.0,
+              "_source": {
+                "n": 1
+              },
+              "fields": {
+                "s": [
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-sf/_search",
+      "body": {
+        "script_fields": {
+          "s": {
+            "script": "doc['n'].value"
+          }
+        },
+        "fields": [
+          "n"
+        ]
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 3,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-sf",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "s": [
+                  1
+                ],
+                "n": [
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-sf/_search",
+      "body": {
+        "size": 1,
+        "sort": [
+          "n"
+        ],
+        "script_fields": {
+          "s": {
+            "script": "doc['n'].value"
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 3,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "esm-sf",
+              "_id": "1",
+              "_score": null,
+              "fields": {
+                "s": [
+                  1
+                ]
+              },
+              "sort": [
+                1
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "DELETE /esm-sf",
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-sf",
+      "body": {
+        "mappings": {
+          "properties": {
+            "n": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-sf"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-sf/_doc/1?refresh=true",
+      "body": {
+        "n": 1
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 201,
+      "response": {
+        "_index": "esm-sf",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-sf/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "t": {
+            "top_hits": {
+              "script_fields": {
+                "s": {
+                  "script": "doc['n'].value"
+                }
+              }
+            }
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 4,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": []
+        },
+        "aggregations": {
+          "t": {
+            "hits": {
+              "total": {
+                "value": 1,
+                "relation": "eq"
+              },
+              "max_score": 1.0,
+              "hits": [
+                {
+                  "_index": "esm-sf",
+                  "_id": "1",
+                  "_score": 1.0,
+                  "fields": {
+                    "s": [
+                      1
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-sf/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "t": {
+            "top_hits": {
+              "script_fields": {
+                "s": {
+                  "script": "doc['n'].value"
+                }
+              },
+              "stored_fields": [
+                "_source"
+              ]
+            }
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 4,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": []
+        },
+        "aggregations": {
+          "t": {
+            "hits": {
+              "total": {
+                "value": 1,
+                "relation": "eq"
+              },
+              "max_score": 1.0,
+              "hits": [
+                {
+                  "_index": "esm-sf",
+                  "_id": "1",
+                  "_score": 1.0,
+                  "_source": {
+                    "n": 1
+                  },
+                  "fields": {
+                    "s": [
+                      1
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-sf/_search",
+      "body": {
+        "script_fields": {
+          "s": {
+            "script": "doc['n'].value"
+          }
+        },
+        "stored_fields": [
+          "_source"
+        ]
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-sf",
+              "_id": "1",
+              "_score": 1.0,
+              "_source": {
+                "n": 1
+              },
+              "fields": {
+                "s": [
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-sf/_search?_source=true",
+      "body": {
+        "script_fields": {
+          "s": {
+            "script": "doc['n'].value"
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-sf",
+              "_id": "1",
+              "_score": 1.0,
+              "_source": {
+                "n": 1
+              },
+              "fields": {
+                "s": [
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-sf/_search",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "x",
+            "query": {
+              "match_all": {}
+            },
+            "ignore_unmapped": true,
+            "inner_hits": {
+              "script_fields": {
+                "s": {
+                  "script": "1"
+                }
+              }
+            }
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 1,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 0,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": []
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "DELETE /esm-sf",
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-c",
+      "body": {
+        "mappings": {
+          "properties": {
+            "t": {
+              "type": "text"
+            },
+            "ip": {
+              "type": "ip"
+            },
+            "d": {
+              "type": "date"
+            },
+            "b": {
+              "type": "boolean"
+            },
+            "w": {
+              "type": "wildcard"
+            },
+            "ck": {
+              "type": "constant_keyword",
+              "value": "x"
+            },
+            "u": {
+              "type": "unsigned_long"
+            },
+            "k": {
+              "type": "keyword",
+              "doc_values": false
+            },
+            "kk": {
+              "type": "keyword"
+            },
+            "sf": {
+              "type": "scaled_float",
+              "scaling_factor": 10
+            },
+            "tc": {
+              "type": "token_count",
+              "analyzer": "standard"
+            },
+            "l": {
+              "type": "long"
+            }
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-c"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-c/_doc/1?refresh=true",
+      "body": {
+        "t": "a",
+        "ip": "10.0.0.1",
+        "d": 1,
+        "b": true,
+        "w": "x",
+        "u": 1,
+        "k": "z",
+        "kk": "z",
+        "sf": 1.5,
+        "tc": "a b",
+        "l": 3
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 201,
+      "response": {
+        "_index": "esm-c",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_search",
+      "body": {
+        "collapse": {
+          "field": "t"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [t] of the type [text]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [t] of the type [text]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [t] of the type [text]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [t] of the type [text]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_search",
+      "body": {
+        "collapse": {
+          "field": "ip"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [ip] of the type [ip]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [ip] of the type [ip]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [ip] of the type [ip]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [ip] of the type [ip]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_search",
+      "body": {
+        "collapse": {
+          "field": "d"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [d] of the type [date]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [d] of the type [date]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [d] of the type [date]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [d] of the type [date]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_search",
+      "body": {
+        "collapse": {
+          "field": "b"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [b] of the type [boolean]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [b] of the type [boolean]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [b] of the type [boolean]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [b] of the type [boolean]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_search",
+      "body": {
+        "collapse": {
+          "field": "w"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [w] of the type [wildcard]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [w] of the type [wildcard]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [w] of the type [wildcard]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [w] of the type [wildcard]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_search",
+      "body": {
+        "collapse": {
+          "field": "ck"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [ck] of the type [constant_keyword]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [ck] of the type [constant_keyword]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [ck] of the type [constant_keyword]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [ck] of the type [constant_keyword]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_search",
+      "body": {
+        "collapse": {
+          "field": "u"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-c",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "u": [
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_search",
+      "body": {
+        "collapse": {
+          "field": "k"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "cannot collapse on field `k` without `doc_values`"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "cannot collapse on field `k` without `doc_values`"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "cannot collapse on field `k` without `doc_values`",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "cannot collapse on field `k` without `doc_values`"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_search",
+      "body": {
+        "collapse": {
+          "field": "kk"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-c",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "kk": [
+                  "z"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_search",
+      "body": {
+        "collapse": {
+          "field": "sf"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [sf] of the type [scaled_float]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [sf] of the type [scaled_float]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [sf] of the type [scaled_float]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [sf] of the type [scaled_float]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_search",
+      "body": {
+        "collapse": {
+          "field": "tc"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-c",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "tc": [
+                  2
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_search",
+      "body": {
+        "collapse": {
+          "field": "l"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-c",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "l": [
+                  3
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_search",
+      "body": {
+        "collapse": {
+          "field": "_index"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_index] of the type [_index]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [_index] of the type [_index]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [_index] of the type [_index]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_index] of the type [_index]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_search",
+      "body": {
+        "collapse": {
+          "field": "_seq_no"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_seq_no] of the type [_seq_no]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [_seq_no] of the type [_seq_no]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [_seq_no] of the type [_seq_no]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_seq_no] of the type [_seq_no]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_search",
+      "body": {
+        "collapse": {
+          "field": "_routing"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_routing] of the type [_routing]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [_routing] of the type [_routing]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [_routing] of the type [_routing]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_routing] of the type [_routing]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c/_search",
+      "body": {
+        "collapse": {
+          "field": "nope"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "no mapping found for `nope` in order to collapse on"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "no mapping found for `nope` in order to collapse on"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "no mapping found for `nope` in order to collapse on",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "no mapping found for `nope` in order to collapse on"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "DELETE /esm-c",
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-c2",
+      "body": {
+        "mappings": {
+          "properties": {
+            "dn": {
+              "type": "date_nanos"
+            },
+            "v": {
+              "type": "version"
+            },
+            "ck": {
+              "type": "counted_keyword"
+            },
+            "by": {
+              "type": "byte"
+            },
+            "hf": {
+              "type": "half_float"
+            },
+            "i": {
+              "type": "integer"
+            },
+            "f": {
+              "type": "flattened"
+            }
+          }
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-c2"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-c2/_doc/1?refresh=true",
+      "body": {
+        "dn": 1,
+        "by": 1,
+        "hf": 1.5,
+        "i": 1,
+        "v": "1.0.0",
+        "ck": "x",
+        "f": {
+          "a": "b"
+        }
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 201,
+      "response": {
+        "_index": "esm-c2",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c2/_search",
+      "body": {
+        "collapse": {
+          "field": "dn"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [dn] of the type [date_nanos]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c2",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [dn] of the type [date_nanos]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [dn] of the type [date_nanos]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [dn] of the type [date_nanos]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c2/_search",
+      "body": {
+        "collapse": {
+          "field": "by"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 3,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-c2",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "by": [
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c2/_search",
+      "body": {
+        "collapse": {
+          "field": "hf"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 3,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-c2",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "hf": [
+                  1.5
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c2/_search",
+      "body": {
+        "collapse": {
+          "field": "i"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 2,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-c2",
+              "_id": "1",
+              "_score": 1.0,
+              "fields": {
+                "i": [
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c2/_search",
+      "body": {
+        "collapse": {
+          "field": "f"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [f] of the type [flattened]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c2",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [f] of the type [flattened]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [f] of the type [flattened]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [f] of the type [flattened]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c2/_search",
+      "body": {
+        "collapse": {
+          "field": "f.a"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [f._keyed] of the type [flattened]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c2",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [f._keyed] of the type [flattened]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [f._keyed] of the type [flattened]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [f._keyed] of the type [flattened]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c2/_search",
+      "body": {
+        "collapse": {
+          "field": "_doc_count"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_doc_count] of the type [_doc_count]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c2",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [_doc_count] of the type [_doc_count]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [_doc_count] of the type [_doc_count]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_doc_count] of the type [_doc_count]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c2/_search",
+      "body": {
+        "collapse": {
+          "field": "_field_names"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_field_names] of the type [_field_names]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c2",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [_field_names] of the type [_field_names]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [_field_names] of the type [_field_names]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_field_names] of the type [_field_names]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c2/_search",
+      "body": {
+        "collapse": {
+          "field": "_primary_term"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "no mapping found for `_primary_term` in order to collapse on"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c2",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "no mapping found for `_primary_term` in order to collapse on"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "no mapping found for `_primary_term` in order to collapse on",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "no mapping found for `_primary_term` in order to collapse on"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c2/_search",
+      "body": {
+        "collapse": {
+          "field": "v"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [v] of the type [version]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c2",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [v] of the type [version]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [v] of the type [version]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [v] of the type [version]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c2/_search",
+      "body": {
+        "collapse": {
+          "field": "ck"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [ck] of the type [counted_keyword]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c2",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [ck] of the type [counted_keyword]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [ck] of the type [counted_keyword]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [ck] of the type [counted_keyword]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c2/_search",
+      "body": {
+        "collapse": {
+          "field": "_tier"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_tier] of the type [_tier]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c2",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [_tier] of the type [_tier]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [_tier] of the type [_tier]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_tier] of the type [_tier]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-c2/_search",
+      "body": {
+        "collapse": {
+          "field": "_index_mode"
+        },
+        "_source": false
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_index_mode] of the type [_index_mode]"
+            }
+          ],
+          "type": "search_phase_execution_exception",
+          "reason": "all shards failed",
+          "phase": "query",
+          "grouped": true,
+          "failed_shards": [
+            {
+              "shard": 0,
+              "index": "esm-c2",
+              "node": "EV9bgUQxQzWgjxDu5-ty4g",
+              "reason": {
+                "type": "illegal_argument_exception",
+                "reason": "collapse is not supported for the field [_index_mode] of the type [_index_mode]"
+              }
+            }
+          ],
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "collapse is not supported for the field [_index_mode] of the type [_index_mode]",
+            "caused_by": {
+              "type": "illegal_argument_exception",
+              "reason": "collapse is not supported for the field [_index_mode] of the type [_index_mode]"
+            }
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "DELETE /esm-c2",
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    }
+  ]
+}

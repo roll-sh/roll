@@ -1,0 +1,231 @@
+#defaults: {"context": "score", "setup": {"index": "painless-docs", "document": {"l": [5, 3], "i": 7, "sh": 3, "by": 2, "d": 1.5, "f": 0.1, "hf": 0.1, "sf": 1.234, "ul": 18446744073709551615, "ver": "1.2.3", "v": [1, 2, 3], "ip": "10.0.0.1", "bin": "aGVsbG8=", "g": "41.12,-71.34", "k": ["b", "a"], "dt": "2020-01-02T03:04:05.678Z", "dn": "2020-01-02T03:04:05.123456789Z", "b": [true, false], "t": "hello world", "obj": {"x": 9}, "tag": "x"}}}
+----
+double s = 0; for (def x : doc['l']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['l'].size() + (doc['l'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['i']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['i'].size() + (doc['i'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['sh']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['sh'].size() + (doc['sh'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['by']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['by'].size() + (doc['by'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['d']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['d'].size() + (doc['d'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['f']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['f'].size() + (doc['f'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['hf']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['hf'].size() + (doc['hf'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['sf']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['sf'].size() + (doc['sf'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['ul']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['ul'].size() + (doc['ul'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['ver']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['ver'].size() + (doc['ver'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['v']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['v'].size() + (doc['v'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['ip']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['ip'].size() + (doc['ip'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['bin']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['bin'].size() + (doc['bin'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['g']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['g'].size() + (doc['g'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['k']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['k'].size() + (doc['k'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['dt']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['dt'].size() + (doc['dt'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['dn']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['dn'].size() + (doc['dn'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['b']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['b'].size() + (doc['b'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['t']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['t'].size() + (doc['t'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['obj.x']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['obj.x'].size() + (doc['obj.x'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['tag']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['tag'].size() + (doc['tag'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (def x : doc['nope']) { s += x instanceof Number ? x.doubleValue() : 1 } return s
+----
+return doc['nope'].size() + (doc['nope'].isEmpty() ? 100 : 0)
+----
+double s = 0; for (double x : doc['l']) { s += x } return s
+----
+long s = 0; for (long x : doc['l']) { s += x } return s
+----
+int s = 0; for (int x : doc['l']) { s += x } return s
+----
+String s = ''; for (String x : doc['l']) { s += x } return s.length()
+----
+def s = 0; for (x in doc['l']) { s++ } return s
+----
+double s = 0; for (double x : doc['d']) { s += x } return s
+----
+long s = 0; for (long x : doc['d']) { s += x } return s
+----
+int s = 0; for (int x : doc['d']) { s += x } return s
+----
+String s = ''; for (String x : doc['d']) { s += x } return s.length()
+----
+def s = 0; for (x in doc['d']) { s++ } return s
+----
+double s = 0; for (double x : doc['k']) { s += x } return s
+----
+long s = 0; for (long x : doc['k']) { s += x } return s
+----
+int s = 0; for (int x : doc['k']) { s += x } return s
+----
+String s = ''; for (String x : doc['k']) { s += x } return s.length()
+----
+def s = 0; for (x in doc['k']) { s++ } return s
+----
+double s = 0; for (double x : doc['dt']) { s += x } return s
+----
+long s = 0; for (long x : doc['dt']) { s += x } return s
+----
+int s = 0; for (int x : doc['dt']) { s += x } return s
+----
+String s = ''; for (String x : doc['dt']) { s += x } return s.length()
+----
+def s = 0; for (x in doc['dt']) { s++ } return s
+----
+double s = 0; for (double x : doc['b']) { s += x } return s
+----
+long s = 0; for (long x : doc['b']) { s += x } return s
+----
+int s = 0; for (int x : doc['b']) { s += x } return s
+----
+String s = ''; for (String x : doc['b']) { s += x } return s.length()
+----
+def s = 0; for (x in doc['b']) { s++ } return s
+----
+double s = 0; for (double x : doc['g']) { s += x } return s
+----
+long s = 0; for (long x : doc['g']) { s += x } return s
+----
+int s = 0; for (int x : doc['g']) { s += x } return s
+----
+String s = ''; for (String x : doc['g']) { s += x } return s.length()
+----
+def s = 0; for (x in doc['g']) { s++ } return s
+----
+double s = 0; for (double x : doc['v']) { s += x } return s
+----
+long s = 0; for (long x : doc['v']) { s += x } return s
+----
+int s = 0; for (int x : doc['v']) { s += x } return s
+----
+String s = ''; for (String x : doc['v']) { s += x } return s.length()
+----
+def s = 0; for (x in doc['v']) { s++ } return s
+----
+double s = 0; for (double x : doc['ul']) { s += x } return s
+----
+long s = 0; for (long x : doc['ul']) { s += x } return s
+----
+int s = 0; for (int x : doc['ul']) { s += x } return s
+----
+String s = ''; for (String x : doc['ul']) { s += x } return s.length()
+----
+def s = 0; for (x in doc['ul']) { s++ } return s
+----
+double s = 0; for (long x : doc['l']) { if (x == 3) { continue } s += x } return s
+----
+double s = 0; for (long x : doc['l']) { if (x == 3) { break } s += x } return s
+----
+double s = 0; for (long x : doc['l']) { for (long y : doc['l']) { s += x * y } } return s
+----
+double s = 0; for (long x : doc['l']) { s += doc['l'].size() } return s
+----
+def l = doc['l']; double s = 0; for (long x : l) { s += x } return s
+----
+double s = 0; for (boolean x : doc['b']) { s += x ? 1 : 0 } return s
+----
+double s = 0; for (char x : doc['k']) { s += 1 } return s
+----
+double s = 0; for (Long x : doc['l']) { s += x } return s
+----
+double s = 0; for (Integer x : doc['l']) { s += x } return s
+----
+double s = 0; for (ZonedDateTime x : doc['dt']) { s += x.getYear() } return s
+----
+double s = 0; for (def x : doc['g']) { s += x.lat } return s
+----
+return doc['l'].size() == 0 ? 0 : doc['l'].value
+----
+doc['nope'].size()
+----
+doc['l'].size() > 1
+----
+#defaults: {"context": "score", "setup": {"index": "painless-docs", "document": {"tag": "empty"}}}
+----
+double s = 0; for (def x : doc['l']) { s += 1 } return s + doc['l'].size()
+----
+return doc['l'].isEmpty() ? 1 : 0
+----
+double s = 0; for (def x : doc['d']) { s += 1 } return s + doc['d'].size()
+----
+return doc['d'].isEmpty() ? 1 : 0
+----
+double s = 0; for (def x : doc['k']) { s += 1 } return s + doc['k'].size()
+----
+return doc['k'].isEmpty() ? 1 : 0
+----
+double s = 0; for (def x : doc['dt']) { s += 1 } return s + doc['dt'].size()
+----
+return doc['dt'].isEmpty() ? 1 : 0
+----
+double s = 0; for (def x : doc['nope']) { s += 1 } return s + doc['nope'].size()
+----
+return doc['nope'].isEmpty() ? 1 : 0
+----
+#defaults: {"context": "long_field", "setup": {"index": "painless-docs", "document": {"l": [5, 3], "i": 7, "sh": 3, "by": 2, "d": 1.5, "f": 0.1, "hf": 0.1, "sf": 1.234, "ul": 18446744073709551615, "ver": "1.2.3", "v": [1, 2, 3], "ip": "10.0.0.1", "bin": "aGVsbG8=", "g": "41.12,-71.34", "k": ["b", "a"], "dt": "2020-01-02T03:04:05.678Z", "dn": "2020-01-02T03:04:05.123456789Z", "b": [true, false], "t": "hello world", "obj": {"x": 9}, "tag": "x"}}}
+----
+for (long v : doc['l']) emit(v * 2)
+----
+for (def v : doc['l']) { if (doc['l'].size() > 1) emit(v) }
+----
+#defaults: {"context": "filter", "setup": {"index": "painless-docs", "document": {"l": [5, 3], "i": 7, "sh": 3, "by": 2, "d": 1.5, "f": 0.1, "hf": 0.1, "sf": 1.234, "ul": 18446744073709551615, "ver": "1.2.3", "v": [1, 2, 3], "ip": "10.0.0.1", "bin": "aGVsbG8=", "g": "41.12,-71.34", "k": ["b", "a"], "dt": "2020-01-02T03:04:05.678Z", "dn": "2020-01-02T03:04:05.123456789Z", "b": [true, false], "t": "hello world", "obj": {"x": 9}, "tag": "x"}}}
+----
+doc['l'].size() > 1
+----
+for (long v : doc['l']) { if (v == 3) return true } return false

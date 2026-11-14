@@ -1,0 +1,4339 @@
+{
+  "description" : "Mapping and settings validation added in round 2: dense_vector index_options update rules, vectordb_document mode, flattened mapped properties and passthrough, passthrough objects, _id mode, _routing doc values in field caps, metadata field aliases, TSDB/logsdb source and timestamp rules, date settings, auto_create_index patterns, edge_ngram deprecation, flush/refresh counters.",
+  "steps" : [
+    {
+      "req" : "PUT /esm-dv",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "e" : {
+              "type" : "dense_vector",
+              "dims" : 4,
+              "index_options" : {
+                "type" : "hnsw"
+              }
+            },
+            "f" : {
+              "type" : "dense_vector",
+              "dims" : 4,
+              "index_options" : {
+                "type" : "flat"
+              }
+            },
+            "q" : {
+              "type" : "dense_vector",
+              "dims" : 4,
+              "index_options" : {
+                "type" : "int8_flat"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-dv"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-dv/_mapping",
+      "body" : {
+        "properties" : {
+          "e" : {
+            "type" : "dense_vector",
+            "dims" : 4,
+            "index_options" : {
+              "type" : "flat"
+            }
+          }
+        }
+      },
+      "skip" : "the conflict text ends with a JVM identity hash",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [e] conflicts with existing mapper:\n\tCannot update parameter [index_options] from [{type=hnsw, m=16, ef_construction=100, flat_index_threshold=-1}] to [org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper$FlatIndexOptions@30320f80]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [e] conflicts with existing mapper:\n\tCannot update parameter [index_options] from [{type=hnsw, m=16, ef_construction=100, flat_index_threshold=-1}] to [org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper$FlatIndexOptions@30320f80]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-dv/_mapping",
+      "body" : {
+        "properties" : {
+          "e" : {
+            "type" : "dense_vector",
+            "dims" : 4,
+            "index_options" : {
+              "type" : "hnsw",
+              "m" : 8
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [e] conflicts with existing mapper:\n\tCannot update parameter [index_options] from [{type=hnsw, m=16, ef_construction=100, flat_index_threshold=-1}] to [{type=hnsw, m=8, ef_construction=100, flat_index_threshold=-1}]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [e] conflicts with existing mapper:\n\tCannot update parameter [index_options] from [{type=hnsw, m=16, ef_construction=100, flat_index_threshold=-1}] to [{type=hnsw, m=8, ef_construction=100, flat_index_threshold=-1}]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-dv/_mapping",
+      "body" : {
+        "properties" : {
+          "e" : {
+            "type" : "dense_vector",
+            "dims" : 4,
+            "index_options" : {
+              "type" : "int8_hnsw",
+              "m" : 32
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-dv/_mapping",
+      "body" : {
+        "properties" : {
+          "e" : {
+            "type" : "dense_vector",
+            "dims" : 4,
+            "index_options" : {
+              "type" : "int4_flat"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [e] conflicts with existing mapper:\n\tCannot update parameter [index_options] from [{type=int8_hnsw, m=32, ef_construction=100, on_disk_rescore=false, rescore_vector=none, flat_index_threshold=-1}] to [{type=int4_flat, rescore_vector=null}]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [e] conflicts with existing mapper:\n\tCannot update parameter [index_options] from [{type=int8_hnsw, m=32, ef_construction=100, on_disk_rescore=false, rescore_vector=none, flat_index_threshold=-1}] to [{type=int4_flat, rescore_vector=null}]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-dv/_mapping",
+      "body" : {
+        "properties" : {
+          "f" : {
+            "type" : "dense_vector",
+            "dims" : 4,
+            "index_options" : {
+              "type" : "int8_hnsw"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-dv/_mapping",
+      "body" : {
+        "properties" : {
+          "q" : {
+            "type" : "dense_vector",
+            "dims" : 4,
+            "index_options" : {
+              "type" : "int4_flat"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-dv/_mapping",
+      "body" : {
+        "properties" : {
+          "q" : {
+            "type" : "dense_vector",
+            "dims" : 4,
+            "index_options" : {
+              "type" : "flat"
+            }
+          }
+        }
+      },
+      "skip" : "the conflict text ends with a JVM identity hash",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [q] conflicts with existing mapper:\n\tCannot update parameter [index_options] from [{type=int4_flat, rescore_vector=null}] to [org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper$FlatIndexOptions@30320f80]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [q] conflicts with existing mapper:\n\tCannot update parameter [index_options] from [{type=int4_flat, rescore_vector=null}] to [org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper$FlatIndexOptions@30320f80]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-dv/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-dv" : {
+          "mappings" : {
+            "properties" : {
+              "e" : {
+                "type" : "dense_vector",
+                "dims" : 4,
+                "index" : true,
+                "similarity" : "cosine",
+                "index_options" : {
+                  "type" : "int8_hnsw",
+                  "m" : 32,
+                  "ef_construction" : 100
+                }
+              },
+              "f" : {
+                "type" : "dense_vector",
+                "dims" : 4,
+                "index" : true,
+                "similarity" : "cosine",
+                "index_options" : {
+                  "type" : "int8_hnsw",
+                  "m" : 16,
+                  "ef_construction" : 100
+                }
+              },
+              "q" : {
+                "type" : "dense_vector",
+                "dims" : 4,
+                "index" : true,
+                "similarity" : "cosine",
+                "index_options" : {
+                  "type" : "int4_flat"
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 64,
+              "index_options" : {
+                "type" : "bbq_disk"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-v"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-v" : {
+          "mappings" : {
+            "properties" : {
+              "v" : {
+                "type" : "dense_vector",
+                "dims" : 64,
+                "index" : true,
+                "similarity" : "cosine",
+                "index_options" : {
+                  "type" : "bbq_disk",
+                  "cluster_size" : 384,
+                  "flat_index_threshold" : -1,
+                  "default_visit_percentage" : 0.0,
+                  "rescore_vector" : {
+                    "oversample" : 3.0
+                  },
+                  "bits" : 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-v",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 64,
+              "index_options" : {
+                "type" : "bbq_disk",
+                "cluster_size" : 1
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: cluster_size must be between 64 and 65536, got: 1"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: cluster_size must be between 64 and 65536, got: 1",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "cluster_size must be between 64 and 65536, got: 1"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v",
+              "index_uuid" : "_na_",
+              "index" : "esm-v"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v",
+          "index_uuid" : "_na_",
+          "index" : "esm-v"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-v",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v",
+              "index_uuid" : "_na_",
+              "index" : "esm-v"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v",
+          "index_uuid" : "_na_",
+          "index" : "esm-v"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 64,
+              "index_options" : {
+                "type" : "bbq_hnsw"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-v"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-v" : {
+          "mappings" : {
+            "properties" : {
+              "v" : {
+                "type" : "dense_vector",
+                "dims" : 64,
+                "index" : true,
+                "similarity" : "cosine",
+                "index_options" : {
+                  "type" : "bbq_hnsw",
+                  "m" : 16,
+                  "ef_construction" : 100,
+                  "rescore_vector" : {
+                    "oversample" : 3.0
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-v",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 64,
+              "index_options" : {
+                "type" : "bbq_flat"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-v"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-v" : {
+          "mappings" : {
+            "properties" : {
+              "v" : {
+                "type" : "dense_vector",
+                "dims" : 64,
+                "index" : true,
+                "similarity" : "cosine",
+                "index_options" : {
+                  "type" : "bbq_flat",
+                  "rescore_vector" : {
+                    "oversample" : 3.0
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-v",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 64,
+              "index_options" : {
+                "type" : "int4_hnsw",
+                "confidence_interval" : 0.9
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-v"
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Parameter [confidence_interval] in [index_options] for dense_vector field [v] is deprecated and will be removed in a future version\""
+        ]
+      }
+    },
+    {
+      "req" : "GET /esm-v/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-v" : {
+          "mappings" : {
+            "properties" : {
+              "v" : {
+                "type" : "dense_vector",
+                "dims" : 64,
+                "index" : true,
+                "similarity" : "cosine",
+                "index_options" : {
+                  "type" : "int4_hnsw",
+                  "m" : 16,
+                  "ef_construction" : 100,
+                  "confidence_interval" : 0.9
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-v",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 64,
+              "index_options" : {
+                "type" : "hnsw",
+                "on_disk_rescore" : true
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: on_disk_rescore is only supported for indexed and quantized vector types"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: on_disk_rescore is only supported for indexed and quantized vector types",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "on_disk_rescore is only supported for indexed and quantized vector types"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v",
+              "index_uuid" : "_na_",
+              "index" : "esm-v"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v",
+          "index_uuid" : "_na_",
+          "index" : "esm-v"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-v",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v",
+              "index_uuid" : "_na_",
+              "index" : "esm-v"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v",
+          "index_uuid" : "_na_",
+          "index" : "esm-v"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 64,
+              "index_options" : {
+                "type" : "int8_hnsw",
+                "on_disk_rescore" : true,
+                "flat_index_threshold" : 5
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-v"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-v" : {
+          "mappings" : {
+            "properties" : {
+              "v" : {
+                "type" : "dense_vector",
+                "dims" : 64,
+                "index" : true,
+                "similarity" : "cosine",
+                "index_options" : {
+                  "type" : "int8_hnsw",
+                  "m" : 16,
+                  "ef_construction" : 100,
+                  "on_disk_rescore" : true,
+                  "flat_index_threshold" : 5
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-v",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 64,
+              "index_options" : {
+                "type" : "int8_flat",
+                "rescore_vector" : {
+                  "oversample" : 0.5
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: oversample must be greater than 1 or exactly 0"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: oversample must be greater than 1 or exactly 0",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "oversample must be greater than 1 or exactly 0"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v",
+              "index_uuid" : "_na_",
+              "index" : "esm-v"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v",
+          "index_uuid" : "_na_",
+          "index" : "esm-v"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-v",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v",
+              "index_uuid" : "_na_",
+              "index" : "esm-v"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v",
+          "index_uuid" : "_na_",
+          "index" : "esm-v"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 64,
+              "index_options" : {
+                "type" : "int8_flat",
+                "rescore_vector" : { }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: Invalid rescore_vector value. Missing required field oversample"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: Invalid rescore_vector value. Missing required field oversample",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Invalid rescore_vector value. Missing required field oversample"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v",
+              "index_uuid" : "_na_",
+              "index" : "esm-v"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v",
+          "index_uuid" : "_na_",
+          "index" : "esm-v"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-v",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v",
+              "index_uuid" : "_na_",
+              "index" : "esm-v"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v",
+          "index_uuid" : "_na_",
+          "index" : "esm-v"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 64,
+              "index_options" : {
+                "type" : "hnsw",
+                "rescore_vector" : {
+                  "oversample" : 2
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Mapping definition for [v] has unsupported parameters:  [rescore_vector : {oversample=2}]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: Mapping definition for [v] has unsupported parameters:  [rescore_vector : {oversample=2}]",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "Mapping definition for [v] has unsupported parameters:  [rescore_vector : {oversample=2}]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v",
+              "index_uuid" : "_na_",
+              "index" : "esm-v"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v",
+          "index_uuid" : "_na_",
+          "index" : "esm-v"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-v",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v",
+              "index_uuid" : "_na_",
+              "index" : "esm-v"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v",
+          "index_uuid" : "_na_",
+          "index" : "esm-v"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 64,
+              "index_options" : {
+                "type" : "hnsw",
+                "foo" : 1
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Mapping definition for [v] has unsupported parameters:  [foo : 1]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: Mapping definition for [v] has unsupported parameters:  [foo : 1]",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "Mapping definition for [v] has unsupported parameters:  [foo : 1]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v",
+              "index_uuid" : "_na_",
+              "index" : "esm-v"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v",
+          "index_uuid" : "_na_",
+          "index" : "esm-v"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-v",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v",
+              "index_uuid" : "_na_",
+              "index" : "esm-v"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v",
+          "index_uuid" : "_na_",
+          "index" : "esm-v"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 64,
+              "index_options" : {
+                "type" : "int8_hnsw",
+                "m" : "x"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: For input string: \"x\""
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: For input string: \"x\"",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"x\""
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v",
+              "index_uuid" : "_na_",
+              "index" : "esm-v"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v",
+          "index_uuid" : "_na_",
+          "index" : "esm-v"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-v",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v",
+              "index_uuid" : "_na_",
+              "index" : "esm-v"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v",
+          "index_uuid" : "_na_",
+          "index" : "esm-v"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 64,
+              "index_options" : {
+                "type" : "int8_flat",
+                "rescore_vector" : {
+                  "oversample" : 2
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-v"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-v" : {
+          "mappings" : {
+            "properties" : {
+              "v" : {
+                "type" : "dense_vector",
+                "dims" : 64,
+                "index" : true,
+                "similarity" : "cosine",
+                "index_options" : {
+                  "type" : "int8_flat",
+                  "rescore_vector" : {
+                    "oversample" : 2.0
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-v",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 64,
+              "index_options" : {
+                "type" : "bbq_disk",
+                "bits" : 3
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: 'bits' must be 1, 2, 4 or 7, got: 3 for field [v]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: 'bits' must be 1, 2, 4 or 7, got: 3 for field [v]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "'bits' must be 1, 2, 4 or 7, got: 3 for field [v]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v",
+              "index_uuid" : "_na_",
+              "index" : "esm-v"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v",
+          "index_uuid" : "_na_",
+          "index" : "esm-v"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-v",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-v]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-v",
+              "index_uuid" : "_na_",
+              "index" : "esm-v"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-v]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-v",
+          "index_uuid" : "_na_",
+          "index" : "esm-v"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 64,
+              "index_options" : {
+                "type" : "bbq_disk",
+                "bits" : 2,
+                "default_visit_percentage" : 5
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-v"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-v/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-v" : {
+          "mappings" : {
+            "properties" : {
+              "v" : {
+                "type" : "dense_vector",
+                "dims" : 64,
+                "index" : true,
+                "similarity" : "cosine",
+                "index_options" : {
+                  "type" : "bbq_disk",
+                  "cluster_size" : 384,
+                  "flat_index_threshold" : -1,
+                  "default_visit_percentage" : 5.0,
+                  "rescore_vector" : {
+                    "oversample" : 1.5
+                  },
+                  "bits" : 2
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-v",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 3,
+              "index_options" : {
+                "type" : "int4_hnsw"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: int4_hnsw only supports even dimensions; provided=3"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: int4_hnsw only supports even dimensions; provided=3",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "int4_hnsw only supports even dimensions; provided=3"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 32,
+              "index_options" : {
+                "type" : "bbq_hnsw"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: bbq_hnsw does not support dimensions fewer than 64; provided=32"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: bbq_hnsw does not support dimensions fewer than 64; provided=32",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "bbq_hnsw does not support dimensions fewer than 64; provided=32"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-v",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 32,
+              "element_type" : "byte",
+              "index_options" : {
+                "type" : "int8_hnsw"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: [element_type] cannot be [byte] when using index type [int8_hnsw]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: [element_type] cannot be [byte] when using index type [int8_hnsw]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[element_type] cannot be [byte] when using index type [int8_hnsw]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-vdb",
+      "body" : {
+        "settings" : {
+          "index.mode" : "vectordb_document"
+        },
+        "mappings" : {
+          "properties" : {
+            "embedding" : {
+              "type" : "dense_vector",
+              "dims" : 8
+            },
+            "e2" : {
+              "type" : "dense_vector",
+              "dims" : 8,
+              "element_type" : "float"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-vdb"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-vdb/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-vdb" : {
+          "mappings" : {
+            "properties" : {
+              "e2" : {
+                "type" : "dense_vector",
+                "element_type" : "float",
+                "dims" : 8,
+                "index" : true,
+                "similarity" : "cosine",
+                "index_options" : {
+                  "type" : "int8_hnsw",
+                  "m" : 16,
+                  "ef_construction" : 100
+                }
+              },
+              "embedding" : {
+                "type" : "dense_vector",
+                "element_type" : "bfloat16",
+                "dims" : 8,
+                "index" : true,
+                "similarity" : "cosine",
+                "index_options" : {
+                  "type" : "int8_hnsw",
+                  "m" : 16,
+                  "ef_construction" : 100
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-vdb/_settings?filter_path=*.settings.index.mode,*.settings.index.mapping,*.settings.index.merge,*.settings.index.store",
+      "status" : 200,
+      "response" : {
+        "esm-vdb" : {
+          "settings" : {
+            "index" : {
+              "mode" : "vectordb_document",
+              "mapping" : {
+                "exclude_source_vectors" : "true"
+              },
+              "merge" : {
+                "scheduler" : {
+                  "auto_throttle" : "false"
+                },
+                "intra_merge_parallelism_enabled" : "true"
+              },
+              "store" : {
+                "preload" : [
+                  "vex",
+                  "veq",
+                  "veb",
+                  "cenivf"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-vdb2",
+      "body" : {
+        "settings" : {
+          "index.mode" : "vectordb_document",
+          "index.mapping.exclude_source_vectors" : false
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[index.mapping.exclude_source_vectors] cannot be set to [false] when [index.mode=vectordb_document]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[index.mapping.exclude_source_vectors] cannot be set to [false] when [index.mode=vectordb_document]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-fl",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "labels" : {
+              "type" : "flattened",
+              "passthrough" : {
+                "priority" : 5
+              },
+              "properties" : {
+                "host.name" : {
+                  "type" : "keyword"
+                },
+                "count" : {
+                  "type" : "long"
+                }
+              }
+            },
+            "ra" : {
+              "type" : "passthrough",
+              "priority" : 10,
+              "properties" : {
+                "env" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-fl"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-fl/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-fl" : {
+          "mappings" : {
+            "properties" : {
+              "labels" : {
+                "type" : "flattened",
+                "passthrough" : {
+                  "priority" : 5
+                },
+                "properties" : {
+                  "count" : {
+                    "type" : "long"
+                  },
+                  "host.name" : {
+                    "type" : "keyword"
+                  }
+                }
+              },
+              "ra" : {
+                "type" : "passthrough",
+                "priority" : 10,
+                "properties" : {
+                  "env" : {
+                    "type" : "keyword"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-fl/_mapping?include_defaults=true&filter_path=*.mappings.properties.labels.passthrough,*.mappings.properties.labels.type",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "request [/esm-fl/_mapping] contains unrecognized parameter: [include_defaults]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "request [/esm-fl/_mapping] contains unrecognized parameter: [include_defaults]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-fl/_mapping",
+      "body" : {
+        "properties" : {
+          "labels" : {
+            "type" : "flattened",
+            "properties" : {
+              "extra" : {
+                "type" : "ip"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-fl/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-fl" : {
+          "mappings" : {
+            "properties" : {
+              "labels" : {
+                "type" : "flattened",
+                "properties" : {
+                  "count" : {
+                    "type" : "long"
+                  },
+                  "extra" : {
+                    "type" : "ip"
+                  },
+                  "host.name" : {
+                    "type" : "keyword"
+                  }
+                }
+              },
+              "ra" : {
+                "type" : "passthrough",
+                "priority" : 10,
+                "properties" : {
+                  "env" : {
+                    "type" : "keyword"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-fl2",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "labels" : {
+              "type" : "flattened",
+              "properties" : {
+                "x" : {
+                  "type" : "geo_point"
+                }
+              }
+            }
+          }
+        }
+      },
+      "skip" : "the type list is a Java Set.of, whose order changes with every JVM start",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Type [geo_point] is not supported as a mapped sub-field of flattened field [labels]. Supported types: [half_float, boolean, long, byte, date, date_nanos, ip, short, keyword, constant_keyword, integer, scaled_float, text, float, unsigned_long, wildcard, double]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: Type [geo_point] is not supported as a mapped sub-field of flattened field [labels]. Supported types: [half_float, boolean, long, byte, date, date_nanos, ip, short, keyword, constant_keyword, integer, scaled_float, text, float, unsigned_long, wildcard, double]",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "Type [geo_point] is not supported as a mapped sub-field of flattened field [labels]. Supported types: [half_float, boolean, long, byte, date, date_nanos, ip, short, keyword, constant_keyword, integer, scaled_float, text, float, unsigned_long, wildcard, double]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-fl2",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "labels" : {
+              "type" : "flattened",
+              "properties" : {
+                "x" : {
+                  "type" : "keyword",
+                  "copy_to" : "y"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "[copy_to] is not supported on properties of flattened field [labels]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: [copy_to] is not supported on properties of flattened field [labels]",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "[copy_to] is not supported on properties of flattened field [labels]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-fl2",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "labels" : {
+              "type" : "flattened",
+              "properties" : {
+                "x" : {
+                  "type" : "keyword",
+                  "fields" : {
+                    "r" : {
+                      "type" : "keyword"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "[fields] (multi-fields) is not supported on properties of flattened field [labels]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: [fields] (multi-fields) is not supported on properties of flattened field [labels]",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "[fields] (multi-fields) is not supported on properties of flattened field [labels]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-fl2",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "labels" : {
+              "type" : "flattened",
+              "properties" : {
+                "x" : { }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "No type specified for property [x] in flattened field [labels]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: No type specified for property [x] in flattened field [labels]",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "No type specified for property [x] in flattened field [labels]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-fl2",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "labels" : {
+              "type" : "flattened",
+              "properties" : {
+                "x" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Expected map for property [x] in flattened field [labels]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: Expected map for property [x] in flattened field [labels]",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "Expected map for property [x] in flattened field [labels]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-fl2",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "labels" : {
+              "type" : "flattened",
+              "passthrough" : {
+                "priority" : 1
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Flattened field [labels] has [passthrough] set but no [properties] defined"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: Flattened field [labels] has [passthrough] set but no [properties] defined",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "Flattened field [labels] has [passthrough] set but no [properties] defined"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-fl2",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "labels" : {
+              "type" : "flattened",
+              "passthrough" : { },
+              "properties" : {
+                "x" : {
+                  "type" : "long"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "[passthrough] requires a [priority] field"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: [passthrough] requires a [priority] field",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "[passthrough] requires a [priority] field"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-fl2",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "labels" : {
+              "type" : "flattened",
+              "passthrough" : {
+                "priority" : -1
+              },
+              "properties" : {
+                "x" : {
+                  "type" : "long"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: [passthrough.priority] must be non-negative, got [-1]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: [passthrough.priority] must be non-negative, got [-1]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[passthrough.priority] must be non-negative, got [-1]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-fl2",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "labels" : {
+              "type" : "flattened",
+              "passthrough" : 3,
+              "properties" : {
+                "x" : {
+                  "type" : "long"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "[passthrough] must be an object with a [priority] field, got [3]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: [passthrough] must be an object with a [priority] field, got [3]",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "[passthrough] must be an object with a [priority] field, got [3]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-pt",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "passthrough",
+              "properties" : {
+                "x" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_exception",
+              "reason" : "Pass-through object [a] is missing a non-negative value for parameter [priority]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: Pass-through object [a] is missing a non-negative value for parameter [priority]",
+          "caused_by" : {
+            "type" : "mapper_exception",
+            "reason" : "Pass-through object [a] is missing a non-negative value for parameter [priority]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-pt",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "passthrough",
+              "priority" : 1
+            },
+            "b" : {
+              "type" : "passthrough",
+              "priority" : 1
+            }
+          }
+        }
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_exception",
+              "reason" : "Pass-through source [b] has a conflicting param [priority=1] with source [a]"
+            }
+          ],
+          "type" : "mapper_exception",
+          "reason" : "Pass-through source [b] has a conflicting param [priority=1] with source [a]"
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-pt",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "passthrough",
+              "priority" : 2,
+              "subobjects" : true
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Mapping definition for [a] has unsupported parameters:  [subobjects : true]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: Mapping definition for [a] has unsupported parameters:  [subobjects : true]",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "Mapping definition for [a] has unsupported parameters:  [subobjects : true]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-pt",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "passthrough",
+              "priority" : 1,
+              "time_series_dimension" : true,
+              "dynamic" : "true",
+              "properties" : {
+                "x" : {
+                  "type" : "keyword"
+                },
+                "n" : {
+                  "type" : "long"
+                },
+                "y" : {
+                  "properties" : {
+                    "z" : {
+                      "type" : "long"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-pt"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-pt/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-pt" : {
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "passthrough",
+                "time_series_dimension" : true,
+                "priority" : 1,
+                "dynamic" : "true",
+                "properties" : {
+                  "n" : {
+                    "type" : "long",
+                    "time_series_dimension" : true
+                  },
+                  "x" : {
+                    "type" : "keyword",
+                    "time_series_dimension" : true
+                  },
+                  "y.z" : {
+                    "type" : "long",
+                    "time_series_dimension" : true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-pt/_mapping",
+      "body" : {
+        "properties" : {
+          "a" : {
+            "type" : "passthrough",
+            "priority" : 4,
+            "properties" : {
+              "w" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-pt/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-pt" : {
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "passthrough",
+                "time_series_dimension" : true,
+                "priority" : 4,
+                "dynamic" : "true",
+                "properties" : {
+                  "n" : {
+                    "type" : "long",
+                    "time_series_dimension" : true
+                  },
+                  "w" : {
+                    "type" : "keyword",
+                    "time_series_dimension" : true
+                  },
+                  "x" : {
+                    "type" : "keyword",
+                    "time_series_dimension" : true
+                  },
+                  "y.z" : {
+                    "type" : "long",
+                    "time_series_dimension" : true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-pt/_field_caps?fields=a*",
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-pt"
+        ],
+        "fields" : {
+          "a.n" : {
+            "long" : {
+              "type" : "long",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "a" : {
+            "object" : {
+              "type" : "object",
+              "metadata_field" : false,
+              "searchable" : false,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "a.x" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "a.w" : {
+            "keyword" : {
+              "type" : "keyword",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "a.y.z" : {
+            "long" : {
+              "type" : "long",
+              "metadata_field" : false,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-id",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "number_of_shards" : 5,
+            "number_of_routing_shards" : 5
+          }
+        },
+        "mappings" : {
+          "_routing" : {
+            "doc_values" : true
+          },
+          "_id" : {
+            "mode" : "columnar"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-id"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-id/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-id" : {
+          "mappings" : {
+            "_id" : {
+              "mode" : "columnar"
+            },
+            "_routing" : {
+              "doc_values" : true
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-id/_field_caps?fields=_routing,_id",
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-id"
+        ],
+        "fields" : {
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-id/_mapping",
+      "body" : {
+        "_id" : {
+          "mode" : "document"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [_id] conflicts with existing mapper:\n\tCannot update parameter [mode] from [columnar] to [document]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [_id] conflicts with existing mapper:\n\tCannot update parameter [mode] from [columnar] to [document]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-id/_mapping",
+      "body" : {
+        "_routing" : {
+          "doc_values" : false
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [_routing] conflicts with existing mapper:\n\tCannot update parameter [doc_values] from [true] to [false]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [_routing] conflicts with existing mapper:\n\tCannot update parameter [doc_values] from [true] to [false]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-id2",
+      "body" : {
+        "mappings" : {
+          "_id" : {
+            "mode" : "x"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Unknown value [x] for field [mode] - accepted values are [document, columnar]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: Unknown value [x] for field [mode] - accepted values are [document, columnar]",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "Unknown value [x] for field [mode] - accepted values are [document, columnar]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-id2",
+      "body" : {
+        "mappings" : {
+          "_id" : {
+            "mode" : "columnar",
+            "foo" : 1
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "unknown parameter [foo] on metadata field [_id]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: unknown parameter [foo] on metadata field [_id]",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "unknown parameter [foo] on metadata field [_id]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-id2",
+      "body" : {
+        "mappings" : {
+          "_id" : {
+            "mode" : "document"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-id2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-id2/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-id2" : {
+          "mappings" : { }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-id2/_mapping",
+      "body" : {
+        "_id" : {
+          "mode" : "columnar"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [_id] conflicts with existing mapper:\n\tCannot update parameter [mode] from [document] to [columnar]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [_id] conflicts with existing mapper:\n\tCannot update parameter [mode] from [document] to [columnar]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-id2/_field_caps?fields=_routing,_id",
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-id2"
+        ],
+        "fields" : {
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : false,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-col",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "columnar"
+          }
+        },
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-col"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-col/_field_caps?fields=_routing,_id",
+      "status" : 200,
+      "response" : {
+        "indices" : [
+          "esm-col"
+        ],
+        "fields" : {
+          "_routing" : {
+            "_routing" : {
+              "type" : "_routing",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          },
+          "_id" : {
+            "_id" : {
+              "type" : "_id",
+              "metadata_field" : true,
+              "searchable" : true,
+              "aggregatable" : true,
+              "inference" : false
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-al",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "alias",
+              "path" : "_id"
+            },
+            "b" : {
+              "type" : "alias",
+              "path" : "_index"
+            },
+            "c" : {
+              "type" : "alias",
+              "path" : "_routing"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-al"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-al/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-al" : {
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "alias",
+                "path" : "_id"
+              },
+              "b" : {
+                "type" : "alias",
+                "path" : "_index"
+              },
+              "c" : {
+                "type" : "alias",
+                "path" : "_routing"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-al2",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "alias",
+              "path" : "_tsid"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Invalid [path] value [_tsid] for field alias [a]: an alias must refer to an existing field in the mappings."
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Invalid [path] value [_tsid] for field alias [a]: an alias must refer to an existing field in the mappings."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "time_series",
+            "routing_path" : [
+              "m"
+            ],
+            "time_series" : {
+              "start_time" : "2021-04-28T00:00:00Z",
+              "end_time" : "2021-04-29T00:00:00Z"
+            }
+          }
+        },
+        "mappings" : {
+          "_data_stream_timestamp" : {
+            "enabled" : false
+          }
+        }
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_state_exception",
+              "reason" : "[_data_stream_timestamp] meta field has been disabled"
+            }
+          ],
+          "type" : "illegal_state_exception",
+          "reason" : "[_data_stream_timestamp] meta field has been disabled"
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "time_series",
+            "routing_path" : [
+              "m"
+            ],
+            "time_series" : {
+              "start_time" : "2021-04-28T00:00:00Z",
+              "end_time" : "2021-04-29T00:00:00Z"
+            }
+          }
+        },
+        "mappings" : {
+          "runtime" : {
+            "@timestamp" : {
+              "type" : "date"
+            }
+          },
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "m" : {
+              "type" : "keyword",
+              "time_series_dimension" : true
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "runtime field [@timestamp] shadows an index sort field, which would prevent shards from being allocated"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "runtime field [@timestamp] shadows an index sort field, which would prevent shards from being allocated"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "time_series",
+            "routing_path" : [
+              "m"
+            ],
+            "time_series" : {
+              "start_time" : "2021-04-28T00:00:00Z",
+              "end_time" : "2021-04-29T00:00:00Z"
+            },
+            "mapping" : {
+              "source.mode" : "disabled"
+            }
+          }
+        },
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "m" : {
+              "type" : "keyword",
+              "time_series_dimension" : true
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: _source can not be disabled in index using [time_series] index mode"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: _source can not be disabled in index using [time_series] index mode",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "_source can not be disabled in index using [time_series] index mode"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "time_series",
+            "routing_path" : [
+              "m"
+            ],
+            "time_series" : {
+              "start_time" : "2021-04-28T00:00:00Z",
+              "end_time" : "2021-04-29T00:00:00Z"
+            }
+          }
+        },
+        "mappings" : {
+          "_source" : {
+            "includes" : [
+              "a"
+            ]
+          },
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "m" : {
+              "type" : "keyword",
+              "time_series_dimension" : true
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: filtering the stored _source is incompatible with synthetic source"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: filtering the stored _source is incompatible with synthetic source",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "filtering the stored _source is incompatible with synthetic source"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "time_series",
+            "routing_path" : [
+              "m"
+            ],
+            "time_series" : {
+              "start_time" : "2021-04-28T00:00:00Z",
+              "end_time" : "2021-04-29T00:00:00Z"
+            }
+          }
+        },
+        "mappings" : {
+          "_source" : {
+            "enabled" : false
+          },
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "m" : {
+              "type" : "keyword",
+              "time_series_dimension" : true
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: _source can not be disabled in index using [time_series] index mode"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: _source can not be disabled in index using [time_series] index mode",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "_source can not be disabled in index using [time_series] index mode"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "nested" : {
+              "type" : "nested",
+              "properties" : {
+                "dim" : {
+                  "type" : "keyword",
+                  "time_series_dimension" : true
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "time_series_dimension can't be configured in nested field [nested.dim]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "time_series_dimension can't be configured in nested field [nested.dim]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "time_series",
+            "routing_path" : [ ],
+            "time_series" : {
+              "start_time" : "",
+              "end_time" : ""
+            },
+            "number_of_shards" : 5
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "cannot parse empty datetime"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "cannot parse empty datetime",
+          "suppressed" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "cannot parse empty datetime"
+            },
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "cannot parse empty datetime"
+            }
+          ]
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "time_series",
+            "routing_path" : [
+              "m"
+            ],
+            "time_series" : {
+              "start_time" : "abc"
+            }
+          }
+        },
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "m" : {
+              "type" : "keyword",
+              "time_series_dimension" : true
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "failed to parse date field [abc] with format [strict_date_optional_time||epoch_millis]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "failed to parse date field [abc] with format [strict_date_optional_time||epoch_millis]",
+          "caused_by" : {
+            "type" : "date_time_parse_exception",
+            "reason" : "Failed to parse with all enclosed parsers"
+          },
+          "suppressed" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "failed to parse date field [abc] with format [strict_date_optional_time||epoch_millis]",
+              "caused_by" : {
+                "type" : "date_time_parse_exception",
+                "reason" : "Failed to parse with all enclosed parsers"
+              }
+            }
+          ]
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "time_series",
+            "routing_path" : [
+              "m"
+            ],
+            "time_series" : {
+              "start_time" : "-9999-01-01T00:00:00Z",
+              "end_time" : "9999-12-31T23:59:59.999Z"
+            }
+          }
+        },
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "m" : {
+              "type" : "keyword",
+              "time_series_dimension" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ts"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-ts",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "time_series",
+            "routing_path" : [
+              "m"
+            ],
+            "time_series" : {
+              "start_time" : 1632625782000,
+              "end_time" : 1632625792000
+            }
+          }
+        },
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "m" : {
+              "type" : "keyword",
+              "time_series_dimension" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ts"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts/_settings",
+      "body" : {
+        "index.time_series.end_time" : 1632625793000
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts/_settings",
+      "body" : {
+        "index.time_series.end_time" : 1632625792000
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "index.time_series.end_time must be larger than current value [1632625793000] but was [2021-09-26T03:09:52Z]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "index.time_series.end_time must be larger than current value [1632625793000] but was [2021-09-26T03:09:52Z]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts/_settings",
+      "body" : {
+        "index.time_series.end_time" : "2021-09-26T03:09:52.120Z"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "index.time_series.end_time must be larger than current value [1632625793000] but was [2021-09-26T03:09:52.120Z]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "index.time_series.end_time must be larger than current value [1632625793000] but was [2021-09-26T03:09:52.120Z]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts/_settings",
+      "body" : {
+        "index.time_series.end_time" : 1632625700000
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "index.time_series.end_time must be larger than index.time_series.start_time"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "index.time_series.end_time must be larger than index.time_series.start_time"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts/_settings",
+      "body" : {
+        "index.time_series.end_time" : "abc"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "failed to parse date field [abc] with format [strict_date_optional_time||epoch_millis]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "failed to parse date field [abc] with format [strict_date_optional_time||epoch_millis]",
+          "caused_by" : {
+            "type" : "date_time_parse_exception",
+            "reason" : "Failed to parse with all enclosed parsers"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ts/_settings",
+      "body" : {
+        "index.time_series.end_time" : "2021-09-26T03:09:54Z"
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ts/_settings?filter_path=**.time_series",
+      "status" : 200,
+      "response" : {
+        "esm-ts" : {
+          "settings" : {
+            "index" : {
+              "time_series" : {
+                "end_time" : "2021-09-26T03:09:54Z",
+                "start_time" : "1632625782000"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ld",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "logsdb",
+            "mapping" : {
+              "source.mode" : "disabled"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: _source can not be disabled in index using [logsdb] index mode"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: _source can not be disabled in index using [logsdb] index mode",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "_source can not be disabled in index using [logsdb] index mode"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ld",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "logsdb"
+          }
+        },
+        "mappings" : {
+          "_source" : {
+            "excludes" : [
+              "b"
+            ]
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: filtering the stored _source is incompatible with synthetic source"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: filtering the stored _source is incompatible with synthetic source",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "filtering the stored _source is incompatible with synthetic source"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ld",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mapping" : {
+              "source.mode" : "synthetic"
+            }
+          }
+        },
+        "mappings" : {
+          "_source" : {
+            "excludes" : [
+              "a"
+            ]
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: filtering the stored _source is incompatible with synthetic source"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: filtering the stored _source is incompatible with synthetic source",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "filtering the stored _source is incompatible with synthetic source"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ld",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "logsdb"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ld"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ld/_settings?include_defaults=true&filter_path=*.defaults.index.mapping.total_fields",
+      "status" : 200,
+      "response" : {
+        "esm-ld" : {
+          "defaults" : {
+            "index" : {
+              "mapping" : {
+                "total_fields" : {
+                  "limit" : "1000",
+                  "ignore_dynamic_beyond_limit" : "true"
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s",
+      "body" : {
+        "settings" : {
+          "index.mapping.array_objects.limit" : 0
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [0] for setting [index.mapping.array_objects.limit] must be >= 1"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse value [0] for setting [index.mapping.array_objects.limit] must be >= 1"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s",
+      "body" : {
+        "settings" : {
+          "index.mapping.array_objects.limit" : "abc"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [abc] for setting [index.mapping.array_objects.limit]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse value [abc] for setting [index.mapping.array_objects.limit]",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"abc\""
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_cluster/settings",
+      "body" : {
+        "transient" : {
+          "action.auto_create_index" : "test"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "persistent" : { },
+        "transient" : {
+          "action" : {
+            "auto_create_index" : "test"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_cluster/settings",
+      "body" : {
+        "transient" : {
+          "action.auto_create_index" : "test,-dest"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "persistent" : { },
+        "transient" : {
+          "action" : {
+            "auto_create_index" : "test,-dest"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_cluster/settings",
+      "body" : {
+        "transient" : {
+          "action.auto_create_index" : ""
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "persistent" : { },
+        "transient" : {
+          "action" : {
+            "auto_create_index" : ""
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_cluster/settings",
+      "body" : {
+        "transient" : {
+          "action.auto_create_index" : ","
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't parse [,] for setting [action.auto_create_index] must be either [true, false, or a comma separated list of index patterns]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Can't parse [,] for setting [action.auto_create_index] must be either [true, false, or a comma separated list of index patterns]",
+          "suppressed" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [,] as only [true] or [false] are allowed."
+            }
+          ]
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_cluster/settings",
+      "body" : {
+        "transient" : {
+          "action.auto_create_index" : "-"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't parse [-] for setting [action.auto_create_index] must contain an index name after [-]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Can't parse [-] for setting [action.auto_create_index] must contain an index name after [-]",
+          "suppressed" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [-] as only [true] or [false] are allowed."
+            }
+          ]
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_cluster/settings",
+      "body" : {
+        "transient" : {
+          "action.auto_create_index" : "a,,b"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't parse [a,,b] for setting [action.auto_create_index] must be either [true, false, or a comma separated list of index patterns]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Can't parse [a,,b] for setting [action.auto_create_index] must be either [true, false, or a comma separated list of index patterns]",
+          "suppressed" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [a,,b] as only [true] or [false] are allowed."
+            }
+          ]
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_cluster/settings",
+      "body" : {
+        "transient" : {
+          "action.auto_create_index" : "+"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't parse [+] for setting [action.auto_create_index] must contain an index name after [+]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Can't parse [+] for setting [action.auto_create_index] must contain an index name after [+]",
+          "suppressed" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [+] as only [true] or [false] are allowed."
+            }
+          ]
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_cluster/settings",
+      "body" : {
+        "transient" : {
+          "action.auto_create_index" : null
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "persistent" : { },
+        "transient" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-eg",
+      "body" : {
+        "settings" : {
+          "analysis" : {
+            "filter" : {
+              "my_edge_ngram" : {
+                "type" : "edge_ngram",
+                "min_gram" : 3,
+                "side" : "front",
+                "max_gram" : 6
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-eg"
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"The [side] parameter is deprecated and will be removed. Use a [reverse] before and after the [edge_ngram] instead.\""
+        ]
+      }
+    },
+    {
+      "req" : "PUT /esm-f",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 2,
+          "number_of_replicas" : 0
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-f"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-f/_stats/flush,refresh?filter_path=_all,indices.*.primaries",
+      "mask" : [
+        "total_time_in_millis",
+        "total_time_excluding_waiting_on_lock_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "_all" : {
+          "primaries" : {
+            "refresh" : {
+              "total" : 4,
+              "total_time_in_millis" : 0,
+              "external_total" : 4,
+              "external_total_time_in_millis" : 0,
+              "listeners" : 0
+            },
+            "flush" : {
+              "total" : 0,
+              "periodic" : 0,
+              "total_time_in_millis" : 0,
+              "total_time_excluding_waiting_on_lock_in_millis" : 0
+            }
+          },
+          "total" : {
+            "refresh" : {
+              "total" : 4,
+              "total_time_in_millis" : 0,
+              "external_total" : 4,
+              "external_total_time_in_millis" : 0,
+              "listeners" : 0
+            },
+            "flush" : {
+              "total" : 0,
+              "periodic" : 0,
+              "total_time_in_millis" : 0,
+              "total_time_excluding_waiting_on_lock_in_millis" : 0
+            }
+          }
+        },
+        "indices" : {
+          "esm-f" : {
+            "primaries" : {
+              "refresh" : {
+                "total" : 4,
+                "total_time_in_millis" : 0,
+                "external_total" : 4,
+                "external_total_time_in_millis" : 0,
+                "listeners" : 0
+              },
+              "flush" : {
+                "total" : 0,
+                "periodic" : 0,
+                "total_time_in_millis" : 0,
+                "total_time_excluding_waiting_on_lock_in_millis" : 0
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-f/_flush",
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "failed" : 0
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-f/_stats/flush,refresh?filter_path=_all,indices.*.primaries",
+      "mask" : [
+        "total_time_in_millis",
+        "total_time_excluding_waiting_on_lock_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "_all" : {
+          "primaries" : {
+            "refresh" : {
+              "total" : 4,
+              "total_time_in_millis" : 0,
+              "external_total" : 4,
+              "external_total_time_in_millis" : 0,
+              "listeners" : 0
+            },
+            "flush" : {
+              "total" : 2,
+              "periodic" : 0,
+              "total_time_in_millis" : 0,
+              "total_time_excluding_waiting_on_lock_in_millis" : 0
+            }
+          },
+          "total" : {
+            "refresh" : {
+              "total" : 4,
+              "total_time_in_millis" : 0,
+              "external_total" : 4,
+              "external_total_time_in_millis" : 0,
+              "listeners" : 0
+            },
+            "flush" : {
+              "total" : 2,
+              "periodic" : 0,
+              "total_time_in_millis" : 0,
+              "total_time_excluding_waiting_on_lock_in_millis" : 0
+            }
+          }
+        },
+        "indices" : {
+          "esm-f" : {
+            "primaries" : {
+              "refresh" : {
+                "total" : 4,
+                "total_time_in_millis" : 0,
+                "external_total" : 4,
+                "external_total_time_in_millis" : 0,
+                "listeners" : 0
+              },
+              "flush" : {
+                "total" : 2,
+                "periodic" : 0,
+                "total_time_in_millis" : 0,
+                "total_time_excluding_waiting_on_lock_in_millis" : 0
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-f/_refresh",
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "failed" : 0
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-f/_flush?force=true",
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "failed" : 0
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-f/_stats/flush,refresh?filter_path=_all,indices.*.primaries",
+      "mask" : [
+        "total_time_in_millis",
+        "total_time_excluding_waiting_on_lock_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "_all" : {
+          "primaries" : {
+            "refresh" : {
+              "total" : 8,
+              "total_time_in_millis" : 0,
+              "external_total" : 6,
+              "external_total_time_in_millis" : 0,
+              "listeners" : 0
+            },
+            "flush" : {
+              "total" : 4,
+              "periodic" : 0,
+              "total_time_in_millis" : 15,
+              "total_time_excluding_waiting_on_lock_in_millis" : 15
+            }
+          },
+          "total" : {
+            "refresh" : {
+              "total" : 8,
+              "total_time_in_millis" : 0,
+              "external_total" : 6,
+              "external_total_time_in_millis" : 0,
+              "listeners" : 0
+            },
+            "flush" : {
+              "total" : 4,
+              "periodic" : 0,
+              "total_time_in_millis" : 15,
+              "total_time_excluding_waiting_on_lock_in_millis" : 15
+            }
+          }
+        },
+        "indices" : {
+          "esm-f" : {
+            "primaries" : {
+              "refresh" : {
+                "total" : 8,
+                "total_time_in_millis" : 0,
+                "external_total" : 6,
+                "external_total_time_in_millis" : 0,
+                "listeners" : 0
+              },
+              "flush" : {
+                "total" : 4,
+                "periodic" : 0,
+                "total_time_in_millis" : 15,
+                "total_time_excluding_waiting_on_lock_in_millis" : 15
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-f/_stats/flush,refresh?level=shards&filter_path=indices.*.shards.*.flush,indices.*.shards.*.refresh",
+      "mask" : [
+        "total_time_in_millis",
+        "total_time_excluding_waiting_on_lock_in_millis"
+      ],
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-f" : {
+            "shards" : {
+              "0" : [
+                {
+                  "refresh" : {
+                    "total" : 4,
+                    "total_time_in_millis" : 0,
+                    "external_total" : 3,
+                    "external_total_time_in_millis" : 0,
+                    "listeners" : 0
+                  },
+                  "flush" : {
+                    "total" : 2,
+                    "periodic" : 0,
+                    "total_time_in_millis" : 8,
+                    "total_time_excluding_waiting_on_lock_in_millis" : 8
+                  }
+                }
+              ],
+              "1" : [
+                {
+                  "refresh" : {
+                    "total" : 4,
+                    "total_time_in_millis" : 0,
+                    "external_total" : 3,
+                    "external_total_time_in_millis" : 0,
+                    "listeners" : 0
+                  },
+                  "flush" : {
+                    "total" : 2,
+                    "periodic" : 0,
+                    "total_time_in_millis" : 7,
+                    "total_time_excluding_waiting_on_lock_in_millis" : 7
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-f/_flush?force=true&wait_if_ongoing=false",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: wait_if_ongoing must be true for a force flush;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: wait_if_ongoing must be true for a force flush;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

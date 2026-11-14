@@ -1,0 +1,737 @@
+{
+  "description" : "ES|QL review fixes (round 4): -0.0 and 0.0 group and VALUES apart but dedupe within a multi-value, -0.0 == 0.0, INLINE STATS with multi-valued keys",
+  "steps" : [
+    {
+      "req" : "PUT /xpack-nz?filter_path=errors,acknowledged,error",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "d" : {
+              "type" : "double"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /xpack-nz/_bulk?refresh=true&filter_path=errors,error",
+      "raw" : "{\"index\":{}}\n{\"d\":0.0}\n{\"index\":{}}\n{\"d\":-0.0}\n{\"index\":{}}\n{\"d\":-0.0}\n{\"index\":{}}\n{\"d\":[-0.0,0.0,1.0]}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "PUT /xpack-is?filter_path=errors,acknowledged,error",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            },
+            "n" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /xpack-is/_bulk?refresh=true&filter_path=errors,error",
+      "raw" : "{\"index\":{}}\n{\"k\":\"a\",\"n\":1}\n{\"index\":{}}\n{\"k\":[\"a\",\"b\"],\"n\":2}\n{\"index\":{}}\n{\"k\":\"b\",\"n\":3}\n{\"index\":{}}\n{\"n\":4}\n{\"index\":{}}\n{\"k\":[\"b\",\"c\"],\"n\":5}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM xpack-nz | STATS c = COUNT(*) BY d | SORT d, c"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "d",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            3,
+            -0.0
+          ],
+          [
+            1,
+            0.0
+          ],
+          [
+            1,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM xpack-nz | WHERE MV_COUNT(d) == 1 | STATS c = COUNT_DISTINCT(d), v = VALUES(d)"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "v",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            2,
+            [
+              0.0,
+              -0.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM xpack-nz | STATS v = VALUES(d)"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "v",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            [
+              0.0,
+              -0.0,
+              1.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM xpack-nz | EVAL m = MV_DEDUPE(d) | KEEP d, m | SORT d"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "d",
+            "type" : "double"
+          },
+          {
+            "name" : "m",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            -0.0,
+            -0.0
+          ],
+          [
+            -0.0,
+            -0.0
+          ],
+          [
+            [
+              -0.0,
+              0.0,
+              1.0
+            ],
+            [
+              -0.0,
+              1.0
+            ]
+          ],
+          [
+            0.0,
+            0.0
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = [0.0, -0.0, 1.0] | MV_EXPAND a | STATS c = COUNT(*) BY a | SORT a"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "a",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            -0.0
+          ],
+          [
+            1,
+            0.0
+          ],
+          [
+            1,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = [0.0, -0.0, 1.0] | STATS v = VALUES(a)"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "v",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            [
+              0.0,
+              -0.0,
+              1.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = -0.0 | EVAL b = a == 0.0, c = 0.0 * -1"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "double"
+          },
+          {
+            "name" : "b",
+            "type" : "boolean"
+          },
+          {
+            "name" : "c",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            -0.0,
+            true,
+            -0.0
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = [-0.0, 0.0] | STATS c=COUNT(*) BY a"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "a",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            -0.0
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM xpack-nz | INLINE STATS c = COUNT(*) BY d | SORT d, c | LIMIT 10"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "d",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            [
+              3,
+              1
+            ],
+            [
+              -0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          [
+            3,
+            -0.0
+          ],
+          [
+            3,
+            -0.0
+          ],
+          [
+            1,
+            0.0
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM xpack-nz | STATS c=COUNT(*) BY d, e = d * 2 | SORT d, e"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "d",
+            "type" : "double"
+          },
+          {
+            "name" : "e",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            2,
+            -0.0,
+            -0.0
+          ],
+          [
+            1,
+            -0.0,
+            null
+          ],
+          [
+            1,
+            0.0,
+            0.0
+          ],
+          [
+            1,
+            1.0,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM xpack-nz | WHERE d == 0.0 | STATS c = COUNT(*)"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM xpack-nz | WHERE d == -0.0 | STATS c = COUNT(*)"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM xpack-nz | EVAL x = d + 0 | WHERE x == 0.0 | STATS c = COUNT(*)"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            3
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM xpack-nz | SORT d | KEEP d"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "d",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            -0.0
+          ],
+          [
+            -0.0
+          ],
+          [
+            [
+              -0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          [
+            0.0
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM xpack-nz | STATS m=MIN(d), x=MAX(d)"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "m",
+            "type" : "double"
+          },
+          {
+            "name" : "x",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            -0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = [0.0, -0.0] | MV_EXPAND a | SORT a"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            -0.0
+          ],
+          [
+            0.0
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM xpack-is | INLINE STATS c = COUNT(*), s = SUM(n) BY k | SORT n"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "n",
+            "type" : "long"
+          },
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "s",
+            "type" : "long"
+          },
+          {
+            "name" : "k",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            2,
+            3,
+            "a"
+          ],
+          [
+            2,
+            [
+              2,
+              3
+            ],
+            [
+              3,
+              10
+            ],
+            [
+              "a",
+              "b"
+            ]
+          ],
+          [
+            3,
+            3,
+            10,
+            "b"
+          ],
+          [
+            4,
+            1,
+            4,
+            null
+          ],
+          [
+            5,
+            [
+              3,
+              1
+            ],
+            [
+              10,
+              5
+            ],
+            [
+              "b",
+              "c"
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM xpack-is | INLINE STATS c = COUNT(*) BY k, m = n % 2 | SORT n"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "n",
+            "type" : "long"
+          },
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "k",
+            "type" : "keyword"
+          },
+          {
+            "name" : "m",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            1,
+            "a",
+            1
+          ],
+          [
+            2,
+            [
+              1,
+              1
+            ],
+            [
+              "a",
+              "b"
+            ],
+            0
+          ],
+          [
+            3,
+            2,
+            "b",
+            1
+          ],
+          [
+            4,
+            1,
+            null,
+            0
+          ],
+          [
+            5,
+            [
+              2,
+              1
+            ],
+            [
+              "b",
+              "c"
+            ],
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM xpack-is | INLINE STATS c = COUNT(*) BY k | WHERE c > 1 | SORT n | KEEP n, c"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "n",
+            "type" : "long"
+          },
+          {
+            "name" : "c",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            3
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "DELETE /xpack-nz?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /xpack-is?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

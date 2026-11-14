@@ -95,6 +95,7 @@ written once in SQLite's dialect), as roll code's did.
 | streams | `stream:cluster:<id>` | a tenant's whole Kafka cluster on one owner (the stream SASL maps a key to); acknowledged once in the owner's write-ahead log in S3; per partition later (`crates/stream-broker/README.md`, "On the fleet") |
 | storage | `storage:meta` | built: one metadata log for the deployment, a hot standby following it (docs/storage/architecture.md, "Many nodes"); `storage:account:<id>` (a log per account) is designed there, not built |
 | queues | `mq:<vhost>/<queue>` (`#<n>` per partition after the first) | built: every node serves every client (stream clients too, as one virtual node) and forwards to each queue's owner over the internal RPC (no splice); logs in S3 Standard, fenced by put-if-absent (docs/queues/architecture.md, "Many nodes") |
+| search | `search:cluster:<name>` | built: the owner loads the cluster from object storage and serves it; any node's REST port and the edge forward a request to it (`Cluster::dispatch`, `/internal/search/rest`); an unloaded cluster's lease is given up; writes are fenced by ownership markers in S3, acknowledged once the WAL batch is in S3 (docs/search/architecture.md, "On the fleet") |
 | tasks | `tasks:cell:default` | built: the log store cell's leader (replaces the cell's own S3 lease; fencing stays in the log), hot standbys following the log (deploy/aws/README.md, "On the roll cloud fleet"); `tasks:tenant:<id>` needs more cells and a tenant catalog, designed there, not built |
 
 ## The edge
@@ -131,6 +132,7 @@ written once in SQLite's dialect), as roll code's did.
 | `<id>.redis.us-east-1.roll.sh:6379` (TLS), `https://<id>.redis.us-east-1.roll.sh` (REST) | Redis | DNS only |
 | `<id>.kafka.us-east-1.roll.sh:9092` (TLS + SASL), HTTPS REST on 443 | streams | DNS only |
 | `<id>.nosql.us-east-1.roll.sh:9042` (TLS), HTTPS Alternator on 443 | nosql | DNS only |
+| `https://<cluster>.search.us-east-1.roll.sh` | search: the Elasticsearch REST API (the label names the cluster) | DNS only |
 | `<vhost>.mq.us-east-1.roll.sh` 5671 AMQPS, 8883 MQTTS, 61614 STOMP TLS, 5551 streams (TLS), 443 web | queues: one hostname per vhost (below) | DNS only |
 | `tasks.us-east-1.roll.sh` | tasks API (`/v1/tasks`, hosted tenants at `/t/<tenant>/v1/tasks`) | DNS only |
 | `s3.us-east-1.roll.site`, `<bucket>.s3.us-east-1.roll.site` | S3 API (path and virtual-host style) | DNS only |
@@ -170,7 +172,7 @@ when `ROLL_EDGE=1` (without it rolld is unchanged).
 
 | listener | what happens |
 | --- | --- |
-| 8443 (HTTPS) | HTTP/1.1, routed by `Host`: `roll.sh` → `ROLL_DASHBOARD_UPSTREAM` (streamed, WebSockets included) except `/<owner>/<repo>.git/…` → code's git routes; `git.roll.sh` → code's git routes; `api.roll.sh` → rolld's API router; `<id>.redis.…` → Redis REST; `<id>.kafka.…` → the streams HTTP API; `<id>.nosql.…` → Alternator; `<id>.mq.…` → web-STOMP or web-MQTT by `Sec-WebSocket-Protocol`, else the queues HTTP API; `tasks.…` → tasks (`/v1/tasks/…`, `/t/<tenant>/v1/tasks/…`, `/_roll/tenants`; run on the cell's leader); `s3.…`, `<bucket>.s3.…` → the S3 server; `chg-<id>.roll.site` → code previews. `<bucket>.roll.site` answers 404 at the origin: it is served by the CDN Worker. |
+| 8443 (HTTPS) | HTTP/1.1, routed by `Host`: `roll.sh` → `ROLL_DASHBOARD_UPSTREAM` (streamed, WebSockets included) except `/<owner>/<repo>.git/…` → code's git routes; `git.roll.sh` → code's git routes; `api.roll.sh` → rolld's API router; `<id>.redis.…` → Redis REST; `<id>.kafka.…` → the streams HTTP API; `<id>.nosql.…` → Alternator; `<cluster>.search.…` → the search REST API (run on the cluster's owner); `<id>.mq.…` → web-STOMP or web-MQTT by `Sec-WebSocket-Protocol`, else the queues HTTP API; `tasks.…` → tasks (`/v1/tasks/…`, `/t/<tenant>/v1/tasks/…`, `/_roll/tenants`; run on the cell's leader); `s3.…`, `<bucket>.s3.…` → the S3 server; `chg-<id>.roll.site` → code previews. `<bucket>.roll.site` answers 404 at the origin: it is served by the CDN Worker. |
 | 5432 | `SSLRequest` → `S` → TLS, or TLS straight away (`sslnegotiation=direct`, ALPN `postgresql`); `GSSENCRequest` → `N`; a startup packet in the clear is refused (`08P01`); cancel requests may come in the clear. The endpoint is the server name's `<id>`, else `options=endpoint=<id>`; naming two different ones is an error. |
 | 6379 | TLS, then Redis: the server name's first label is the database, and the connection is spliced to its owner right after the handshake (without a server name, from its first AUTH or HELLO … AUTH on). |
 | 9092 | TLS, then Kafka; metadata names the server name the client used (one virtual broker per hostname), never a node address. |
@@ -188,7 +190,7 @@ when `ROLL_EDGE=1` (without it rolld is unchanged).
   replaces it), and a request naming one of them on a connection that didn't show it gets 403,
   whatever the TLS server name was. DNS-only hostnames ask for no client certificate.
 - **Certificates**: two sets, so roll.sh and roll.site never share one: `roll.sh`, `api.roll.sh`,
-  `git.roll.sh`, `tasks.us-east-1.roll.sh` and `*.{pg,redis,kafka,nosql,mq}.us-east-1.roll.sh`;
+  `git.roll.sh`, `tasks.us-east-1.roll.sh` and `*.{pg,redis,kafka,nosql,mq,search}.us-east-1.roll.sh`;
   and `*.roll.site`, `s3.us-east-1.roll.site`, `*.s3.us-east-1.roll.site`. Bucket names with
   dots aren't covered by the wildcard and use path style, as on S3. They're stored sealed under
   `ROLL_SECRET_KEY` (`system/certs/{product,site}.sealed`, plus the ACME account), every node
@@ -445,9 +447,9 @@ The contract between the stack, the image and rolld. Each setting is a flag with
 | `ROLL_ADVERTISE_URL` | `http://<private ip>:7070` | where other nodes reach this one |
 | `ROLL_API` | `0.0.0.0:7070` | internal HTTP: node-to-node hops and `GET /healthz`; never public |
 | `ROLL_SYSTEM_DATABASE` | the system database's URL | catalogs and accounts for every product; roll code's data unless `ROLL_CODE_DATABASE` is set; roll streams' catalog (schema `streams`) |
-| `ROLL_SYSTEM_DB_CONNECTIONS` | 8 (the stack's `SystemDbConnections`) | connections a node opens to the system database across its products, split by `DbBudget` (code's two pools 3 each, nosql 2, redis and streams 1, one each for queues, code's `LISTEN`, roll previews (with code), workspace projects and accounts); unset: each product's default, about 63 |
+| `ROLL_SYSTEM_DB_CONNECTIONS` | 8 (the stack's `SystemDbConnections`) | connections a node opens to the system database across its products, split by `DbBudget` (code's two pools 3 each, nosql 2, redis, streams, search and apps 1, one each for queues, code's `LISTEN`, roll previews (with code), workspace projects and accounts); unset: each product's default, about 77 |
 | `ROLL_STREAM_ACK_LINGER_MS` | `50` | how long a stream's owner gathers appends before writing its write-ahead log object: `acks=all` latency against S3 PUTs (at most one per busy stream per round) |
-| `ROLL_PRODUCTS` | `redis,streams,tasks,storage,nosql,queues,code` | the products the node runs (see "Products"); Postgres is off until its engine runs in process |
+| `ROLL_PRODUCTS` | `redis,streams,tasks,storage,nosql,queues,code,search` | the products the node runs (see "Products"); Postgres is off until its engine runs in process |
 | `ROLL_S3_BUCKET`, `AWS_REGION` | `roll-cloud-data-<account>`, `us-east-1` | all product data, under per-product prefixes |
 | `ROLL_SECRET_KEY` | from Secrets Manager | seals owners' keys, the stored certificates and accounts' TOTP seeds |
 | `ROLL_ADMIN_TOKEN` | from Secrets Manager | the operator token every control-plane API accepts |
@@ -493,9 +495,10 @@ header.
 ### Products
 
 `ROLL_PRODUCTS` (`--products`) is a comma list of `postgres`, `redis`, `streams`, `tasks`,
-`storage`, `nosql`, `queues` and `code`; unset, every product runs. The older switches are
-shorthands over the same set: `--no-storage`, `--no-queues` and `--no-nosql` take one out, and
-`--code-only`, `--queues-only` and `--nosql-only` mean `ROLL_PRODUCTS=<that one>`
+`storage`, `nosql`, `queues`, `code` and `search`; unset, every product runs. The older switches are
+shorthands over the same set: `--no-storage`, `--no-queues`, `--no-nosql` and `--no-search` take
+one out, and `--code-only`, `--queues-only`, `--nosql-only` and `--search-only` mean
+`ROLL_PRODUCTS=<that one>`
 (`crates/rolld/src/products.rs` decides).
 
 - A product that's off binds none of its ports (the edge's too), starts no background work, and
@@ -631,7 +634,9 @@ against it, then removes everything it created (all named `roll-cloud-e2e-*`).
   SNI, a `sync` database), streams (librdkafka, SASL_SSL, `acks=all`, idempotent), storage
   (aws-sdk-s3, path and virtual-host style, multipart uploads), tasks (publish with `dedup_id`,
   pull and ack), queues (lapin over AMQPS with the URL the API gave a vhost, publisher confirms to
-  a quorum queue, a consumer with manual acks).
+  a quorum queue, a consumer with manual acks), search (the Elasticsearch REST API on the
+  cluster's own hostname with its password: documents `PUT` by id, realtime `GET`s, and an
+  `_mget` of every acknowledged document at the end).
 - **The disruptions**: SIGKILL of the node holding the most leases (started again afterwards); a
   rolling restart, each node stopped with SIGTERM (it must exit 0 holding no lease) and healthy
   again before the next; a fourth node joining and leaving. After each, every tenant lease must be

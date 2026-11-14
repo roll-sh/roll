@@ -1,0 +1,179 @@
+ByteBuffer.wrap(new byte[] {1, 2, 3}, 1, 2)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}, 1, 1); return [b.limit(), b.get(0), b.get(1)]
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}, 1, 1); return b.get(2)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}); return b.get(3)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}); return b.get(-1)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}); return b.getInt(0)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5}); return b.getShort(4)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5}); return b.getChar(4)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9}); return b.getLong(2)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9}); return b.getDouble(2)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9}); return b.getFloat(6)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1}); return b.asCharBuffer()
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1}); def c = b.asCharBuffer(); return [c.get(0), c.get(2), c.limit(), c.toString(), c.length()]
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1}); return b.asCharBuffer().get(3)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1}, 1, 5); return [b.asCharBuffer(), b.asCharBuffer().get(0), b.asShortBuffer(), b.asShortBuffer().get(1)]
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1}); return [b.asShortBuffer(), b.asIntBuffer(), b.asLongBuffer(), b.asFloatBuffer(), b.asDoubleBuffer()]
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}).order(ByteOrder.LITTLE_ENDIAN); return [b.asShortBuffer(), b.asIntBuffer(), b.asLongBuffer(), b.asFloatBuffer(), b.asDoubleBuffer(), b.asIntBuffer().get(1), b.asLongBuffer().get(0), b.asShortBuffer().get(3), b.asFloatBuffer().get(0), b.asDoubleBuffer().get(0)]
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); IntBuffer i = b.asIntBuffer(); return i.get(2)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); return b.asLongBuffer().get(1)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); return b.asDoubleBuffer().get(-1)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); return b.asFloatBuffer().get(2)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); return b.asShortBuffer().get(4)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65}); def c = b.asCharBuffer(); return [c.limit(), c == c, c.equals(b.asCharBuffer()), c.hashCode() == b.asCharBuffer().hashCode(), b.equals(ByteBuffer.wrap(new byte[] {0, 65})), b.hashCode()]
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}, 1, 2); return [b.equals(ByteBuffer.wrap(new byte[] {2, 3})), b.hashCode(), ByteBuffer.wrap(new byte[] {2, 3}).hashCode()]
+----
+ByteBuffer.wrap(new byte[] {1, 2, 3}, 2, 2)
+----
+ByteBuffer.wrap(new byte[] {1, 2, 3}, -1, 2)
+----
+ByteBuffer.wrap(null)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}); return b.order(null).order()
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[0]); return [b, b.asCharBuffer(), b.asIntBuffer().limit()]
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {1,2,3,4,5,6,7,8,9}, 3, 6); return [b.getInt(0), b.getInt(3), b.getInt(5), b.asIntBuffer(), b.asIntBuffer().get(0), b.getLong(1)]
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {1,2,3,4,5,6,7,8,9}, 3, 6); return b.getInt(6)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {1,2,3,4,5,6,7,8,9}, 3, 6); return b.get(9)
+----
+def b = ByteBuffer.wrap(new byte[] {1,2,3,4}); return [b.limit, b.order(), ByteOrder.BIG_ENDIAN, ByteOrder.LITTLE_ENDIAN.toString()]
+----
+def b = ByteBuffer.wrap(new byte[] {1,2,3,4}); def c = b.asCharBuffer(); return [c instanceof CharSequence, c.charAt(0), c.length(), c.subSequence(0, 1), c.chars().count(), c.isEmpty()]
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66}); CharBuffer c = b.asCharBuffer(); return c + 'x'
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66}); return b.asCharBuffer().toString().length()
+----
+def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); def c = b.asCharBuffer(); return [c instanceof CharSequence, c.charAt(0), c.length(), c.subSequence(0, 1), c.chars().count()]
+----
+def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); CharSequence c = b.asCharBuffer(); return [c.charAt(1), c.length(), c.subSequence(1, 2), c.toString(), c.codePoints().count(), c.isEmpty()]
+----
+def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); CharSequence c = b.asCharBuffer(); return c.charAt(2)
+----
+def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); def c = b.asCharBuffer(); return [c.limit(), c.equals('AB'), c.compareTo(b.asCharBuffer()), c.hashCode()]
+----
+def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); def c = b.asIntBuffer(); return [c.limit(), c.hashCode(), c.equals(b.asIntBuffer()), c.get(0)]
+----
+def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return [b.asCharBuffer() instanceof Buffer, b instanceof Buffer, b.asIntBuffer() instanceof Comparable, b instanceof Comparable]
+----
+def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return 'x' =~ /x/ && b.asCharBuffer() ==~ /AB/
+----
+def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return /A/.matcher(b.asCharBuffer()).find()
+----
+def b = ByteBuffer.wrap(new byte[] {1,2,3,4}); return b.order(ByteOrder.LITTLE_ENDIAN).getInt(0) + ' ' + b.getShort(2) + ' ' + b.getChar(0) + ' ' + b.order()
+----
+def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return b.asCharBuffer().get(2)
+----
+def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return b.get(4)
+----
+def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return b.getInt(1)
+----
+ByteBuffer.wrap(new byte[0]).getChar(0)
+----
+ByteBuffer.wrap(new byte[0]).getShort(0)
+----
+ByteBuffer.wrap(new byte[0]).getLong(0)
+----
+ByteBuffer.wrap(new byte[0]).getFloat(0)
+----
+ByteBuffer.wrap(new byte[0]).getDouble(0)
+----
+ByteBuffer.wrap(new byte[0]).asCharBuffer().get(0)
+----
+ByteBuffer.wrap(new byte[0]).asShortBuffer().get(0)
+----
+ByteBuffer.wrap(new byte[0]).asIntBuffer().get(0)
+----
+ByteBuffer.wrap(new byte[0]).asLongBuffer().get(0)
+----
+ByteBuffer.wrap(new byte[0]).asFloatBuffer().get(0)
+----
+ByteBuffer.wrap(new byte[0]).asDoubleBuffer().get(0)
+----
+ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asCharBuffer().get(0)
+----
+ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(0)
+----
+ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(0)
+----
+ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asLongBuffer().get(0)
+----
+ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(0)
+----
+ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asDoubleBuffer().get(0)
+----
+CharSequence c = ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asCharBuffer(); return c.charAt(0)
+----
+CharSequence c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return c.subSequence(1, 4)
+----
+CharSequence c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return [c.subSequence(1, 3), c.subSequence(1, 3).length(), c.subSequence(1,3).charAt(1)]
+----
+CharSequence c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return c.subSequence(2, 1)
+----
+def c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return c.subSequence(1, 3).get(1)
+----
+def c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return [c.subSequence(1, 3).limit(), c.subSequence(1, 3).get(0), c.subSequence(1,3).hashCode()]
+----
+def c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asIntBuffer(); return c.compareTo(ByteBuffer.wrap(new byte[]{0,65,0,67}).asIntBuffer())
+----
+def c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return c.compareTo(ByteBuffer.wrap(new byte[]{0,65,0,66}).asCharBuffer())
+----
+def c = ByteBuffer.wrap(new byte[]{1,2,3}); return [c.compareTo(ByteBuffer.wrap(new byte[]{1,2})), c.compareTo(ByteBuffer.wrap(new byte[]{1,-2})), c.equals(c), c.equals(null), c.equals('x')]
+----
+def c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return c.compareTo('x')
+----
+ByteBuffer c = ByteBuffer.wrap(new byte[]{0,0,0,0,0,0,0,0, 127,-8,0,0,0,0,0,0}); def d = c.asDoubleBuffer(); return [d.get(1), d.equals(ByteBuffer.wrap(new byte[]{0,0,0,0,0,0,0,0, 127,-8,0,0,0,0,0,1}).asDoubleBuffer()), d.hashCode()]
+----
+ByteBuffer c = ByteBuffer.wrap(new byte[]{-128,0,0,0,0,0,0,0}); def d = c.asDoubleBuffer(); return [d.get(0), d.equals(ByteBuffer.wrap(new byte[8]).asDoubleBuffer()), d.compareTo(ByteBuffer.wrap(new byte[8]).asDoubleBuffer())]
+----
+def b = ByteBuffer.wrap(new byte[]{1,2,3,4,5}, 1, 3); return [b.asShortBuffer(), b.asShortBuffer().get(0), b.hashCode(), b.toString()]
+----
+def b = ByteBuffer.wrap(new byte[]{0,65,0,66}); return b.asCharBuffer().chars().sum()
+----
+def b = ByteBuffer.wrap(new byte[]{0,65,0,66}); return String.valueOf(b.asCharBuffer()) + b.asCharBuffer().toString()
+----
+def b = ByteBuffer.wrap(new byte[]{0,65,0,66}); StringBuilder sb = new StringBuilder(); sb.append(b.asCharBuffer()); sb.append(b); return sb.toString()
+----
+def b = ByteBuffer.wrap(new byte[]{0,65,0,66}); return 'AB'.contentEquals(b.asCharBuffer())
+----
+def b = ByteBuffer.wrap(new byte[]{0,65,0,66}); return [b.asCharBuffer().getClass(), b.getClass(), b.asLongBuffer().getClass().getName()]
+----
+def b = ByteBuffer.wrap(new byte[]{1}); return b.compareTo(null)
+----
+def b = ByteBuffer.wrap(new byte[]{1}).asIntBuffer(); return b.compareTo(null)
+----
+def b = ByteBuffer.wrap(new byte[]{1}); return b.compareTo('x')
+----
+def b = ByteBuffer.wrap(new byte[]{1,2,3,4}).asIntBuffer(); return b.compareTo(ByteBuffer.wrap(new byte[]{1}))
+----
+def b = ByteBuffer.wrap(new byte[]{1,2,3,4}).asCharBuffer(); return b.compareTo(null)
+----
+ByteBuffer b = ByteBuffer.wrap(new byte[]{1,2,3,4}); return b.compareTo(b.asShortBuffer())
+----
+List l = [ByteBuffer.wrap(new byte[]{3}), ByteBuffer.wrap(new byte[]{1}), ByteBuffer.wrap(new byte[]{2})]; Collections.sort(l); return l

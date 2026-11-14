@@ -1,0 +1,3298 @@
+{
+ "found": {
+  "case": 114,
+  "case_seed": 102000420,
+  "seed": 102
+ },
+ "signature": "POST _update_by_query .error.reason",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "comp0": {
+       "type": "completion"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dbl0": {
+       "type": "double"
+      },
+      "irange0": {
+       "type": "integer_range"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "kwl0": {
+       "normalizer": "lowercase",
+       "type": "keyword"
+      },
+      "long0": {
+       "type": "long"
+      },
+      "mot0": {
+       "type": "match_only_text"
+      },
+      "n": {
+       "properties": {
+        "kw0": {
+         "type": "keyword"
+        },
+        "long0": {
+         "type": "long"
+        },
+        "text0": {
+         "analyzer": "simple",
+         "fields": {
+          "raw": {
+           "ignore_above": 32,
+           "type": "keyword"
+          }
+         },
+         "term_vector": "with_positions_offsets",
+         "type": "text"
+        }
+       },
+       "type": "nested"
+      },
+      "o": {
+       "properties": {
+        "int0": {
+         "type": "integer"
+        },
+        "kw0": {
+         "type": "keyword"
+        }
+       }
+      },
+      "scaled0": {
+       "scaling_factor": 100,
+       "type": "scaled_float"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "text1": {
+       "analyzer": "stop",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 5,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m19-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m19-a"
+  },
+  {
+   "es": {
+    "body": {
+     "errors": false,
+     "items": [
+      {
+       "index": {
+        "_id": "1",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "2",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "3",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "4",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 1,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "5",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "6",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 1,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "7",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 1,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "8",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 1,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "9",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 2,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "10",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 3,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "create": {
+        "_id": "11",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 2,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "11",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 3,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 2,
+        "result": "updated",
+        "status": 200
+       }
+      },
+      {
+       "index": {
+        "_id": "12",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 4,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "13",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 2,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "3",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 4,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 2,
+        "result": "updated",
+        "status": 200
+       }
+      },
+      {
+       "index": {
+        "_id": "14",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "15",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 2,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "5",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_seq_no": 5,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 2,
+        "result": "updated",
+        "status": 200
+       }
+      }
+     ],
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": {
+      "_id": "1",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "comp0": "quick apple",
+     "date0": [
+      1710723600000,
+      "2024-07-19T15:00:00Z",
+      "2025-01-27T22:00:00Z"
+     ],
+     "dbl0": 7.7,
+     "kw0": "Alpha",
+     "kw1": "x-1",
+     "long0": 55,
+     "mot0": "data slow",
+     "n": [
+      {
+       "kw0": "user@example.com",
+       "long0": 26,
+       "text0": "blue lazy of banana Dogs"
+      },
+      {
+       "kw0": "alpha",
+       "long0": 76,
+       "text0": "green red query index runs fast shard score fast"
+      }
+     ],
+     "o": {
+      "int0": -18
+     },
+     "scaled0": 137.7,
+     "text0": "blue data over of stream",
+     "text1": "cherry runs red dog green dog green fox of"
+    },
+    {
+     "index": {
+      "_id": "2",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "date0": 1706346000000,
+     "dbl0": 57.47,
+     "kw0": [
+      "user@example.com",
+      "Alpha"
+     ],
+     "kw1": "gamma",
+     "kwl0": "user@example.com",
+     "long0": 26,
+     "mot0": "quick lazy query jumps score ran cherry",
+     "n": [
+      {
+       "kw0": "delta",
+       "text0": "the green dog jumps the apple banana Quick Quick"
+      },
+      {
+       "kw0": "rho",
+       "long0": 40,
+       "text0": "lazy search ran the search"
+      }
+     ],
+     "o": {
+      "int0": 121
+     },
+     "text0": "cats elastic",
+     "text1": "lazy fast search brown fox data"
+    },
+    {
+     "index": {
+      "_id": "3",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "comp0": "banana quick",
+     "date0": [
+      "2024-03-19T01:39:00Z",
+      1709577480000
+     ],
+     "dbl0": 27.46,
+     "irange0": {
+      "gte": 74,
+      "lte": 99
+     },
+     "kw0": "delta",
+     "kw1": "Alpha",
+     "kwl0": "pi",
+     "mot0": "engine shard",
+     "n": [
+      {
+       "kw0": "rho",
+       "long0": -18,
+       "text0": "cat search over green stream index"
+      },
+      {
+       "kw0": "beta",
+       "long0": 32,
+       "text0": "cats blue search over dog search lazy fox"
+      }
+     ],
+     "o": {
+      "int0": 14,
+      "kw0": "gamma"
+     },
+     "scaled0": -26.71,
+     "text0": "fast running slow ran the lazy of query Quick",
+     "text1": "of"
+    },
+    {
+     "index": {
+      "_id": "4",
+      "_index": "diff-m19-a",
+      "routing": "r1"
+     }
+    },
+    {
+     "comp0": "cats",
+     "date0": "2024-09-16",
+     "dbl0": -3.99,
+     "irange0": {
+      "gte": -9,
+      "lte": 20
+     },
+     "kw1": "delta",
+     "kwl0": "user@example.com",
+     "long0": 74,
+     "mot0": "Quick engine Quick roll cherry cat cat index search",
+     "n": [
+      {
+       "kw0": "omega",
+       "long0": -2
+      },
+      {
+       "kw0": "pi",
+       "long0": -8,
+       "text0": "the engine elastic query"
+      }
+     ],
+     "o": {
+      "int0": -45,
+      "kw0": ""
+     },
+     "text0": "blue engine",
+     "text1": "blue banana jumps over brown runs engine ran shard"
+    },
+    {
+     "index": {
+      "_id": "5",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "date0": [
+      "2024-12-30",
+      "2025-02-01T05:00:00Z",
+      1709226000000
+     ],
+     "dbl0": -18.62,
+     "irange0": {
+      "gte": -17,
+      "lte": -5
+     },
+     "kw1": "Alpha",
+     "kwl0": "Alpha",
+     "long0": 23,
+     "mot0": "blue slow Quick of",
+     "n": [
+      {
+       "kw0": "pi",
+       "long0": 93,
+       "text0": "quick"
+      }
+     ],
+     "o": {
+      "int0": 8,
+      "kw0": "gamma"
+     },
+     "scaled0": 47.35,
+     "text0": "fast data engine banana quick",
+     "text1": "the index running stream cherry engine stream brown"
+    },
+    {
+     "index": {
+      "_id": "6",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "comp0": "elastic",
+     "date0": 1714294800000,
+     "dbl0": -30.06,
+     "irange0": {
+      "gte": -19,
+      "lte": 9
+     },
+     "kw1": "gamma",
+     "long0": 31,
+     "mot0": "brown lazy stream query elastic over",
+     "n": [
+      {
+       "kw0": "x-1",
+       "long0": 18,
+       "text0": "search"
+      },
+      {
+       "long0": 62,
+       "text0": "search banana engine elastic of blue runs"
+      }
+     ],
+     "o": {
+      "int0": 162
+     },
+     "scaled0": -22.04,
+     "text1": "cats lazy slow"
+    },
+    {
+     "index": {
+      "_id": "7",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "comp0": "fox",
+     "date0": "2024-12-20",
+     "dbl0": 91.79,
+     "irange0": {
+      "gte": 26,
+      "lte": 36
+     },
+     "kw1": [
+      "beta",
+      "beta",
+      "pi"
+     ],
+     "kwl0": "x-1",
+     "long0": -2,
+     "mot0": null,
+     "n": [
+      {
+       "kw0": "rho",
+       "long0": 100,
+       "text0": "cat cats"
+      },
+      {
+       "kw0": "beta",
+       "long0": 66,
+       "text0": "fast Dogs quick engine green banana apple cherry shard"
+      }
+     ],
+     "o": {
+      "int0": 61,
+      "kw0": "delta"
+     },
+     "text0": "index search fast Quick data Dogs shard dog stream",
+     "text1": [
+      "dog query and",
+      "blue fast fast fox running ran the apple dog",
+      "lazy red"
+     ]
+    },
+    {
+     "index": {
+      "_id": "8",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "comp0": "query jumps blue",
+     "date0": [
+      "2024-03-22T08:00:00Z",
+      "2024-07-24",
+      "2024-07-19"
+     ],
+     "irange0": {
+      "gte": 38,
+      "lte": 40
+     },
+     "kw0": null,
+     "kw1": "beta",
+     "kwl0": "user@example.com",
+     "long0": 79,
+     "mot0": "shard shard running",
+     "n": [
+      {
+       "kw0": "beta",
+       "long0": 61,
+       "text0": "score"
+      }
+     ],
+     "o": {
+      "kw0": "Alpha"
+     },
+     "scaled0": 25.38,
+     "text0": "elastic over cherry of",
+     "text1": "fast cat"
+    },
+    {
+     "index": {
+      "_id": "9",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "date0": "2024-12-27T18:00:00Z",
+     "irange0": {
+      "gte": 24,
+      "lte": 48
+     },
+     "kw0": "gamma",
+     "kw1": "gamma",
+     "n": [
+      {
+       "kw0": "gamma"
+      },
+      {
+       "kw0": "x-2",
+       "long0": 33,
+       "text0": "shard data"
+      },
+      {
+       "kw0": "x-1",
+       "long0": 66,
+       "text0": "over brown"
+      }
+     ],
+     "o": {
+      "int0": 199,
+      "kw0": "alpha"
+     }
+    },
+    {
+     "index": {
+      "_id": "10",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "comp0": "cats jumps",
+     "date0": 1712635680000,
+     "dbl0": 57.88,
+     "irange0": {
+      "gte": 4,
+      "lte": 29
+     },
+     "kw0": "alpha",
+     "kwl0": "gamma",
+     "long0": 8,
+     "mot0": "fox brown ran over banana over dog",
+     "o": {
+      "kw0": "alpha"
+     },
+     "scaled0": 10.35,
+     "text0": [
+      "fast runs quick blue index of elastic",
+      "shard",
+      "Dogs"
+     ],
+     "text1": "over"
+    },
+    {
+     "create": {
+      "_id": "11",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "comp0": "of",
+     "date0": 1715115600000,
+     "dbl0": -21,
+     "irange0": {
+      "gte": 77,
+      "lte": 105
+     },
+     "kw0": "x-1",
+     "kw1": "",
+     "kwl0": "beta",
+     "long0": null,
+     "mot0": "stream",
+     "o": {
+      "int0": 185,
+      "kw0": "x-1"
+     },
+     "scaled0": 54.38,
+     "text0": "green engine cat"
+    },
+    {
+     "index": {
+      "_id": "11",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "comp0": "red",
+     "date0": "2024-03-15T02:00:00Z",
+     "dbl0": [
+      123.79,
+      173.61
+     ],
+     "irange0": {
+      "gte": -13,
+      "lte": 0
+     },
+     "kw0": "rho",
+     "kw1": [
+      "gamma",
+      "gamma",
+      ""
+     ],
+     "kwl0": "alpha",
+     "mot0": "slow shard of query over of jumps",
+     "n": [
+      {
+       "kw0": "delta",
+       "long0": 37,
+       "text0": "score dog slow Dogs elastic"
+      },
+      {
+       "kw0": "omega",
+       "long0": 39,
+       "text0": "shard cherry quick engine Dogs cherry jumps red"
+      }
+     ],
+     "o": {
+      "kw0": "delta"
+     },
+     "scaled0": 139.3,
+     "text0": "of dog over blue blue slow elastic runs",
+     "text1": null
+    },
+    {
+     "index": {
+      "_id": "12",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "date0": [
+      "2024-02-18T22:07:00Z",
+      "2024-03-21T08:51:00Z"
+     ],
+     "dbl0": 101.04,
+     "kw0": "beta",
+     "kw1": "user@example.com",
+     "kwl0": "delta",
+     "long0": 44,
+     "mot0": "stream cat fast banana shard search",
+     "n": [
+      {
+       "long0": 47,
+       "text0": "and shard running dog"
+      }
+     ],
+     "o": {
+      "int0": -43,
+      "kw0": "beta"
+     },
+     "scaled0": 116.32,
+     "text0": "runs stream Quick cat quick query cherry cat green",
+     "text1": "fox elastic ran of over cat"
+    },
+    {
+     "index": {
+      "_id": "13",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "comp0": "over query lazy",
+     "date0": "2024-06-20T08:00:00Z",
+     "dbl0": -20.97,
+     "irange0": {
+      "gte": 4,
+      "lte": 11
+     },
+     "kw0": "alpha",
+     "kwl0": "x-2",
+     "long0": [
+      -15,
+      6,
+      80
+     ],
+     "mot0": "engine lazy over index",
+     "n": [
+      {
+       "kw0": "",
+       "text0": "the"
+      },
+      {
+       "kw0": "gamma",
+       "long0": -14,
+       "text0": "data cats over"
+      }
+     ],
+     "o": {
+      "kw0": "user@example.com"
+     },
+     "text0": "dog query blue cherry"
+    },
+    {
+     "index": {
+      "_id": "3",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "comp0": "fox index",
+     "date0": "2025-02-04T09:14:00Z",
+     "kw0": [
+      "delta",
+      "beta",
+      "user@example.com"
+     ],
+     "kwl0": "omega",
+     "long0": 256793976,
+     "mot0": "the data runs",
+     "o": {
+      "int0": 63
+     },
+     "scaled0": 152.07,
+     "text1": "green"
+    },
+    {
+     "index": {
+      "_id": "14",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "date0": 1707703200000,
+     "dbl0": -40.2,
+     "irange0": {
+      "gte": 36,
+      "lte": 47
+     },
+     "kw0": [
+      "gamma",
+      "Alpha",
+      ""
+     ],
+     "kw1": "",
+     "kwl0": null,
+     "long0": 63,
+     "mot0": "cats running green and jumps ran cherry index roll",
+     "n": [
+      {
+       "kw0": "beta",
+       "long0": 97,
+       "text0": "search brown lazy the cherry cats"
+      },
+      {
+       "kw0": "user@example.com",
+       "long0": 22,
+       "text0": "cherry"
+      },
+      {
+       "kw0": "x-1",
+       "long0": 47,
+       "text0": "jumps"
+      }
+     ],
+     "o": {
+      "int0": 135,
+      "kw0": [
+       "omega",
+       "delta",
+       "alpha"
+      ]
+     },
+     "scaled0": 189,
+     "text0": "blue ran stream",
+     "text1": "red"
+    },
+    {
+     "index": {
+      "_id": "15",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "comp0": "score apple cats",
+     "date0": [
+      "2024-11-29T22:00:00Z",
+      "2024-07-24"
+     ],
+     "dbl0": null,
+     "irange0": {
+      "gte": 45,
+      "lte": 51
+     },
+     "kw0": "omega",
+     "kw1": "pi",
+     "kwl0": "x-2",
+     "long0": 85,
+     "mot0": "quick apple quick elastic score and",
+     "n": [
+      {
+       "kw0": "beta",
+       "long0": 40,
+       "text0": "cat slow apple blue shard cat elastic"
+      },
+      {
+       "kw0": "x-2",
+       "long0": 8,
+       "text0": "slow cat"
+      },
+      {
+       "kw0": "",
+       "long0": 74,
+       "text0": "shard ran lazy"
+      }
+     ],
+     "o": {
+      "int0": 54,
+      "kw0": ""
+     },
+     "text0": "green quick engine data dog over and slow",
+     "text1": null
+    },
+    {
+     "index": {
+      "_id": "5",
+      "_index": "diff-m19-a"
+     }
+    },
+    {
+     "comp0": "query quick",
+     "dbl0": -19.74,
+     "irange0": {
+      "gte": 65,
+      "lte": 82
+     },
+     "kw0": "gamma",
+     "kw1": "alpha",
+     "long0": 40,
+     "mot0": "of dog",
+     "n": [
+      {
+       "kw0": "rho",
+       "long0": 83,
+       "text0": "the Quick Dogs quick and running jumps banana index"
+      }
+     ],
+     "o": {
+      "int0": 198,
+      "kw0": [
+       "omega",
+       ""
+      ]
+     },
+     "scaled0": 183.59,
+     "text1": "banana shard"
+    }
+   ],
+   "method": "POST",
+   "path": "/_bulk"
+  },
+  {
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "successful": 5,
+      "total": 5
+     }
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m19-a/_refresh"
+  },
+  {
+   "body": {
+    "_source": false,
+    "aggs": {
+     "global_4": {
+      "aggs": {
+       "filters_1": {
+        "filters": {
+         "filters": {
+          "a": {
+           "bool": {
+            "filter": {
+             "term": {
+              "dbl0": -6.25
+             }
+            },
+            "must_not": [
+             {
+              "term": {
+               "dbl0": 56.05
+              }
+             },
+             {
+              "exists": {
+               "field": "kwl0"
+              }
+             }
+            ],
+            "should": [
+             {
+              "combined_fields": {
+               "fields": [
+                "text0",
+                "text1"
+               ],
+               "query": "fox"
+              }
+             },
+             {
+              "multi_match": {
+               "fields": [
+                "text0",
+                "text1"
+               ],
+               "query": "engine running roll",
+               "tie_breaker": 0.3,
+               "type": "most_fields"
+              }
+             },
+             {
+              "multi_match": {
+               "fields": [
+                "text0",
+                "text1"
+               ],
+               "query": "slow query",
+               "type": "most_fields"
+              }
+             }
+            ]
+           }
+          },
+          "b": {
+           "bool": {
+            "boost": 2.5
+           }
+          }
+         },
+         "other_bucket_key": "rest"
+        }
+       },
+       "nested_2": {
+        "aggs": {
+         "stats_3": {
+          "stats": {
+           "field": "n.long0"
+          }
+         }
+        },
+        "nested": {
+         "path": "n"
+        }
+       }
+      },
+      "global": {}
+     },
+     "terms_5": {
+      "terms": {
+       "field": "o.kw0",
+       "size": 3
+      }
+     }
+    },
+    "fields": [
+     "comp0"
+    ],
+    "highlight": {
+     "fields": {
+      "*": {},
+      "text1": {
+       "require_field_match": false
+      }
+     }
+    },
+    "query": {
+     "match": {
+      "text0": "runs green"
+     }
+    },
+    "size": 0,
+    "timeout": "10s"
+   },
+   "es": {
+    "body": {
+     "error": {
+      "caused_by": {
+       "caused_by": {
+        "reason": "All fields in [combined_fields] query must have the same search analyzer",
+        "type": "illegal_argument_exception"
+       },
+       "reason": "All fields in [combined_fields] query must have the same search analyzer",
+       "type": "illegal_argument_exception"
+      },
+      "failed_shards": [
+       {
+        "index": "diff-m19-a",
+        "node": "GTFtKRkMSi-lm0r0R4ztbA",
+        "reason": {
+         "reason": "All fields in [combined_fields] query must have the same search analyzer",
+         "type": "illegal_argument_exception"
+        },
+        "shard": 0
+       }
+      ],
+      "grouped": true,
+      "phase": "query",
+      "reason": "all shards failed",
+      "root_cause": [
+       {
+        "reason": "All fields in [combined_fields] query must have the same search analyzer",
+        "type": "illegal_argument_exception"
+       }
+      ],
+      "type": "search_phase_execution_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "method": "POST",
+   "path": "/diff-m19-a/_search"
+  },
+  {
+   "body": {
+    "aggs": {
+     "nested_6": {
+      "aggs": {
+       "percentile_ranks_7": {
+        "percentile_ranks": {
+         "field": "n.long0",
+         "values": [
+          0,
+          25,
+          50.5
+         ]
+        }
+       },
+       "sum_8": {
+        "sum": {
+         "script": {
+          "source": "(doc['n.long0'].size() == 0 ? 0 : doc['n.long0'].value) * 2"
+         }
+        }
+       }
+      },
+      "nested": {
+       "path": "n"
+      }
+     },
+     "sum_9": {
+      "sum": {
+       "field": "scaled0",
+       "missing": 0
+      }
+     }
+    },
+    "post_filter": {
+     "exists": {
+      "field": "kwl0"
+     }
+    },
+    "query": {
+     "query_string": {
+      "default_field": "text1",
+      "query": "text0:index"
+     }
+    },
+    "size": 5,
+    "sort": [
+     {
+      "kw1": {
+       "missing": "_first",
+       "order": "desc"
+      }
+     },
+     {
+      "kw0": {
+       "missing": "_last",
+       "order": "asc"
+      }
+     }
+    ],
+    "track_scores": true
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 5,
+      "total": 5
+     },
+     "aggregations": {
+      "nested_6": {
+       "doc_count": 2,
+       "percentile_ranks_7": {
+        "values": {
+         "0.0": 0.0,
+         "25.0": 0.0,
+         "50.5": 0.0
+        }
+       },
+       "sum_8": {
+        "value": 332.0
+       }
+      },
+      "sum_9": {
+       "value": 10.35
+      }
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "10",
+        "_ignored": [
+         "text0.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": 1.4505503,
+        "_source": {
+         "comp0": "cats jumps",
+         "date0": 1712635680000,
+         "dbl0": 57.88,
+         "irange0": {
+          "gte": 4,
+          "lte": 29
+         },
+         "kw0": "alpha",
+         "kwl0": "gamma",
+         "long0": 8,
+         "mot0": "fox brown ran over banana over dog",
+         "o": {
+          "kw0": "alpha"
+         },
+         "scaled0": 10.35,
+         "text0": [
+          "fast runs quick blue index of elastic",
+          "shard",
+          "Dogs"
+         ],
+         "text1": "over"
+        },
+        "sort": [
+         null,
+         "alpha"
+        ]
+       },
+       {
+        "_id": "7",
+        "_ignored": [
+         "n.text0.raw",
+         "text0.raw",
+         "text1.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": 1.4505503,
+        "_source": {
+         "comp0": "fox",
+         "date0": "2024-12-20",
+         "dbl0": 91.79,
+         "irange0": {
+          "gte": 26,
+          "lte": 36
+         },
+         "kw1": [
+          "beta",
+          "beta",
+          "pi"
+         ],
+         "kwl0": "x-1",
+         "long0": -2,
+         "mot0": null,
+         "n": [
+          {
+           "kw0": "rho",
+           "long0": 100,
+           "text0": "cat cats"
+          },
+          {
+           "kw0": "beta",
+           "long0": 66,
+           "text0": "fast Dogs quick engine green banana apple cherry shard"
+          }
+         ],
+         "o": {
+          "int0": 61,
+          "kw0": "delta"
+         },
+         "text0": "index search fast Quick data Dogs shard dog stream",
+         "text1": [
+          "dog query and",
+          "blue fast fast fox running ran the apple dog",
+          "lazy red"
+         ]
+        },
+        "sort": [
+         "pi",
+         null
+        ]
+       }
+      ],
+      "max_score": 1.4505503,
+      "total": {
+       "relation": "eq",
+       "value": 2
+      }
+     },
+     "timed_out": false,
+     "took": 2
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m19-a/_search?search_type=dfs_query_then_fetch"
+  },
+  {
+   "body": {
+    "_source": {
+     "includes": [
+      "o.*",
+      "kw*"
+     ]
+    },
+    "aggs": {
+     "range_10": {
+      "range": {
+       "field": "scaled0",
+       "keyed": false,
+       "ranges": [
+        {
+         "to": 0
+        },
+        {
+         "from": 0,
+         "to": 50
+        },
+        {
+         "from": 50
+        }
+       ]
+      }
+     }
+    },
+    "size": 50,
+    "sort": [
+     {
+      "long0": {
+       "mode": "min",
+       "order": "asc"
+      }
+     },
+     {
+      "_score": {
+       "order": "asc"
+      }
+     }
+    ]
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 5,
+      "total": 5
+     },
+     "aggregations": {
+      "range#range_10": {
+       "buckets": [
+        {
+         "doc_count": 1,
+         "key": "*-0.0",
+         "to": 0.0
+        },
+        {
+         "doc_count": 2,
+         "from": 0.0,
+         "key": "0.0-50.0",
+         "to": 50.0
+        },
+        {
+         "doc_count": 6,
+         "from": 50.0,
+         "key": "50.0-*"
+        }
+       ]
+      }
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "13",
+        "_index": "diff-m19-a",
+        "_score": 1.0,
+        "_source": {
+         "kw0": "alpha",
+         "kwl0": "x-2",
+         "o": {
+          "kw0": "user@example.com"
+         }
+        },
+        "sort": [
+         -15,
+         1.0
+        ]
+       },
+       {
+        "_id": "7",
+        "_ignored": [
+         "n.text0.raw",
+         "text0.raw",
+         "text1.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": 1.0,
+        "_source": {
+         "kw1": [
+          "beta",
+          "beta",
+          "pi"
+         ],
+         "kwl0": "x-1",
+         "o": {
+          "int0": 61,
+          "kw0": "delta"
+         }
+        },
+        "sort": [
+         -2,
+         1.0
+        ]
+       },
+       {
+        "_id": "10",
+        "_ignored": [
+         "text0.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": 1.0,
+        "_source": {
+         "kw0": "alpha",
+         "kwl0": "gamma",
+         "o": {
+          "kw0": "alpha"
+         }
+        },
+        "sort": [
+         8,
+         1.0
+        ]
+       },
+       {
+        "_id": "2",
+        "_ignored": [
+         "n.text0.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": 1.0,
+        "_source": {
+         "kw0": [
+          "user@example.com",
+          "Alpha"
+         ],
+         "kw1": "gamma",
+         "kwl0": "user@example.com",
+         "o": {
+          "int0": 121
+         }
+        },
+        "sort": [
+         26,
+         1.0
+        ]
+       },
+       {
+        "_id": "6",
+        "_ignored": [
+         "n.text0.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": 1.0,
+        "_source": {
+         "kw1": "gamma",
+         "o": {
+          "int0": 162
+         }
+        },
+        "sort": [
+         31,
+         1.0
+        ]
+       },
+       {
+        "_id": "5",
+        "_ignored": [
+         "n.text0.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": 1.0,
+        "_source": {
+         "kw0": "gamma",
+         "kw1": "alpha",
+         "o": {
+          "int0": 198,
+          "kw0": [
+           "omega",
+           ""
+          ]
+         }
+        },
+        "sort": [
+         40,
+         1.0
+        ]
+       },
+       {
+        "_id": "12",
+        "_ignored": [
+         "text0.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": 1.0,
+        "_source": {
+         "kw0": "beta",
+         "kw1": "user@example.com",
+         "kwl0": "delta",
+         "o": {
+          "int0": -43,
+          "kw0": "beta"
+         }
+        },
+        "sort": [
+         44,
+         1.0
+        ]
+       },
+       {
+        "_id": "1",
+        "_ignored": [
+         "n.text0.raw",
+         "text1.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": 1.0,
+        "_source": {
+         "kw0": "Alpha",
+         "kw1": "x-1",
+         "o": {
+          "int0": -18
+         }
+        },
+        "sort": [
+         55,
+         1.0
+        ]
+       },
+       {
+        "_id": "14",
+        "_ignored": [
+         "n.text0.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": 1.0,
+        "_source": {
+         "kw0": [
+          "gamma",
+          "Alpha",
+          ""
+         ],
+         "kw1": "",
+         "kwl0": null,
+         "o": {
+          "int0": 135,
+          "kw0": [
+           "omega",
+           "delta",
+           "alpha"
+          ]
+         }
+        },
+        "sort": [
+         63,
+         1.0
+        ]
+       },
+       {
+        "_id": "4",
+        "_ignored": [
+         "text1.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_routing": "r1",
+        "_score": 1.0,
+        "_source": {
+         "kw1": "delta",
+         "kwl0": "user@example.com",
+         "o": {
+          "int0": -45,
+          "kw0": ""
+         }
+        },
+        "sort": [
+         74,
+         1.0
+        ]
+       },
+       {
+        "_id": "8",
+        "_index": "diff-m19-a",
+        "_score": 1.0,
+        "_source": {
+         "kw0": null,
+         "kw1": "beta",
+         "kwl0": "user@example.com",
+         "o": {
+          "kw0": "Alpha"
+         }
+        },
+        "sort": [
+         79,
+         1.0
+        ]
+       },
+       {
+        "_id": "15",
+        "_ignored": [
+         "n.text0.raw",
+         "text0.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": 1.0,
+        "_source": {
+         "kw0": "omega",
+         "kw1": "pi",
+         "kwl0": "x-2",
+         "o": {
+          "int0": 54,
+          "kw0": ""
+         }
+        },
+        "sort": [
+         85,
+         1.0
+        ]
+       },
+       {
+        "_id": "3",
+        "_index": "diff-m19-a",
+        "_score": 1.0,
+        "_source": {
+         "kw0": [
+          "delta",
+          "beta",
+          "user@example.com"
+         ],
+         "kwl0": "omega",
+         "o": {
+          "int0": 63
+         }
+        },
+        "sort": [
+         256793976,
+         1.0
+        ]
+       },
+       {
+        "_id": "9",
+        "_index": "diff-m19-a",
+        "_score": 1.0,
+        "_source": {
+         "kw0": "gamma",
+         "kw1": "gamma",
+         "o": {
+          "int0": 199,
+          "kw0": "alpha"
+         }
+        },
+        "sort": [
+         9223372036854775807,
+         1.0
+        ]
+       },
+       {
+        "_id": "11",
+        "_ignored": [
+         "n.text0.raw",
+         "text0.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": 1.0,
+        "_source": {
+         "kw0": "rho",
+         "kw1": [
+          "gamma",
+          "gamma",
+          ""
+         ],
+         "kwl0": "alpha",
+         "o": {
+          "kw0": "delta"
+         }
+        },
+        "sort": [
+         9223372036854775807,
+         1.0
+        ]
+       }
+      ],
+      "max_score": null,
+      "total": {
+       "relation": "eq",
+       "value": 15
+      }
+     },
+     "timed_out": false,
+     "took": 1
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m19-a/_search?typed_keys=true"
+  },
+  {
+   "body": {
+    "comp0": "fast stream of",
+    "date0": "2024-10-10T21:16:00Z",
+    "dbl0": 49.5,
+    "irange0": {
+     "gte": -1,
+     "lte": 5
+    },
+    "kw0": "x-1",
+    "kwl0": "delta",
+    "long0": 81,
+    "mot0": "fast quick",
+    "n": [
+     {
+      "kw0": "beta",
+      "long0": 82,
+      "text0": "elastic cats dog of index the data"
+     },
+     {
+      "text0": "search cat index cats over of quick data"
+     }
+    ],
+    "o": {
+     "int0": 162
+    },
+    "scaled0": -8.66,
+    "text1": "runs runs lazy shard"
+   },
+   "es": {
+    "body": {
+     "_id": "16",
+     "_index": "diff-m19-a",
+     "_primary_term": 1,
+     "_seq_no": 3,
+     "_shards": {
+      "failed": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "_version": 1,
+     "result": "created"
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 201
+   },
+   "method": "PUT",
+   "path": "/diff-m19-a/_doc/16"
+  },
+  {
+   "body": {
+    "_source": [
+     "text0"
+    ],
+    "highlight": {
+     "fields": {
+      "text0": {}
+     },
+     "post_tags": [
+      "</b>"
+     ],
+     "pre_tags": [
+      "<b>"
+     ]
+    },
+    "query": {
+     "match": {
+      "text0": "query"
+     }
+    },
+    "seq_no_primary_term": true,
+    "timeout": "10s",
+    "version": true
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 5,
+      "total": 5
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "13",
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_score": 1.135697,
+        "_seq_no": 2,
+        "_source": {
+         "text0": "dog query blue cherry"
+        },
+        "_version": 1,
+        "highlight": {
+         "text0": [
+          "dog <b>query</b> blue cherry"
+         ]
+        }
+       },
+       {
+        "_id": "12",
+        "_ignored": [
+         "text0.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_primary_term": 1,
+        "_score": 1.0594962,
+        "_seq_no": 4,
+        "_source": {
+         "text0": "runs stream Quick cat quick query cherry cat green"
+        },
+        "_version": 1,
+        "highlight": {
+         "text0": [
+          "runs stream Quick cat quick <b>query</b> cherry cat green"
+         ]
+        }
+       }
+      ],
+      "max_score": 1.135697,
+      "total": {
+       "relation": "eq",
+       "value": 2
+      }
+     },
+     "timed_out": false,
+     "took": 1
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m19-a/_search"
+  },
+  {
+   "body": {
+    "query": {
+     "exists": {
+      "field": "irange0"
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 5,
+      "total": 5
+     },
+     "count": 11
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m19-a/_count"
+  },
+  {
+   "body": {
+    "aggs": {
+     "date_range_11": {
+      "aggs": {
+       "stats_12": {
+        "stats": {
+         "field": "long0"
+        }
+       },
+       "value_count_13": {
+        "value_count": {
+         "field": "kw1"
+        }
+       }
+      },
+      "date_range": {
+       "field": "date0",
+       "ranges": [
+        {
+         "to": "2024-04-01"
+        },
+        {
+         "from": "2024-04-01",
+         "to": "2024-09-01"
+        },
+        {
+         "from": "2024-09-01"
+        }
+       ]
+      }
+     }
+    },
+    "query": {
+     "dis_max": {
+      "queries": [
+       {
+        "bool": {
+         "filter": [
+          {
+           "match_phrase_prefix": {
+            "mot0": {
+             "query": "shard sc"
+            }
+           }
+          },
+          {
+           "range": {
+            "date0": {
+             "gte": "2024-03-16",
+             "lt": "2024-03-29T13:00:00Z"
+            }
+           }
+          },
+          {
+           "range": {
+            "dbl0": {
+             "gt": 25.08,
+             "lte": 182.8
+            }
+           }
+          }
+         ]
+        }
+       },
+       {
+        "combined_fields": {
+         "fields": [
+          "text0",
+          "text1"
+         ],
+         "query": "Quick and cherry"
+        }
+       }
+      ],
+      "tie_breaker": 0.3
+     }
+    },
+    "size": 0
+   },
+   "es": {
+    "body": {
+     "error": {
+      "failed_shards": [
+       {
+        "index": "diff-m19-a",
+        "node": "GTFtKRkMSi-lm0r0R4ztbA",
+        "reason": {
+         "caused_by": {
+          "reason": "All fields in [combined_fields] query must have the same search analyzer",
+          "type": "illegal_argument_exception"
+         },
+         "index": "diff-m19-a",
+         "index_uuid": "H3k8KRVhSNK-8aWReobpGg",
+         "reason": "failed to create query: All fields in [combined_fields] query must have the same search analyzer",
+         "type": "query_shard_exception"
+        },
+        "shard": 0
+       }
+      ],
+      "grouped": true,
+      "phase": "query",
+      "reason": "all shards failed",
+      "root_cause": [
+       {
+        "index": "diff-m19-a",
+        "index_uuid": "H3k8KRVhSNK-8aWReobpGg",
+        "reason": "failed to create query: All fields in [combined_fields] query must have the same search analyzer",
+        "type": "query_shard_exception"
+       }
+      ],
+      "type": "search_phase_execution_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "method": "POST",
+   "path": "/diff-m19-a/_search"
+  },
+  {
+   "body": {
+    "fields": [
+     "rt"
+    ],
+    "runtime_mappings": {
+     "rt": {
+      "script": {
+       "source": "emit((doc['long0'].size() == 0 ? 0 : doc['long0'].value) + 0.5)"
+      },
+      "type": "double"
+     }
+    },
+    "sort": [
+     {
+      "date0": {
+       "missing": "_last",
+       "order": "desc"
+      }
+     }
+    ]
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 5,
+      "total": 5
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "3",
+        "_index": "diff-m19-a",
+        "_score": null,
+        "_source": {
+         "comp0": "fox index",
+         "date0": "2025-02-04T09:14:00Z",
+         "kw0": [
+          "delta",
+          "beta",
+          "user@example.com"
+         ],
+         "kwl0": "omega",
+         "long0": 256793976,
+         "mot0": "the data runs",
+         "o": {
+          "int0": 63
+         },
+         "scaled0": 152.07,
+         "text1": "green"
+        },
+        "fields": {
+         "rt": [
+          256793976.5
+         ]
+        },
+        "sort": [
+         1738660440000
+        ]
+       },
+       {
+        "_id": "1",
+        "_ignored": [
+         "n.text0.raw",
+         "text1.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": null,
+        "_source": {
+         "comp0": "quick apple",
+         "date0": [
+          1710723600000,
+          "2024-07-19T15:00:00Z",
+          "2025-01-27T22:00:00Z"
+         ],
+         "dbl0": 7.7,
+         "kw0": "Alpha",
+         "kw1": "x-1",
+         "long0": 55,
+         "mot0": "data slow",
+         "n": [
+          {
+           "kw0": "user@example.com",
+           "long0": 26,
+           "text0": "blue lazy of banana Dogs"
+          },
+          {
+           "kw0": "alpha",
+           "long0": 76,
+           "text0": "green red query index runs fast shard score fast"
+          }
+         ],
+         "o": {
+          "int0": -18
+         },
+         "scaled0": 137.7,
+         "text0": "blue data over of stream",
+         "text1": "cherry runs red dog green dog green fox of"
+        },
+        "fields": {
+         "rt": [
+          55.5
+         ]
+        },
+        "sort": [
+         1738015200000
+        ]
+       },
+       {
+        "_id": "9",
+        "_index": "diff-m19-a",
+        "_score": null,
+        "_source": {
+         "date0": "2024-12-27T18:00:00Z",
+         "irange0": {
+          "gte": 24,
+          "lte": 48
+         },
+         "kw0": "gamma",
+         "kw1": "gamma",
+         "n": [
+          {
+           "kw0": "gamma"
+          },
+          {
+           "kw0": "x-2",
+           "long0": 33,
+           "text0": "shard data"
+          },
+          {
+           "kw0": "x-1",
+           "long0": 66,
+           "text0": "over brown"
+          }
+         ],
+         "o": {
+          "int0": 199,
+          "kw0": "alpha"
+         }
+        },
+        "fields": {
+         "rt": [
+          0.5
+         ]
+        },
+        "sort": [
+         1735322400000
+        ]
+       },
+       {
+        "_id": "7",
+        "_ignored": [
+         "n.text0.raw",
+         "text0.raw",
+         "text1.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": null,
+        "_source": {
+         "comp0": "fox",
+         "date0": "2024-12-20",
+         "dbl0": 91.79,
+         "irange0": {
+          "gte": 26,
+          "lte": 36
+         },
+         "kw1": [
+          "beta",
+          "beta",
+          "pi"
+         ],
+         "kwl0": "x-1",
+         "long0": -2,
+         "mot0": null,
+         "n": [
+          {
+           "kw0": "rho",
+           "long0": 100,
+           "text0": "cat cats"
+          },
+          {
+           "kw0": "beta",
+           "long0": 66,
+           "text0": "fast Dogs quick engine green banana apple cherry shard"
+          }
+         ],
+         "o": {
+          "int0": 61,
+          "kw0": "delta"
+         },
+         "text0": "index search fast Quick data Dogs shard dog stream",
+         "text1": [
+          "dog query and",
+          "blue fast fast fox running ran the apple dog",
+          "lazy red"
+         ]
+        },
+        "fields": {
+         "rt": [
+          -1.5
+         ]
+        },
+        "sort": [
+         1734652800000
+        ]
+       },
+       {
+        "_id": "15",
+        "_ignored": [
+         "n.text0.raw",
+         "text0.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": null,
+        "_source": {
+         "comp0": "score apple cats",
+         "date0": [
+          "2024-11-29T22:00:00Z",
+          "2024-07-24"
+         ],
+         "dbl0": null,
+         "irange0": {
+          "gte": 45,
+          "lte": 51
+         },
+         "kw0": "omega",
+         "kw1": "pi",
+         "kwl0": "x-2",
+         "long0": 85,
+         "mot0": "quick apple quick elastic score and",
+         "n": [
+          {
+           "kw0": "beta",
+           "long0": 40,
+           "text0": "cat slow apple blue shard cat elastic"
+          },
+          {
+           "kw0": "x-2",
+           "long0": 8,
+           "text0": "slow cat"
+          },
+          {
+           "kw0": "",
+           "long0": 74,
+           "text0": "shard ran lazy"
+          }
+         ],
+         "o": {
+          "int0": 54,
+          "kw0": ""
+         },
+         "text0": "green quick engine data dog over and slow",
+         "text1": null
+        },
+        "fields": {
+         "rt": [
+          85.5
+         ]
+        },
+        "sort": [
+         1732917600000
+        ]
+       },
+       {
+        "_id": "4",
+        "_ignored": [
+         "text1.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_routing": "r1",
+        "_score": null,
+        "_source": {
+         "comp0": "cats",
+         "date0": "2024-09-16",
+         "dbl0": -3.99,
+         "irange0": {
+          "gte": -9,
+          "lte": 20
+         },
+         "kw1": "delta",
+         "kwl0": "user@example.com",
+         "long0": 74,
+         "mot0": "Quick engine Quick roll cherry cat cat index search",
+         "n": [
+          {
+           "kw0": "omega",
+           "long0": -2
+          },
+          {
+           "kw0": "pi",
+           "long0": -8,
+           "text0": "the engine elastic query"
+          }
+         ],
+         "o": {
+          "int0": -45,
+          "kw0": ""
+         },
+         "text0": "blue engine",
+         "text1": "blue banana jumps over brown runs engine ran shard"
+        },
+        "fields": {
+         "rt": [
+          74.5
+         ]
+        },
+        "sort": [
+         1726444800000
+        ]
+       },
+       {
+        "_id": "8",
+        "_index": "diff-m19-a",
+        "_score": null,
+        "_source": {
+         "comp0": "query jumps blue",
+         "date0": [
+          "2024-03-22T08:00:00Z",
+          "2024-07-24",
+          "2024-07-19"
+         ],
+         "irange0": {
+          "gte": 38,
+          "lte": 40
+         },
+         "kw0": null,
+         "kw1": "beta",
+         "kwl0": "user@example.com",
+         "long0": 79,
+         "mot0": "shard shard running",
+         "n": [
+          {
+           "kw0": "beta",
+           "long0": 61,
+           "text0": "score"
+          }
+         ],
+         "o": {
+          "kw0": "Alpha"
+         },
+         "scaled0": 25.38,
+         "text0": "elastic over cherry of",
+         "text1": "fast cat"
+        },
+        "fields": {
+         "rt": [
+          79.5
+         ]
+        },
+        "sort": [
+         1721779200000
+        ]
+       },
+       {
+        "_id": "13",
+        "_index": "diff-m19-a",
+        "_score": null,
+        "_source": {
+         "comp0": "over query lazy",
+         "date0": "2024-06-20T08:00:00Z",
+         "dbl0": -20.97,
+         "irange0": {
+          "gte": 4,
+          "lte": 11
+         },
+         "kw0": "alpha",
+         "kwl0": "x-2",
+         "long0": [
+          -15,
+          6,
+          80
+         ],
+         "mot0": "engine lazy over index",
+         "n": [
+          {
+           "kw0": "",
+           "text0": "the"
+          },
+          {
+           "kw0": "gamma",
+           "long0": -14,
+           "text0": "data cats over"
+          }
+         ],
+         "o": {
+          "kw0": "user@example.com"
+         },
+         "text0": "dog query blue cherry"
+        },
+        "fields": {
+         "rt": [
+          -14.5
+         ]
+        },
+        "sort": [
+         1718870400000
+        ]
+       },
+       {
+        "_id": "6",
+        "_ignored": [
+         "n.text0.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": null,
+        "_source": {
+         "comp0": "elastic",
+         "date0": 1714294800000,
+         "dbl0": -30.06,
+         "irange0": {
+          "gte": -19,
+          "lte": 9
+         },
+         "kw1": "gamma",
+         "long0": 31,
+         "mot0": "brown lazy stream query elastic over",
+         "n": [
+          {
+           "kw0": "x-1",
+           "long0": 18,
+           "text0": "search"
+          },
+          {
+           "long0": 62,
+           "text0": "search banana engine elastic of blue runs"
+          }
+         ],
+         "o": {
+          "int0": 162
+         },
+         "scaled0": -22.04,
+         "text1": "cats lazy slow"
+        },
+        "fields": {
+         "rt": [
+          31.5
+         ]
+        },
+        "sort": [
+         1714294800000
+        ]
+       },
+       {
+        "_id": "10",
+        "_ignored": [
+         "text0.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_score": null,
+        "_source": {
+         "comp0": "cats jumps",
+         "date0": 1712635680000,
+         "dbl0": 57.88,
+         "irange0": {
+          "gte": 4,
+          "lte": 29
+         },
+         "kw0": "alpha",
+         "kwl0": "gamma",
+         "long0": 8,
+         "mot0": "fox brown ran over banana over dog",
+         "o": {
+          "kw0": "alpha"
+         },
+         "scaled0": 10.35,
+         "text0": [
+          "fast runs quick blue index of elastic",
+          "shard",
+          "Dogs"
+         ],
+         "text1": "over"
+        },
+        "fields": {
+         "rt": [
+          8.5
+         ]
+        },
+        "sort": [
+         1712635680000
+        ]
+       }
+      ],
+      "max_score": null,
+      "total": {
+       "relation": "eq",
+       "value": 15
+      }
+     },
+     "timed_out": false,
+     "took": 1
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m19-a/_search"
+  },
+  {
+   "body": {
+    "aggs": {
+     "avg_14": {
+      "avg": {
+       "field": "long0"
+      }
+     }
+    },
+    "highlight": {
+     "fields": {
+      "text1": {}
+     }
+    },
+    "query": {
+     "match": {
+      "text1": "engine"
+     }
+    },
+    "size": 50
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 5,
+      "total": 5
+     },
+     "aggregations": {
+      "avg#avg_14": {
+       "value": 74.0
+      }
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "4",
+        "_ignored": [
+         "text1.raw"
+        ],
+        "_index": "diff-m19-a",
+        "_routing": "r1",
+        "_score": 0.5222341,
+        "_source": {
+         "comp0": "cats",
+         "date0": "2024-09-16",
+         "dbl0": -3.99,
+         "irange0": {
+          "gte": -9,
+          "lte": 20
+         },
+         "kw1": "delta",
+         "kwl0": "user@example.com",
+         "long0": 74,
+         "mot0": "Quick engine Quick roll cherry cat cat index search",
+         "n": [
+          {
+           "kw0": "omega",
+           "long0": -2
+          },
+          {
+           "kw0": "pi",
+           "long0": -8,
+           "text0": "the engine elastic query"
+          }
+         ],
+         "o": {
+          "int0": -45,
+          "kw0": ""
+         },
+         "text0": "blue engine",
+         "text1": "blue banana jumps over brown runs engine ran shard"
+        },
+        "highlight": {
+         "text1": [
+          "blue banana jumps over brown runs <em>engine</em> ran shard"
+         ]
+        }
+       }
+      ],
+      "max_score": 0.5222341,
+      "total": {
+       "relation": "eq",
+       "value": 1
+      }
+     },
+     "timed_out": false,
+     "took": 1
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m19-a/_search?typed_keys=true"
+  },
+  {
+   "body": {
+    "query": {
+     "term": {
+      "kw0": "user@example.com"
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "batches": 1,
+     "deleted": 2,
+     "failures": [],
+     "noops": 0,
+     "requests_per_second": -1.0,
+     "retries": {
+      "bulk": 0,
+      "search": 0
+     },
+     "throttled_millis": 0,
+     "throttled_until_millis": 0,
+     "timed_out": false,
+     "took": 18,
+     "total": 2,
+     "version_conflicts": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m19-a/_delete_by_query?refresh=true"
+  },
+  {
+   "es": {
+    "body": {
+     "date0": [
+      "2024-02-18T22:07:00Z",
+      "2024-03-21T08:51:00Z"
+     ],
+     "dbl0": 101.04,
+     "kw0": "beta",
+     "kw1": "user@example.com",
+     "kwl0": "delta",
+     "long0": 44,
+     "mot0": "stream cat fast banana shard search",
+     "n": [
+      {
+       "long0": 47,
+       "text0": "and shard running dog"
+      }
+     ],
+     "o": {
+      "int0": -43,
+      "kw0": "beta"
+     },
+     "scaled0": 116.32,
+     "text0": "runs stream Quick cat quick query cherry cat green",
+     "text1": "fox elastic ran of over cat"
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "GET",
+   "path": "/diff-m19-a/_source/12"
+  },
+  {
+   "es": {
+    "body": {
+     "responses": [
+      {
+       "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 5,
+        "total": 5
+       },
+       "hits": {
+        "hits": [
+         {
+          "_id": "8",
+          "_index": "diff-m19-a",
+          "_score": 1.4447675,
+          "_source": {
+           "comp0": "query jumps blue",
+           "date0": [
+            "2024-03-22T08:00:00Z",
+            "2024-07-24",
+            "2024-07-19"
+           ],
+           "irange0": {
+            "gte": 38,
+            "lte": 40
+           },
+           "kw0": null,
+           "kw1": "beta",
+           "kwl0": "user@example.com",
+           "long0": 79,
+           "mot0": "shard shard running",
+           "n": [
+            {
+             "kw0": "beta",
+             "long0": 61,
+             "text0": "score"
+            }
+           ],
+           "o": {
+            "kw0": "Alpha"
+           },
+           "scaled0": 25.38,
+           "text0": "elastic over cherry of",
+           "text1": "fast cat"
+          },
+          "highlight": {
+           "text0": [
+            "elastic <b>over</b> cherry of"
+           ]
+          }
+         },
+         {
+          "_id": "1",
+          "_ignored": [
+           "n.text0.raw",
+           "text1.raw"
+          ],
+          "_index": "diff-m19-a",
+          "_score": 1.0525972,
+          "_source": {
+           "comp0": "quick apple",
+           "date0": [
+            1710723600000,
+            "2024-07-19T15:00:00Z",
+            "2025-01-27T22:00:00Z"
+           ],
+           "dbl0": 7.7,
+           "kw0": "Alpha",
+           "kw1": "x-1",
+           "long0": 55,
+           "mot0": "data slow",
+           "n": [
+            {
+             "kw0": "user@example.com",
+             "long0": 26,
+             "text0": "blue lazy of banana Dogs"
+            },
+            {
+             "kw0": "alpha",
+             "long0": 76,
+             "text0": "green red query index runs fast shard score fast"
+            }
+           ],
+           "o": {
+            "int0": -18
+           },
+           "scaled0": 137.7,
+           "text0": "blue data over of stream",
+           "text1": "cherry runs red dog green dog green fox of"
+          },
+          "highlight": {
+           "text0": [
+            "blue data <b>over</b> of stream"
+           ]
+          }
+         },
+         {
+          "_id": "11",
+          "_ignored": [
+           "n.text0.raw",
+           "text0.raw"
+          ],
+          "_index": "diff-m19-a",
+          "_score": 1.0151966,
+          "_source": {
+           "comp0": "red",
+           "date0": "2024-03-15T02:00:00Z",
+           "dbl0": [
+            123.79,
+            173.61
+           ],
+           "irange0": {
+            "gte": -13,
+            "lte": 0
+           },
+           "kw0": "rho",
+           "kw1": [
+            "gamma",
+            "gamma",
+            ""
+           ],
+           "kwl0": "alpha",
+           "mot0": "slow shard of query over of jumps",
+           "n": [
+            {
+             "kw0": "delta",
+             "long0": 37,
+             "text0": "score dog slow Dogs elastic"
+            },
+            {
+             "kw0": "omega",
+             "long0": 39,
+             "text0": "shard cherry quick engine Dogs cherry jumps red"
+            }
+           ],
+           "o": {
+            "kw0": "delta"
+           },
+           "scaled0": 139.3,
+           "text0": "of dog over blue blue slow elastic runs",
+           "text1": null
+          },
+          "highlight": {
+           "text0": [
+            "of dog <b>over</b> blue blue slow elastic runs"
+           ]
+          }
+         },
+         {
+          "_id": "15",
+          "_ignored": [
+           "n.text0.raw",
+           "text0.raw"
+          ],
+          "_index": "diff-m19-a",
+          "_score": 0.55654144,
+          "_source": {
+           "comp0": "score apple cats",
+           "date0": [
+            "2024-11-29T22:00:00Z",
+            "2024-07-24"
+           ],
+           "dbl0": null,
+           "irange0": {
+            "gte": 45,
+            "lte": 51
+           },
+           "kw0": "omega",
+           "kw1": "pi",
+           "kwl0": "x-2",
+           "long0": 85,
+           "mot0": "quick apple quick elastic score and",
+           "n": [
+            {
+             "kw0": "beta",
+             "long0": 40,
+             "text0": "cat slow apple blue shard cat elastic"
+            },
+            {
+             "kw0": "x-2",
+             "long0": 8,
+             "text0": "slow cat"
+            },
+            {
+             "kw0": "",
+             "long0": 74,
+             "text0": "shard ran lazy"
+            }
+           ],
+           "o": {
+            "int0": 54,
+            "kw0": ""
+           },
+           "text0": "green quick engine data dog over and slow",
+           "text1": null
+          },
+          "highlight": {
+           "text0": [
+            "green quick engine data dog <b>over</b> and slow"
+           ]
+          }
+         }
+        ],
+        "max_score": 1.4447675
+       },
+       "status": 200,
+       "timed_out": false,
+       "took": 1
+      },
+      {
+       "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 5,
+        "total": 5
+       },
+       "hits": {
+        "hits": [],
+        "max_score": null,
+        "total": {
+         "relation": "eq",
+         "value": 0
+        }
+       },
+       "status": 200,
+       "timed_out": false,
+       "took": 2
+      }
+     ],
+     "took": 2
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": "diff-m19-a"
+    },
+    {
+     "highlight": {
+      "fields": {
+       "text0": {}
+      },
+      "post_tags": [
+       "</b>"
+      ],
+      "pre_tags": [
+       "<b>"
+      ]
+     },
+     "query": {
+      "match": {
+       "text0": "over"
+      }
+     },
+     "track_total_hits": false
+    },
+    {
+     "index": "diff-m19-a"
+    },
+    {
+     "highlight": {
+      "encoder": "html",
+      "fields": {
+       "text1": {
+        "require_field_match": false
+       }
+      }
+     },
+     "post_filter": {
+      "function_score": {
+       "boost_mode": "sum",
+       "functions": [
+        {
+         "gauss": {
+          "date0": {
+           "decay": 0.5,
+           "origin": "2024-04-10",
+           "scale": "30d"
+          }
+         }
+        },
+        {
+         "weight": 3.0
+        }
+       ],
+       "query": {
+        "range": {
+         "scaled0": {
+          "gt": 115.35,
+          "lte": 161.17
+         }
+        }
+       },
+       "score_mode": "max"
+      }
+     },
+     "query": {
+      "bool": {
+       "must_not": [
+        {
+         "range": {
+          "date0": {
+           "gte": "2024-10-26T09:00:00Z",
+           "lt": "2024-11-15T17:00:00Z"
+          }
+         }
+        },
+        {
+         "bool": {
+          "boost": 2.5,
+          "filter": [
+           {
+            "bool": {
+             "must_not": {
+              "terms": {
+               "o.kw0": [
+                "x-2",
+                "alpha",
+                ""
+               ]
+              }
+             }
+            }
+           }
+          ],
+          "must": {
+           "simple_query_string": {
+            "query": "ran -elastic -the"
+           }
+          }
+         }
+        }
+       ],
+       "should": [
+        {
+         "constant_score": {
+          "boost": 3.0,
+          "filter": {
+           "bool": {
+            "boost": 2.5,
+            "should": [
+             {
+              "term": {
+               "o.int0": 45
+              }
+             }
+            ]
+           }
+          }
+         }
+        },
+        {
+         "term": {
+          "kw1": "beta"
+         }
+        },
+        {
+         "query_string": {
+          "default_operator": "AND",
+          "query": "kw1:score"
+         }
+        }
+       ]
+      }
+     },
+     "rescore": {
+      "query": {
+       "query_weight": 0.7,
+       "rescore_query": {
+        "script": {
+         "script": {
+          "params": {
+           "v": 18
+          },
+          "source": "(doc['dbl0'].size() == 0 ? 0 : doc['dbl0'].value) > params.v"
+         }
+        }
+       },
+       "rescore_query_weight": 1.3
+      },
+      "window_size": 5
+     },
+     "timeout": "10s"
+    }
+   ],
+   "method": "POST",
+   "path": "/_msearch"
+  },
+  {
+   "body": {
+    "query": {
+     "nested": {
+      "path": "n",
+      "query": {
+       "prefix": {
+        "n.kw0": "p"
+       }
+      },
+      "score_mode": "max"
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "valid": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m19-a/_validate/query?"
+  },
+  {
+   "body": {
+    "query": {
+     "dis_max": {
+      "queries": [
+       {},
+       {
+        "wildcard": {
+         "kw0": {
+          "value": "*-1*"
+         }
+        }
+       }
+      ],
+      "tie_breaker": 0.3
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "error": {
+      "reason": "query malformed, empty clause found at [1:52]",
+      "root_cause": [
+       {
+        "reason": "query malformed, empty clause found at [1:52]",
+        "type": "illegal_argument_exception"
+       }
+      ],
+      "type": "illegal_argument_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "method": "POST",
+   "path": "/diff-m19-a/_update_by_query?refresh=true"
+  }
+ ]
+}

@@ -1,0 +1,3202 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "DELETE",
+      "path": "/hw-wild?ignore_unavailable=true",
+      "compare": false,
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/hw-wild",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "refresh_interval": -1
+        },
+        "mappings": {
+          "properties": {
+            "w": {
+              "type": "wildcard"
+            },
+            "ck": {
+              "type": "constant_keyword",
+              "value": "x"
+            },
+            "ck2": {
+              "type": "constant_keyword"
+            },
+            "t": {
+              "type": "text"
+            },
+            "k": {
+              "type": "keyword"
+            },
+            "i": {
+              "type": "integer"
+            },
+            "d": {
+              "type": "date"
+            },
+            "b": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "hw-wild"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "hw-wild",
+            "_id": "1"
+          }
+        },
+        {
+          "w": "x-2 hello",
+          "t": "runs over index",
+          "k": "red"
+        },
+        {
+          "index": {
+            "_index": "hw-wild",
+            "_id": "2"
+          }
+        },
+        {
+          "t": "cherry runs",
+          "d": "2024-01-01"
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "hw-wild",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 2,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-wild",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 2,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "term": {
+            "w": "x-2 hello"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": ": [x-2 hello]",
+                  "details": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "term": {
+            "w": "x-2 hello"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": ": [x-2 hello]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "term": {
+            "w": {
+              "value": "X-2 HELLO",
+              "case_insensitive": true
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": ":PatternAutomatonProvider[matchPattern=X-2 HELLO, caseInsensitive=true]",
+                  "details": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "term": {
+            "w": {
+              "value": "X-2 HELLO",
+              "case_insensitive": true
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": ":PatternAutomatonProvider[matchPattern=X-2 HELLO, caseInsensitive=true]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "terms": {
+            "w": [
+              "x-2 hello",
+              "b"
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": ": [b, x-2 hello]",
+                  "details": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "terms": {
+            "w": [
+              "x-2 hello",
+              "b"
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": ": [b, x-2 hello]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "wildcard": {
+            "w": "x*"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": ":PatternAutomatonProvider[matchPattern=x*, caseInsensitive=false]",
+                  "details": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "wildcard": {
+            "w": "x*"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": ":PatternAutomatonProvider[matchPattern=x*, caseInsensitive=false]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "prefix": {
+            "w": "x-2"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": ":PatternAutomatonProvider[matchPattern=x-2*, caseInsensitive=false]",
+                  "details": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "prefix": {
+            "w": "x-2"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": ":PatternAutomatonProvider[matchPattern=x-2*, caseInsensitive=false]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "regexp": {
+            "w": "x.*"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": ":RegexAutomatonProvider[value=x.*, syntaxFlags=65791, matchFlags=0, maxDeterminizedStates=10000]",
+                  "details": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "regexp": {
+            "w": "x.*"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": ":RegexAutomatonProvider[value=x.*, syntaxFlags=65791, matchFlags=0, maxDeterminizedStates=10000]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "regexp": {
+            "w": {
+              "value": "X.*",
+              "case_insensitive": true,
+              "max_determinized_states": 500
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": ":RegexAutomatonProvider[value=X.*, syntaxFlags=65791, matchFlags=256, maxDeterminizedStates=500]",
+                  "details": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "regexp": {
+            "w": {
+              "value": "X.*",
+              "case_insensitive": true,
+              "max_determinized_states": 500
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": ":RegexAutomatonProvider[value=X.*, syntaxFlags=65791, matchFlags=256, maxDeterminizedStates=500]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "regexp": {
+            "w": {
+              "value": "x.*",
+              "flags": "INTERVAL|EMPTY"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": ":RegexAutomatonProvider[value=x.*, syntaxFlags=36, matchFlags=0, maxDeterminizedStates=10000]",
+                  "details": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "regexp": {
+            "w": {
+              "value": "x.*",
+              "flags": "INTERVAL|EMPTY"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": ":RegexAutomatonProvider[value=x.*, syntaxFlags=36, matchFlags=0, maxDeterminizedStates=10000]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "range": {
+            "w": {
+              "gte": "a",
+              "lt": "z"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": ":RangeAutomatonProvider[lower=[61], upper=[7a], includeLower=true, includeUpper=false]",
+                  "details": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "range": {
+            "w": {
+              "gte": "a",
+              "lt": "z"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": ":RangeAutomatonProvider[lower=[61], upper=[7a], includeLower=true, includeUpper=false]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "range": {
+            "w": {
+              "gt": "a"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": ":RangeAutomatonProvider[lower=[61], upper=null, includeLower=false, includeUpper=true]",
+                  "details": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "range": {
+            "w": {
+              "gt": "a"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": ":RangeAutomatonProvider[lower=[61], upper=null, includeLower=false, includeUpper=true]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "fuzzy": {
+            "w": "x-2 hellp"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 13,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": ":FuzzyQueryAutomatonProvider[searchTerm=x-2 hellp, fuzzyQuery=w:x-2 hellp~2]",
+                  "details": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "fuzzy": {
+            "w": "x-2 hellp"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": ":FuzzyQueryAutomatonProvider[searchTerm=x-2 hellp, fuzzyQuery=w:x-2 hellp~2]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "fuzzy": {
+            "w": {
+              "value": "x-2 hellp",
+              "fuzziness": 1,
+              "prefix_length": 2
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": ":FuzzyQueryAutomatonProvider[searchTerm=x-2 hellp, fuzzyQuery=w:x-2 hellp~1]",
+                  "details": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "fuzzy": {
+            "w": {
+              "value": "x-2 hellp",
+              "fuzziness": 1,
+              "prefix_length": 2
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": ":FuzzyQueryAutomatonProvider[searchTerm=x-2 hellp, fuzzyQuery=w:x-2 hellp~1]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "match": {
+            "w": "x-2 hello"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": ": [x-2 hello]",
+                  "details": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "match": {
+            "w": "x-2 hello"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": ": [x-2 hello]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "wildcard": {
+            "w": "*"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": "FieldExistsQuery [field=w]",
+                  "details": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "wildcard": {
+            "w": "*"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": "FieldExistsQuery [field=w]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "regexp": {
+            "w": ".*"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": "FieldExistsQuery [field=w]",
+                  "details": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "regexp": {
+            "w": ".*"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": "FieldExistsQuery [field=w]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "regexp": {
+            "w": ""
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "regexp": {
+            "w": ""
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": "MatchNoDocsQuery(\"\")"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "prefix": {
+            "w": "x*"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "prefix": {
+            "w": "x*"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": ":PatternAutomatonProvider[matchPattern=x\\**, caseInsensitive=false]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "term": {
+            "w": {
+              "value": "A*?\\b",
+              "case_insensitive": true
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "term": {
+            "w": {
+              "value": "A*?\\b",
+              "case_insensitive": true
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": ":PatternAutomatonProvider[matchPattern=A\\*\\?\\\\b, caseInsensitive=true]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "term": {
+            "ck": "y"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "term": {
+            "ck": "y"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": "MatchNoDocsQuery(\"The \"term\" query was rewritten to a \"match_none\" query.\")"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "term": {
+            "ck2": "y"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "term": {
+            "ck2": "y"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": "MatchNoDocsQuery(\"The \"term\" query was rewritten to a \"match_none\" query.\")"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "match": {
+            "ck": "y"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "match": {
+            "ck": "y"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": "MatchNoDocsQuery(\"The \"term\" query was rewritten to a \"match_none\" query.\")"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "terms": {
+            "ck": [
+              "y",
+              "x"
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 1.0,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 1.0,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": "*:*",
+                  "details": []
+                }
+              },
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "2",
+                "_score": 1.0,
+                "_source": {
+                  "t": "cherry runs",
+                  "d": "2024-01-01"
+                },
+                "_explanation": {
+                  "value": 1.0,
+                  "description": "*:*",
+                  "details": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "terms": {
+            "ck": [
+              "y",
+              "x"
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": "*:*"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "terms": {
+            "ck": [
+              "y"
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "terms": {
+            "ck": [
+              "y"
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": "MatchNoDocsQuery(\"The \"terms\" query was rewritten to a \"match_none\" query.\")"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "match": {
+            "t": {
+              "query": "runs index",
+              "operator": "and",
+              "minimum_should_match": "2"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "match": {
+            "t": {
+              "query": "runs index",
+              "operator": "and",
+              "minimum_should_match": "2"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": "(+t:runs +t:index)~2"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "match": {
+            "t": {
+              "query": "runs index",
+              "operator": "and",
+              "minimum_should_match": "100%"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.80925685,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 0.80925685,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 0.80925685,
+                  "description": "sum of:",
+                  "details": [
+                    {
+                      "value": 0.16853255,
+                      "description": "weight(t:runs in 0) [PerFieldSimilarity], result of:",
+                      "details": [
+                        {
+                          "value": 0.16853255,
+                          "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                          "details": [
+                            {
+                              "value": 2.2,
+                              "description": "boost",
+                              "details": []
+                            },
+                            {
+                              "value": 0.18232156,
+                              "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                              "details": [
+                                {
+                                  "value": 2,
+                                  "description": "n, number of documents containing term",
+                                  "details": []
+                                },
+                                {
+                                  "value": 2,
+                                  "description": "N, total number of documents with field",
+                                  "details": []
+                                }
+                              ]
+                            },
+                            {
+                              "value": 0.4201681,
+                              "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                              "details": [
+                                {
+                                  "value": 1.0,
+                                  "description": "freq, occurrences of term within document",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.2,
+                                  "description": "k1, term saturation parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 0.75,
+                                  "description": "b, length normalization parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 3.0,
+                                  "description": "dl, length of field",
+                                  "details": []
+                                },
+                                {
+                                  "value": 2.5,
+                                  "description": "avgdl, average length of field",
+                                  "details": []
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "value": 0.6407243,
+                      "description": "weight(t:index in 0) [PerFieldSimilarity], result of:",
+                      "details": [
+                        {
+                          "value": 0.6407243,
+                          "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                          "details": [
+                            {
+                              "value": 2.2,
+                              "description": "boost",
+                              "details": []
+                            },
+                            {
+                              "value": 0.6931472,
+                              "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                              "details": [
+                                {
+                                  "value": 1,
+                                  "description": "n, number of documents containing term",
+                                  "details": []
+                                },
+                                {
+                                  "value": 2,
+                                  "description": "N, total number of documents with field",
+                                  "details": []
+                                }
+                              ]
+                            },
+                            {
+                              "value": 0.4201681,
+                              "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                              "details": [
+                                {
+                                  "value": 1.0,
+                                  "description": "freq, occurrences of term within document",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.2,
+                                  "description": "k1, term saturation parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 0.75,
+                                  "description": "b, length normalization parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 3.0,
+                                  "description": "dl, length of field",
+                                  "details": []
+                                },
+                                {
+                                  "value": 2.5,
+                                  "description": "avgdl, average length of field",
+                                  "details": []
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "match": {
+            "t": {
+              "query": "runs index",
+              "operator": "and",
+              "minimum_should_match": "100%"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": "+t:runs +t:index"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "simple_query_string": {
+            "query": "red runs"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.45621464,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 0.45621464,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 0.45621464,
+                  "description": "sum of:",
+                  "details": [
+                    {
+                      "value": 0.2876821,
+                      "description": "weight(k:red in 0) [PerFieldSimilarity], result of:",
+                      "details": [
+                        {
+                          "value": 0.2876821,
+                          "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                          "details": [
+                            {
+                              "value": 2.2,
+                              "description": "boost",
+                              "details": []
+                            },
+                            {
+                              "value": 0.2876821,
+                              "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                              "details": [
+                                {
+                                  "value": 1,
+                                  "description": "n, number of documents containing term",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1,
+                                  "description": "N, total number of documents with field",
+                                  "details": []
+                                }
+                              ]
+                            },
+                            {
+                              "value": 0.45454544,
+                              "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                              "details": [
+                                {
+                                  "value": 1.0,
+                                  "description": "freq, occurrences of term within document",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.2,
+                                  "description": "k1, term saturation parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 0.75,
+                                  "description": "b, length normalization parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.0,
+                                  "description": "dl, length of field",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.0,
+                                  "description": "avgdl, average length of field",
+                                  "details": []
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "value": 0.16853255,
+                      "description": "weight(t:runs in 0) [PerFieldSimilarity], result of:",
+                      "details": [
+                        {
+                          "value": 0.16853255,
+                          "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                          "details": [
+                            {
+                              "value": 2.2,
+                              "description": "boost",
+                              "details": []
+                            },
+                            {
+                              "value": 0.18232156,
+                              "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                              "details": [
+                                {
+                                  "value": 2,
+                                  "description": "n, number of documents containing term",
+                                  "details": []
+                                },
+                                {
+                                  "value": 2,
+                                  "description": "N, total number of documents with field",
+                                  "details": []
+                                }
+                              ]
+                            },
+                            {
+                              "value": 0.4201681,
+                              "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                              "details": [
+                                {
+                                  "value": 1.0,
+                                  "description": "freq, occurrences of term within document",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.2,
+                                  "description": "k1, term saturation parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 0.75,
+                                  "description": "b, length normalization parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 3.0,
+                                  "description": "dl, length of field",
+                                  "details": []
+                                },
+                                {
+                                  "value": 2.5,
+                                  "description": "avgdl, average length of field",
+                                  "details": []
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "2",
+                "_score": 0.19856803,
+                "_source": {
+                  "t": "cherry runs",
+                  "d": "2024-01-01"
+                },
+                "_explanation": {
+                  "value": 0.19856803,
+                  "description": "sum of:",
+                  "details": [
+                    {
+                      "value": 0.19856803,
+                      "description": "weight(t:runs in 1) [PerFieldSimilarity], result of:",
+                      "details": [
+                        {
+                          "value": 0.19856803,
+                          "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                          "details": [
+                            {
+                              "value": 2.2,
+                              "description": "boost",
+                              "details": []
+                            },
+                            {
+                              "value": 0.18232156,
+                              "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                              "details": [
+                                {
+                                  "value": 2,
+                                  "description": "n, number of documents containing term",
+                                  "details": []
+                                },
+                                {
+                                  "value": 2,
+                                  "description": "N, total number of documents with field",
+                                  "details": []
+                                }
+                              ]
+                            },
+                            {
+                              "value": 0.49504948,
+                              "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                              "details": [
+                                {
+                                  "value": 1.0,
+                                  "description": "freq, occurrences of term within document",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.2,
+                                  "description": "k1, term saturation parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 0.75,
+                                  "description": "b, length normalization parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 2.0,
+                                  "description": "dl, length of field",
+                                  "details": []
+                                },
+                                {
+                                  "value": 2.5,
+                                  "description": "avgdl, average length of field",
+                                  "details": []
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "simple_query_string": {
+            "query": "red runs"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": "(MatchNoDocsQuery(\"failed [d] query, caused by parse_exception:[failed to parse date field [red] with format [strict_date_optional_time||epoch_millis]: [failed to parse date field [red] with format [strict_date_optional_time||epoch_millis]]]\") | t:red | : [red] | MatchNoDocsQuery(\"\") | MatchNoDocsQuery(\"\") | k:red)~1.0 (MatchNoDocsQuery(\"failed [d] query, caused by parse_exception:[failed to parse date field [runs] with format [strict_date_optional_time||epoch_millis]: [failed to parse date field [runs] with format [strict_date_optional_time||epoch_millis]]]\") | t:runs | : [runs] | MatchNoDocsQuery(\"\") | MatchNoDocsQuery(\"\") | k:runs)~1.0"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "simple_query_string": {
+            "query": "red",
+            "fields": [
+              "k",
+              "t"
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.2876821,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 0.2876821,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 0.2876821,
+                  "description": "sum of:",
+                  "details": [
+                    {
+                      "value": 0.2876821,
+                      "description": "weight(k:red in 0) [PerFieldSimilarity], result of:",
+                      "details": [
+                        {
+                          "value": 0.2876821,
+                          "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                          "details": [
+                            {
+                              "value": 2.2,
+                              "description": "boost",
+                              "details": []
+                            },
+                            {
+                              "value": 0.2876821,
+                              "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                              "details": [
+                                {
+                                  "value": 1,
+                                  "description": "n, number of documents containing term",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1,
+                                  "description": "N, total number of documents with field",
+                                  "details": []
+                                }
+                              ]
+                            },
+                            {
+                              "value": 0.45454544,
+                              "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                              "details": [
+                                {
+                                  "value": 1.0,
+                                  "description": "freq, occurrences of term within document",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.2,
+                                  "description": "k1, term saturation parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 0.75,
+                                  "description": "b, length normalization parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.0,
+                                  "description": "dl, length of field",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.0,
+                                  "description": "avgdl, average length of field",
+                                  "details": []
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "simple_query_string": {
+            "query": "red",
+            "fields": [
+              "k",
+              "t"
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": "(t:red | k:red)~1.0"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "query_string": {
+            "query": "red"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.2876821,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 0.2876821,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 0.2876821,
+                  "description": "max of:",
+                  "details": [
+                    {
+                      "value": 0.2876821,
+                      "description": "weight(k:red in 0) [PerFieldSimilarity], result of:",
+                      "details": [
+                        {
+                          "value": 0.2876821,
+                          "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                          "details": [
+                            {
+                              "value": 2.2,
+                              "description": "boost",
+                              "details": []
+                            },
+                            {
+                              "value": 0.2876821,
+                              "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                              "details": [
+                                {
+                                  "value": 1,
+                                  "description": "n, number of documents containing term",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1,
+                                  "description": "N, total number of documents with field",
+                                  "details": []
+                                }
+                              ]
+                            },
+                            {
+                              "value": 0.45454544,
+                              "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                              "details": [
+                                {
+                                  "value": 1.0,
+                                  "description": "freq, occurrences of term within document",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.2,
+                                  "description": "k1, term saturation parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 0.75,
+                                  "description": "b, length normalization parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.0,
+                                  "description": "dl, length of field",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.0,
+                                  "description": "avgdl, average length of field",
+                                  "details": []
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "red"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": "(MatchNoDocsQuery(\"failed [d] query, caused by parse_exception:[failed to parse date field [red] with format [strict_date_optional_time||epoch_millis]: [failed to parse date field [red] with format [strict_date_optional_time||epoch_millis]]]\") | t:red | : [red] | MatchNoDocsQuery(\"\") | MatchNoDocsQuery(\"\") | k:red)"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_search",
+      "body": {
+        "explain": true,
+        "query": {
+          "multi_match": {
+            "query": "red"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.2876821,
+            "hits": [
+              {
+                "_shard": "[hw-wild][0]",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_index": "hw-wild",
+                "_id": "1",
+                "_score": 0.2876821,
+                "_source": {
+                  "w": "x-2 hello",
+                  "t": "runs over index",
+                  "k": "red"
+                },
+                "_explanation": {
+                  "value": 0.2876821,
+                  "description": "max of:",
+                  "details": [
+                    {
+                      "value": 0.2876821,
+                      "description": "weight(k:red in 0) [PerFieldSimilarity], result of:",
+                      "details": [
+                        {
+                          "value": 0.2876821,
+                          "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                          "details": [
+                            {
+                              "value": 2.2,
+                              "description": "boost",
+                              "details": []
+                            },
+                            {
+                              "value": 0.2876821,
+                              "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                              "details": [
+                                {
+                                  "value": 1,
+                                  "description": "n, number of documents containing term",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1,
+                                  "description": "N, total number of documents with field",
+                                  "details": []
+                                }
+                              ]
+                            },
+                            {
+                              "value": 0.45454544,
+                              "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                              "details": [
+                                {
+                                  "value": 1.0,
+                                  "description": "freq, occurrences of term within document",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.2,
+                                  "description": "k1, term saturation parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 0.75,
+                                  "description": "b, length normalization parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.0,
+                                  "description": "dl, length of field",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.0,
+                                  "description": "avgdl, average length of field",
+                                  "details": []
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-wild/_validate/query?explain",
+      "body": {
+        "query": {
+          "multi_match": {
+            "query": "red"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-wild",
+              "valid": true,
+              "explanation": "(MatchNoDocsQuery(\"failed [d] query, caused by parse_exception:[failed to parse date field [red] with format [strict_date_optional_time||epoch_millis]: [failed to parse date field [red] with format [strict_date_optional_time||epoch_millis]]]\") | t:red | : [red] | MatchNoDocsQuery(\"\") | MatchNoDocsQuery(\"\") | k:red)"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/hw-wild",
+      "compare": false,
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

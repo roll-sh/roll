@@ -1,0 +1,55 @@
+{
+ "found": {
+  "case": 45,
+  "case_seed": 117000396,
+  "seed": 117
+ },
+ "signature": "POST _validate .error",
+ "steps": [
+  {
+   "body": {
+    "settings": {
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m13-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m13-a"
+  },
+  {
+   "body": {
+    "query": {
+     "bool": {
+      "must_not": [
+       {}
+      ]
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "error": "org.elasticsearch.common.ParsingException: Failed to parse; org.elasticsearch.xcontent.XContentParseException: [1:32] [bool] failed to parse field [must_not]",
+     "valid": false
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m13-a/_validate/query?explain=true"
+  }
+ ]
+}

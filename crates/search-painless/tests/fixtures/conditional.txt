@@ -1,0 +1,318 @@
+#defaults: {"doc": {"a": 1, "s": "x", "tags": ["t1", "t2"], "o": {"k": 2, "l": [1, 2]}, "n": null, "d": 1.5}, "meta": {"_index": "painless-ingest", "_id": "1"}}
+ctx.a == 1
+----
+ctx.a == 2
+----
+return ctx.s == 'x' && ctx.tags.contains('t2')
+----
+ctx.o.k > 1
+----
+ctx.o?.missing?.x == null
+----
+ctx.missing == null
+----
+ctx.n == null
+----
+ctx.tags.size() == 2
+----
+ctx._index == 'painless-ingest'
+----
+ctx._id == '1'
+----
+ctx._source == null
+----
+ctx.containsKey('a')
+----
+ctx.containsKey('_index')
+----
+ctx.keySet().size() > 0
+----
+ctx.a = 5; return true
+----
+ctx.x = 5; return true
+----
+ctx.remove('a'); return true
+----
+ctx.tags.add('t3'); return true
+----
+ctx.o.k = 3; return true
+----
+ctx.o.l.add(3); return true
+----
+ctx.o.put('z', 1); return true
+----
+ctx.tags.remove(0); return true
+----
+ctx.tags.set(0, 'x'); return true
+----
+ctx.o.l.clear(); return true
+----
+ctx.clear(); return true
+----
+ctx.putAll(['q': 1]); return true
+----
+ctx.o.entrySet().iterator().next().setValue(5); return true
+----
+ctx.tags.iterator().next(); return true
+----
+ctx.o.keySet().remove('k'); return true
+----
+ctx.o.values().size() == 2
+----
+ctx.tags.stream().anyMatch(t -> t == 't1')
+----
+return ctx.tags.toString() == '[t1, t2]'
+----
+return ctx.o.toString()
+----
+return null
+----
+return 1
+----
+return 'true'
+----
+def x = ctx.a; return x
+----
+Boolean b = null; return b
+----
+ctx.missing.x == 1
+----
+ctx.s.foo()
+----
+ctx.a / 0 == 1
+----
+field('a').get(null) == 1
+----
+field('o.k').get(0) == 2
+----
+field('o.l').get(1, -1) == 2
+----
+field('o.l').get(5, -1) == -1
+----
+field('missing').exists() == false
+----
+field('o.k').exists()
+----
+field('o').hasValue(v -> v != null)
+----
+field('tags').hasValue(v -> v == 't2')
+----
+field('tags').hasValue(v -> v == 'zz')
+----
+int n = 0; for (def v : field('tags')) { n++ } return n == 2
+----
+field('missing').get('dflt') == 'dflt'
+----
+field('n').get('dflt') == null
+----
+field('o.l').get(null) == 1
+----
+field('a').set(2); return true
+----
+field(null).exists()
+----
+field('').exists()
+----
+params.p == 1
+----
+#params: {"p": 1}
+params.p == 1
+----
+#params: {"p": [1, 2]}
+params.p.add(3); return true
+----
+#params: {"p": {"q": 1}}
+params.p.q == 1
+----
+params.size() == 0
+----
+#doc: {"ts": "2021-01-01T00:00:00Z"}
+ZonedDateTime.parse(ctx.ts).getYear() == 2021
+----
+#doc: {"msg": "Error: disk full"}
+ctx.msg =~ /^Error/
+----
+#doc: {"msg": "Error: disk full"}
+ctx.msg ==~ /disk/
+----
+#doc: {"msg": "abc"}
+ctx.msg.length() > 2 && ctx.msg.startsWith('a')
+----
+#doc: {"l": [1, 2, 3]}
+ctx.l.stream().mapToInt(x -> x).sum() == 6
+----
+#doc: {"m": {"a.b": 1}}
+ctx.m['a.b'] == 1
+----
+#doc: {"a.b": 1}
+ctx['a.b'] == 1
+----
+#doc: {"x": 1.5}
+ctx.x > 1
+----
+#doc: {"x": "5"}
+Integer.parseInt(ctx.x) == 5
+----
+#doc: {"x": 9223372036854775807}
+ctx.x == Long.MAX_VALUE
+----
+#doc: {"x": true}
+ctx.x
+----
+#doc: {"x": "yes"}
+ctx.x
+----
+ctx._ingest.timestamp != null
+----
+ctx._ingest == null
+----
+ctx.get('a') == 1 && ctx.getOrDefault('zz', 7) == 7
+----
+ctx.o.l[-1] == 2
+----
+ctx.tags[5] == null
+----
+ctx.o.l.get(5) == null
+----
+List l = ctx.tags; l.add('q'); return true
+----
+Map m = new HashMap(ctx.o); m.put('z', 1); return m.size() == 3
+----
+List l = new ArrayList(ctx.tags); l.add('q'); return l.size() == 3
+----
+ctx.o.l instanceof List
+----
+ctx.o instanceof Map
+----
+ctx instanceof Map
+----
+ctx.getClass().getName() != null
+----
+throw new IllegalStateException('nope')
+----
+while (true) {}
+----
+#doc: {"a": 1, "s": "x", "tags": ["t1", "t2"], "o": {"k": 2, "l": [1, 2]}, "n": null, "d": 1.5}
+ctx.tags.add(0, 'x'); return true
+----
+ctx.tags.addAll(['x']); return true
+----
+ctx.tags.addAll(0, ['x']); return true
+----
+ctx.tags.removeAll(['t1']); return true
+----
+ctx.tags.retainAll(['t1']); return true
+----
+ctx.tags.removeIf(t -> true); return true
+----
+ctx.tags.replaceAll(t -> t); return true
+----
+ctx.tags.sort(null); return true
+----
+ctx.tags.remove('t1'); return true
+----
+def it = ctx.tags.iterator(); it.next(); it.remove(); return true
+----
+def it = ctx.tags.listIterator(); it.next(); it.set('q'); return true
+----
+def it = ctx.tags.listIterator(); it.add('q'); return true
+----
+ctx.o.replaceAll((k, v) -> v); return true
+----
+ctx.o.putIfAbsent('k', 1); return true
+----
+ctx.o.putIfAbsent('zz', 1); return true
+----
+ctx.o.computeIfAbsent('zz', k -> 1); return true
+----
+ctx.o.computeIfPresent('k', (k, v) -> 1); return true
+----
+ctx.o.compute('k', (k, v) -> 1); return true
+----
+ctx.o.merge('k', 1, (a, b) -> a); return true
+----
+ctx.o.replace('k', 9); return true
+----
+ctx.o.replace('k', 2, 9); return true
+----
+ctx.o.remove('k', 2); return true
+----
+ctx.o.keySet().add('q'); return true
+----
+ctx.o.keySet().clear(); return true
+----
+ctx.o.values().add(1); return true
+----
+ctx.o.values().clear(); return true
+----
+ctx.o.entrySet().clear(); return true
+----
+ctx.o.entrySet().add(null); return true
+----
+ctx.o.l.subList(0, 1).clear(); return true
+----
+ctx.tags.containsAll(['t1'])
+----
+ctx.tags.containsAll(ctx.tags)
+----
+ctx.tags.equals(ctx.tags)
+----
+ctx.tags == ctx.tags
+----
+ctx.o.hashCode() == ctx.o.hashCode()
+----
+ctx.o.equals(ctx.o)
+----
+ctx.tags.toArray().length == 2
+----
+ctx.o.entrySet().size() == 2
+----
+ctx.o.entrySet().toString().contains('UnmodifiableIngestData$1@')
+----
+ctx.o.values().toString().startsWith('org.elasticsearch.ingest.IngestDocument$UnmodifiableIngestList@')
+----
+ctx.toString().startsWith('org.elasticsearch.ingest.IngestDocument$UnmodifiableIngestData@')
+----
+ctx.tags.toString().startsWith('org.elasticsearch.ingest.IngestDocument$UnmodifiableIngestList@')
+----
+ctx.o.keySet().toString() == '[k, l]'
+----
+ctx.o.each((k, v) -> v); return true
+----
+ctx.o.forEach((k, v) -> {}); return true
+----
+ctx.o.collect((k, v) -> k).size() == 2
+----
+ctx.tags.findAll(t -> true).add('x')
+----
+ctx.o.l.collect(x -> x).add(3)
+----
+ctx.o.findAll((k, v) -> true).put('q', 1) == null
+----
+ctx.tags.stream().collect(Collectors.toList()).add('x')
+----
+ctx.o.l.sum() == 3
+----
+ctx.o.getByPath('l.0') == 1
+----
+ctx.o.l.join(',') == '1,2'
+----
+ctx.o.values().iterator().next().getClass() == Integer.class
+----
+ctx.o.l.iterator().next() == 1
+----
+ctx.a == 1 && ctx.d > 1.4
+----
+Map m = ctx.o; return m.size() == 2
+----
+#doc: {"b": "AAEC"}
+ctx.b == 'AAEC'
+----
+#doc: {"arr": [[1, 2], [3]]}
+ctx.arr[0].add(9)
+----
+#doc: {"arr": [{"x": 1}]}
+ctx.arr[0].x = 2; return true
+----
+#doc: {"arr": [{"x": 1}]}
+ctx.arr[0].x == 1

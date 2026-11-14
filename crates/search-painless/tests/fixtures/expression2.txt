@@ -1,0 +1,199 @@
+max(1 2)
+----
+max(
+----
+(
+----
+)
+----
+1 = 2
+----
+doc['l'](
+----
+a.
+----
+doc['l'
+----
+1 ? : 2
+----
+--1
+----
+!!1
+----
+~~5
+----
+1 < < 2
+----
+1 <> 2
+----
+1 =< 2
+----
+~
+----
+-
+----
+a b
+----
+1 +
+*
+----
+1 +	*
+----
+é
+----
+doc['é']
+----
+0x7fffffffffffffffff
+----
+077777777777777777777777
+----
+999999999999999999999
+----
+1e400
+----
+.5e-3
+----
+5 % 0
+----
+-0.0
+----
+1 ? 2 : 3 ? 4 : 5
+----
+0 ? 2 : 0 ? 4 : 5
+----
+1 || 0 && 0
+----
+2 * 3 % 4
+----
+1 - 2 - 3
+----
+2 << 1 + 1
+----
+1 == 1 == 1
+----
+1 < 2 < 3
+----
+((((((((((((((((((((1))))))))))))))))))))
+----
+abs(-0.0)
+----
+#params: {"t": true}
+t
+----
+#params: {"i": 3, "f": 1.5, "neg": -2}
+i * f + neg
+----
+#params: {"_score": 7}
+_score
+----
+#context: score
+#params: {"_score": 7}
+_score
+----
+#params: {"x": 1}
+x(1)
+----
+doc['l'].avg() + doc['d'].avg()
+----
+doc['l'].median() * doc['l'].count()
+----
+doc['by'].sum() + doc['b'].count()
+----
+doc['f'].value * 3
+----
+doc['hf'].max()
+----
+doc['ul'].count()
+----
+doc['dn'].getYear()
+----
+doc['dn'].date.year
+----
+doc['old'].getHourOfDay()
+----
+doc['old'].date.hourOfDay
+----
+doc['old'].date.weekOfWeekyear
+----
+doc['old'].date.dayOfWeek
+----
+doc['g'].lat + doc['g'].lon
+----
+doc['g'].empty + doc['l'].empty
+----
+doc['g'].getLat()
+----
+doc['g'].date.year
+----
+doc['l'].date.year
+----
+doc['l'].getDate.year
+----
+doc['l'].date.year.x
+----
+doc['l']['x']
+----
+doc['l'][0].x
+----
+doc["l"]['x']
+----
+doc[1]
+----
+doc['l'].min() > doc['l'].max() ? 1 : 0
+----
+doc['l'] | 1
+----
+doc['big'] >> 1
+----
+doc['big'] & -1
+----
+~doc['neg']
+----
+doc['neg'] << 2
+----
+doc['d'] && doc['l']
+----
+doc['neg'] || 0
+----
+!doc['l']
+----
+haversin(doc['g'].lat, doc['g'].lon, 40, -70)
+----
+#context: score
+doc['l'].max() * _score + 1
+----
+#context: score
+_value + 1
+----
+#context: sort
+_score
+----
+#context: sort
+_value
+----
+#context: sort
+doc['d'].empty * 10 + doc['l']
+----
+#context: aggs
+_score * 3 + _value
+----
+#context: aggs
+doc['dt'].getMonth()
+----
+#context: value
+_value * _value
+----
+#context: value
+doc['l'].count()
+----
+#context: filter
+doc['l'] < 0
+----
+#context: filter
+_value
+----
+#context: filter
+doc['g'].empty
+----
+#context: filter
+-0.0

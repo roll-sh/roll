@@ -1,0 +1,1068 @@
+{
+  "description" : "OpenSearch 3.9.0 dialect search details: suggestions sorted by name, nested inner hit sources in HashMap order and filtered by full paths, the geo_point sort message, collapse on a multi-valued field (500), stored_fields _none_ with fields failing on the shards, t-digest 3.3 percentile ranks, significant_terms' background from maxDoc, and _msearch's empty first line and header keys.",
+  "dialect" : "opensearch",
+  "steps" : [
+    {
+      "req" : "PUT /esm-q",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "title" : {
+              "type" : "text"
+            },
+            "tag" : {
+              "type" : "keyword"
+            },
+            "n" : {
+              "type" : "integer"
+            },
+            "p" : {
+              "type" : "double"
+            },
+            "loc" : {
+              "type" : "geo_point"
+            },
+            "nest" : {
+              "type" : "nested",
+              "properties" : {
+                "k" : {
+                  "type" : "keyword"
+                },
+                "v" : {
+                  "type" : "integer"
+                }
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-q"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-q/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"title\":\"the quick brown fox\",\"tag\":[\"a\",\"b\"],\"n\":1,\"p\":1.5,\"loc\":\"40.1,-70.2\",\"nest\":[{\"k\":\"x\",\"v\":1},{\"zeta\":1,\"alpha\":2,\"k\":\"y\",\"mid\":3,\"v\":2}]}\n{\"index\":{\"_id\":\"2\"}}\n{\"title\":\"lazy dogs jump over the fox\",\"tag\":\"b\",\"n\":2,\"p\":2.5,\"loc\":\"41.1,-71.2\",\"nest\":[{\"k\":\"x\",\"v\":3}]}\n{\"index\":{\"_id\":\"3\"}}\n{\"title\":\"brown dog\",\"tag\":\"c\",\"n\":3,\"p\":-1}\n",
+      "headers" : {
+        "content-type" : "application/x-ndjson"
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 48,
+        "errors" : false,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "esm-q",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-q",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-q",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-q/_search",
+      "body" : {
+        "size" : 0,
+        "suggest" : {
+          "zz" : {
+            "text" : "fox",
+            "term" : {
+              "field" : "title"
+            }
+          },
+          "aa" : {
+            "text" : "browm",
+            "term" : {
+              "field" : "title"
+            }
+          },
+          "mm" : {
+            "text" : "quik brown",
+            "phrase" : {
+              "field" : "title"
+            }
+          },
+          "b1" : {
+            "text" : "fox",
+            "term" : {
+              "field" : "title"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 13,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "suggest" : {
+          "aa" : [
+            {
+              "text" : "browm",
+              "offset" : 0,
+              "length" : 5,
+              "options" : [
+                {
+                  "text" : "brown",
+                  "score" : 0.8,
+                  "freq" : 2
+                }
+              ]
+            }
+          ],
+          "b1" : [
+            {
+              "text" : "fox",
+              "offset" : 0,
+              "length" : 3,
+              "options" : [ ]
+            }
+          ],
+          "mm" : [
+            {
+              "text" : "quik brown",
+              "offset" : 0,
+              "length" : 10,
+              "options" : [
+                {
+                  "text" : "quick brown",
+                  "score" : 0.1335202
+                }
+              ]
+            }
+          ],
+          "zz" : [
+            {
+              "text" : "fox",
+              "offset" : 0,
+              "length" : 3,
+              "options" : [ ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-q/_search",
+      "body" : {
+        "query" : {
+          "nested" : {
+            "path" : "nest",
+            "query" : {
+              "match_all" : { }
+            },
+            "inner_hits" : { }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 6,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "esm-q",
+              "_id" : "1",
+              "_score" : 1.0,
+              "_source" : {
+                "title" : "the quick brown fox",
+                "tag" : [
+                  "a",
+                  "b"
+                ],
+                "n" : 1,
+                "p" : 1.5,
+                "loc" : "40.1,-70.2",
+                "nest" : [
+                  {
+                    "k" : "x",
+                    "v" : 1
+                  },
+                  {
+                    "zeta" : 1,
+                    "alpha" : 2,
+                    "k" : "y",
+                    "mid" : 3,
+                    "v" : 2
+                  }
+                ]
+              },
+              "inner_hits" : {
+                "nest" : {
+                  "hits" : {
+                    "total" : {
+                      "value" : 2,
+                      "relation" : "eq"
+                    },
+                    "max_score" : 1.0,
+                    "hits" : [
+                      {
+                        "_index" : "esm-q",
+                        "_id" : "1",
+                        "_nested" : {
+                          "field" : "nest",
+                          "offset" : 0
+                        },
+                        "_score" : 1.0,
+                        "_source" : {
+                          "v" : 1,
+                          "k" : "x"
+                        }
+                      },
+                      {
+                        "_index" : "esm-q",
+                        "_id" : "1",
+                        "_nested" : {
+                          "field" : "nest",
+                          "offset" : 1
+                        },
+                        "_score" : 1.0,
+                        "_source" : {
+                          "zeta" : 1,
+                          "v" : 2,
+                          "alpha" : 2,
+                          "mid" : 3,
+                          "k" : "y"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "_index" : "esm-q",
+              "_id" : "2",
+              "_score" : 1.0,
+              "_source" : {
+                "title" : "lazy dogs jump over the fox",
+                "tag" : "b",
+                "n" : 2,
+                "p" : 2.5,
+                "loc" : "41.1,-71.2",
+                "nest" : [
+                  {
+                    "k" : "x",
+                    "v" : 3
+                  }
+                ]
+              },
+              "inner_hits" : {
+                "nest" : {
+                  "hits" : {
+                    "total" : {
+                      "value" : 1,
+                      "relation" : "eq"
+                    },
+                    "max_score" : 1.0,
+                    "hits" : [
+                      {
+                        "_index" : "esm-q",
+                        "_id" : "2",
+                        "_nested" : {
+                          "field" : "nest",
+                          "offset" : 0
+                        },
+                        "_score" : 1.0,
+                        "_source" : {
+                          "v" : 3,
+                          "k" : "x"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-q/_search",
+      "body" : {
+        "query" : {
+          "nested" : {
+            "path" : "nest",
+            "query" : {
+              "match_all" : { }
+            },
+            "inner_hits" : {
+              "_source" : [
+                "nest.zeta",
+                "nest.k"
+              ]
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "esm-q",
+              "_id" : "1",
+              "_score" : 1.0,
+              "_source" : {
+                "title" : "the quick brown fox",
+                "tag" : [
+                  "a",
+                  "b"
+                ],
+                "n" : 1,
+                "p" : 1.5,
+                "loc" : "40.1,-70.2",
+                "nest" : [
+                  {
+                    "k" : "x",
+                    "v" : 1
+                  },
+                  {
+                    "zeta" : 1,
+                    "alpha" : 2,
+                    "k" : "y",
+                    "mid" : 3,
+                    "v" : 2
+                  }
+                ]
+              },
+              "inner_hits" : {
+                "nest" : {
+                  "hits" : {
+                    "total" : {
+                      "value" : 2,
+                      "relation" : "eq"
+                    },
+                    "max_score" : 1.0,
+                    "hits" : [
+                      {
+                        "_index" : "esm-q",
+                        "_id" : "1",
+                        "_nested" : {
+                          "field" : "nest",
+                          "offset" : 0
+                        },
+                        "_score" : 1.0,
+                        "_source" : {
+                          "k" : "x"
+                        }
+                      },
+                      {
+                        "_index" : "esm-q",
+                        "_id" : "1",
+                        "_nested" : {
+                          "field" : "nest",
+                          "offset" : 1
+                        },
+                        "_score" : 1.0,
+                        "_source" : {
+                          "zeta" : 1,
+                          "k" : "y"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "_index" : "esm-q",
+              "_id" : "2",
+              "_score" : 1.0,
+              "_source" : {
+                "title" : "lazy dogs jump over the fox",
+                "tag" : "b",
+                "n" : 2,
+                "p" : 2.5,
+                "loc" : "41.1,-71.2",
+                "nest" : [
+                  {
+                    "k" : "x",
+                    "v" : 3
+                  }
+                ]
+              },
+              "inner_hits" : {
+                "nest" : {
+                  "hits" : {
+                    "total" : {
+                      "value" : 1,
+                      "relation" : "eq"
+                    },
+                    "max_score" : 1.0,
+                    "hits" : [
+                      {
+                        "_index" : "esm-q",
+                        "_id" : "2",
+                        "_nested" : {
+                          "field" : "nest",
+                          "offset" : 0
+                        },
+                        "_score" : 1.0,
+                        "_source" : {
+                          "k" : "x"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-q/_search",
+      "body" : {
+        "sort" : [
+          {
+            "loc" : "asc"
+          }
+        ]
+      },
+      "mask" : [
+        "took",
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "can't sort on geo_point field without using specific sorting feature, like geo_distance"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-q",
+              "node" : "bVJYEuz1SeOILgYRWAmCUQ",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "can't sort on geo_point field without using specific sorting feature, like geo_distance"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "can't sort on geo_point field without using specific sorting feature, like geo_distance",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "can't sort on geo_point field without using specific sorting feature, like geo_distance"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-q/_search",
+      "body" : {
+        "collapse" : {
+          "field" : "tag"
+        },
+        "sort" : [
+          "n"
+        ]
+      },
+      "mask" : [
+        "took",
+        "node"
+      ],
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_state_exception",
+              "reason" : "failed to collapse 2, the collapse field must be single valued"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-q",
+              "node" : "bVJYEuz1SeOILgYRWAmCUQ",
+              "reason" : {
+                "type" : "illegal_state_exception",
+                "reason" : "failed to collapse 2, the collapse field must be single valued"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_state_exception",
+            "reason" : "failed to collapse 2, the collapse field must be single valued",
+            "caused_by" : {
+              "type" : "illegal_state_exception",
+              "reason" : "failed to collapse 2, the collapse field must be single valued"
+            }
+          }
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-q/_search",
+      "body" : {
+        "query" : {
+          "terms" : {
+            "tag" : [
+              "a",
+              "c"
+            ]
+          }
+        },
+        "fields" : [
+          "title"
+        ],
+        "stored_fields" : "_none_"
+      },
+      "mask" : [
+        "took",
+        "node"
+      ],
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "search_exception",
+              "reason" : "[stored_fields] cannot be disabled when using the [fields] option"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-q",
+              "node" : "bVJYEuz1SeOILgYRWAmCUQ",
+              "reason" : {
+                "type" : "search_exception",
+                "reason" : "[stored_fields] cannot be disabled when using the [fields] option"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "search_exception",
+            "reason" : "[stored_fields] cannot be disabled when using the [fields] option"
+          }
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-q/_search",
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "p" : {
+            "percentiles" : {
+              "field" : "p"
+            }
+          },
+          "r" : {
+            "percentile_ranks" : {
+              "field" : "p",
+              "values" : [
+                -2,
+                -1,
+                0,
+                1,
+                1.5,
+                2,
+                2.5,
+                3
+              ]
+            }
+          },
+          "rn" : {
+            "percentile_ranks" : {
+              "field" : "n",
+              "values" : [
+                1,
+                2,
+                2.5,
+                3,
+                5
+              ]
+            }
+          },
+          "rk" : {
+            "percentile_ranks" : {
+              "field" : "p",
+              "values" : [
+                1
+              ],
+              "keyed" : false
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 5,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "aggregations" : {
+          "p" : {
+            "values" : {
+              "1.0" : -1.0,
+              "5.0" : -1.0,
+              "25.0" : -1.0,
+              "50.0" : 1.5,
+              "75.0" : 2.5,
+              "95.0" : 2.5,
+              "99.0" : 2.5
+            }
+          },
+          "r" : {
+            "values" : {
+              "-2.0" : 0.0,
+              "-1.0" : 16.666666666666664,
+              "0.0" : 33.33333333333333,
+              "1.0" : 33.33333333333333,
+              "1.5" : 50.0,
+              "2.0" : 66.66666666666666,
+              "2.5" : 83.33333333333334,
+              "3.0" : 100.0
+            }
+          },
+          "rk" : {
+            "values" : [
+              {
+                "key" : 1.0,
+                "value" : 33.33333333333333
+              }
+            ]
+          },
+          "rn" : {
+            "values" : {
+              "1.0" : 16.666666666666664,
+              "2.0" : 50.0,
+              "2.5" : 66.66666666666666,
+              "3.0" : 83.33333333333334,
+              "5.0" : 100.0
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-q/_search",
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "t" : {
+            "terms" : {
+              "field" : "tag"
+            },
+            "aggs" : {
+              "r" : {
+                "percentile_ranks" : {
+                  "field" : "p",
+                  "values" : [
+                    0,
+                    2
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "aggregations" : {
+          "t" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "b",
+                "doc_count" : 2,
+                "r" : {
+                  "values" : {
+                    "0.0" : 0.0,
+                    "2.0" : 50.0
+                  }
+                }
+              },
+              {
+                "key" : "a",
+                "doc_count" : 1,
+                "r" : {
+                  "values" : {
+                    "0.0" : 0.0,
+                    "2.0" : 100.0
+                  }
+                }
+              },
+              {
+                "key" : "c",
+                "doc_count" : 1,
+                "r" : {
+                  "values" : {
+                    "0.0" : 100.0,
+                    "2.0" : 100.0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-q/_search",
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "sig" : {
+            "significant_terms" : {
+              "field" : "tag",
+              "min_doc_count" : 1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 5,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "aggregations" : {
+          "sig" : {
+            "doc_count" : 3,
+            "bg_count" : 6,
+            "buckets" : [
+              {
+                "key" : "b",
+                "doc_count" : 2,
+                "score" : 0.6666666666666666,
+                "bg_count" : 2
+              },
+              {
+                "key" : "c",
+                "doc_count" : 1,
+                "score" : 0.3333333333333333,
+                "bg_count" : 1
+              },
+              {
+                "key" : "a",
+                "doc_count" : 1,
+                "score" : 0.3333333333333333,
+                "bg_count" : 1
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-q/_msearch",
+      "raw" : "{}\n{\"query\":{\"match_all\":{}},\"size\":0}\n",
+      "headers" : {
+        "content-type" : "application/x-ndjson"
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "responses" : [
+          {
+            "took" : 2,
+            "timed_out" : false,
+            "_shards" : {
+              "total" : 1,
+              "successful" : 1,
+              "skipped" : 0,
+              "failed" : 0
+            },
+            "hits" : {
+              "total" : {
+                "value" : 3,
+                "relation" : "eq"
+              },
+              "max_score" : null,
+              "hits" : [ ]
+            },
+            "status" : 200
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-q/_msearch",
+      "raw" : "{\"bogus\":1}\n{\"size\":0}\n",
+      "headers" : {
+        "content-type" : "application/x-ndjson"
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "key [bogus] is not supported in the metadata section"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "key [bogus] is not supported in the metadata section"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-q/_msearch",
+      "raw" : "{\"index\":\"esm-q\",\"searchType\":\"query_then_fetch\",\"ignoreUnavailable\":true}\n{\"size\":0}\n",
+      "headers" : {
+        "content-type" : "application/x-ndjson"
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "responses" : [
+          {
+            "took" : 2,
+            "timed_out" : false,
+            "_shards" : {
+              "total" : 1,
+              "successful" : 1,
+              "skipped" : 0,
+              "failed" : 0
+            },
+            "hits" : {
+              "total" : {
+                "value" : 3,
+                "relation" : "eq"
+              },
+              "max_score" : null,
+              "hits" : [ ]
+            },
+            "status" : 200
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    }
+  ]
+}

@@ -1,0 +1,259 @@
+{
+ "found": {
+  "case": 49,
+  "case_seed": 106000367,
+  "seed": 106
+ },
+ "signature": "POST _search .aggregations.top_hits#top_hits.hits.hits[].sort[]",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "ulong0": {
+       "type": "unsigned_long"
+      }
+     }
+    },
+    "settings": {
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m7-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m7-a"
+  },
+  {
+   "es": {
+    "body": {
+     "errors": false,
+     "items": [
+      {
+       "index": {
+        "_id": "15",
+        "_index": "diff-m7-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 2
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      }
+     ],
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": {
+      "_id": "15",
+      "_index": "diff-m7-a"
+     }
+    },
+    {
+     "date0": "2024-05-07T17:24:00Z",
+     "dbl0": null,
+     "flt0": 80.09,
+     "kw0": "rho",
+     "n": [
+      {
+       "kw0": "pi",
+       "long0": 16,
+       "text0": "jumps green green over Dogs jumps Dogs"
+      },
+      {
+       "kw0": "pi",
+       "long0": 2335621144,
+       "text0": "of dog"
+      },
+      {
+       "kw0": "Alpha",
+       "text0": "cats lazy"
+      }
+     ],
+     "text0": [
+      "over elastic green apple",
+      "data elastic green"
+     ],
+     "text1": [
+      "query Dogs cat and",
+      "index engine fox and cats fast query banana"
+     ],
+     "ulong0": 35
+    }
+   ],
+   "method": "POST",
+   "path": "/_bulk"
+  },
+  {
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "successful": 1,
+      "total": 2
+     }
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m7-a/_refresh"
+  },
+  {
+   "body": {
+    "aggs": {
+     "top_hits_4": {
+      "top_hits": {
+       "sort": [
+        {
+         "ulong0": {}
+        }
+       ]
+      }
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "aggregations": {
+      "top_hits#top_hits_4": {
+       "hits": {
+        "hits": [
+         {
+          "_id": "15",
+          "_index": "diff-m7-a",
+          "_score": null,
+          "_source": {
+           "date0": "2024-05-07T17:24:00Z",
+           "dbl0": null,
+           "flt0": 80.09,
+           "kw0": "rho",
+           "n": [
+            {
+             "kw0": "pi",
+             "long0": 16,
+             "text0": "jumps green green over Dogs jumps Dogs"
+            },
+            {
+             "kw0": "pi",
+             "long0": 2335621144,
+             "text0": "of dog"
+            },
+            {
+             "kw0": "Alpha",
+             "text0": "cats lazy"
+            }
+           ],
+           "text0": [
+            "over elastic green apple",
+            "data elastic green"
+           ],
+           "text1": [
+            "query Dogs cat and",
+            "index engine fox and cats fast query banana"
+           ],
+           "ulong0": 35
+          },
+          "sort": [
+           -9223372036854775773
+          ]
+         }
+        ],
+        "max_score": null,
+        "total": {
+         "relation": "eq",
+         "value": 1
+        }
+       }
+      }
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "15",
+        "_index": "diff-m7-a",
+        "_score": 1.0,
+        "_source": {
+         "date0": "2024-05-07T17:24:00Z",
+         "dbl0": null,
+         "flt0": 80.09,
+         "kw0": "rho",
+         "n": [
+          {
+           "kw0": "pi",
+           "long0": 16,
+           "text0": "jumps green green over Dogs jumps Dogs"
+          },
+          {
+           "kw0": "pi",
+           "long0": 2335621144,
+           "text0": "of dog"
+          },
+          {
+           "kw0": "Alpha",
+           "text0": "cats lazy"
+          }
+         ],
+         "text0": [
+          "over elastic green apple",
+          "data elastic green"
+         ],
+         "text1": [
+          "query Dogs cat and",
+          "index engine fox and cats fast query banana"
+         ],
+         "ulong0": 35
+        }
+       }
+      ],
+      "max_score": 1.0,
+      "total": {
+       "relation": "eq",
+       "value": 1
+      }
+     },
+     "timed_out": false,
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m7-a/_search?typed_keys=true"
+  }
+ ]
+}

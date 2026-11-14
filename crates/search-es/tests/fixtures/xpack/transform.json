@@ -1,0 +1,407 @@
+{
+  "description" : "transform: preview, put validation, start/stop, the pivot result, update, delete",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-tsrc",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "user" : {
+              "type" : "keyword"
+            },
+            "amount" : {
+              "type" : "double"
+            },
+            "ts" : {
+              "type" : "date"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-tsrc"
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-tsrc/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {}}\n{\"user\": \"a\", \"amount\": 10, \"ts\": \"2024-01-01T00:00:00Z\"}\n{\"index\": {}}\n{\"user\": \"a\", \"amount\": 5, \"ts\": \"2024-01-02T00:00:00Z\"}\n{\"index\": {}}\n{\"user\": \"b\", \"amount\": 7, \"ts\": \"2024-01-01T00:00:00Z\"}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /_transform/_preview?filter_path=preview,generated_dest_index.mappings",
+      "mask" : [ "creation_date_in_millis" ],
+      "body" : {
+        "source" : {
+          "index" : "compat-xpack-tsrc"
+        },
+        "pivot" : {
+          "group_by" : {
+            "user" : {
+              "terms" : {
+                "field" : "user"
+              }
+            }
+          },
+          "aggregations" : {
+            "total" : {
+              "sum" : {
+                "field" : "amount"
+              }
+            },
+            "n" : {
+              "value_count" : {
+                "field" : "amount"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "preview" : [
+          {
+            "total" : 15.0,
+            "user" : "a",
+            "n" : 2
+          },
+          {
+            "total" : 7.0,
+            "user" : "b",
+            "n" : 1
+          }
+        ],
+        "generated_dest_index" : {
+          "mappings" : {
+            "_meta" : {
+              "_transform" : {
+                "transform" : "transform-preview",
+                "version" : {
+                  "created" : "10.0.0"
+                },
+                "creation_date_in_millis" : 1792748891371
+              },
+              "created_by" : "transform"
+            },
+            "properties" : {
+              "total" : {
+                "type" : "double"
+              },
+              "user" : {
+                "type" : "keyword"
+              },
+              "n" : {
+                "type" : "long"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "PUT /_transform/compat-xpack-tr",
+      "body" : {
+        "source" : {
+          "index" : "compat-xpack-tsrc"
+        },
+        "dest" : {
+          "index" : "compat-xpack-tdest"
+        },
+        "pivot" : {
+          "group_by" : {
+            "user" : {
+              "terms" : {
+                "field" : "user"
+              }
+            }
+          },
+          "aggregations" : {
+            "total" : {
+              "sum" : {
+                "field" : "amount"
+              }
+            }
+          }
+        },
+        "description" : "d"
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_transform/compat-xpack-tr",
+      "body" : {
+        "source" : {
+          "index" : "compat-xpack-tsrc"
+        },
+        "dest" : {
+          "index" : "compat-xpack-tdest"
+        },
+        "pivot" : {
+          "group_by" : {
+            "user" : {
+              "terms" : {
+                "field" : "user"
+              }
+            }
+          },
+          "aggregations" : {
+            "total" : {
+              "sum" : {
+                "field" : "amount"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_already_exists_exception",
+              "reason" : "Transform with id [compat-xpack-tr] already exists"
+            }
+          ],
+          "type" : "resource_already_exists_exception",
+          "reason" : "Transform with id [compat-xpack-tr] already exists"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_transform/compat-xpack-bad",
+      "body" : {
+        "source" : {
+          "index" : "compat-xpack-tsrc"
+        },
+        "dest" : {
+          "index" : "compat-xpack-tdest2"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [data_frame_transform_config] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "Failed to build [data_frame_transform_config] after last required field arrived",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Transform configuration must specify exactly 1 function"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_transform/compat-xpack-bad2",
+      "body" : {
+        "source" : {
+          "index" : "compat-xpack-tsrc"
+        },
+        "dest" : {
+          "index" : "compat-xpack-tdest2"
+        },
+        "pivot" : {
+          "group_by" : {
+            "user" : {
+              "terms" : {
+                "field" : "user"
+              }
+            }
+          },
+          "aggregations" : {
+            "total" : {
+              "sum" : {
+                "field" : "amount"
+              }
+            }
+          }
+        },
+        "foo" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:189] [data_frame_transform_config] unknown field [foo]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:189] [data_frame_transform_config] unknown field [foo]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /_transform/compat-xpack-tr?filter_path=count,transforms.id,transforms.source,transforms.dest,transforms.pivot,transforms.description,transforms.settings",
+      "status" : 200,
+      "response" : {
+        "count" : 1,
+        "transforms" : [
+          {
+            "id" : "compat-xpack-tr",
+            "source" : {
+              "index" : [
+                "compat-xpack-tsrc"
+              ],
+              "query" : {
+                "match_all" : { }
+              }
+            },
+            "dest" : {
+              "index" : "compat-xpack-tdest"
+            },
+            "pivot" : {
+              "group_by" : {
+                "user" : {
+                  "terms" : {
+                    "field" : "user"
+                  }
+                }
+              },
+              "aggregations" : {
+                "total" : {
+                  "sum" : {
+                    "field" : "amount"
+                  }
+                }
+              }
+            },
+            "description" : "d",
+            "settings" : { }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "GET /_transform/compat-xpack-nope",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "Transform with id [compat-xpack-nope] could not be found"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "Transform with id [compat-xpack-nope] could not be found"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "POST /_transform/compat-xpack-tr/_start",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /_transform/compat-xpack-tr/_start",
+      "skip" : "timing: Elasticsearch runs the batch checkpoint asynchronously, roll finishes it within _start",
+      "status" : 409,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "status_exception",
+              "reason" : "Cannot start transform [compat-xpack-tr] as it is already started."
+            }
+          ],
+          "type" : "status_exception",
+          "reason" : "Cannot start transform [compat-xpack-tr] as it is already started."
+        },
+        "status" : 409
+      }
+    },
+    {
+      "req" : "POST /_transform/compat-xpack-tr/_stop?wait_for_completion=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-tdest/_refresh",
+      "skip" : "refresh",
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        }
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-tdest/_search?sort=user&filter_path=hits.hits._source",
+      "skip" : "timing: Elasticsearch stopped the batch transform before its first checkpoint was indexed",
+      "status" : 200,
+      "response" : { }
+    },
+    {
+      "req" : "POST /_transform/compat-xpack-tr/_update?filter_path=description",
+      "body" : {
+        "description" : "new"
+      },
+      "status" : 200,
+      "response" : {
+        "description" : "new"
+      }
+    },
+    {
+      "req" : "DELETE /_transform/compat-xpack-tr",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_transform/compat-xpack-tr",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "Transform with id [compat-xpack-tr] could not be found"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "Transform with id [compat-xpack-tr] could not be found"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-tdest",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-tsrc",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

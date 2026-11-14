@@ -1,0 +1,830 @@
+{
+  "description" : "Stored scripts and ingest pipeline storage.",
+  "steps" : [
+    {
+      "req" : "PUT /_scripts/esm-s1",
+      "body" : {
+        "script" : {
+          "lang" : "painless",
+          "source" : "return 1"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_scripts/esm-s1",
+      "status" : 200,
+      "response" : {
+        "_id" : "esm-s1",
+        "found" : true,
+        "script" : {
+          "lang" : "painless",
+          "source" : "return 1"
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_scripts/esm-nope",
+      "status" : 404,
+      "response" : {
+        "_id" : "esm-nope",
+        "found" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_scripts/esm-s2",
+      "body" : {
+        "script" : {
+          "lang" : "mustache",
+          "source" : {
+            "query" : {
+              "match_all" : { }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_scripts/esm-s2",
+      "status" : 200,
+      "response" : {
+        "_id" : "esm-s2",
+        "found" : true,
+        "script" : {
+          "lang" : "mustache",
+          "source" : "{\"query\":{\"match_all\":{}}}",
+          "options" : {
+            "content_type" : "application/json;charset=utf-8"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_scripts/esm-s3",
+      "body" : {
+        "script" : {
+          "lang" : "bogus",
+          "source" : "1"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "unable to put stored script with unsupported lang [bogus]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "unable to put stored script with unsupported lang [bogus]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_scripts/esm-s3",
+      "body" : {
+        "script" : {
+          "source" : "1"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "must specify lang for stored script"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "must specify lang for stored script"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_scripts/esm-s3",
+      "body" : {
+        "script" : {
+          "lang" : "painless"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "must specify source for stored script"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "must specify source for stored script"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_scripts/esm-s3",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "unexpected token [END_OBJECT, expected [script]",
+              "line" : 1,
+              "col" : 2
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "unexpected token [END_OBJECT, expected [script]",
+          "line" : 1,
+          "col" : 2
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_scripts/esm-s3",
+      "body" : {
+        "script" : "1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "unexpected token [VALUE_STRING], expected [{, <source>]",
+              "line" : 1,
+              "col" : 11
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "unexpected token [VALUE_STRING], expected [{, <source>]",
+          "line" : 1,
+          "col" : 11
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_scripts/esm-s3",
+      "body" : {
+        "script" : {
+          "lang" : "painless",
+          "source" : "1",
+          "options" : {
+            "a" : "b"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "illegal compiler options [{a=b}] specified"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "illegal compiler options [{a=b}] specified"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_scripts/esm-s3/bogus",
+      "body" : {
+        "script" : {
+          "lang" : "painless",
+          "source" : "1"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "failed to parse/compile stored script [esm-s3]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "failed to parse/compile stored script [esm-s3]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Unknown context [bogus]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_scripts/esm-s3",
+      "body" : {
+        "script" : {
+          "lang" : "mustache",
+          "source" : ""
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "source cannot be empty"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "source cannot be empty"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_scripts/esm-s1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_scripts/esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "stored script [esm-s1] does not exist and cannot be deleted"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "stored script [esm-s1] does not exist and cannot be deleted"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/esm-p1",
+      "body" : {
+        "description" : "d",
+        "processors" : [
+          {
+            "set" : {
+              "field" : "a",
+              "value" : 1
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_ingest/pipeline/esm-p1",
+      "status" : 200,
+      "response" : {
+        "esm-p1" : {
+          "description" : "d",
+          "processors" : [
+            {
+              "set" : {
+                "field" : "a",
+                "value" : 1
+              }
+            }
+          ],
+          "created_date_millis" : 1792521002952,
+          "modified_date_millis" : 1792521002952
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_ingest/pipeline/esm-nope",
+      "status" : 404,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_ingest/pipeline/esm-p*?summary=true",
+      "status" : 200,
+      "response" : {
+        "esm-p1" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/esm-p2",
+      "body" : {
+        "processors" : [
+          {
+            "bogus" : { }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "No processor type exists with name [bogus]",
+              "processor_type" : "bogus"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "No processor type exists with name [bogus]",
+          "processor_type" : "bogus"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/esm-p2",
+      "body" : {
+        "processors" : [
+          {
+            "set" : { }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[field] required property is missing",
+              "property_name" : "field",
+              "processor_type" : "set"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "[field] required property is missing",
+          "property_name" : "field",
+          "processor_type" : "set"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/esm-p2",
+      "body" : {
+        "processors" : [
+          {
+            "set" : {
+              "field" : "a"
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[value] required property is missing",
+              "property_name" : "value",
+              "processor_type" : "set"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "[value] required property is missing",
+          "property_name" : "value",
+          "processor_type" : "set"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/esm-p2",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[processors] required property is missing",
+              "property_name" : "processors"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "[processors] required property is missing",
+          "property_name" : "processors"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/esm-p2",
+      "body" : {
+        "processors" : [
+          {
+            "set" : {
+              "field" : "a",
+              "value" : 1,
+              "bogus" : 2
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "processor [set] doesn't support one or more provided configuration parameters [bogus]",
+              "processor_type" : "set"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "processor [set] doesn't support one or more provided configuration parameters [bogus]",
+          "processor_type" : "set"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/esm-p2",
+      "body" : {
+        "processors" : {
+          "set" : {
+            "field" : "a",
+            "value" : 1
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[processors] property isn't a list, but of type [java.util.HashMap]",
+              "property_name" : "processors"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "[processors] property isn't a list, but of type [java.util.HashMap]",
+          "property_name" : "processors"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/esm-p2",
+      "body" : {
+        "processors" : [ ],
+        "bogus" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "pipeline [esm-p2] doesn't support one or more provided configuration parameters [bogus]"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "pipeline [esm-p2] doesn't support one or more provided configuration parameters [bogus]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/esm-p2",
+      "body" : {
+        "processors" : [
+          {
+            "rename" : {
+              "field" : "a"
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "[target_field] required property is missing",
+              "property_name" : "target_field",
+              "processor_type" : "rename"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "[target_field] required property is missing",
+          "property_name" : "target_field",
+          "processor_type" : "rename"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/esm-p2",
+      "body" : {
+        "processors" : [
+          {
+            "lowercase" : {
+              "field" : "a",
+              "tag" : "t1",
+              "ignore_missing" : true,
+              "if" : "ctx.a != null"
+            }
+          }
+        ],
+        "version" : 3,
+        "_meta" : {
+          "k" : "v"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_ingest/pipeline/esm-p2",
+      "status" : 200,
+      "response" : {
+        "esm-p2" : {
+          "processors" : [
+            {
+              "lowercase" : {
+                "field" : "a",
+                "tag" : "t1",
+                "ignore_missing" : true,
+                "if" : "ctx.a != null"
+              }
+            }
+          ],
+          "version" : 3,
+          "_meta" : {
+            "k" : "v"
+          },
+          "created_date_millis" : 1792521002987,
+          "modified_date_millis" : 1792521002987
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/esm-p2?if_version=2",
+      "body" : {
+        "processors" : [ ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "version conflict, required version [2] for pipeline [esm-p2] but current version is [3]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "version conflict, required version [2] for pipeline [esm-p2] but current version is [3]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/esm-p2?if_version=3",
+      "body" : {
+        "processors" : [ ],
+        "version" : 4
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-pi",
+      "body" : {
+        "settings" : {
+          "index.default_pipeline" : "esm-p2"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-pi"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/esm-p2",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "pipeline [esm-p2] cannot be deleted because it is the default pipeline for 1 index(es) including [esm-pi]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "pipeline [esm-p2] cannot be deleted because it is the default pipeline for 1 index(es) including [esm-pi]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-pi",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/esm-p2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/esm-nope",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "pipeline [esm-nope] is missing"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "pipeline [esm-nope] is missing"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/esm-nope*",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "pipeline [esm-nope*] is missing"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "pipeline [esm-nope*] is missing"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/esm-p*",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_ingest/pipeline/esm-p*",
+      "status" : 404,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}
