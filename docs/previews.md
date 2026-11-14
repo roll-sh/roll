@@ -1361,8 +1361,10 @@ Ranked by what a person notices first. Done so far:
    (a `deploy`); previews holds no power of its own there. Production gets the preview's image
    as is (no build) with its own variables (live in `scripts/preview-apps.sh`: production served
    main, then the change's page). Only a trusted change's preview offers it (a fork's code never
-   gets production's variables), and only for the build the sheet showed: a newer push deployed
-   since it opened is refused before anything is promoted. It merges into #28 with #26.
+   gets production's variables), and only for the build the sheet showed: it sends that
+   deployment as roll apps' `expect` (fc6fbf48c), so a newer push deployed since is a 409 from
+   the same read the promotion is made of (live: a promote expecting another deployment refused).
+   It merges into #28 with #26.
 2. **Dynamic credentials a preview renews** (roll secrets' leases): a preview resolves with
    `dynamic: false` today, so a dynamic link inherited from its base is named as a problem.
    Previews converges every few minutes, so it could hold such a lease itself: resolve the
