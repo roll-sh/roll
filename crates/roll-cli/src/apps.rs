@@ -545,6 +545,10 @@ pub enum AppsCmd {
     Env {
         #[command(flatten)]
         target: Target,
+        /// Every service of the project gets it (each through its own call, each answered):
+        /// one environment for the whole project, as Railway's are.
+        #[arg(long, conflicts_with = "private")]
+        all_services: bool,
         #[arg(long)]
         branch: Option<String>,
         /// Stop deploying on pushes.
@@ -2395,7 +2399,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, private, open, maintenance, serve, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, error_page, maintenance_page, roll_pages } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, private, open, maintenance, serve, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, error_page, maintenance_page, roll_pages } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -2472,6 +2476,37 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     r.insert(k.trim().to_string(), v);
                 }
                 body.insert("run".into(), Value::Object(r));
+            }
+            if all_services {
+                // Each service's own call (each is authorized for that service, as one at a time):
+                // what worked and what didn't, never a half-done project reported as done.
+                let all = api.get(&format!("/v1/apps/projects/{}/services", enc(&s(&svc["project"])))).await?;
+                let mut out = Vec::new();
+                let mut failed = 0;
+                for one in all.as_array().into_iter().flatten() {
+                    let r = api.call(reqwest::Method::PUT, &env_path(one, &target.env), Some(Value::Object(body.clone()))).await;
+                    if !json_out {
+                        match &r {
+                            Ok(e) => println!("{:<24} {}", s(&one["name"]), e["url"].as_str().unwrap_or("")),
+                            Err(err) => println!("{:<24} failed: {err:#}", s(&one["name"])),
+                        }
+                    }
+                    failed += r.is_err() as usize;
+                    out.push(match r {
+                        Ok(e) => json!({ "service": one["id"], "environment": e }),
+                        Err(err) => json!({ "service": one["id"], "error": format!("{err:#}") }),
+                    });
+                }
+                if failed > 0 {
+                    if json_out {
+                        println!("{}", serde_json::to_string_pretty(&out)?);
+                    }
+                    bail!("{failed} of {} services didn't get {}", out.len(), target.env);
+                }
+                if json_out {
+                    println!("{}", serde_json::to_string_pretty(&out)?);
+                }
+                return Ok(());
             }
             let e = api.call(reqwest::Method::PUT, &env_path(&svc, &target.env), Some(Value::Object(body))).await?;
             if let (Some(t), Some(url)) = (&token, e["url"].as_str()) {

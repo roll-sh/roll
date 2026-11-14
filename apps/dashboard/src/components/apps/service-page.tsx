@@ -136,10 +136,11 @@ function NewEnvironment({
   envs: string[];
   busy: boolean;
   onCancel: () => void;
-  onCreate: (name: string, branch: string | null, variablesFrom: string | null) => void;
+  onCreate: (name: string, branch: string | null, variablesFrom: string | null, everyService: boolean) => void;
 }) {
   const [name, setName] = useState("");
   const [branch, setBranch] = useState("");
+  const [every, setEvery] = useState(false);
   const [from, setFrom] = useState(envs.includes(PRODUCTION) ? PRODUCTION : "");
   const ok = SERVICE_NAME.test(name);
   return (
@@ -147,7 +148,7 @@ function NewEnvironment({
       className="rise mt-3 flex flex-wrap items-end gap-2 rounded-xl border border-line bg-panel px-4 py-3"
       onSubmit={(e) => {
         e.preventDefault();
-        if (ok) onCreate(name, branch.trim() || null, from || null);
+        if (ok) onCreate(name, branch.trim() || null, from || null, every);
       }}
     >
       <label className="flex flex-col gap-1 text-[12px] text-muted">
@@ -173,6 +174,10 @@ function NewEnvironment({
           </select>
         </label>
       )}
+      <label className="inline-flex items-center gap-1.5 pb-2 text-[12px] text-muted" title="One environment for the whole project: each of its services gets it">
+        <input type="checkbox" checked={every} onChange={(e) => setEvery(e.target.checked)} />
+        Every service in the project
+      </label>
       <button type="submit" className={primary} disabled={!ok || busy}>
         Create
       </button>
@@ -356,8 +361,17 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           envs={service.environments.map((e) => e.name)}
           busy={busy}
           onCancel={() => setAdding(false)}
-          onCreate={async (name, branch, variablesFrom) => {
-            const made = await runner.run("environment", () => appsApi.putEnvironment(service.id, name, { branch, ...(variablesFrom ? { variables_from: variablesFrom } : {}) }));
+          onCreate={async (name, branch, variablesFrom, everyService) => {
+            const body = { branch, ...(variablesFrom ? { variables_from: variablesFrom } : {}) };
+            const made = await runner.run("environment", async () => {
+              if (!everyService) return appsApi.putEnvironment(service.id, name, body);
+              // Each service's own call (each allowed or refused on its own): what didn't get it is said.
+              const all = await appsApi.services(service.project);
+              const done = await Promise.allSettled(all.map((s) => appsApi.putEnvironment(s.id, name, body)));
+              const failed = done.flatMap((r, i) => (r.status === "rejected" ? [`${all[i].name}: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`] : []));
+              if (failed.length) throw new Error(`${failed.length} of ${all.length} services didn't get ${name}: ${failed.join("; ")}`);
+              return done;
+            });
             if (made) {
               setAdding(false);
               go({ env: name });
