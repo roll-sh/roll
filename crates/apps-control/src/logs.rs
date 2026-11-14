@@ -87,7 +87,8 @@ impl LogHub {
     }
 
     fn push(&self, key: &str, line: LogLine) {
-        if key.starts_with("env:")
+        // The drains' sources: an environment's output, its requests, its builds.
+        if (key.starts_with("env:") || key.starts_with("http:") || key.starts_with("build:"))
             && let Some(tap) = self.tap.lock().as_ref()
         {
             let _ = tap.try_send((Arc::from(key), line.clone()));

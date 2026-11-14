@@ -207,6 +207,8 @@ pub struct Apps {
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
     /// Log drains whose batch came back (the drainer sends the next).
     drain_done: Arc<Mutex<Vec<String>>>,
+    /// Bumped by a drain's change on this node: the drainer reads its projects' drains again.
+    drains_gen: std::sync::atomic::AtomicU64,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
     access: Mutex<HashMap<String, Option<Access>>>,
     /// Bumped by every change to the access cache: a cold read caches what it read only if
@@ -335,6 +337,7 @@ impl Apps {
             capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
+            drains_gen: std::sync::atomic::AtomicU64::new(0),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
             needs: Mutex::new(HashMap::new()),

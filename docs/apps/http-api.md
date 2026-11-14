@@ -43,7 +43,9 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/projects/{project}/notifications/{nid}/test` | | `{ ok, code, error }` (sent now, not retried) | write |
 | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` | | `Delivery[]`, newest first (50) | read |
 | `GET /v1/apps/projects/{project}/drains` | | `LogDrain[]` (the URL never returned, only its host) | read |
-| `POST /v1/apps/projects/{project}/drains` | `{ url }` (https, a public host) | 201 `LogDrain` + `secret` once | reveal (its secret comes back) |
+| `POST /v1/apps/projects/{project}/drains` | `{ url, sources?, environments?, services?, previews?, headers? }` (https, a public host; `sources` some of `runtime` (default), `http`, `build`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`) | 201 `LogDrain` + `secret` once | reveal (its secret comes back) |
+| `PATCH /v1/apps/projects/{project}/drains/{did}` | `{ sources?, environments?, services?, previews?, headers? }` (given ones replace, `headers` all of them; a new URL is a new drain) | `LogDrain` | reveal (it can send more out) |
+| `POST /v1/apps/projects/{project}/drains/{did}/test` | | `{ ok, code, error }` (one line sent now, signed and with its headers, not retried) | write |
 | `DELETE /v1/apps/projects/{project}/drains/{did}` | | 204 | write |
 | `GET /v1/apps/projects/{project}/limits` | | `SpendLimits` | read |
 | `PUT /v1/apps/projects/{project}/limits` | `{ alert_usd: number \| null, hard_usd: number \| null }` | `SpendLimits` (this month's alert and cap are decided again within 30 s) | admin (the hard limit pauses the whole project) |
@@ -473,7 +475,15 @@ type SpendLimits = { alert_usd: number | null; hard_usd: number | null; month_us
  *  webhooks are (X-Roll-Signature-256, X-Roll-Timestamp, X-Roll-Delivery the batch's id). Best
  *  effort: a batch is tried three times, then dropped; a drain that can't keep up loses its
  *  oldest lines. At most 5 a project. */
-type LogDrain = { id: string; project: string; host: string; created_at: number; secret?: string };
+type LogDrain = {
+  id: string; project: string; host: string; created_at: number; secret?: string;
+  sources: ("runtime" | "http" | "build")[]; // runtime: the instances' output and roll's lines about them; http: the access log, a request a line (text: an AccessLine); build: each deploy's build
+  environments: string[];     // only these environments' (empty: every one)
+  services: string[];         // only these services' (ids; empty: every one)
+  previews: boolean;          // preview environments' too (a drain made before this field: true)
+  headers: string[];          // the names of the headers it's sent with (values sealed, never returned)
+};
+// A batch's line: { t, source, service, service_name, environment, instance, deployment, stream, text }.
 /** A request through the proxy (`stream: "http"` lines' text, JSON). The path has no query string. */
 type AccessLine = {
   method: string; path: string; status: number; ms: number; bytes: number;

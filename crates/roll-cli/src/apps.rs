@@ -624,12 +624,35 @@ pub enum AppsCmd {
         yes: bool,
     },
     /// The project's log drains: list them, `--add <https url>` (prints its signing secret
-    /// once), or `--remove <id>`.
+    /// once), `--edit <id>`, `--test <id>`, or `--remove <id>`.
     Drains {
         #[command(flatten)]
         target: Target,
-        #[arg(long, conflicts_with = "remove")]
+        #[arg(long, conflicts_with_all = ["remove", "edit", "test"])]
         add: Option<String>,
+        /// With `--add` or `--edit`: what it's sent, comma-separated: `runtime` (the default),
+        /// `http` (a request a line), `build`.
+        #[arg(long, value_name = "SOURCES")]
+        source: Option<String>,
+        /// With `--add` or `--edit`: only this environment's (repeat it for more).
+        #[arg(long = "only-env")]
+        only_env: Vec<String>,
+        /// With `--add` or `--edit`: only this service's (a name or id; repeat it for more).
+        #[arg(long = "only-service")]
+        only_service: Vec<String>,
+        /// With `--add` or `--edit`: preview environments' too (left out by default).
+        #[arg(long)]
+        previews: bool,
+        /// With `--add` or `--edit`: a header it's sent with, `Name: value` (a vendor's API key;
+        /// sealed, never shown again). Repeatable; with `--edit` they replace its headers.
+        #[arg(long, value_name = "NAME: VALUE")]
+        header: Vec<String>,
+        /// Change a drain in place (its URL and secret stay).
+        #[arg(long, value_name = "ID", conflicts_with_all = ["remove", "test"])]
+        edit: Option<String>,
+        /// Send one a test line now (not retried) and print how it answered.
+        #[arg(long, value_name = "ID", conflicts_with = "remove")]
+        test: Option<String>,
         #[arg(long)]
         remove: Option<String>,
     },
@@ -2494,11 +2517,58 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Drains { target, add, remove } => {
+        AppsCmd::Drains { target, add, source, only_env, only_service, previews, header, edit, test, remove } => {
+            let given = source.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews || !header.is_empty();
+            if given && add.is_none() && edit.is_none() {
+                bail!("--source, --only-env, --only-service, --previews and --header go with --add or --edit");
+            }
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/projects/{}/drains", enc(&s(&svc["project"])));
-            if let Some(url) = add {
-                let d = api.post(&path, json!({ "url": url })).await?;
+            let mut settings = serde_json::Map::new();
+            if let Some(src) = source {
+                settings.insert("sources".into(), json!(src.split(',').map(str::trim).filter(|x| !x.is_empty()).collect::<Vec<_>>()));
+            }
+            if !only_env.is_empty() {
+                settings.insert("environments".into(), json!(only_env));
+            }
+            if !only_service.is_empty() {
+                settings.insert("services".into(), json!(only_service));
+            }
+            if previews {
+                settings.insert("previews".into(), json!(true));
+            }
+            if !header.is_empty() {
+                let mut h = serde_json::Map::new();
+                for line in &header {
+                    let (k, v) = line.split_once(':').ok_or_else(|| anyhow::anyhow!("--header is `Name: value`"))?;
+                    h.insert(k.trim().to_string(), json!(v.trim()));
+                }
+                settings.insert("headers".into(), Value::Object(h));
+            }
+            let row = |d: &Value| format!("{}  {}  {}{}", s(&d["id"]), s(&d["host"]), d["sources"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_default(), d["headers"].as_array().filter(|a| !a.is_empty()).map(|a| format!("  headers {}", a.iter().map(s).collect::<Vec<_>>().join(", "))).unwrap_or_default());
+            if let Some(id) = test {
+                let r = api.post(&format!("{path}/{}/test", enc(&id)), json!({})).await?;
+                if !json_out {
+                    match (r["ok"] == true, r["code"].as_u64(), r["error"].as_str()) {
+                        (true, code, _) => println!("delivered{}", code.map(|c| format!(" ({c})")).unwrap_or_default()),
+                        (false, code, error) => bail!("not delivered: {}", error.map(str::to_string).or(code.map(|c| format!("answered {c}"))).unwrap_or_else(|| "no answer".into())),
+                    }
+                    return Ok(());
+                }
+                r
+            } else if let Some(id) = edit {
+                if settings.is_empty() {
+                    bail!("nothing to change: --source, --only-env, --only-service, --previews or --header");
+                }
+                let d = api.call(reqwest::Method::PATCH, &format!("{path}/{}", enc(&id)), Some(Value::Object(settings))).await?;
+                if !json_out {
+                    println!("{}", row(&d));
+                    return Ok(());
+                }
+                d
+            } else if let Some(url) = add {
+                settings.insert("url".into(), json!(url));
+                let d = api.post(&path, Value::Object(settings)).await?;
                 if !json_out {
                     println!("{}  {}  secret {}", s(&d["id"]), s(&d["host"]), s(&d["secret"]));
                     eprintln!("the secret is shown once: check X-Roll-Signature-256 with it");
@@ -2512,7 +2582,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 let v = api.get(&path).await?;
                 if !json_out {
                     for d in v.as_array().into_iter().flatten() {
-                        println!("{}  {}", s(&d["id"]), s(&d["host"]));
+                        println!("{}", row(d));
                     }
                     return Ok(());
                 }

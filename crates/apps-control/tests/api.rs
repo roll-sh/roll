@@ -1705,14 +1705,23 @@ async fn a_log_drain_gets_the_runtime_output_signed() {
     use hmac::Mac;
     let w = world().await;
     let got: Arc<parking_lot::Mutex<Vec<(axum::http::HeaderMap, bytes::Bytes)>>> = Default::default();
-    let g = got.clone();
-    let app = axum::Router::new().route("/logs", axum::routing::post(move |h: axum::http::HeaderMap, b: bytes::Bytes| {
-        let g = g.clone();
-        async move {
-            g.lock().push((h, b));
-            StatusCode::OK
-        }
-    }));
+    let vendor: Arc<parking_lot::Mutex<Vec<(axum::http::HeaderMap, bytes::Bytes)>>> = Default::default();
+    let (g, v) = (got.clone(), vendor.clone());
+    let app = axum::Router::new()
+        .route("/logs", axum::routing::post(move |h: axum::http::HeaderMap, b: bytes::Bytes| {
+            let g = g.clone();
+            async move {
+                g.lock().push((h, b));
+                StatusCode::OK
+            }
+        }))
+        .route("/vendor", axum::routing::post(move |h: axum::http::HeaderMap, b: bytes::Bytes| {
+            let v = v.clone();
+            async move {
+                v.lock().push((h, b));
+                StatusCode::ACCEPTED
+            }
+        }));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let at = l.local_addr().unwrap();
     tokio::spawn(axum::serve(l, app).into_future());
@@ -1723,6 +1732,16 @@ async fn a_log_drain_gets_the_runtime_output_signed() {
     assert!(!call(&w.api, "GET", &base, None).await.1.to_string().contains("/logs"), "the URL never comes back");
     // A request wakes the service: its instance's output goes out.
     let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    // A vendor's drain: its key as a header (sealed, never shown), only the requests, only this service.
+    let (st, vd) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{at}/vendor"), "sources": ["http"], "services": ["api"], "headers": {"DD-API-KEY": "k-123"}}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{vd}");
+    assert_eq!((&vd["sources"], &vd["headers"]), (&json!(["http"]), &json!(["DD-API-KEY"])), "{vd}");
+    assert!(!call(&w.api, "GET", &base, None).await.1.to_string().contains("k-123"), "a header's value never comes back");
+    let (st, v) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{at}/vendor"), "headers": {"X-Roll-Signature-256": "x"}}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "roll's own headers aren't a drain's: {v}");
+    let test = call(&w.api, "POST", &format!("{base}/{}/test", vd["id"].as_str().unwrap()), None).await.1;
+    assert_eq!((&test["ok"], &test["code"]), (&json!(true), &json!(202)), "{test}");
+    vendor.lock().clear();
     visit(&w, &host(&svc["environments"][0]["url"]), "/").await;
     let mut lines = Vec::new();
     for _ in 0..200 {
@@ -1742,6 +1761,19 @@ async fn a_log_drain_gets_the_runtime_output_signed() {
     mac.update(&b);
     let want = mac.finalize().into_bytes().iter().map(|x| format!("{x:02x}")).collect::<String>();
     assert_eq!(h["x-roll-signature-256"].to_str().unwrap(), format!("sha256={want}"));
+    // The vendor got the request, with its key, and nothing else.
+    let mut sent = Vec::new();
+    for _ in 0..200 {
+        sent = vendor.lock().clone();
+        if !sent.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let (h, b) = sent.first().cloned().unwrap_or_else(|| panic!("nothing reached the vendor's drain"));
+    assert_eq!(h["dd-api-key"], "k-123");
+    let lines: Vec<Value> = String::from_utf8_lossy(&b).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert!(!lines.is_empty() && lines.iter().all(|l| l["source"] == "http"), "{lines:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

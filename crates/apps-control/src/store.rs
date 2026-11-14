@@ -632,6 +632,12 @@ impl Store {
         db.add_column("environments", "firewall", "TEXT")?;
         db.add_column("environments", "headers", "TEXT")?;
         db.add_column("environments", "paused", "INTEGER NOT NULL DEFAULT 0")?;
+        // Drains made before their filters sent every environment's runtime output: still so.
+        db.add_column("log_drains", "sources", "TEXT")?;
+        db.add_column("log_drains", "environments", "TEXT")?;
+        db.add_column("log_drains", "services", "TEXT")?;
+        db.add_column("log_drains", "previews", "INTEGER NOT NULL DEFAULT 1")?;
+        db.add_column("log_drains", "headers_sealed", "TEXT")?;
         db.add_column("domains", "redirect_to", "TEXT")?;
         Ok(Store { db, sealer })
     }
@@ -2011,30 +2017,66 @@ impl Store {
 
     // ── log drains ──
 
-    pub fn add_drain(&self, project: &str, host: &str, url: &str, secret: &str) -> Result<LogDrain> {
+    pub fn add_drain(&self, project: &str, host: &str, url: &str, secret: &str, d: &DrainSettings) -> Result<LogDrain> {
         let id = new_id("lgd");
         let now = self.now()?;
         let (u, s) = (self.sealer.seal(&format!("drain:{id}:url"), url), self.sealer.seal(&format!("drain:{id}:secret"), secret));
-        self.db.execute("INSERT INTO log_drains (id, project, host, url_sealed, secret_sealed, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![id, project, host, u, s, now])?;
-        Ok(LogDrain { id, project: project.into(), host: host.into(), created_at: now })
+        let h = self.seal_drain_headers(&id, &d.headers);
+        self.db.execute(
+            "INSERT INTO log_drains (id, project, host, url_sealed, secret_sealed, created_at, sources, environments, services, previews, headers_sealed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![id, project, host, u, s, now, to_json(&d.sources), to_json(&d.environments), to_json(&d.services), d.previews, h],
+        )?;
+        Ok(self.drains(project)?.into_iter().find(|x| x.id == id).expect("just made"))
+    }
+
+    fn seal_drain_headers(&self, id: &str, headers: &[(String, String)]) -> Option<String> {
+        (!headers.is_empty()).then(|| self.sealer.seal(&format!("drain:{id}:headers"), &serde_json::to_string(headers).expect("JSON")))
+    }
+
+    /// Its sources, filters and (when given) headers: the URL and secret stay.
+    pub fn update_drain(&self, project: &str, id: &str, d: &DrainSettings, headers: bool) -> Result<LogDrain> {
+        let n = if headers {
+            let h = self.seal_drain_headers(id, &d.headers);
+            self.db.execute(
+                "UPDATE log_drains SET sources = ?, environments = ?, services = ?, previews = ?, headers_sealed = ? WHERE id = ? AND project = ?",
+                params![to_json(&d.sources), to_json(&d.environments), to_json(&d.services), d.previews, h, id, project],
+            )?
+        } else {
+            self.db.execute(
+                "UPDATE log_drains SET sources = ?, environments = ?, services = ?, previews = ? WHERE id = ? AND project = ?",
+                params![to_json(&d.sources), to_json(&d.environments), to_json(&d.services), d.previews, id, project],
+            )?
+        };
+        if n == 0 {
+            return Err(Error::NotFound(format!("no log drain {id}")));
+        }
+        Ok(self.drains(project)?.into_iter().find(|x| x.id == id).expect("updated"))
     }
 
     pub fn drains(&self, project: &str) -> Result<Vec<LogDrain>> {
-        Ok(self.db.query("SELECT id, project, host, created_at FROM log_drains WHERE project = ? ORDER BY created_at", [project], |r| {
-            Ok(LogDrain { id: r.get(0)?, project: r.get(1)?, host: r.get(2)?, created_at: r.get(3)? })
-        })?)
+        Ok(self.drain_secrets(project)?.into_iter().map(|o| o.drain).collect())
     }
 
-    /// A project's drains with their URLs and secrets opened, to send to.
-    pub fn drain_secrets(&self, project: &str) -> Result<Vec<(LogDrain, String, String)>> {
-        let rows: Vec<(LogDrain, String, String)> = self.db.query("SELECT id, project, host, created_at, url_sealed, secret_sealed FROM log_drains WHERE project = ?", [project], |r| {
-            Ok((LogDrain { id: r.get(0)?, project: r.get(1)?, host: r.get(2)?, created_at: r.get(3)? }, r.get(4)?, r.get(5)?))
-        })?;
+    /// A project's drains with their URLs, secrets and headers opened, to send to.
+    pub fn drain_secrets(&self, project: &str) -> Result<Vec<OpenedDrain>> {
+        type Row = (String, String, String, i64, String, String, Option<String>, Option<String>, Option<String>, bool, Option<String>);
+        let rows: Vec<Row> = self.db.query(
+            "SELECT id, project, host, created_at, url_sealed, secret_sealed, sources, environments, services, previews, headers_sealed FROM log_drains WHERE project = ? ORDER BY created_at",
+            [project],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get::<_, i64>(9)? != 0, r.get(10)?)),
+        )?;
         rows.into_iter()
-            .map(|(d, u, s)| {
-                let url = self.sealer.open(&format!("drain:{}:url", d.id), &u)?;
-                let secret = self.sealer.open(&format!("drain:{}:secret", d.id), &s)?;
-                Ok((d, url, secret))
+            .map(|(id, project, host, created_at, u, s, sources, environments, services, previews, h)| {
+                let url = self.sealer.open(&format!("drain:{id}:url"), &u)?;
+                let secret = self.sealer.open(&format!("drain:{id}:secret"), &s)?;
+                let headers: Vec<(String, String)> = match h {
+                    Some(h) => serde_json::from_str(&self.sealer.open(&format!("drain:{id}:headers"), &h)?).unwrap_or_default(),
+                    None => Vec::new(),
+                };
+                let list = |j: Option<String>| -> Vec<String> { j.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default() };
+                let sources = sources.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_else(|| vec!["runtime".to_string()]);
+                let drain = LogDrain { id, project, host, created_at, sources, environments: list(environments), services: list(services), previews, headers: headers.iter().map(|(n, _)| n.clone()).collect() };
+                Ok(OpenedDrain { drain, url, secret, headers })
             })
             .collect()
     }
@@ -2132,6 +2174,24 @@ impl Store {
 }
 
 const TARGET_COLS: &str = "id, project, kind, host, events, created_at, environments, services, previews";
+
+/// A drain's sources, filters and headers, checked.
+#[derive(Clone, Debug, Default)]
+pub struct DrainSettings {
+    pub sources: Vec<String>,
+    pub environments: Vec<String>,
+    pub services: Vec<String>,
+    pub previews: bool,
+    pub headers: Vec<(String, String)>,
+}
+
+/// A drain with what sending to it needs, opened.
+pub struct OpenedDrain {
+    pub drain: LogDrain,
+    pub url: String,
+    pub secret: String,
+    pub headers: Vec<(String, String)>,
+}
 
 /// What a target follows ([`NotifyTarget::follows`]).
 pub struct TargetFilters {

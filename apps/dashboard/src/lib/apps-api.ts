@@ -598,11 +598,31 @@ export interface AppEvent {
 }
 
 /** A project's log drain: where its services' runtime output is POSTed (NDJSON). */
+export type DrainSource = "runtime" | "http" | "build";
+
+export interface DrainSettings {
+  sources?: DrainSource[];
+  environments?: string[];
+  services?: string[];
+  previews?: boolean;
+  /** `{name: value}`: a vendor's key (DD-API-KEY, Authorization); sealed. */
+  headers?: Record<string, string>;
+}
+
 export interface LogDrain {
   id: string;
   project: string;
   host: string;
   created_at: number;
+  /** What it's sent: the instances' output, the requests (a line each), the builds. */
+  sources: DrainSource[];
+  /** Only these environments' (empty: every one). */
+  environments: string[];
+  /** Only these services' (ids; empty: every one). */
+  services: string[];
+  previews: boolean;
+  /** The names of the headers it's sent with; their values are sealed, never shown. */
+  headers: string[];
   /** Only in the answer that made it. */
   secret?: string;
 }
@@ -702,7 +722,10 @@ export const appsApi = {
   environment: (id: string, e: string) => call<Environment>("GET", env(id, e)),
   notifyTargets: (project: string) => call<NotifyTarget[]>("GET", `/v1/apps/projects/${enc(project)}/notifications`),
   drains: (project: string) => call<LogDrain[]>("GET", `/v1/apps/projects/${enc(project)}/drains`),
-  addDrain: (project: string, url: string) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, { url }),
+  addDrain: (project: string, body: { url: string } & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
+  /** Its sources, filters and headers (given ones replace; `headers` replaces them all); its URL and secret stay. */
+  updateDrain: (project: string, id: string, body: DrainSettings) => call<LogDrain>("PATCH", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`, body),
+  testDrain: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}/test`),
   removeDrain: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`),
   limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
   setLimits: (project: string, body: { alert_usd: number | null; hard_usd: number | null }) => call<SpendLimits>("PUT", `/v1/apps/projects/${enc(project)}/limits`, body),
