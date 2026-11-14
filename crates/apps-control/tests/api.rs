@@ -2373,6 +2373,8 @@ async fn a_private_caller_wakes_a_sleeping_service_and_keeps_it_awake() {
     let id = svc["id"].as_str().unwrap().to_string();
     let base = format!("/v1/apps/services/{id}/environments/production");
     let state = || async { call(&w.api, "GET", &base, None).await.1["state"].as_str().unwrap_or("").to_string() };
+    let (logs, logkey) = (&w.apps.logs, format!("env:{id}/production"));
+    let logkey = &logkey;
     let until = |want: &'static str| async move {
         for _ in 0..100 {
             if state().await == want {
@@ -2380,17 +2382,27 @@ async fn a_private_caller_wakes_a_sleeping_service_and_keeps_it_awake() {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        panic!("never {want}: {}", state().await);
+        let log: Vec<String> = logs.follow(logkey, 30).0.into_iter().map(|l| l.text).collect();
+        panic!("never {want}: {} {log:?}", state().await);
     };
-    assert_eq!(state().await, "stopped");
+    // Live in the store a moment before the environment has it.
+    until("stopped").await;
+    for _ in 0..100 {
+        if !w.fake.instances(&id).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let name = w.fake.instances(&id)[0].0.clone();
     let live = w.apps.live(&id, "production");
     // A caller connects while it's asleep.
     w.fake.connect(&name);
     until("running").await;
-    // Connected: in use, however long since rolld's last request.
+    // Connected: in use, however long since rolld's last request. Checked in its last two idle
+    // seconds before it would freeze (29 s of its 30), as the check runs every second there; a
+    // jump past 30 would let the reaper's own tick freeze it first.
     w.fake.set_private(&name, 1);
-    live.backdate(Duration::from_secs(31));
+    live.backdate(Duration::from_secs(29));
     live.answer_private(true).await;
     live.tick().await;
     assert_eq!(state().await, "running");
