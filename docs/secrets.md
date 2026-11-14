@@ -1217,6 +1217,24 @@ minutes.
   refused. Key fetches are one at a time per issuer, and a failed one isn't retried for 30 s.
   Logins are capped at 120 a minute per identity and 240 per client address (429 `rate_limited`),
   counted per node before any work.
+- **Pinned keys, for an issuer roll can't reach.** A cluster signs its service accounts' tokens as
+  `https://kubernetes.default.svc.cluster.local` (k3s, kind, kubeadm, a private EKS endpoint), an
+  issuer roll can't and shouldn't fetch. An identity can carry the issuer's public keys instead
+  (`jwks`, a JWKS document up to 64 KiB with at least one RS256 or ES256 key; as Vault's
+  `jwt_validation_pubkeys`): the issuer is then only compared with the token's `iss`, never
+  fetched, and only those keys verify a login (`pinned_keys` counts them). When the cluster's keys
+  change, delete the identity and add it again.
+
+  ```sh
+  kubectl get --raw /openid/v1/jwks > jwks.json
+  roll secrets identities add pods --jwks jwks.json --audience roll --for-env production \
+    --issuer "$(kubectl get --raw /.well-known/openid-configuration | jq -r .issuer)" \
+    --subject system:serviceaccount:shop:web
+  ```
+
+  Checked on k3s 1.33: a pod running as `shop/web` with a projected token for audience `roll`
+  (`ROLL_OIDC_TOKEN_FILE`) ran `roll run` with production's values, and the audit log names
+  `system:serviceaccount:shop:web`.
 - **Who makes them.** Identities are made by people (or the operator), never by a token or a
   login; a login can't create tokens either, so nothing it makes outlives it.
 - **Login.** `POST /v1/secrets/login {identity, token}` (public: the token is the credential)
@@ -1482,8 +1500,8 @@ type Compare = { from: string; to: string; path: string; rows: { key: string; st
 type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number }[]; approvals: number; approvals_needed: number; applied_seq: number | null };
 type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
 type Lease = { id: string; environment: string; path: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
-type Identity = { id: string; name: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null; allowed_ips: string[] | null };
-type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[] };
+type Identity = { id: string; name: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null; allowed_ips: string[] | null; pinned_keys?: number };
+type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; jwks?: string };
 type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; created_by: string; last_used_at: number | null; prefix: string; allowed_ips: string[] | null };
 type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 type Action = "read" | "reveal" | "write" | "delete" | "admin";

@@ -366,6 +366,8 @@ impl Secrets {
         db.ensure_schema(identities::SCHEMA)?;
         db.ensure_schema(exports::SCHEMA)?;
         db.add_column("tokens", "identity", "TEXT")?;
+        // An identity's pinned keys: a JWKS, for an issuer roll doesn't fetch (identities.rs).
+        db.add_column("identities", "jwks", "TEXT")?;
         // Typed keys (required.rs).
         db.add_column("required", "type", "TEXT")?;
         db.add_column("required", "pattern", "TEXT")?;

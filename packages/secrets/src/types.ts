@@ -195,8 +195,11 @@ export type Identity = {
   last_subject: string | null;
   /** Client addresses (CIDRs) a login works from; null: any. */
   allowed_ips: string[] | null;
+  /** How many keys it pins, when it carries its issuer's keys (a cluster roll can't reach). */
+  pinned_keys?: number;
 };
-export type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[] };
+/** `jwks`: the issuer's keys (a JWKS document as text); then the issuer is never fetched. */
+export type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; jwks?: string };
 export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 export type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null };
 /** `since`: rows at or after this time (ms); `before`: rows older than this id. */

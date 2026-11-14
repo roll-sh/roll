@@ -623,6 +623,10 @@ pub enum Identities {
         /// Only log in (and use the token) from this address or CIDR (repeatable).
         #[arg(long = "allow-ip")]
         allow_ips: Vec<String>,
+        /// The issuer's keys (a JWKS file, `-` for stdin), for an issuer roll can't reach: a
+        /// cluster's own (`kubectl get --raw /openid/v1/jwks`). Then the issuer is never fetched.
+        #[arg(long, value_name = "FILE")]
+        jwks: Option<String>,
     },
     /// Delete an identity; the tokens it gave out stop working.
     Rm { id: String },
@@ -1349,10 +1353,11 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 for i in v.as_array().into_iter().flatten() {
                     let list = |x: &Value| x.as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_else(|| "all".into());
                     let used = i["last_used_at"].as_i64().map(|at| format!("{} by {}", ago(at), s(&i["last_subject"]))).unwrap_or_else(|| "never".into());
-                    println!("{}  {:<16} {}  {}  envs {}  {}  {} min  used {used}", s(&i["id"]), s(&i["name"]), s(&i["issuer"]), s(&i["subject"]), list(&i["environments"]), list(&i["actions"]), i["ttl_minutes"]);
+                    let keys = i["pinned_keys"].as_u64().map(|n| format!(" ({n} pinned key{})", if n == 1 { "" } else { "s" })).unwrap_or_default();
+                    println!("{}  {:<16} {}{keys}  {}  envs {}  {}  {} min  used {used}", s(&i["id"]), s(&i["name"]), s(&i["issuer"]), s(&i["subject"]), list(&i["environments"]), list(&i["actions"]), i["ttl_minutes"]);
                 }
             }
-            Identities::Add { name, github, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips } => {
+            Identities::Add { name, github, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips, jwks } => {
                 let (issuer, subject) = match (github, issuer, subject) {
                     (Some(repo), _, _) => ("https://token.actions.githubusercontent.com".to_string(), format!("repo:{repo}:*")),
                     (None, Some(i), Some(s)) => (i, s),
@@ -1376,6 +1381,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 if !allow_ips.is_empty() {
                     body["allowed_ips"] = json!(allow_ips);
+                }
+                if let Some(f) = jwks {
+                    let doc = if f == "-" { std::io::read_to_string(std::io::stdin().take(1 << 20))? } else { std::fs::read_to_string(&f).with_context(|| format!("reading {f}"))? };
+                    body["jwks"] = json!(doc);
                 }
                 let v = c.call(Method::POST, &format!("{}/identities", c.base()), Some(body)).await?;
                 if json_out {
