@@ -531,6 +531,11 @@ async fn run() -> anyhow::Result<()> {
     if let Some(c) = &code {
         router = c.router(router);
     }
+    // roll apps' public traffic another node forwarded to this one (a service it owns): to apps'
+    // public router, not the API (which has no route for an app's paths).
+    if let Some(a) = &apps {
+        router = apps_control::public::with_forwarded(router, a.apps.clone());
+    }
     // In a cluster, requests from other nodes are verified first.
     if cluster.backend_name() != "memory" {
         router = router.layer(axum::middleware::from_fn_with_state(cluster.clone(), roll_cluster::accept_forwarded));

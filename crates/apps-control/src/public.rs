@@ -60,8 +60,9 @@ pub fn port_router(apps: Arc<Apps>, service: String, env: String) -> axum::Route
 /// the first node, so on any later hop they're a node's own.
 fn rewritten_to(req: &mut Request) -> Option<(String, String)> {
     if req.extensions().get::<roll_cluster::Forwarded>().is_none() {
-        req.headers_mut().remove(REWRITE_TO);
-        req.headers_mut().remove(VIA_SITE);
+        for h in [REWRITE_TO, VIA_SITE, PUBLIC] {
+            req.headers_mut().remove(h);
+        }
         return None;
     }
     let to = req.headers().get(REWRITE_TO)?.to_str().ok()?;
@@ -69,8 +70,12 @@ fn rewritten_to(req: &mut Request) -> Option<(String, String)> {
     Some((s.to_string(), e.to_string()))
 }
 
-/// Run the request where the service lives (`deployment`: one deployment's own URL).
-pub async fn serve(apps: Arc<Apps>, service: String, env: String, deployment: Option<String>, req: Request) -> Response {
+/// Run the request where the service lives (`deployment`: one deployment's own URL). A forward
+/// to its owner is marked as public traffic ([`PUBLIC`]): the owner's internal API hands it to
+/// this router ([`with_forwarded`]), which finds the service again by its `Host` (or a rewrite's
+/// [`REWRITE_TO`]).
+pub async fn serve(apps: Arc<Apps>, service: String, env: String, deployment: Option<String>, mut req: Request) -> Response {
+    req.headers_mut().insert(HeaderName::from_static(PUBLIC), HeaderValue::from_static("1"));
     let cluster = apps.deps.cluster.clone();
     cluster
         .dispatch(&lease_key(&service), req, move |req, _guard| async move { proxy(apps, &service, &env, deployment.as_deref(), req).await })
@@ -146,6 +151,24 @@ async fn rewrite_of(apps: &Arc<Apps>, key: String, path: String, query: Option<S
 const VIA_SITE: &str = "x-roll-via-site";
 /// The service and environment a rewrite sends a request to, for the node that owns it.
 const REWRITE_TO: &str = "x-roll-rewrite-to";
+/// On a forward: public traffic for a service this node owns, not a call to its API.
+const PUBLIC: &str = "x-roll-apps-public";
+
+/// rolld's internal API (where [`Cluster::dispatch`](roll_cluster::Cluster::dispatch) forwards to
+/// a service's owner), with roll apps' public traffic that another node sent here (signed, and
+/// marked [`PUBLIC`] by roll's own public router) handed to [`router`] instead of the API: the
+/// API has no route for an app's paths. Layered inside `accept_forwarded`, which says a request
+/// came from a node.
+pub fn with_forwarded(api: axum::Router, apps: Arc<Apps>) -> axum::Router {
+    api.layer(axum::middleware::from_fn_with_state(router(apps), forwarded_public))
+}
+
+async fn forwarded_public(axum::extract::State(public): axum::extract::State<axum::Router>, req: Request, next: axum::middleware::Next) -> Response {
+    if req.extensions().get::<roll_cluster::Forwarded>().is_some() && req.headers().contains_key(PUBLIC) {
+        return tower::ServiceExt::oneshot(public, req).await.unwrap_or_else(|e| match e {});
+    }
+    next.run(req).await
+}
 
 /// Send `req` to the project's service `to.0` in `env` at `to.1`, where that service lives,
 /// through all of its own gates (access, allow list, firewall, rate limit, maintenance).
