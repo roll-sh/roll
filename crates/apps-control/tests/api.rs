@@ -1110,6 +1110,11 @@ async fn changes_are_an_audit_trail_without_values() {
     assert_eq!(trail[2]["data"]["set"], json!(["API_KEY"]));
     assert_eq!(trail[0]["data"]["changed"], json!(["run.min_instances"]));
     assert!(!trail.to_string().contains("sk-s3cr3t"), "a value never reaches the trail");
+    // Its timeline: what roll did too (the deploy that went live), never a value either.
+    let (_, all) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity?all=1"), None).await;
+    let kinds: Vec<&str> = all.as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert!(kinds.contains(&"deploy.active") && kinds.contains(&"audit.settings"), "{kinds:?}");
+    assert!(!all.to_string().contains("sk-s3cr3t"));
 }
 
 /// A project past its alert gets `spend.alert` once; past its hard limit it's capped: its

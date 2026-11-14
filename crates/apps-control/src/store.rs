@@ -1037,9 +1037,12 @@ impl Store {
     }
 
     /// A service's audit trail (`audit.*` events), newest first.
-    pub fn activity(&self, service: &str, limit: usize) -> Result<Vec<Event>> {
+    /// A service's events, newest first: the audit trail (what people changed), or (`all`) every
+    /// kind (deploys, failures, crash loops, alerts, domains) as one timeline.
+    pub fn activity(&self, service: &str, limit: usize, all: bool) -> Result<Vec<Event>> {
+        let only = if all { "" } else { " AND kind LIKE 'audit.%'" };
         Ok(self.db.query(
-            "SELECT seq, at, kind, service, env, deployment, data FROM events WHERE service = ? AND kind LIKE 'audit.%' ORDER BY seq DESC LIMIT ?",
+            &format!("SELECT seq, at, kind, service, env, deployment, data FROM events WHERE service = ?{only} ORDER BY seq DESC LIMIT ?"),
             params![service, limit.clamp(1, 500) as i64],
             |r| {
                 let data: String = r.get(6)?;

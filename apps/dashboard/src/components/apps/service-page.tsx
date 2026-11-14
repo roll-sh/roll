@@ -31,8 +31,9 @@ import { SettingsTab } from "./settings";
 import { clock, RunnerError, StateBadge, SureButton, until, useRunner, type Runner } from "./shared";
 import { UsageTab } from "./usage";
 import { RedeployBanner, VariablesTab } from "./variables";
+import { EventsTab } from "./activity";
 
-export const SERVICE_TABS = ["deployments", "logs", "metrics", "variables", "jobs", "shell", "domains", "usage", "settings"] as const;
+export const SERVICE_TABS = ["deployments", "logs", "metrics", "events", "variables", "jobs", "shell", "domains", "usage", "settings"] as const;
 export type ServiceTab = (typeof SERVICE_TABS)[number];
 
 const TAB_LABEL: Record<ServiceTab, string> = {
@@ -44,6 +45,7 @@ const TAB_LABEL: Record<ServiceTab, string> = {
   shell: "Shell",
   domains: "Domains",
   usage: "Usage",
+  events: "Events",
   settings: "Settings",
 };
 
@@ -587,6 +589,8 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           <DomainsTab service={service.id} env={env!} runner={runner} />
         ) : tab === "usage" ? (
           <UsageTab service={service.id} env={envName} prices={overview?.prices ?? null} />
+        ) : tab === "events" ? (
+          <EventsTab service={service.id} changed={`${data.deploys?.[0]?.id ?? ""}:${data.deploys?.[0]?.status ?? ""}:${env?.state ?? ""}`} />
         ) : (
           <SettingsTab
             service={service}

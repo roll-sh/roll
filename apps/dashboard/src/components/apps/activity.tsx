@@ -35,6 +35,33 @@ export function describe(e: AppEvent): string {
       return `set the registry login${d.server ? ` for ${String(d.server)}` : ""}`;
     case "audit.registry.removed":
       return "removed the registry login";
+    // What roll did or saw (its timeline).
+    case "deploy.active":
+      return `put a deployment live${where}`;
+    case "deploy.failed":
+      return `saw a deploy fail${where}: ${String(d.error ?? "no reason given")}`;
+    case "crash_loop":
+      return `saw it crash ${String(d.crashes ?? "")} times in 10 minutes${where}: ${String(d.last_error ?? "")}`;
+    case "cron.failed":
+      return `saw a scheduled run fail${where}${d.exit_code != null ? ` (exit ${String(d.exit_code)})` : ""}`;
+    case "job.failed":
+      return `saw a job fail${where}${d.exit_code != null ? ` (exit ${String(d.exit_code)})` : ""}`;
+    case "alert.memory":
+    case "alert.errors":
+    case "alert.latency":
+    case "alert.log":
+      return `alerted: ${e.kind.slice(6)} at ${String(d.value ?? d.count ?? "")} (the alert is at ${String(d.threshold ?? "")})${where}`;
+    case "domain.active":
+      return `put ${String(d.hostname)} live${where}`;
+    case "domain.expiring":
+      return `warned ${String(d.hostname)} is removed tomorrow unless it verifies`;
+    case "domain.expired":
+      return `removed ${String(d.hostname)}: unverified for 7 days`;
+    case "domain.tls_failed":
+      return `saw ${String(d.hostname)}'s certificate fail: ${String(d.error ?? "")}`;
+    case "spend.alert":
+    case "spend.limit":
+      return e.kind === "spend.limit" ? "paused the project at its spending limit" : "alerted on the project's spend";
     default:
       return e.kind.replace(/^audit\./, "");
   }
@@ -72,3 +99,42 @@ export function ActivityPanel({ service }: { service: string }) {
     </Panel>
   );
 }
+
+/**
+ * A service's timeline (Render's Events): what roll did and saw (deploys, failures, crash loops,
+ * alerts, domains) and what people changed, newest first, refreshed as it changes.
+ */
+export function EventsTab({ service, changed }: { service: string; changed: string }) {
+  const [events, setEvents] = useState<AppEvent[] | null>(null);
+  useEffect(() => {
+    appsApi.activity(service, true).then(setEvents, () => setEvents([]));
+  }, [service, changed]);
+  return (
+    <Panel title="Events">
+      {events === null ? (
+        <p className="px-5 py-4 text-[13px] text-subtle">
+          <span className="shimmer">Loading…</span>
+        </p>
+      ) : events.length === 0 ? (
+        <p className="px-5 py-4 text-[13px] text-muted">Nothing yet. Deploys, failures, crash loops, alerts, domains and changes people make show here.</p>
+      ) : (
+        <ul className="divide-y divide-line">
+          {events.map((e) => {
+            const bad = /failed|crash_loop|alert\.|expired|spend\.limit/.test(e.kind);
+            const who = e.kind.startsWith("audit.") ? (typeof e.data?.actor === "string" ? (e.data.actor as string) : "someone") : "roll";
+            return (
+              <li key={e.seq} className="flex gap-3 px-5 py-2.5 text-[12.5px]">
+                <span className="shrink-0 font-mono text-[11.5px] text-subtle tabular-nums">{clock(e.at, true)}</span>
+                <i className={`mt-1.5 size-1.5 shrink-0 rounded-full ${bad ? "bg-danger" : who === "roll" ? "bg-subtle" : "bg-accent"}`} />
+                <span className="min-w-0 flex-1 break-words">
+                  <span className="text-fg">{who}</span> <span className="text-muted">{describe(e)}</span>
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </Panel>
+  );
+}
+

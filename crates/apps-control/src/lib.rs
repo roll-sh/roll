@@ -2004,11 +2004,11 @@ impl Apps {
     }
 
     /// `GET /v1/apps/services/{id}/activity`: its audit trail, newest first.
-    pub async fn activity(self: &Arc<Self>, service: &str) -> Result<Vec<Event>> {
+    pub async fn activity(self: &Arc<Self>, service: &str, all: bool) -> Result<Vec<Event>> {
         let sid = service.to_string();
         self.db(move |s| {
             s.service(&sid)?;
-            s.activity(&sid, 200)
+            s.activity(&sid, 200, all)
         })
         .await
     }

@@ -278,8 +278,14 @@ async fn links(State(apps): S, Path(id): Path<String>) -> R {
     ok(apps.links(&id).await?)
 }
 
-async fn activity(State(apps): S, Path(id): Path<String>) -> R {
-    ok(apps.activity(&id).await?)
+#[derive(Deserialize)]
+struct ActivityQuery {
+    /// Every kind of event, not only the audit trail: the service's timeline.
+    all: Option<String>,
+}
+
+async fn activity(State(apps): S, Path(id): Path<String>, Query(q): Query<ActivityQuery>) -> R {
+    ok(apps.activity(&id, truthy(&q.all)).await?)
 }
 
 async fn put_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {

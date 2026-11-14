@@ -665,7 +665,8 @@ export const appsApi = {
   remove: (id: string) => call<null>("DELETE", svc(id)),
 
   links: (id: string) => call<Link[]>("GET", `${svc(id)}/links`),
-  activity: (id: string) => call<AppEvent[]>("GET", `${svc(id)}/activity`),
+  /** `all`: every kind of event (its timeline), not only what people changed. */
+  activity: (id: string, all = false) => call<AppEvent[]>("GET", `${svc(id)}/activity${qs({ all: all || undefined })}`),
   link: (id: string, kind: LinkKind, ref: string, prefix?: string) =>
     call<Link>("PUT", `${svc(id)}/links/${kind}/${enc(ref)}`, prefix ? { prefix } : {}),
   unlink: (id: string, kind: LinkKind, ref: string) => call<null>("DELETE", `${svc(id)}/links/${kind}/${enc(ref)}`),
