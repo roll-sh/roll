@@ -163,6 +163,8 @@ pub fn render_template(ctx: &Ctx, body: &Map, id_override: Option<&str>) -> EsRe
     match crate::json::parse(out.as_bytes()) {
         Ok(Some(v)) => Ok(v),
         Ok(None) => Ok(Value::Obj(Map::new())),
+        // A template that renders to truncated JSON fails as Jackson's end of file.
+        Err(e) if e.eof => Err(EsError::from(e)),
         Err(e) => Err(EsError::x_content_parse_bare(e.to_string())),
     }
 }
@@ -203,7 +205,8 @@ pub async fn search_template(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body_map()?.ok_or_else(|| EsError::action_request_validation(&["template is missing".into()]))?;
     let rendered = render_template(ctx, &body, None)?;
     crate::xpack::security::check_lookups(ctx, Some(&rendered))?;
-    let explain = body.get("explain").and_then(Value::as_bool);
+    // The URL's `explain` wins over the body's, as on `_search`.
+    let explain = if ctx.query("explain").is_some() { Some(ctx.bool_param("explain", false)?) } else { body.get("explain").and_then(Value::as_bool) };
     let profile = body.get("profile").and_then(Value::as_bool);
     let mut req = super::parse_request(ctx, Some(&rendered), None)?;
     crate::xpack::inference::query::rewrite_request(ctx, &mut req).await?;
@@ -224,6 +227,16 @@ pub async fn msearch_template(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let data = ctx.body.clone();
     let lines: Vec<&[u8]> = data.split(|b| *b == b'\n').filter(|l| !l.iter().all(|b| b.is_ascii_whitespace())).collect();
     let default_index = ctx.path_param("index").map(str::to_string);
+    // `MultiSearchTemplateRequest.validate`: every search names a template, or none runs.
+    for pair in lines.chunks(2) {
+        if let [_, b] = pair
+            && let Ok(Some(Value::Obj(body))) = crate::json::parse(b)
+            && body.get("id").is_none()
+            && body.get("source").is_none_or(|s| matches!(s, Value::Str(t) if t.is_empty()))
+        {
+            return Err(EsError::action_request_validation(&["template is missing".into()]));
+        }
+    }
     let mut responses = Vec::new();
     for pair in lines.chunks(2) {
         let [h, b] = pair else { break };

@@ -26,21 +26,21 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
 - Of the 3808 tests that pass on Elasticsearch 9.5.5 (and run here), roll passes **3808** (100%); every x-pack clients test passes.
   <!-- test-search: roll >= 3810 -->
 - Elasticsearch's module, plugin and x-pack YAML suites outside `test/free` (67 suites, 6,349 tests;
-  [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 5,153, **4,992 of
+  [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 5,155, **4,994 of
   the 5,541** that pass on Elasticsearch 9.5.5 (90%), each run like its suite's own test cluster (a
-  full run of every suite at `1dce30b61` plus the dot-prefix warnings, 2026-11-14). 30 suites pass
-  every test Elasticsearch passes. What's left, largest first: x-pack `platinum` (1,064 of 1,412;
-  machine learning is most of it), plugins roll doesn't ship (the `analysis-icu`, `-kuromoji`,
-  `-nori`, `-phonetic`, `-smartcn`, `-stempel` and `-ukrainian` analyzers, `mapper-annotated-text`,
-  `-murmur3` and `-size`, `ingest-attachment`, `ingest-otel`, `prometheus`), `apm-data`'s templates
-  and pipelines (1 of 26), cross-cluster replication, snapshot lifecycle management and
-  `reindex-management` (none), `eql` (27 of 39), `mapper-extras` (133 of 143: `match_only_text`
-  synthetic source, `search_as_you_type` highlighting), `mapper-unsigned-long` (33 of 34: a `terms`
-  aggregation across `long` and `unsigned_long` indices), `logsdb` (225 of 234: `_ignored_source`
-  binary entries, the `@timestamp` doc values skipper), runtime fields (247 of 248: highlighting
-  them). In `platinum` besides machine learning: `geo_shape` runtime fields, `geo_bounds` of shapes
-  crossing the dateline, dateline-crossing `geohex` cells in the `geo_grid` processor, synthetic
-  `_source` order of `counted_keyword` values.
+  full run of every suite at `1dce30b61` plus the dot-prefix warnings, 2026-11-14; `lang-mustache`
+  rerun since). 30 suites pass every test Elasticsearch passes. What's left, largest first: x-pack
+  `platinum` (1,064 of 1,412; machine learning is most of it), plugins roll doesn't ship (the
+  `analysis-icu`, `-kuromoji`, `-nori`, `-phonetic`, `-smartcn`, `-stempel` and `-ukrainian`
+  analyzers, `mapper-annotated-text`, `-murmur3` and `-size`, `ingest-attachment`, `ingest-otel`,
+  `prometheus`), `apm-data`'s templates and pipelines (1 of 26), cross-cluster replication, snapshot
+  lifecycle management and `reindex-management` (none), `eql` (27 of 39), `mapper-extras` (133 of
+  143: `match_only_text` synthetic source, `search_as_you_type` highlighting),
+  `mapper-unsigned-long` (33 of 34: a `terms` aggregation across `long` and `unsigned_long`
+  indices), `logsdb` (225 of 234: `_ignored_source` binary entries, the `@timestamp` doc values
+  skipper), runtime fields (247 of 248: highlighting them). In `platinum` besides machine learning:
+  `geo_shape` runtime fields, `geo_bounds` of shapes crossing the dateline, dateline-crossing
+  `geohex` cells in the `geo_grid` processor, synthetic `_source` order of `counted_keyword` values.
 - The OpenSearch 3.9.0 suite (opensearch dialect): 1455 of 1506 pass — every test that passes
   on a real single-node OpenSearch 3.9.0 (`crates/search-yaml/baseline/opensearch-3.9.0.txt`,
   re-checked against OpenSearch 3.9.0 in Docker); the other 51 are environment skips
@@ -222,7 +222,7 @@ the discovery/store plugins.
 | `ingest-otel` | `modules/ingest-otel` | plain | 13 | 13 | 0 | 0 | 13 |
 | `ip-location` | `modules/ip-location` | plain | 4 | 1 | 0 | 0 | 1 |
 | `lang-expression` | `modules/lang-expression` | plain | 3 | 3 | 3 | 3 | 0 |
-| `lang-mustache` | `modules/lang-mustache` | plain | 21 | 21 | 18 | 18 | 3 |
+| `lang-mustache` | `modules/lang-mustache` | plain | 21 | 21 | 20 | 20 | 1 |
 | `lang-painless` | `modules/lang-painless` | plain | 345 | 342 | 337 | 337 | 5 |
 | `mapper-extras` | `modules/mapper-extras` | plain | 143 | 143 | 133 | 133 | 10 |
 | `parent-join` | `modules/parent-join` | plain | 27 | 24 | 24 | 24 | 0 |
@@ -278,7 +278,7 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | **6,349** | **5,541** | **5,153** | **4,992** | **549** |
+| **total** | | | **6,349** | **5,541** | **5,155** | **4,994** | **547** |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
@@ -286,7 +286,7 @@ the discovery/store plugins.
 <!-- test-search: dot-prefix-validation >= 6 -->
 <!-- test-search: ingest-common >= 175 -->
 <!-- test-search: lang-expression >= 3 -->
-<!-- test-search: lang-mustache >= 18 -->
+<!-- test-search: lang-mustache >= 20 -->
 <!-- test-search: lang-painless >= 337 -->
 <!-- test-search: mapper-extras >= 133 -->
 <!-- test-search: parent-join >= 24 -->
