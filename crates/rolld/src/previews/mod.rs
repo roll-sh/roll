@@ -49,6 +49,7 @@ pub fn start(
     workspace: Arc<roll_workspace::Workspace>,
     cluster: Arc<roll_cluster::Cluster>,
     on: Products,
+    apps: Option<Arc<apps_control::Apps>>,
 ) -> anyhow::Result<Running> {
     let store = open_store(args, home)?;
     let api = Api::new(args.api);
@@ -103,7 +104,14 @@ pub fn start(
         workspace.clone(),
         source.clone(),
         branchers,
-        Arc::new(Services { apps: RollApps::new(api.clone()), runtime: runtime.clone() }),
+        // roll apps' instances are screenshotted where roll apps says they run (`Apps::reachable`).
+        // On one node only for now: on a fleet an instance runs on its service's holder, which
+        // needn't be the preview's.
+        Arc::new(Services {
+            apps: RollApps::new(api.clone()),
+            runtime: runtime.clone(),
+            reach: apps.filter(|_| !clustered).map(|a| Arc::new(services::AppsReach(a)) as Arc<dyn services::Reach>),
+        }),
         Arc::new(Secrets(api.clone())),
         leader,
     );

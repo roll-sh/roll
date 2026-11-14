@@ -229,6 +229,34 @@ fn variables_patch(before: &Value, mut set: serde_json::Map<String, Value>) -> V
 pub struct Services {
     pub apps: RollApps,
     pub runtime: Arc<roll_previews::runtime::Runtime>,
+    /// Where roll apps' instances can be screenshotted (`None`: they can't, so a project on roll
+    /// apps gets no screenshots and no baseline).
+    pub reach: Option<Arc<dyn Reach>>,
+}
+
+/// Where a roll apps instance can be screenshotted (roll apps' `Apps::reachable`): its container
+/// on this host and the port the app listens on inside it, the instance woken and kept awake
+/// while the answer lives. `None` where there's nothing to join (Fargate).
+#[async_trait]
+pub trait Reach: Send + Sync {
+    async fn reach(&self, service: &str, env: &str) -> anyhow::Result<Option<Reached>>;
+}
+
+/// roll apps' own (`Apps::reachable`): the instance's container and port, its lease held.
+pub struct AppsReach(pub Arc<apps_control::Apps>);
+
+#[async_trait]
+impl Reach for AppsReach {
+    async fn reach(&self, service: &str, env: &str) -> anyhow::Result<Option<Reached>> {
+        Ok(self.0.reachable(service, env).await?.map(|r| Reached { container: r.container.clone(), port: r.port, hold: Box::new(r) }))
+    }
+}
+
+pub struct Reached {
+    pub container: String,
+    pub port: u16,
+    /// Keeps the instance awake until dropped.
+    pub hold: Box<dyn std::any::Any + Send + Sync>,
 }
 
 impl Services {
@@ -295,10 +323,17 @@ impl roll_previews::ports::Apps for Services {
     }
 
     async fn screenshot(&self, preview: &str, service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
-        match self.apps.find(preview, service).await? {
-            Some(_) => Ok(None),
-            None => self.runtime.screenshot(preview, service, opts).await,
-        }
+        let Some((id, env)) = self.apps.find(preview, service).await? else { return self.runtime.screenshot(preview, service, opts).await };
+        // A roll apps instance: the same browser run, in its own network, held awake meanwhile.
+        let Some(reach) = &self.reach else { return Ok(None) };
+        let Some(at) = reach.reach(&id, &env).await? else { return Ok(None) };
+        let shot = self.runtime.screenshot_in(&at.container, at.port, opts).await;
+        drop(at.hold);
+        shot.map(Some)
+    }
+
+    fn screenshots_apps(&self) -> bool {
+        self.reach.is_some()
     }
 
     fn status(&self, preview: &str, service: &str) -> Option<roll_previews::ServiceState> {

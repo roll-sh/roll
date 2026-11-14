@@ -496,7 +496,7 @@ async fn run() -> anyhow::Result<()> {
                 queues: queues.is_some(),
                 tasks: tasks.is_some(),
             };
-            let p = previews::start(&args, &home, c, workspace.clone(), cluster.clone(), on_products)?;
+            let p = previews::start(&args, &home, c, workspace.clone(), cluster.clone(), on_products, apps.as_ref().map(|a| a.apps.clone()))?;
             router = router.merge(roll_previews::api::router(p.engine.clone()));
             Some(p.runtime)
         }

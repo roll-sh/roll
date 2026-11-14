@@ -348,6 +348,11 @@ pub trait Apps: Send + Sync {
     async fn screenshot(&self, _preview: &str, _service: &str, _opts: &ShotOptions) -> anyhow::Result<Option<Shot>> {
         Ok(None)
     }
+    /// Whether services run by the project's app platform (a `catalog`) can be screenshotted too,
+    /// so a project there gets a baseline.
+    fn screenshots_apps(&self) -> bool {
+        false
+    }
     /// What it's doing on this node (`None`: never started here).
     fn status(&self, preview: &str, service: &str) -> Option<ServiceState>;
 }

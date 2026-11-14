@@ -467,7 +467,12 @@ api PUT "/v1/previews/projects/$PRJ/settings" '{"visual_review":"required"}' >/d
 REVIEW=$(api GET "/v1/previews/$PV" | jq_ "(d.get('visual_review') or {}).get('state')")
 [ "$REVIEW" = changed ] || { echo "a page that differs from main's should wait for a review: $REVIEW"; exit 1; }
 # Required: the change can't land in roll meanwhile.
-BLOCKED=$(api GET "/v1/code/changes/$CHG" | jq_ "[b['kind'] for b in d.get('blockers', [])]")
+# (roll code hears of the rule with the preview's next report.)
+for _ in $(seq 1 120); do
+  BLOCKED=$(api GET "/v1/code/changes/$CHG" | jq_ "[b['kind'] for b in d.get('blockers', [])]")
+  case "$BLOCKED" in *visual*) break;; esac
+  sleep 0.5
+done
 case "$BLOCKED" in *visual*) ;; *) echo "a required visual review should keep the change from landing: $BLOCKED"; exit 1;; esac
 # Accepting what wasn't seen (an older screenshot's head) is refused; what was, accepted.
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$PV/visual/accept" -H 'content-type: application/json' -d '{"head":"cs_not_this_one"}')" = 409 ] || { echo "accepting an older screenshot should be refused"; exit 1; }
