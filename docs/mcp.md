@@ -419,7 +419,9 @@ waits on a sibling PR reaching main is last.
    twice: a token's one-resource request 83–115 µs p50 with it, 105–116 µs without).
 2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions.
-3. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
+3. **The operator's steps:** where the API listener can be reached other than through the edge,
+   set `ROLL_TRUSTED_PROXIES` to the edge's or load balancer's addresses (the cloud deploy, with no
+   thread running now, is where); and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
 4. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
