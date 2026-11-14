@@ -190,7 +190,7 @@ pub fn with_forwarded(api: axum::Router, apps: Arc<Apps>) -> axum::Router {
     let route = axum::Router::new()
         .route(INTERNAL, axum::routing::any(forwarded_public))
         .with_state(apps)
-        .layer(axum::middleware::from_fn_with_state(cluster, roll_cluster::require_signed));
+        .route_layer(axum::middleware::from_fn_with_state(cluster, roll_cluster::require_signed));
     api.merge(route)
 }
 
