@@ -990,6 +990,9 @@ Ranked by what a person notices first. Done so far:
 - screenshot comparisons off the async runtime, and a test for reading a run's pages;
 - the previews waiting for a visual review first in the list, tagged "to review";
 - `roll preview screenshot` (any screenshot or diff to a file);
+- on roll apps: one deployment per change of what's deployed (an in-flight poll redeployed each
+  time: 26 deploys of a preview's environment to 3, ready 63 s to 19 s), and the feedback
+  button and screenshots on the stacked `feature/roll-previews-on-apps`;
 - the settings' screenshot rules in a section of their own ("Screenshots and checks");
 - a second service in the live check (`wiki:/` taken in its own run and compared);
 - the diff against main in a public preview's comment (a signed link of its own), and the
@@ -1044,37 +1047,33 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Screenshots of roll apps' services, on the fleet**: on one node it's done and measured on
+1. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
-   instance's network, main's baseline on roll apps, 0.08% against it). It merges into #28 once #26
+   instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
+   its environment for a visitor through roll, the page's notes from previews). It merges into #28 once #26
    is on main. On a fleet an instance runs on its service's holder, and Fargate has no container
    to join: previews' own internal screenshot route, run on the holder through
    `cluster.dispatch(&apps_control::lease_key(service), …)` (the apps thread's advice), joins the
    instance where `reachable` answers (Docker) and else loads the environment's URL through its
    access link, in the browser container.
-2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
-   (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
-   `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
-   (PR #26) to reach main: today's apps refuses an unknown field, which would
-   fail every link-access deploy.
-3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+5. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+6. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.
