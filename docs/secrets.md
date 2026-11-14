@@ -2741,14 +2741,14 @@ user's call).
    gateways).
 11. **ACME on project CAs**, starting with external account binding (Vault PKI, step-ca).
 12. *The user's call:* land the stack (#62).
-13. *Waits on roll MCP's #25 on `main`:* #30 onto #62 (roll-access's tokens replace `rlst_`;
-   renewed logins and pinned keys mint workload tokens; reach lists grants; `Caller` keeps
-   `runtime`; `NewGrant { …, ..Default::default() }`), then a workload identity a person creates
+13. *Waits on roll MCP's #25 on `main`:* #64 (#30 onto #62: roll-access's tokens replace `rlst_`,
+   re-keyed identities revoke their workload tokens, reach lists roll-access's tokens; every suite
+   passes), then a workload identity a person creates
    asks roll-access's policy (held until an admin approves, `policy_now().needs_approval(&scope,
    false)`, admins told through `Access::tell_admins`), and the Access tab shows tokens waiting
    for approval and rotations that keep the old secret (`keep_old_for_s`).
-14. *Waits on other threads:* transit keys scoped by name (#24/#25 with #47), roll search echoing a
-   key's `access` (then a key that doesn't say `data` is refused), previews resolving with
+14. *Waits on other threads:* transit keys scoped by name (#24/#25 with #47), roll search's #29 (it
+   echoes a key's `access`: then a key that doesn't say `data` is refused), previews resolving with
    `dynamic: false`, a live check of OpenSearch links (#29 with #51), splitting the CLI's
    `secrets.rs` once the stack has landed.
 15. *Waits on linking chat users to roll accounts:* approving change requests from Slack.
