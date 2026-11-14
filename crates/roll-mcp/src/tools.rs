@@ -745,7 +745,7 @@ static TOOLS: &[Tool] = &[
     t("apps_add_domain", "Add a domain", "Point a domain at an environment.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains", &[SERVICE, ENV, breq("hostname", Ty::Str, "Host name")]),
     t("apps_remove_domain", "Remove a domain", "Remove a domain.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/domains/{host}", &[SERVICE, ENV, req("host", "Host name")]),
     // ── previews (roll previews) ──
-    t("previews_list", "List previews", "Preview environments.", "previews", "GET", "/v1/previews", &[q("project", Ty::Str, "Workspace project")]),
+    t("previews_list", "List previews", "Preview environments with their counts and states (checks, visual review, pages); previews_get has one preview's issues, broken links and diffs.", "previews", "GET", "/v1/previews", &[q("project", Ty::Str, "Workspace project")]),
     t(
         "previews_get",
         "Get a preview",
