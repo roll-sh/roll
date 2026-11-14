@@ -285,6 +285,163 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Storage format v2, round 1 (2026-11-14, agent 231)
+
+HANDOFF "Storage format v2: design" has the study behind it and "Storage format v2, round 1"
+what changed: block format 2, a store file's blocks in the block cache's form. **base** is
+`248f9f8fa` (origin's head at the round's start); **s001** format 2 at zstd level -1 (measured,
+not kept: the accounts table's rows take 28% more bytes); **s002** format 2 at zstd level 1,
+`620376440`; **s003** s002 with a block's entries copied into an allocation of their own size on
+load, `9fb5eab1b` (the pushed change). Plain dist builds (fat LTO, line tables) of one checkout,
+equal-length paths (`~/.cache/a231/bin/<4 chars>`). Lane C (servers 14,15,32,33; clients
+16,17,34,35) for bulk and TPC-H, lane A (6,7,24,25; 8,9,26,27) for point reads and short
+transactions, lane B (10,11,28,29; 12,13,30,31) for range reads, each run under its lane's lock,
+waiting up to an hour for quiet CPUs outside it; a bulk run with a step over 1.0 foreign core was
+run again. The host was at load 20-37 throughout (other sessions' builds and benchmarks).
+
+### Bulk (1M rows, settled, bg_ steps counted; user instructions G, s002 against base, 5 rounds)
+
+s003 (the pushed change) against base, 5 rounds:
+
+| step | base | s003 | % per round | median |
+|---|---|---|---|---|
+| COPY in | 10.227 | 10.169 | -0.6 x5 | -0.6 |
+| CREATE INDEX | 6.175 | 6.080 | -1.5 / -1.5 / -1.5 / -1.6 / -1.6 | -1.5 |
+| CREATE UNIQUE INDEX | 4.378 | 4.323 | -1.3 / -1.0 / -1.3 / -1.3 / -1.3 | -1.3 |
+| COPY out | 3.113 | 3.113 | +0.0 / +0.2 / 0 / 0 / 0 | 0.0 |
+| INSERT … SELECT | 7.087 | 6.970 | -1.7 / -1.4 / -1.3 / -1.0 / -0.8 | -1.3 |
+| UPDATE half | 13.406 | 13.405 | +0.1 / -0.0 / -0.1 / +0.0 / -0.1 | -0.0 |
+| DELETE a quarter | 6.391 | 6.153 | -3.1 / +0.0 / -2.5 / -1.4 / -4.6 | -2.5 |
+| **bg after it (compaction)** | 6.889 | 5.936 | -9.8 / -8.9 / -28.0 / -10.5 / -23.1 | **-10.5** |
+| **VACUUM** (reads the compaction's outputs) | 2.051 | 1.834 | -10.6 x4 / -10.5 | **-10.6** |
+| ANALYZE, count(*), TRUNCATE, DROP | 1.881 | 1.881 | 0 | 0.0 |
+| **all steps** | 61.536 | 60.000 | -2.3 / -1.9 / -4.4 / -2.1 / -3.9 | **-2.3** |
+| cycles, all steps | 30.36 | 29.34 | -3.7 / +4.0 / -6.1 / -0.8 / -4.7 | -3.7 |
+| MB written | 201.1 | 181.6 | -4.1 / -9.7 x4 | **-9.7** |
+
+Rows equal in every run (count and sums of every column of both tables). Peak (cgroup) base
+291-362 MB (median 360), s003 290-356 (319); VmHWM 251-255 both. Data dir at the end: base 25 MB
+in all five, s003 22. The host was at load 25-37: a run with a step over 1.0 foreign core was
+run again up to three times and kept then (base's first with 9 such steps): instructions are
+what the gate reads. s002 (without the copy on load, 5 rounds): the compaction -6.7%, VACUUM
+-10.6% x5, all steps -0.9..-2.2% every round, MB written -6.0% (one round +0.1%). s001 (zstd -1,
+3 rounds): the compaction -11.7 / +3.5 / -19.2%, VACUUM -15.8%, MB written -9%.
+
+### TPC-H SF1 (each arm on a data directory it loaded itself; 3 alternating rounds; user instructions %)
+
+| build, cache | 22-query instructions against base | cycles | wall, sum of medians | per query (instructions) | peak (VmHWM) |
+|---|---|---|---|---|---|
+| s003, 2 GB | (a lost q04 window) / -0.13 / +0.09% | -1.2 / +6.6 / +5.3% (load 23-43) | 14.43 -> 16.24 s (load) | every median within +-1% (q13 -1.0 / -0.2 / +2.5, q16 +0.8 / -1.2 / +1.3, q09 -1.6 / -0.4 / -1.1) | base 1,695-1,697 MB, **s003 1,691-1,693** |
+| s003, 256 MB | **-14.58 / -14.63 / -14.41%** | -16.9 / -13.5 / -7.1% | **52.01 -> 45.67 s** | every query lower every round: q07 -26, q08 -25, q09 -18, q04 / q05 / q22 -16..-18, q03 -15, q21 -12, q11 -11..-13, q20 -11, q19 -10, q17 -8..-9, q02 -9, q18 -8, q14 -7, q06 -7, q15 -6, q16 -6, q10 -5, q12 -5, q01 -4, q13 -2 | base 627-644, s003 612-657 |
+| s002, 2 GB | +0.44 / +0.01 / +0.17% | +1.9 / +5.4 / -3.1% | 13.26 -> 13.52 s | q13 +3.6 / +0.1 / +1.7, the rest within +-1% | base 1,693-1,697, s002 1,706-1,719 (the slice kept the trailer: fixed in s003) |
+| s002, 256 MB | -14.63 / -14.44 / -14.38% | -16.9 / -14.0 / -11.5% | 53.74 -> 48.38 s | every query lower every round | base 593-639, s002 626-637 |
+
+All 22 result hashes equal PostgreSQL's in every pass of every build. Data directory after the
+load and a clean close: base 638 MB (73 files of format 1), s002 / s003 561 MB (73 of format 2).
+At a 2 GB cache every block is read from its file once (the warm-up) and the cache form is the
+same, so the queries run the same code on the same bytes; at 256 MB a miss no longer decodes and
+decompresses a third fewer bytes.
+
+### Same day against PostgreSQL 18.6 and pgrust
+
+Bulk (settled; two runs each, medians; roll is s003; wall without the settles; bg_ rows are each
+step's background work):
+
+| step | PostgreSQL wall / CPU s / G ins | pgrust | roll s003 | roll base (5 runs, the gate's) |
+|---|---|---|---|---|
+| COPY in | 1.05 / 0.90 / 6.48 | 1.09 / 0.82 / 4.93 | 1.46 / 1.31 / 10.17 | 1.38 / 1.23 / 10.23 |
+| CREATE INDEX | 0.50 / 0.89 / 3.14 | 0.71 / 0.91 / 2.79 | 0.75 / 1.12 / 6.08 | 0.77 / 1.10 / 6.17 |
+| CREATE UNIQUE INDEX | 0.42 / 0.54 / 2.25 | 0.58 / 0.44 / 1.79 | 0.47 / 0.64 / 4.32 | 0.50 / 0.68 / 4.38 |
+| COPY out | 0.54 / 0.44 / 3.21 | 0.45 / 0.31 / 1.98 | 0.55 / 0.43 / 3.11 | 0.54 / 0.39 / 3.11 |
+| INSERT … SELECT | 1.07 / 0.80 / 4.31 | 1.23 / 0.89 / 4.32 | 0.97 / 0.84 / 6.98 | 0.97 / 0.87 / 7.09 |
+| UPDATE half | 4.86 / 4.74 / 27.50 | 6.48 / 5.47 / 22.80 | 2.14 / 1.98 / 13.43 | 2.15 / 1.99 / 13.41 |
+| DELETE a quarter | 0.34 / 0.24 / 1.67 | 0.50 / 0.29 / 1.50 | 1.09 / 0.98 / 6.29 | 1.12 / 0.95 / 6.39 |
+| bg after it | 0 | 0.08 / 0.17 | 0.28 / 6.34 | 0.30 / 6.89 |
+| VACUUM | 0.37 / 0.35 / 2.53 | 0.91 / 0.83 / 3.07 | 0.34 / 0.24 / 1.83 | 0.41 / 0.25 / 2.05 |
+| ANALYZE | 0.23 / 0.14 / 0.50 | 0.34 / 0.14 / 0.51 | 0.28 / 0.14 / 0.53 | 0.22 / 0.10 / 0.53 |
+| count(*) after | 0.16 / 0.14 / 0.49 | 0.15 / 0.06 / 0.17 | 0.33 / 0.30 / 1.35 | 0.20 / 0.27 / 1.35 |
+| **all steps** (bg included) | 9.96 / 9.34 / **52.3** | 12.73 / 10.63 / **44.7** | 8.69 / 8.28 / **60.5** | 8.50 / 8.16 / 61.6 |
+
+Instructions, roll against PostgreSQL / pgrust: s003 1.16x / 1.35x (base 1.18x / 1.38x). Peak
+(cgroup): PostgreSQL 817-955 MB, pgrust 1,186-1,220, roll 348 (base 291-362). MB written over the
+script: PostgreSQL 1,576-1,604, pgrust 1,402-1,795, roll 181-189 (base 189-201). Data dir at the
+end: PostgreSQL 394 MB, pgrust 393, roll 22 (base 25). Walls and CPU seconds carry the host's load
+(25-40; PostgreSQL's 256 MB pass below ran at load 57-119).
+
+TPC-H SF1 at a 2 GB cache (one pass each, medians of three runs; roll is s003):
+
+| | sum of medians, s | CPU, s | peak |
+|---|---|---|---|
+| PostgreSQL | 16.71 | 43.57 | 1,698 MB |
+| pgrust | 11.71 | 18.82 | 2,008 MB |
+| roll | 15.64 | 40.28 | 1,655 MB (VmHWM 1,733) |
+
+TPC-H SF1 at 256 MB (`shared_buffers = 256MB` for PostgreSQL and pgrust, set as a `-c` flag on
+their loaded volumes; `--cache-mb 256` for roll):
+
+| | sum of medians, s | CPU, s | peak |
+|---|---|---|---|
+| PostgreSQL | 28.92 | 70.22 | 366 MB |
+| pgrust | 25.00 | 38.29 | 630 MB |
+| roll (s003) | 52.06 | 131.00 | 603 MB (VmHWM 654) |
+| roll, the gate's runs (base -> s003) | 52.01 -> 45.67 | | 627-644 -> 612-657 MB |
+
+At 256 MB roll is far behind both: the index-join queries (q07 5.4 s against 1.4 and 1.6, q09
+11.8 against 3.9 and 5.1, q17 7.2 against 1.6 and 1.2, q08, q02, q20, q11) read a 16 kB block,
+decompressed, for each index probe or heap fetch that misses, where PostgreSQL copies one 8 kB
+page from the OS page cache. Format 2 made each miss 14% cheaper; the lead is in HANDOFF.
+
+All result hashes equal PostgreSQL's in every pass.
+
+Point reads and short transactions (lane A, one round, each server started once; roll s003;
+foreign load in cores in the last column, a run over 1.0 is disturbed):
+
+| workload | clients | server | ops/s | CPU µs/op | p50 / p99 ms | peak MiB | foreign |
+|---|---:|---|---:|---:|---:|---:|---:|
+| prepared point select | 1 | roll | 18,502 | 49.0 | 0.046 / 0.116 | 173 | 1.03 |
+| | | PostgreSQL | 8,853 | 62.5 | 0.081 / 0.359 | 205 | 2.34 |
+| | | pgrust | 14,808 | 38.6 | 0.060 / 0.143 | 443 | 1.40 |
+| prepared point select | 8 | roll | 80,667 | 42.7 | 0.086 / 0.234 | 173 | 0.26 |
+| | | PostgreSQL | 49,202 | 66.6 | 0.155 / 0.441 | 228 | 0.59 |
+| | | pgrust | 92,284 | 36.2 | 0.078 / 0.193 | 479 | 0.35 |
+| prepared point select | 32 | roll | 76,218 | 49.6 | 0.265 / 2.751 | 173 | 0.24 |
+| | | PostgreSQL | 51,162 | 74.0 | 0.550 / 2.059 | 261 | 0.22 |
+| | | pgrust | 85,930 | 44.7 | 0.335 / 1.067 | 566 | 0.18 |
+| short transactions | 8 | roll | 7,867 | 310.2 | 0.674 / 5.473 | 199 | 0.51 |
+| | | PostgreSQL | 8,160 | 317.9 | 0.735 / 4.162 | 283 | 0.98 |
+| | | pgrust | 9,838 | 262.5 | 0.625 / 2.872 | 566 | 0.97 |
+| short transactions | 32 | roll | 6,432 | 384.8 | 3.189 / 31.03 | 207 | 1.02 |
+| | | PostgreSQL | 942 | 651.4 | 21.2 / 208.2 | 322 | 3.38 |
+| | | pgrust | 11,114 | 278.0 | 2.294 / 12.43 | 654 | 0.58 |
+
+### Point reads, short transactions, range reads (5 alternating pairs; medians against base)
+
+Agent 221's harness on lane A (agent 223's workload mix on lane B for range reads), 100,000
+accounts, user instructions and cycles per operation of the connections' threads. Cached point
+reads run the same code on the same block bytes in every build here, so s002's and s003's cells
+measure the same paths; lane A was shared with agents 229, 230, 232, 233 and 235 throughout.
+
+| cell | build | instr/op | cycles/op | CPU/op | ops/s |
+|---|---|---|---|---|---|
+| point select, 8 clients | s002 | -1.1% (pairs -2.0..-0.2) | -2.3% | -2.6% | +3.3% |
+| | s003 | POINT8_S003 | | | |
+| point select, 1 client | s002 | -0.3% | -0.7% | +1.9% | -3.9% |
+| | s003 | (every pair over 1.0 foreign core: not counted) | | | |
+| point select, 32 clients | s002 | -0.2% | +4.9% (pairs -4.5..+15.7; two disturbed) | 0.0% | -0.8% |
+| | s003 | -0.5% (every pair -0.3..-1.1) | +0.5% | +2.9% | -2.4% |
+| short transactions, 8 clients | s002 | -4.0% (one pair flagged) | -0.5% | -0.3% | -1.0% |
+| | s003 | -3.0% (three pairs flagged) | -2.3% | +3.3% | -5.7% |
+| short transactions, 32 clients | s002 | +0.9% (three pairs flagged; the two clean +0.9, +9.6) | -1.7% | -10.9% | +39% |
+| | s003 | -5.2% | +3.2% | +8.4% | -13.7% |
+| range read (100 rows), 8 clients | s002 | -0.3% | -1.3% | +1.1% | -3.4% |
+| | s003 | -1.5% | +0.2% | +2.5% | -1.8% |
+
+Short transactions vary by +-5% a run of one binary (agent 221's figure) and more at this load:
+their cells show no change beyond that. Footprint (fresh server, cgroup anon+shmem 25 s into 100
+idle sessions, lane B): base 37.6 / 37.5 / 37.6 MB, s003 36.3 / 37.4 / 37.4; fresh data directory
+3.03 MB both. fsyncs per commit: the commit path is unchanged (a file's fsync at its finish, the
+WAL's per commit group, as before).
+
 ## Executor, round 17 (2026-11-14, agent 232)
 
 HANDOFF "Executor, round 17" has what changed: a merging scan's L1 files found by binary
