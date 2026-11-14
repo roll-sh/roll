@@ -428,6 +428,10 @@ pub async fn start(
     cfg.web_url = Some(args.web_url.trim_end_matches('/').to_string()).filter(|u| !u.is_empty());
     // Local development only: notification targets on this machine or a private network.
     cfg.allow_private = std::env::var("ROLL_APPS_ALLOW_PRIVATE").is_ok_and(|v| v == "1" || v == "true");
+    // Built deployments each environment keeps to roll back to (older ones' images go).
+    if let Some(n) = std::env::var("ROLL_APPS_KEEP_DEPLOYMENTS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0) {
+        cfg.keep_deployments = n;
+    }
     let edge = crate::edge::Public::of(args);
     cfg.domain = a.domain.clone().unwrap_or_else(|| if edge.is_some() { format!("up.{}", args.edge.site_domain) } else { "apps.localhost".into() });
     if edge.is_some() {

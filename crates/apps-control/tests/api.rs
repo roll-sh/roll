@@ -414,6 +414,50 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     assert_eq!(count().await, before + 1);
 }
 
+/// Each environment keeps its newest built deployments to roll back to; older ones are pruned
+/// (history only, their images gone unless another deployment runs the same one), a rollback to
+/// one is refused with why, and the list pages back through all of them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn old_deployments_are_pruned_past_what_an_environment_keeps() {
+    let w = world_with(|c| {
+        c.keep_deployments = 2;
+        c.keep_recent = Duration::ZERO;
+    })
+    .await;
+    let (_, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    let id = svc["id"].as_str().unwrap_or_else(|| panic!("{svc}")).to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production/deploys");
+    let mut deps = vec![svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string()];
+    settled(&w, &id, "production", &deps[0]).await;
+    for _ in 0..3 {
+        let (_, d) = call(&w.api, "POST", &base, Some(json!({}))).await;
+        let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+        assert_eq!(d["status"], "active", "{d}");
+        deps.push(d["id"].as_str().unwrap().to_string());
+    }
+    let mut images = Vec::new();
+    for d in &deps {
+        images.push(call(&w.api, "GET", &format!("{base}/{d}"), None).await.1["image"].as_str().unwrap().to_string());
+    }
+    let (old0, old1, kept) = (images[0].clone(), images[1].clone(), images[2].clone());
+    w.apps.prune().await;
+    let removed = w.fake.removed.lock().clone();
+    assert!(removed.contains(&old0) && removed.contains(&old1) && !removed.contains(&kept), "{removed:?}");
+    let (_, d0) = call(&w.api, "GET", &format!("{base}/{}", deps[0]), None).await;
+    assert!(d0["pruned_at"].is_i64(), "{d0}");
+    let (st, r) = call(&w.api, "POST", &format!("{base}/{}/rollback", deps[0]), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{r}");
+    assert_eq!(call(&w.api, "POST", &format!("{base}/{}/rollback", deps[2]), Some(json!({}))).await.0, StatusCode::ACCEPTED, "a kept one rolls back");
+    // Paged back with `before`: every one, newest first.
+    let (_, page) = call(&w.api, "GET", &base, None).await;
+    let last = page.as_array().unwrap().last().unwrap()["created_at"].as_i64().unwrap();
+    let (_, older) = call(&w.api, "GET", &format!("{base}?before={last}"), None).await;
+    assert!(older.as_array().unwrap().is_empty() && page.as_array().unwrap().len() == 5, "{page}");
+    // Pruned once: a second pass removes nothing again.
+    w.apps.prune().await;
+    assert_eq!(w.fake.removed.lock().len(), removed.len());
+}
+
 /// A GET that finds its instance gone (killed: nothing listens, and roll doesn't know yet) goes
 /// to a fresh instance instead of a 503; a request with a body isn't sent twice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

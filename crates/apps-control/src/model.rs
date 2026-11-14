@@ -1137,6 +1137,9 @@ pub struct Deployment {
     /// Who asked for it: a push's commit author, the token or connection that called the API
     /// (`operator` for the operator's token), none when roll did it on its own or nothing said.
     pub actor: Option<String>,
+    /// When it was pruned (unix ms): out of what's kept, its image gone; history only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pruned_at: Option<i64>,
     /// The settings this deployment runs with (frozen when it was made).
     #[serde(skip)]
     pub run: Run,

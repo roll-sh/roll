@@ -1930,7 +1930,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 for d in v.as_array().into_iter().flatten() {
                     let rev = d["revision"].as_str().map(|r| &r[..r.len().min(8)]).unwrap_or("-").to_string();
                     let by = d["actor"].as_str().map(|a| format!("  ({})", a.strip_prefix("git:").unwrap_or(a))).unwrap_or_default();
-                    println!("{}  {:<10} {:<8} {rev:<8} {}{by}", s(&d["id"]), s(&d["status"]), s(&d["trigger"]), s(&d["message"]));
+                    // A pruned one is history only (its image is gone): nothing to roll back to.
+                    let status = if d["pruned_at"].is_i64() { "pruned".to_string() } else { s(&d["status"]) };
+                    println!("{}  {status:<10} {:<8} {rev:<8} {}{by}", s(&d["id"]), s(&d["trigger"]), s(&d["message"]));
                 }
                 return Ok(());
             }

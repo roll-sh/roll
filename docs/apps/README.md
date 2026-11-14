@@ -262,9 +262,17 @@ every deployment is immutable with instant rollback.
   variables, same revision, no build. It's how a `roll up` service takes new variables.
 - **Retries**: `POST …/deploys` takes an `Idempotency-Key`; a retry answers the first call's
   deployment.
-- **Instant rollback**: the old image is still in the registry (deployments keep their
-  images until the deployment is deleted from history), so a rollback is a rollout with no
-  build: seconds, not minutes.
+- **Instant rollback**: the old image is still in the registry, so a rollback is a rollout with
+  no build: seconds, not minutes.
+- **What's kept to roll back to**: each environment's newest 10 built deployments
+  (`ROLL_APPS_KEEP_DEPLOYMENTS`), its live one, any pending, live or ready (a no-traffic deploy),
+  and any that ended in the last day (draining, skew protection) unless its environment was
+  deleted. Every ten minutes the service's owner prunes the rest: still in the history (paged with
+  `?before=`), `pruned_at` set, its image, static site and build log gone once no deployment left
+  names the image (a promotion or a rollback runs the same one). A rollback to a pruned one is a
+  409 saying to deploy its revision again; the dashboard and `roll apps deploys` show it as pruned
+  (`api.rs::old_deployments_are_pruned_past_what_an_environment_keeps`). Before this, nothing but
+  a service's deletion removed an image: every push, and every deleted preview, kept its own.
 
 ### The runtime: scale to zero, wake on request
 
@@ -1580,83 +1588,75 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (a product review of what one engineer can close here now, bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **Old deployments' images, sites and uploads are never cleaned up**: only a service's deletion
-   removes an image, so every push (and every preview environment, deleted or not) keeps ~300 MB
-   on a Docker node or in ECR, and the deploy list stops at 100 with no paging. Keep the last N
-   built deployments per environment (10), always keeping `deployments_in_use`, images other
-   environments' live deployments share, the rollback chain and the last static sites skew
-   protection serves; mark the rest `pruned` and remove an image once nothing references it (sites,
-   uploads and build logs alike); an ephemeral environment's deletion frees its own. `?before=`
-   paging on `…/deploys`. (Railway, Render, Fly and Vercel all cap what they keep.)
-2. **A failed deploy says why**: a build's error is only "docker build exited with N", and a rollout's
+1. **A failed deploy says why**: a build's error is only "docker build exited with N", and a rollout's
    "the health check didn't pass within 60 s"; the new instance's own output never reaches the
    deploy log. Keep BuildKit's failing step (`ERROR: … failed to solve: process "…"`) as the
    deployment's error; copy a failed instance's last lines into the deploy log; while the health
    check waits, read the sandbox's listening sockets (`runtime/netns.rs`) and end early with "the
    app listens on 127.0.0.1:3000; roll expects 0.0.0.0:$PORT (8080)" (Render's "no open ports").
-3. **Requests roll turns away are in the access log and the metrics**: the allow list's and the
+2. **Requests roll turns away are in the access log and the metrics**: the allow list's and the
    firewall's 403, the rate limit's 429, a private environment's 401, maintenance and failed wakes
    (503, 402) return before any access line or meter, so a service that can't wake shows 0% errors
    and `alert.errors` never fires. Every answer is written and metered, roll's own with a `by`
    (`allow_list|firewall|rate_limit|private|maintenance|wake|capped`); access lines carry the
    client's IP, user agent and host (what an allow list or a firewall rule needs); `?by=`.
-4. **Cron runs as jobs are**: done: a run left `running` by a node that died fails with its
+3. **Cron runs as jobs are**: done: a run left `running` by a node that died fails with its
    `cron.failed` on takeover (it held the schedule back: every run after was skipped), and a job's
    gets its `job.failed`. Left: each run's own log (`run:<id>`), `GET …/runs/{run}`, `…/logs` and
    `…/cancel` (a hung run now lasts its whole timeout), `roll apps runs`, and the dashboard's
    Scheduled runs panel opening a run's output (Render's, Cloud Run Jobs').
-5. **Notifications by environment and service**: a target follows every environment, so each pull
+4. **Notifications by environment and service**: a target follows every environment, so each pull
    request's preview sends its failed deploys and alerts to the team's channel. `environments`
    (names, `production`, `!ephemeral`) and `services` on a target, new ones skipping ephemeral
    environments (Vercel's, Render's).
-6. **Logs by time and by instance**: `before=` reading back through the stored chunks, `instance=`,
+5. **Logs by time and by instance**: `before=` reading back through the stored chunks, `instance=`,
    `deployment=`, `stream=`; `roll apps logs --before/--instance/--deployment`; a time picker and an
    instance chip in the Logs tab (Railway's, Render's, Cloud Run's).
-7. **A domain that won't verify says what DNS answered**: the CNAME targets, TXT values and A records
+6. **A domain that won't verify says what DNS answered**: the CNAME targets, TXT values and A records
    seen, and the likely mistake (another target, Cloudflare's proxy on, the TXT on the wrong name or
    quoted); events `domain.active`, `domain.tls_failed`, `domain.expiring` (day 6) and
    `domain.expired`, notified by default; "removed in N days unless verified" in the Domains tab
    (Vercel's "Invalid configuration").
-8. **An environment for the whole project at once**: `POST /v1/apps/projects/{project}/environments`
+7. **An environment for the whole project at once**: `POST /v1/apps/projects/{project}/environments`
    making it for every service (each through the existing PUT, each answer reported), `roll apps
    env --all`, "every service" in the dashboard's switcher (Railway's environments), names as roll
    secrets' project environments will have them.
-9. Small parity items: the dashboard's rollback offering `keep_variables` (the CLI has
+8. Small parity items: the dashboard's rollback offering `keep_variables` (the CLI has
    `--keep-variables`; after a leaked secret's rotation the dashboard can only roll back to it);
    its Deploy button taking a revision and `no_traffic` (Render's deploy a specific commit,
    Vercel's preview then promote); `build.target` for a multi-stage Dockerfile (Fly's, Render's).
-10. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+9. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-11. **Region**: the region shown on the overview and each environment, defaulting to the project's
+10. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-12. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+11. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-13. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+12. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-14. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+13. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-15. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+14. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-16. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-17. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+15. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+16. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-18. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+17. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-19. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+18. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-20. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+19. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-21. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+20. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

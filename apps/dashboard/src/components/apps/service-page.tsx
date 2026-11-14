@@ -258,7 +258,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
   const redeploy = () => runner.run("redeploy", () => appsApi.redeploy(service.id, envName));
   const upload = service.source.kind === "upload";
   // What a crash's "Roll back" goes to: the newest deployment that was live before this one.
-  const previous = data.deploys?.find((d) => d.status === "inactive" && d.id !== env?.active?.id && d.image) ?? null;
+  const previous = data.deploys?.find((d) => d.status === "inactive" && d.id !== env?.active?.id && d.image && !d.pruned_at) ?? null;
   const busy = runner.busy !== null;
 
   return (

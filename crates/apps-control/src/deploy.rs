@@ -289,6 +289,9 @@ impl Apps {
         self.refuse_capped(service)?;
         let old = self.deployment(service, env, dep).await?;
         let Some(image) = old.image.clone() else { return Err(Error::Conflict(format!("{dep} never built an image, so there's nothing to roll back to"))) };
+        if old.pruned_at.is_some() {
+            return Err(Error::Conflict(format!("{dep} is older than what's kept to roll back to and its image was cleaned up; deploy its revision again")));
+        }
         let did = old.id.clone();
         if !keep_variables && let Some(then) = self.db(move |s| s.snapshot(&did)).await? {
             let (sid, e) = (service.to_string(), env.to_string());
@@ -327,7 +330,7 @@ impl Apps {
     /// through rollbacks (after B → A, the next goes to what came before A, never forward to B).
     pub async fn rollback_previous(self: &Arc<Self>, service: &str, env: &str, actor: Option<String>, keep_variables: bool) -> Result<Deployment> {
         let (sid, e) = (service.to_string(), env.to_string());
-        let (row, all) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.deployments(&sid, &e, 100)?))).await?;
+        let (row, all) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.deployments(&sid, &e, 100, None)?))).await?;
         let Some(active) = row.active.and_then(|a| all.iter().find(|d| d.id == a).cloned()) else {
             return Err(Error::Conflict(format!("{env} has nothing live to roll back from")));
         };
@@ -358,13 +361,34 @@ impl Apps {
         self.deployment(service, env, dep).await
     }
 
-    pub async fn deployments(self: &Arc<Self>, service: &str, env: &str) -> Result<Vec<Deployment>> {
+    pub async fn deployments(self: &Arc<Self>, service: &str, env: &str, before: Option<i64>) -> Result<Vec<Deployment>> {
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| {
             s.environment(&sid, &e)?;
-            s.deployments(&sid, &e, 100)
+            s.deployments(&sid, &e, 100, before)
         })
         .await
+    }
+
+    /// Old deployments of the services this node owns, past what each environment keeps
+    /// (`keep_deployments`): pruned in the store, then their images (once no deployment names
+    /// them), static sites and build logs go. Every ten minutes.
+    pub async fn prune(self: &Arc<Self>) {
+        let Ok(services) = self.db(|s| s.services(None)).await else { return };
+        let (keep, day_ago) = (self.cfg.keep_deployments.max(1), code_sql::now_ms() - self.cfg.keep_recent.as_millis() as i64);
+        for svc in services.into_iter().filter(|s| self.owns(&s.id)) {
+            let sid = svc.id.clone();
+            let Ok(pruned) = self.db(move |s| s.prune_deployments(&sid, keep, day_ago)).await else { continue };
+            for p in pruned {
+                if let Some(img) = &p.image {
+                    self.deps.builder.remove_image(img).await;
+                    if let Some(k) = crate::sites::key(img) {
+                        self.drop_site(&k).await;
+                    }
+                }
+                self.logs.delete(&format!("build:{}", p.id)).await;
+            }
+        }
     }
 
     pub async fn deployment(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<Deployment> {
@@ -385,7 +409,7 @@ impl Apps {
     pub async fn deploy_commits(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<Value> {
         let d = self.deployment(service, env, dep).await?;
         let (sid, e) = (service.to_string(), env.to_string());
-        let (svc, row, all) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?, s.deployments(&sid, &e, 100)?))).await?;
+        let (svc, row, all) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?, s.deployments(&sid, &e, 100, None)?))).await?;
         let none = json!({ "since": null, "commits": null, "complete": false });
         let (Source::Repo { repo, .. }, Some(to), Some(sources)) = (&svc.source, d.revision.as_deref(), self.deps.sources.clone()) else { return Ok(none) };
         let since = if row.active.as_deref() == Some(dep) {
@@ -1454,6 +1478,8 @@ impl Apps {
                     let runtime = self.deps.runtime.clone();
                     tokio::spawn(async move { runtime.sweep(&in_use.into_iter().collect()).await });
                 }
+                let this = self.clone();
+                tokio::spawn(async move { this.prune().await });
             }
             if n.is_multiple_of(60) {
                 self.sweep_uploads().await;

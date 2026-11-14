@@ -62,6 +62,8 @@ pub struct Fake {
     pub pulled_as: Mutex<Option<String>>,
     /// Each build's `no_cache` and its Dockerfile, in order.
     pub built: Mutex<Vec<(bool, String)>>,
+    /// Images removed ([`Builder::remove_image`]).
+    pub removed: Mutex<Vec<String>>,
     /// Instances that answer 500 from now on (a running app that broke: [`Fake::sicken`]).
     sick: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Instances the kernel killed for their memory ([`Fake::oom`]).
@@ -543,7 +545,9 @@ impl Builder for Fake {
         Ok(job.tag.clone())
     }
 
-    async fn remove_image(&self, _image: &str) {}
+    async fn remove_image(&self, image: &str) {
+        self.removed.lock().push(image.to_string());
+    }
 
     fn shares_caches(&self) -> bool {
         true

@@ -54,7 +54,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}` | | `Environment` | read |
 | `DELETE /v1/apps/services/{id}/environments/{env}` | | 204 | delete |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys` | `NewDeploy`, or a gzipped tar (`application/gzip`) | 202 `Deployment` | deploy* |
-| `GET /v1/apps/services/{id}/environments/{env}/deploys` | | `Deployment[]`, newest first | read |
+| `GET /v1/apps/services/{id}/environments/{env}/deploys?before=` | | `Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}` | | `Deployment` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs?follow=&tail=` | | `LogLine[]` or SSE | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/commits` | | `DeployCommits`: what a repo deployment brings over the live one (for the live one: the one live before it), along its first parents, newest first, at most 50 | read |
@@ -362,6 +362,7 @@ type Deployment = {
   image: string | null;      // the built or pinned image, by digest once known
   plan: Plan | null;         // what the build detected
   rollback_of: string | null;
+  pruned_at?: number;        // pruned (older than the environment keeps): history only, its image gone; a rollback to it is a 409
   steps?: { step: "build" | "pre_deploy" | "rollout" | "live" | "failed"; at: number }[]; // when each began: on GET …/deploys/{dep} only
   error: string | null;
   created_at: number;

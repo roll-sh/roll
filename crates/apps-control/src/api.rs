@@ -427,8 +427,14 @@ async fn delete_env(State(apps): S, Path((id, env)): Path<(String, String)>, ext
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-async fn deploys(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
-    ok(apps.deployments(&id, &env).await?)
+#[derive(serde::Deserialize)]
+struct DeploysQuery {
+    /// Made before then (unix ms; the last one's `created_at`): the next page.
+    before: Option<i64>,
+}
+
+async fn deploys(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<DeploysQuery>) -> R {
+    ok(apps.deployments(&id, &env, q.before).await?)
 }
 
 /// JSON (`NewDeploy`), or a gzipped tar of the tree (`roll up`).

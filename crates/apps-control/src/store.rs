@@ -12,7 +12,7 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
 use code_sql::{Db, OptionalExtension, params};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS services (
@@ -451,7 +451,13 @@ pub struct Store {
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
 const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen";
-const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor";
+/// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
+pub struct Pruned {
+    pub id: String,
+    pub image: Option<String>,
+}
+
+const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor, pruned_at";
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> code_sql::Result<T> {
     serde_json::from_str(s).map_err(|e| code_sql::Error::Conversion(e.to_string()))
@@ -541,6 +547,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         run: json(&r.get::<_, String>(15)?)?,
         vars_hash: r.get(16)?,
         actor: r.get(17)?,
+        pruned_at: r.get(18)?,
         steps: Vec::new(),
     })
 }
@@ -578,6 +585,7 @@ impl Store {
         db.add_column("domains", "verified_at", "INTEGER")?;
         db.add_column("env_access", "bypass_hash", "TEXT")?;
         db.add_column("deployments", "actor", "TEXT")?;
+        db.add_column("deployments", "pruned_at", "INTEGER")?;
         db.add_column("environments", "wait_for_ci", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "run", "TEXT NOT NULL DEFAULT '{}'")?;
         db.add_column("environments", "hook_hash", "TEXT")?;
@@ -1054,7 +1062,7 @@ impl Store {
                 )?;
             }
             c.execute(
-                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, ?)"),
+                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, NULL, ?)"),
                 params![
                     id,
                     service,
@@ -1120,12 +1128,55 @@ impl Store {
         Ok(())
     }
 
-    pub fn deployments(&self, service: &str, env: &str, limit: usize) -> Result<Vec<Deployment>> {
+    /// Newest first; `before` (ms): only those made before then (the next page).
+    pub fn deployments(&self, service: &str, env: &str, limit: usize, before: Option<i64>) -> Result<Vec<Deployment>> {
         Ok(self.db.query(
-            &format!("SELECT {DEPLOY_COLS} FROM deployments WHERE service = ? AND env = ? ORDER BY created_at DESC, id DESC LIMIT ?"),
-            params![service, env, limit as i64],
+            &format!("SELECT {DEPLOY_COLS} FROM deployments WHERE service = ? AND env = ? AND created_at < ? ORDER BY created_at DESC, id DESC LIMIT ?"),
+            params![service, env, before.unwrap_or(i64::MAX), limit as i64],
             deploy_row,
         )?)
+    }
+
+    /// A service's deployments past what's kept, marked pruned in one transaction: what's kept
+    /// is each environment's newest `keep` built ones, its live one, any pending, live or ready,
+    /// and any that ended since `recent` (draining, skew protection) unless its environment was
+    /// deleted. The images no deployment left names (another's may: a promotion, a rollback).
+    pub fn prune_deployments(&self, service: &str, keep: usize, recent: i64) -> Result<Vec<Pruned>> {
+        let now = self.now()?;
+        Ok(self.db.write(|c| {
+            let rows: Vec<(String, String, String, Option<String>, i64)> = c.query(
+                "SELECT id, env, status, image, COALESCE(finished_at, created_at) FROM deployments WHERE service = ? AND pruned_at IS NULL ORDER BY created_at DESC, id DESC",
+                [service],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?;
+            let live: Vec<String> = c.query("SELECT active FROM environments WHERE service = ? AND active IS NOT NULL", [service], |r| r.get(0))?;
+            let mut built: HashMap<String, usize> = HashMap::new();
+            let mut out = Vec::new();
+            for (id, env, status, image, ended) in rows {
+                let removed = status == "removed";
+                if image.is_some() && !removed {
+                    let n = built.entry(env).or_default();
+                    *n += 1;
+                    if *n <= keep {
+                        continue;
+                    }
+                }
+                let running = matches!(status.as_str(), "queued" | "building" | "deploying" | "active" | "ready");
+                if running || live.contains(&id) || (!removed && ended >= recent) {
+                    continue;
+                }
+                c.execute("UPDATE deployments SET pruned_at = ? WHERE id = ?", params![now, id])?;
+                out.push(Pruned { id, image });
+            }
+            for p in &mut out {
+                if let Some(img) = &p.image
+                    && c.query_row("SELECT 1 FROM deployments WHERE image = ? AND pruned_at IS NULL LIMIT 1", [img], |_| Ok(())).optional()?.is_some()
+                {
+                    p.image = None;
+                }
+            }
+            Ok::<_, code_sql::Error>(out)
+        })?)
     }
 
     /// Every deployment of a service, any environment.

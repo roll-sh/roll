@@ -129,6 +129,11 @@ pub struct AppsConfig {
     pub allow_private: bool,
     /// Between two passes over spend limits (`spend`).
     pub spend_every: Duration,
+    /// Built deployments each environment keeps to roll back to; older ones' images go
+    /// ([`Apps::prune`]).
+    pub keep_deployments: usize,
+    /// And every one that ended within this (draining, skew protection, a quick rollback).
+    pub keep_recent: Duration,
 }
 
 impl AppsConfig {
@@ -151,6 +156,8 @@ impl AppsConfig {
             web_url: None,
             allow_private: false,
             spend_every: Duration::from_secs(30),
+            keep_deployments: 10,
+            keep_recent: Duration::from_secs(24 * 3600),
         }
     }
 }
@@ -586,7 +593,7 @@ impl Apps {
         let sid = e.service.clone();
         let public = self.db(move |s| s.service(&sid)).await.map(|s| s.run.public).unwrap_or(true);
         let (svc, env) = (e.service.clone(), e.name.clone());
-        let recent = self.db(move |s| s.deployments(&svc, &env, 1)).await?;
+        let recent = self.db(move |s| s.deployments(&svc, &env, 1, None)).await?;
         let active = match &e.active {
             Some(a) => {
                 let a = a.clone();

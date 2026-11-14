@@ -416,6 +416,8 @@ export interface Deployment {
   started_at: number | null;
   finished_at: number | null;
   ready_ms: number | null;
+  /** Pruned (older than its environment keeps): history only, its image gone, so it can't be rolled back to. */
+  pruned_at?: number;
   /** When each step began (`build`, `pre_deploy`, `rollout`, then `live` or `failed`): on a single deployment's GET. */
   steps?: { step: string; at: number }[];
 }

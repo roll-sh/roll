@@ -125,7 +125,7 @@ export function Deployments({
                         <ExternalLink className="size-3.5" /> Open
                       </a>
                     )}
-                    {!active && !isPending(d.status) && d.image && d.status !== "removed" && (
+                    {!active && !isPending(d.status) && d.image && !d.pruned_at && d.status !== "removed" && (
                       <SureButton
                         className={`${btn} ${d.status === "ready" ? "" : "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 max-md:opacity-100"}`}
                         disabled={runner.busy !== null}
