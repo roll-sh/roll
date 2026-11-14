@@ -1209,6 +1209,7 @@ impl Apps {
         let domains = self.db(move |s| s.custom_domains_of(&sid, Some(&e))).await?;
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.delete_environment(&sid, &e)).await?;
+        self.hosts_changed();
         self.release_domains(&domains).await;
         self.teardown_live(service, env).await;
         self.set_access_cache(service, env, None);
@@ -1796,6 +1797,7 @@ impl Apps {
         let tls = if self.deps.tls.issues() { TlsStatus::Pending } else { TlsStatus::None };
         let (sid, e, h) = (service.to_string(), env.to_string(), host.clone());
         let mut d = self.db(move |s| s.add_domain(&sid, &e, &h, tls)).await?;
+        self.hosts_changed();
         // Only now, accepted and claimed, does the hostname go to the certificate's provider.
         if let Some((tls, tls_error)) = self.refresh_tls(&host).await {
             (d.tls, d.tls_error) = (tls, tls_error);
@@ -1870,6 +1872,7 @@ impl Apps {
 
         let (hh, err) = (h.clone(), error.clone());
         self.db(move |s| s.set_domain_status(&hh, status, err.as_deref())).await?;
+        self.hosts_changed();
 
         if let Some((tls, tls_error)) = self.refresh_tls(&h).await {
             (d.tls, d.tls_error) = (tls, tls_error);
@@ -1886,6 +1889,7 @@ impl Apps {
         self.hosts_changed();
         let (sid, e, h) = (service.to_string(), env.to_string(), host.to_ascii_lowercase());
         self.db(move |s| s.delete_domain(&sid, &e, &h)).await?;
+        self.hosts_changed();
         self.release_domains(&[host.to_ascii_lowercase()]).await;
         Ok(())
     }
@@ -1908,6 +1912,7 @@ impl Apps {
         let age = older_than.as_millis() as i64;
         // The database's clock, which stamped them.
         let expired = self.db(move |s| s.expire_domain_claims(s.now()? - age)).await?;
+        self.hosts_changed();
         let hosts: Vec<String> = expired.into_iter().map(|(svc, env, h)| {
             tracing::info!(service = %svc, env = %env, host = %h, "apps: an unverified custom domain expired");
             h
@@ -1950,6 +1955,7 @@ impl Apps {
         }
         let (hh, t) = (h.clone(), to.clone());
         self.db(move |s| s.set_redirect(&hh, t.as_deref())).await?;
+        self.hosts_changed();
         self.domains(service, env).await?.into_iter().find(|d| d.hostname == h).ok_or_else(|| Error::NotFound(h.clone()))
     }
 
@@ -2001,19 +2007,28 @@ impl Apps {
         // Every request asks: kept a second (another node's change shows within it), and
         // forgotten at once on any change here. It was two queries a request, about 150 µs of the
         // proxy's 260 (`docker.rs::the_proxys_own_cost_is_measured`, release).
+        // Kept by the name itself (no port, any case, no trailing dot), and only a name that is
+        // one (253 bytes at most) and names something: anyone can send any Host, and a miss isn't
+        // worth a slot.
+        let key = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h).trim_end_matches('.').to_ascii_lowercase();
+        if key.is_empty() || key.len() > 253 {
+            return None;
+        }
         let generation = self.hosts_gen.load(std::sync::atomic::Ordering::SeqCst);
-        if let Some((at, g, v)) = self.hosts.lock().get(host).cloned()
+        if let Some((at, g, v)) = self.hosts.lock().get(&key).cloned()
             && g == generation
             && at.elapsed() < HOST_TTL
         {
             return v;
         }
         let v = self.env_for_host_now(host).await;
-        let mut cache = self.hosts.lock();
-        if cache.len() >= 10_000 {
-            cache.clear();
+        if v.is_some() {
+            let mut cache = self.hosts.lock();
+            if cache.len() >= 10_000 {
+                cache.clear();
+            }
+            cache.insert(key, (Instant::now(), generation, v.clone()));
         }
-        cache.insert(host.to_string(), (Instant::now(), generation, v.clone()));
         v
     }
 

@@ -670,7 +670,11 @@ impl Runtime for Docker {
     }
 
     async fn remove_network(&self, name: &str) {
-        if name.starts_with(super::PREFIX) {
+        // Only one no container is on, stopped ones included (a stopped instance's start would
+        // fail on a network gone, and Docker only refuses with running ones).
+        if name.starts_with(super::PREFIX)
+            && docker(&["ps", "-aq", "--filter", &format!("network={name}")]).await.is_ok_and(|ids| ids.trim().is_empty())
+        {
             let _ = docker(&["network", "rm", name]).await;
         }
     }

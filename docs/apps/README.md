@@ -1250,9 +1250,12 @@ ones.
 
 One instance is restarted on its own (`POST …/instances/{name}/restart`, `roll apps restart
 --instance 1`, Restart on its row in Settings' Instances; Fly's `machine restart`): a web
-service's fresh instance starts and answers first, then this one leaves rotation and drains, so
-no request sees it go; a worker's stops and the reaper starts what's wanted. If the fresh one
-doesn't start, the old one keeps serving and the answer says why
+service's fresh instance starts and answers first (outside the wake lock, as a deploy's do),
+then the two swap under the lock and this one drains, so no request sees it go. One with a
+volume, a worker's, an old deployment's or a canary's, or one at `max_instances` stops first
+instead (never two on a volume, never past the most), and the reaper or the next request starts
+what's wanted; a capped project's are refused. If the fresh one doesn't start, the old one keeps
+serving and the answer says why
 (`api.rs::one_instance_is_restarted_without_the_rest`).
 
 ## HTTP/2 and gRPC
@@ -1355,7 +1358,8 @@ Spend counts the services a project has now (a deleted service's month drops out
   at load 22 to 30): it added 250, 265 and 261 µs at the median (mean 259). Two store queries a
   request (the host's environment, then whether its service is still public) were most of it:
   with a host's answer kept a second (forgotten at once on any change on that node: its
-  settings, environments, domains), it adds 133, 90 and 102 µs (mean 108), 58% less. Requests a
+  settings, environments, domains; only a name of 253 bytes at most that names something is
+  kept, since anyone can send any `Host`), it adds 133, 90 and 102 µs (mean 108), 58% less. Requests a
   second at 50 at once are the app's (busybox httpd, about 550 either way). On another node a
   change (made private, a domain gone) shows within that second; the node that made it sees it
   at once.
@@ -1671,9 +1675,9 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (a second product review of the experience, a product review of what one engineer can close here now, bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **Why it isn't serving, on the service page**: paused by the spend limit, in maintenance,
-   private, waiting for a commit's checks, a domain failed: one line each under the header, with
-   its fix (raise the limit, end maintenance, copy a link, open Domains); `capped` on the canvas.
+1. **A private-caller flake under load**: `a_private_caller_wakes_a_sleeping_service_and_keeps_it_awake`
+   saw its instance crashed instead of running once in a full gate at load 30 (alone it passes);
+   find why the wake crashed, not a longer wait.
 2. **Errors where the click was**: one runner's error shows above the tabs, off-screen on Settings
    (several screens tall): a failed Save, Test, domain or firewall action is invisible. Show it
    beside its control, or sticky.
