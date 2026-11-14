@@ -104,7 +104,7 @@ own host), `Authorization: ApiKey base64(<name>:<password>)` or
 | GET | `/v1/search/clusters/{id}/indices` | `_cat/indices` as JSON numbers: health, status, shards, docs, sizes; docs and sizes of open indices come from the engine (as `_stats` reports them: Lucene documents, nested ones included, unflushed writes included). Wakes the cluster |
 | POST | `/v1/search/clusters/{id}/request` | console: `{method, path, body?}` (a JSON body, sent byte for byte so `_source` keeps its key order, or a string such as NDJSON, sent as is) → `{status, headers, body, took_ms, truncated}`. Accepts bodies up to the cluster's `max_body_mb` (the request may be up to twice that plus 1 MiB, for JSON escapes) |
 | GET | `/v1/search/clusters/{id}/usage?days=30` | loaded seconds, GiB-hours, requests, stored GiB-months, cost, and the same workload on Elastic Cloud Hosted, an Amazon OpenSearch Service domain and OpenSearch Serverless |
-| POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?}` (`access`: `admin`, the default, or `data`: a link's role, data, templates, pipelines and lifecycle policies without security) → `{id, name, api_key, url, expires_at?}`: `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password) |
+| POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?}` (`access`: `admin`, the default, or `data`: a link's role, data, templates, pipelines and lifecycle policies without security) → `{id, name, api_key, url, expires_at?}`: `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
 | DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone) |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}` | Elasticsearch's `GET`/`PUT`/`DELETE /<index>`: mappings, settings and aliases; create (body: `mappings`, `settings`); delete |
 | GET, PUT | `/v1/search/clusters/{id}/indices/{index}/mapping` | `GET`/`PUT /<index>/_mapping` |
@@ -295,8 +295,8 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `<user>@<cluster>:<password>@`; never the cluster's password or security);
    rolld's `RollResources` glue goes on apps' `Resources::link` / `unlink` with whichever of #29
    and #26 reaches main second. Secrets' link provider (#20) asks for `access: "data"` keys;
-OpenSearch-flavor clusters have no API keys (a 400): the keys route minting an internal user
-   there (`{username, password}` instead of `api_key`) is proposed to the secrets thread. The fleet test with every product on passed on this branch
+On OpenSearch-flavor clusters the keys route mints an internal user (`{username,
+   password}` instead of `api_key`), agreed with the secrets thread. The fleet test with every product on passed on this branch
    (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall 1.2 s in
    the rolling restart).
 8. **Dashboard polish**: the index browser and console are on the per-index routes, and a

@@ -201,7 +201,7 @@ pub fn authenticate_password(cluster: &Cluster, user: &str, password: &str, nati
     if user == OWNER {
         return (!native).then(|| owner(&st));
     }
-    let u = entry(&st, Kind::Users, user)?;
+    let u = entry(&st, Kind::Users, user).filter(|u| !expired(u))?;
     let hash = u.get("hash").and_then(Value::as_str).filter(|h| !h.is_empty())?;
     super::users::check_password_with(cluster, user, password, hash, verify_hash).then(|| principal_of(&st, user, &u, false))
 }
@@ -212,7 +212,17 @@ pub fn lookup_user(cluster: &Cluster, name: &str) -> Option<Principal> {
     if name == OWNER {
         return Some(owner(&st));
     }
-    entry(&st, Kind::Users, name).map(|u| principal_of(&st, name, &u, false))
+    entry(&st, Kind::Users, name).filter(|u| !expired(u)).map(|u| principal_of(&st, name, &u, false))
+}
+
+/// The attribute roll keeps an internal user's expiry in (unix ms; roll search's keys route
+/// makes users that expire, as API keys do).
+pub const EXPIRES_ATTRIBUTE: &str = "roll_expires_at";
+
+/// Whether an internal user's [`EXPIRES_ATTRIBUTE`] has passed: it can no longer sign in or be
+/// run as.
+fn expired(u: &Value) -> bool {
+    u.pointer(&["attributes", EXPIRES_ATTRIBUTE]).and_then(|v| v.to_es_string().parse::<i64>().ok()).is_some_and(|at| crate::time::now_millis() >= at)
 }
 
 /// bcrypt costs above this never verify (a hash a client gave can't make a login take minutes).

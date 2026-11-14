@@ -306,6 +306,9 @@ fn os_link_role() -> Value {
     })
 }
 
+/// The name prefix of the internal users the keys route makes on OpenSearch-flavor clusters.
+const OS_KEY_PREFIX: &str = "roll-key-";
+
 /// A link's credential ([`Control::mint_link`]): its variables (unprefixed) and what revoking
 /// it takes.
 #[derive(Clone, Debug)]
@@ -1147,25 +1150,41 @@ impl Control {
     /// An OpenSearch-flavor cluster's link: a role and an internal user named
     /// `roll-link-<random>`, the user holding only that role.
     async fn mint_os_link(&self, c: &SearchCluster, url: &str) -> Result<LinkCredential> {
-        let name = format!("roll-link-{}", random_string(12));
-        let password = random_string(40);
-        let api = "/_plugins/_security/api";
-        let role = self.call(c, EsRequest::json("PUT", &format!("{api}/roles/{name}"), serde_json::to_vec(&os_link_role()).unwrap_or_default())).await;
-        if role.status >= 300 {
-            return Err(ControlError::Internal(anyhow::anyhow!("making a link role of cluster {} failed ({})", c.name, role.status)));
-        }
-        let user = json!({ "password": password, "opendistro_security_roles": [name], "description": "roll: an app's link" });
-        let resp = self.call(c, EsRequest::json("PUT", &format!("{api}/internalusers/{name}"), serde_json::to_vec(&user).unwrap_or_default())).await;
-        if resp.status >= 300 {
-            let _ = self.call(c, EsRequest::new("DELETE", &format!("{api}/roles/{name}"))).await;
-            return Err(ControlError::Internal(anyhow::anyhow!("making a link user of cluster {} failed ({})", c.name, resp.status)));
-        }
+        let (name, password) = self.os_user(c, "roll-link-", true, "roll: an app's link", None).await?;
         let mut u = reqwest::Url::parse(url).map_err(|e| ControlError::Internal(anyhow::anyhow!("cluster {} has no URL: {e}", c.name)))?;
         let userinfo = (u.set_username(&format!("{name}@{}", c.name)), u.set_password(Some(&password)));
         if userinfo != (Ok(()), Ok(())) {
             return Err(ControlError::Internal(anyhow::anyhow!("cluster {}'s URL takes no credentials", c.name)));
         }
         Ok(LinkCredential { vars: vec![("OPENSEARCH_URL".into(), u.to_string().trim_end_matches('/').to_string())], kept: format!("osuser:{name}") })
+    }
+
+    /// A new internal user of an OpenSearch-flavor cluster named `<prefix><random>`, with a random
+    /// password: a role of its own with [`os_link_role`]'s permissions (`data`), else `all_access`
+    /// (which can't administer security). `expires_ms`: it can't sign in from then on
+    /// (`EXPIRES_ATTRIBUTE`, checked by the cluster). Returns its name and password.
+    async fn os_user(&self, c: &SearchCluster, prefix: &str, data: bool, description: &str, expires_ms: Option<i64>) -> Result<(String, String)> {
+        let name = format!("{prefix}{}", random_string(12));
+        let password = random_string(40);
+        let api = "/_plugins/_security/api";
+        if data {
+            let role = self.call(c, EsRequest::json("PUT", &format!("{api}/roles/{name}"), serde_json::to_vec(&os_link_role()).unwrap_or_default())).await;
+            if role.status >= 300 {
+                return Err(ControlError::Internal(anyhow::anyhow!("making a role of cluster {} failed ({})", c.name, role.status)));
+            }
+        }
+        let mut user = json!({ "password": password, "opendistro_security_roles": [if data { name.as_str() } else { "all_access" }], "description": description });
+        if let Some(ms) = expires_ms {
+            user["attributes"] = json!({ search_es::xpack::security::opensearch::EXPIRES_ATTRIBUTE: ms.to_string() });
+        }
+        let resp = self.call(c, EsRequest::json("PUT", &format!("{api}/internalusers/{name}"), serde_json::to_vec(&user).unwrap_or_default())).await;
+        if resp.status >= 300 {
+            if data {
+                let _ = self.call(c, EsRequest::new("DELETE", &format!("{api}/roles/{name}"))).await;
+            }
+            return Err(ControlError::Internal(anyhow::anyhow!("making a user of cluster {} failed ({})", c.name, resp.status)));
+        }
+        Ok((name, password))
     }
 
     /// Revokes what [`Self::mint_link`] made (`kept`), at once. Gone already (the key, the
@@ -1210,19 +1229,29 @@ impl Control {
         if name.trim().is_empty() || name.len() > 1024 {
             return Err(ControlError::Invalid("name: 1 to 1024 characters".into()));
         }
+        let data = match access.unwrap_or("admin") {
+            "admin" => false,
+            "data" => true,
+            a => return Err(ControlError::Invalid(format!("access must be admin or data, not {a:?}"))),
+        };
+        if expires_in_s.is_some_and(|s| s <= 0) {
+            return Err(ControlError::Invalid("expires_in_s must be positive".into()));
+        }
+        // OpenSearch clients sign in with a user: the key is an internal user of its own.
         if c.flavor == "opensearch" {
-            return Err(ControlError::Invalid(format!("the OpenSearch-flavor cluster {} has no API keys: OpenSearch clients sign in with a user", c.name)));
+            let expires_ms = expires_in_s.map(|s| crate::meter::now_ms().saturating_add(s.saturating_mul(1000)));
+            let (user, password) = self.os_user(&c, OS_KEY_PREFIX, data, &format!("roll key: {name}"), expires_ms).await?;
+            let mut out = json!({ "id": user, "name": name, "username": format!("{user}@{}", c.name), "password": password, "url": connection_of(&self.cfg, &c.name)["url"] });
+            if let Some(ms) = expires_ms {
+                out["expires_at"] = json!(ms / 1000);
+            }
+            return Ok(out);
         }
         let mut body = json!({ "name": name });
-        match access.unwrap_or("admin") {
-            "admin" => {}
-            "data" => body["role_descriptors"] = json!({ "roll_link": link_role() }),
-            a => return Err(ControlError::Invalid(format!("access must be admin or data, not {a:?}"))),
+        if data {
+            body["role_descriptors"] = json!({ "roll_link": link_role() });
         }
         if let Some(s) = expires_in_s {
-            if s <= 0 {
-                return Err(ControlError::Invalid("expires_in_s must be positive".into()));
-            }
             body["expiration"] = json!(format!("{s}s"));
         }
         let resp = self.call(&c, EsRequest::json("POST", "/_security/api_key", serde_json::to_vec(&body).unwrap_or_default())).await;
@@ -1245,6 +1274,20 @@ impl Control {
     /// revoked already).
     pub async fn delete_key(&self, id: &str, key_id: &str) -> Result<()> {
         let c = self.get(id).await?;
+        if c.flavor == "opensearch" {
+            // Only users the keys route made: never another internal user.
+            let api = "/_plugins/_security/api";
+            if !key_id.starts_with(OS_KEY_PREFIX) {
+                return Err(ControlError::NotFound(format!("no API key {key_id} on cluster {}", c.name)));
+            }
+            let r = self.call(&c, EsRequest::new("DELETE", &format!("{api}/internalusers/{}", urlencoding::encode(key_id)))).await;
+            let _ = self.call(&c, EsRequest::new("DELETE", &format!("{api}/roles/{}", urlencoding::encode(key_id)))).await;
+            return match r.status {
+                s if s < 300 => Ok(()),
+                404 => Err(ControlError::NotFound(format!("no API key {key_id} on cluster {}", c.name))),
+                s => Err(ControlError::Internal(anyhow::anyhow!("removing key user {key_id} of cluster {} failed ({s})", c.name))),
+            };
+        }
         let body = serde_json::to_vec(&json!({ "ids": [key_id] })).unwrap_or_default();
         let resp = self.call(&c, EsRequest::json("DELETE", "/_security/api_key", body)).await;
         let v: Value = serde_json::from_slice(&resp.body).unwrap_or(Value::Null);

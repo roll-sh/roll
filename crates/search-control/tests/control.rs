@@ -1086,9 +1086,6 @@ async fn a_link_credential_uses_the_data_and_is_revoked() {
     let e = env().await;
     for (name, flavor) in [("es-link", "elasticsearch"), ("os-link", "opensearch")] {
         e.post("/v1/search/clusters", json!({"name": name, "flavor": flavor})).await;
-        if flavor == "opensearch" {
-            assert_eq!(e.call(reqwest::Method::POST, "/v1/search/clusters/os-link/keys", Some(json!({"name": "k"}))).await.0, 400);
-        }
         let cred = e.control.mint_link(name, "svc_1").await.unwrap();
         let vars: std::collections::HashMap<_, _> = cred.vars.iter().cloned().collect();
         let send = |method: reqwest::Method, path: &str, body: Option<Value>| {
@@ -1118,6 +1115,31 @@ async fn a_link_credential_uses_the_data_and_is_revoked() {
         assert_eq!(send(reqwest::Method::GET, "/items/_doc/1", None).await, 401, "{name}: revoked");
         e.control.revoke_link(name, &cred.kept).await.unwrap();
     }
+    // The keys route on an OpenSearch-flavor cluster (roll secrets): an internal user of its own,
+    // the data role, removed on DELETE, and refused once its expiry passes.
+    let as_user = |u: &str, p: &str, method: reqwest::Method, path: &str, body: Option<Value>| {
+        let mut r = e.http.request(method, format!("{}{path}", e.es)).basic_auth(u, Some(p));
+        if let Some(b) = body {
+            r = r.json(&b);
+        }
+        async move { r.send().await.unwrap().status().as_u16() }
+    };
+    let k = e.post("/v1/search/clusters/os-link/keys", json!({"name": "worker", "access": "data"})).await;
+    assert!(k.get("api_key").is_none(), "{k}");
+    let (u, p) = (k["username"].as_str().unwrap().to_string(), k["password"].as_str().unwrap().to_string());
+    assert_eq!(as_user(&u, &p, reqwest::Method::PUT, "/items/_doc/2", Some(json!({"n": 2}))).await, 201);
+    assert_eq!(as_user(&u, &p, reqwest::Method::PUT, "/_plugins/_security/api/internalusers/x", Some(json!({"password": "correcthorsebattery"}))).await, 403);
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("/v1/search/clusters/os-link/keys/{}", k["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, 204);
+    assert_eq!(as_user(&u, &p, reqwest::Method::GET, "/items/_doc/2", None).await, 401, "removed");
+    let (s, _) = e.call(reqwest::Method::DELETE, "/v1/search/clusters/os-link/keys/admin", None).await;
+    assert_eq!(s, 404, "the keys route removes only users it made");
+    let k = e.post("/v1/search/clusters/os-link/keys", json!({"name": "brief", "expires_in_s": 1})).await;
+    assert!(k["expires_at"].as_i64().is_some(), "{k}");
+    let (u, p) = (k["username"].as_str().unwrap().to_string(), k["password"].as_str().unwrap().to_string());
+    assert_eq!(as_user(&u, &p, reqwest::Method::GET, "/items/_doc/2", None).await, 200);
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert_eq!(as_user(&u, &p, reqwest::Method::GET, "/items/_doc/2", None).await, 401, "expired");
 }
 
 /// The host of a URL (its cluster's name on the edge, a node's address otherwise).
