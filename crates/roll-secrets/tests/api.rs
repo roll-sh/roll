@@ -1007,6 +1007,40 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
 }
 
 #[tokio::test]
+async fn an_encryption_key_encrypts_for_apps_and_never_leaves_roll() {
+    use base64::Engine;
+    let b64 = |s: &[u8]| base64::engine::general_purpose::STANDARD.encode(s);
+    let api = Api::new().await;
+    let k = api.ok(Method::POST, "/transit", Some(json!({ "name": "cards" }))).await;
+    assert_eq!(k["latest_version"], 1);
+    assert!(!api.ok(Method::GET, "/transit", None).await.to_string().contains("\"key\""), "no key material in a listing");
+    // Encrypt bound to a context; it opens under that context only.
+    let one = api.ok(Method::POST, "/transit/cards/encrypt", Some(json!({ "plaintext": b64(b"4111 1111 1111 1111"), "context": "order:42" }))).await;
+    let ct = one["ciphertext"].as_str().unwrap().to_string();
+    assert!(ct.starts_with("roll:v1:"), "{ct}");
+    let open = |ct: &str, context: &str| api.call(Method::POST, "/transit/cards/decrypt", Some(json!({ "ciphertext": ct, "context": context })));
+    assert_eq!(open(&ct, "order:42").await.1["plaintext"], b64(b"4111 1111 1111 1111"));
+    assert_eq!(open(&ct, "order:43").await.0, StatusCode::BAD_REQUEST);
+    // Rotation: new ciphertexts use v2, old ones still open, rewrap moves them without the plaintext.
+    assert_eq!(api.ok(Method::POST, "/transit/cards/rotate", None).await["latest_version"], 2);
+    let re = api.ok(Method::POST, "/transit/cards/rewrap", Some(json!({ "items": [{ "ciphertext": ct, "context": "order:42" }] }))).await;
+    let ct2 = re["items"][0]["ciphertext"].as_str().unwrap().to_string();
+    assert!(ct2.starts_with("roll:v2:") && open(&ct2, "order:42").await.1["plaintext"] == b64(b"4111 1111 1111 1111"));
+    // Retiring v1: what it encrypted no longer opens.
+    api.ok(Method::PATCH, "/transit/cards", Some(json!({ "min_decrypt_version": 2 }))).await;
+    let (s, e) = open(&ct, "order:42").await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("retired"), "{e}");
+    // A data key for local envelope encryption: its ciphertext opens to it.
+    let dk = api.ok(Method::POST, "/transit/cards/datakey", Some(json!({}))).await;
+    assert_eq!(base64::engine::general_purpose::STANDARD.decode(dk["plaintext"].as_str().unwrap()).unwrap().len(), 32);
+    assert_eq!(api.call(Method::POST, "/transit/cards/decrypt", Some(json!({ "ciphertext": dk["ciphertext"] }))).await.1["plaintext"], dk["plaintext"]);
+    // Deleting makes everything unreadable for good: only with the name repeated.
+    assert_eq!(api.call(Method::DELETE, "/transit/cards", None).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(api.call(Method::DELETE, "/transit/cards?confirm=cards", None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(open(&ct2, "order:42").await.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn reads_unlike_the_reader_are_alerted() {
     let api = Api::new().await;
     api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "notify_url": "https://hooks.example/T0/B0/x" }))).await;

@@ -555,6 +555,27 @@ only the host is shown. An answer is read once, never logged, and never part of 
 a key still links to can't be deleted, nor one with a retired credential still waiting out its
 grace period (its revocation goes through the rotator).
 
+### Encryption keys
+
+Encryption as a service, as Vault's Transit engine and Infisical's KMS give: an app sends data and
+gets ciphertext back under a named key that never leaves roll, so it can keep encrypted fields (card
+numbers, tokens, notes) in its own database without holding a key.
+
+- `POST …/transit {name}` (admin; `roll secrets transit add NAME`) makes a key. Each version is 32
+  random bytes sealed with the project's data key, bound to the key and version, so a project's
+  customer-managed key covers it too.
+- `POST …/transit/{name}/encrypt {plaintext (base64), context?}` (`write`) answers `{ciphertext}`:
+  `roll:v<version>:<base64url(nonce ‖ AES-256-GCM)>`. `context` (a row's id, say) is bound in: the
+  same ciphertext under another context won't open. `{items: […]}` encrypts a batch (1,000 items,
+  4 MiB at most; 64 KiB each) and answers `{items: [{ciphertext}]}`.
+- `…/decrypt {ciphertext, context?}` (`reveal`, audited) answers `{plaintext}` (or a batch);
+  `…/datakey {context?}` (`reveal`) a fresh 256-bit data key and its ciphertext, for encrypting large
+  data locally (envelope encryption).
+- `…/rotate` (admin) adds a version new encryptions use; older ones keep decrypting.
+  `…/rewrap` (`write`) re-encrypts under the newest without the plaintext leaving roll, and
+  `PATCH …/transit/{name} {min_decrypt_version}` retires older versions. `DELETE …/transit/{name}?confirm=<name>`
+  deletes a key for good: what it encrypted can't be decrypted again.
+
 ## Consumption
 
 ### `roll secrets` and `roll run`
@@ -583,6 +604,7 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
+roll secrets transit ls | add NAME | rotate NAME | encrypt NAME [--context C] | decrypt NAME [--context C] | rm NAME --confirm NAME
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -1419,6 +1441,15 @@ isn't in the workspace is 404.
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `GET /transit` | | `TransitKey[]` (`read`; versions and dates, never key material) |
+| `POST /transit` | `{name}` | 201 `TransitKey` (`admin`) |
+| `PATCH /transit/{name}` | `{min_decrypt_version}` | `TransitKey` (`admin`) |
+| `DELETE /transit/{name}?confirm=` | | 204; 400 unless `confirm` repeats the name (`admin`) |
+| `POST /transit/{name}/rotate` | | `TransitKey` (`admin`) |
+| `POST /transit/{name}/encrypt` | `{plaintext, context?}` or `{items: […]}` | `{ciphertext}` or `{items: [{ciphertext}]}` (`write`) |
+| `POST /transit/{name}/rewrap` | `{ciphertext, context?}` or `{items: […]}` | `{ciphertext}` or `{items}` (`write`) |
+| `POST /transit/{name}/decrypt` | `{ciphertext, context?}` or `{items: […]}` | `{plaintext}` or `{items}` (`reveal`, audited) |
+| `POST /transit/{name}/datakey` | `{context?}` | `{plaintext, ciphertext}` (`reveal`, audited) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
 

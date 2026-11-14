@@ -84,6 +84,13 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/findings", get(all_health))
         .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
+        .route(&format!("{P}/transit"), get(transit_keys).post(add_transit_key))
+        .route(&format!("{P}/transit/{{name}}"), axum::routing::patch(config_transit_key).delete(delete_transit_key))
+        .route(&format!("{P}/transit/{{name}}/rotate"), post(rotate_transit_key))
+        .route(&format!("{P}/transit/{{name}}/encrypt"), post(transit_encrypt))
+        .route(&format!("{P}/transit/{{name}}/decrypt"), post(transit_decrypt))
+        .route(&format!("{P}/transit/{{name}}/rewrap"), post(transit_rewrap))
+        .route(&format!("{P}/transit/{{name}}/datakey"), post(transit_datakey))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
@@ -851,6 +858,98 @@ async fn add_rotator(State(s): S, Who(c): Who, Path(project): Path<String>, b: B
 async fn delete_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_rotator(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn transit_keys(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.transit_keys(&project, &c)).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewTransitKey {
+    name: String,
+}
+
+async fn add_transit_key(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: NewTransitKey = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_transit_key(&project, &n.name, &c)).await?))
+}
+
+async fn rotate_transit_key(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.rotate_transit_key(&project, &name, &c)).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransitConfig {
+    min_decrypt_version: u32,
+}
+
+async fn config_transit_key(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let t: TransitConfig = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.set_min_decrypt_version(&project, &name, t.min_decrypt_version, &c)).await?))
+}
+
+#[derive(Deserialize)]
+struct Confirm {
+    #[serde(default)]
+    confirm: String,
+}
+
+async fn delete_transit_key(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, axum::extract::Query(q): axum::extract::Query<Confirm>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_transit_key(&project, &name, &q.confirm, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// One item, or `{items: […]}` for a batch: the answer has the same shape.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OneOrMany<T> {
+    Many { items: Vec<T> },
+    One(T),
+}
+
+impl<T> OneOrMany<T> {
+    fn split(self) -> (Vec<T>, bool) {
+        match self {
+            OneOrMany::Many { items } => (items, true),
+            OneOrMany::One(t) => (vec![t], false),
+        }
+    }
+}
+
+fn shaped(field: &str, out: Vec<serde_json::Value>, many: bool) -> serde_json::Value {
+    if many { json!({ "items": out.into_iter().map(|v| json!({ field: v })).collect::<Vec<_>>() }) } else { json!({ field: out.into_iter().next().unwrap_or_default() }) }
+}
+
+async fn transit_encrypt(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Plain>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_encrypt(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("ciphertext", out.into_iter().map(serde_json::Value::String).collect(), many)))
+}
+
+async fn transit_decrypt(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Cipher>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_decrypt(&project, &name, items, &c)).await?;
+    Ok(secret_response(ok(shaped("plaintext", out.iter().map(|v| serde_json::Value::String(v.expose().to_string())).collect(), many))))
+}
+
+async fn transit_rewrap(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let (items, many) = body::<OneOrMany<crate::transit::Cipher>>(&b)?.split();
+    let out = blocking(s, move |s| s.transit_rewrap(&project, &name, items, &c)).await?;
+    Ok(ok(shaped("ciphertext", out.into_iter().map(serde_json::Value::String).collect(), many)))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct DataKey {
+    #[serde(default)]
+    context: Option<String>,
+}
+
+async fn transit_datakey(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let d: DataKey = if b.is_empty() { DataKey::default() } else { body(&b)? };
+    Ok(secret_response(ok(blocking(s, move |s| s.transit_datakey(&project, &name, d.context, &c)).await?)))
 }
 
 async fn list_syncs(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

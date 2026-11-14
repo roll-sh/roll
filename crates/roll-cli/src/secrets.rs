@@ -282,6 +282,9 @@ pub enum Secrets {
     Tokens(Tokens),
     /// Where a key is set, in every project you can read (`STRIPE_*` for a prefix). Never values.
     Find { key: String },
+    /// Encryption keys (encryption as a service): encrypt stdin, decrypt stdin, rotate, list.
+    #[command(subcommand)]
+    Transit(TransitCmd),
     /// A key pair for backups: the secret key written to a file only you can read, the public key
     /// printed (give it to `backup --to`).
     Keygen {
@@ -494,6 +497,33 @@ pub enum Requests {
         bypass: bool,
     },
     Close { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum TransitCmd {
+    #[command(alias = "list")]
+    Ls,
+    Add { name: String },
+    /// A new version that encryptions use from now on.
+    Rotate { name: String },
+    /// Encrypt stdin (any bytes); prints the ciphertext.
+    Encrypt {
+        name: String,
+        #[arg(long)]
+        context: Option<String>,
+    },
+    /// Decrypt the ciphertext on stdin; writes the plaintext's bytes to stdout.
+    Decrypt {
+        name: String,
+        #[arg(long)]
+        context: Option<String>,
+    },
+    /// Delete a key for good (what it encrypted can't be decrypted again).
+    Rm {
+        name: String,
+        #[arg(long)]
+        confirm: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1165,6 +1195,48 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             println!("{} is {}", s(&v["id"]), s(&v["state"]));
         }
+        Secrets::Transit(t) => match t {
+            TransitCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/transit", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for k in v.as_array().into_iter().flatten() {
+                    println!("{:<20} v{}  decrypts from v{}", s(&k["name"]), k["latest_version"], k["min_decrypt_version"]);
+                }
+            }
+            TransitCmd::Add { name } => {
+                let v = c.call(Method::POST, &format!("{}/transit", c.base()), Some(json!({ "name": name }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Made encryption key {}: `roll secrets transit encrypt {}` encrypts stdin.", s(&v["name"]), s(&v["name"]));
+            }
+            TransitCmd::Rotate { name } => {
+                let v = c.call(Method::POST, &format!("{}/transit/{}/rotate", c.base(), enc(&name)), None).await?;
+                println!("{} is at version {}", s(&v["name"]), v["latest_version"]);
+            }
+            TransitCmd::Encrypt { name, context } => {
+                use base64::Engine;
+                let mut plain = Vec::new();
+                std::io::stdin().read_to_end(&mut plain).context("reading stdin")?;
+                let v = c.call(Method::POST, &format!("{}/transit/{}/encrypt", c.base(), enc(&name)), Some(json!({ "plaintext": base64::engine::general_purpose::STANDARD.encode(&plain), "context": context }))).await?;
+                println!("{}", s(&v["ciphertext"]));
+            }
+            TransitCmd::Decrypt { name, context } => {
+                use base64::Engine;
+                use std::io::Write;
+                let mut ct = String::new();
+                std::io::stdin().read_to_string(&mut ct).context("reading stdin")?;
+                let v = c.call(Method::POST, &format!("{}/transit/{}/decrypt", c.base(), enc(&name)), Some(json!({ "ciphertext": ct.trim(), "context": context }))).await?;
+                let plain = base64::engine::general_purpose::STANDARD.decode(s(&v["plaintext"])).context("the plaintext isn't base64")?;
+                std::io::stdout().write_all(&plain)?;
+            }
+            TransitCmd::Rm { name, confirm } => {
+                c.call(Method::DELETE, &format!("{}/transit/{}?confirm={}", c.base(), enc(&name), enc(&confirm)), None).await?;
+                println!("Deleted {name}");
+            }
+        },
         Secrets::Tokens(t) => match t {
             Tokens::Ls => {
                 let v = c.call(Method::GET, &format!("{}/tokens", c.base()), None).await?;
