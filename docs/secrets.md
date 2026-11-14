@@ -562,8 +562,8 @@ has its logins rotated by roll itself, with no rotator to write, as Infisical's 
 does, and issues a login per lease, as Vault's database engine does. A project registers it
 (`POST …/outside-databases {name, url, roles?, group?, ca?}`, `admin`; `roll secrets databases add
 NAME --role a --role b --group g`, the URL on stdin): `url` is an admin connection
-(`postgres://admin:…@host:5432/db`, `mysql://admin:…@host:3306/db` or
-`sqlserver://admin:…@host:1433/db`, a user that may alter both
+(`postgres://admin:…@host:5432/db`, `mysql://admin:…@host:3306/db`,
+`sqlserver://admin:…@host:1433/db` or `clickhouse://admin:…@host:8443/db`, a user that may alter both
 roles and create roles in the group), sealed with the project's data key like a rotator's (only `host:port` is shown); `roles` are
 two login roles that take turns (managed links); `group` is a role whose grants dynamic logins get;
 one or both. `ca` is the server's CA certificates (PEM) when the system's don't cover it (RDS).
@@ -637,6 +637,20 @@ its logs); `group` is a role, `name` in `authSource` or `name@db` (`read@shop`);
 small BSON reader that checks every length against the bytes present, caps nesting, and reads at
 most 1 MiB. The server is the tenant's, so its replies are read by a small parser that bounds
 nesting, counts and lengths by the bytes present.
+
+**ClickHouse** too, over its HTTPS interface (`clickhouse://admin:…@host:8443/db`, ClickHouse
+Cloud's port; no settings): rolld pins the address it checked, verifies the certificate against
+the URL's host (the system's roots and `ca`), follows no redirect and uses no proxy, and reads at
+most 64 KiB of an answer. Values go as query parameters (`{n:String}`), never into SQL. Passwords
+go as `IDENTIFIED WITH sha256_hash`, so the server never sees one (its query log holds the hash):
+rotation is `ALTER USER` on two users that take turns; a dynamic login is `CREATE USER`, `GRANT
+<group>` and `DEFAULT ROLE <group>` (the group is a role); ending it stops its queries (`KILL
+QUERY`) and drops the user. ClickHouse has no expiry for a user, so a dynamic login lasts until
+roll ends its lease. Users made over SQL need the admin's `access_management`; on a self-managed
+cluster, keep users in replicated access storage. Checked against ClickHouse 25.8: rotation (the old
+password refused, the new one taken), a dynamic login that signs in with the role and can't once
+dropped, an untrusted certificate and a wrong admin password refused, and no password in the
+server's query log.
 
 **SQL Server** (and Azure SQL Managed Instance) too, as Vault's MSSQL engine (`sqlserver://…`; the
 URL may set `encrypt=true` and nothing else). Everything is encrypted and the certificate verified
@@ -1786,7 +1800,7 @@ Open pull requests after this one:
   signature checked.
 - **#41, Redis outside roll** (after #39): two ACL users take turns (`#<sha256>` passwords), or a
   user per lease copying a template user's rules; the tenant's replies read by a bounded parser.
-- **#39, Postgres, MySQL and SQL Server outside roll** (after #20): two login roles take turns (rotation), or a
+- **#39, Postgres, MySQL, SQL Server and ClickHouse outside roll** (after #20): two login roles take turns (rotation), or a
   login per lease in a group role (dynamic), over verified TLS to a public address rolld resolved
   itself (Postgres gets a SCRAM verifier, never the password).
 
