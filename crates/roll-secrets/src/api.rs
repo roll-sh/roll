@@ -87,6 +87,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/leaks"), post(scan_leaks))
         .route(&format!("{P}/health"), get(project_health))
         .route("/v1/secrets/findings", get(all_health))
+        .route(&format!("{P}/rotations"), get(rotations))
         .route(&format!("{P}/kms"), get(kms_key).put(set_kms_key).delete(unset_kms_key))
         .route(&format!("{P}/aws-roles"), get(aws_roles).post(add_aws_role))
         .route(&format!("{P}/aws-roles/{{id}}"), axum::routing::delete(delete_aws_role))
@@ -945,6 +946,10 @@ async fn delete_aws_user(State(s): S, Who(c): Who, Path((project, id)): Path<(St
 async fn delete_aws_role(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_aws_role(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn rotations(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.rotations(&project, &c)).await?))
 }
 
 async fn rotators(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

@@ -20,6 +20,10 @@ const READS_MAX: i64 = 100_000;
 pub enum Issue {
     /// Its value stopped working outside roll.
     Expired,
+    /// Its scheduled rotation fails (the database, vendor or rotator refused or didn't answer).
+    RotationFailing,
+    /// A retired or expired credential roll can't revoke yet (it keeps trying).
+    RevokeFailing,
     /// A required key an environment doesn't define.
     Missing,
     /// A protected environment's value, also set in an unprotected one.
@@ -237,6 +241,33 @@ impl Secrets {
         for (ca, names, serial, end) in ending {
             let names = from_json::<Vec<String>>(&names).join(", ");
             out.push(Finding { issue: Issue::CertificateExpiring, environment: String::new(), path: ca, key: names, detail: format!("ends {} (serial {serial}): sign a new CSR", chrono_day(end)), owner: None });
+        }
+        // What roll couldn't do for a key: rotate it on schedule, or revoke a credential it issued.
+        type Failed = Vec<(String, String, String, String)>;
+        let (failing, unrevoked): (Failed, Failed) = self.db.read(|c| {
+            Ok::<_, crate::Error>((
+                c.query("SELECT env_id, path, key, rotation_error FROM secrets WHERE project_id = ? AND owner = '' AND rotation_error IS NOT NULL", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?,
+                // A retired credential's lease names no key: its link's field says what it was.
+                c.query(
+                    "SELECT env_id, COALESCE(path, '/'), key, link, revoke_error FROM leases WHERE project_id = ? AND revoked_at IS NULL AND revoke_error IS NOT NULL",
+                    [project],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?)),
+                )?
+                .into_iter()
+                .map(|(env, path, key, link, why)| {
+                    let key = if key.is_empty() { serde_json::from_str::<crate::Link>(&link).map(|l| format!("{} {} ({})", l.kind, l.r#ref, l.field)).unwrap_or_default() } else { key };
+                    (env, path, key, why)
+                })
+                .collect(),
+            ))
+        })?;
+        for (issue, rows) in [(Issue::RotationFailing, failing), (Issue::RevokeFailing, unrevoked)] {
+            for (env_id, path, key, why) in rows {
+                let Some(e) = slug.get(env_id.as_str()) else { continue };
+                if caller.allows(Action::Read, &Scope::at(project, &e.slug, &path)) {
+                    out.push(Finding { issue, environment: e.slug.clone(), path, key, detail: why, owner: None });
+                }
+            }
         }
         // Who to ask: the required key's owner, its folder's rule first, else the key's anywhere.
         let owners: Vec<crate::required::Required> = self.db.read(|c| crate::required::of(c, project))?.into_iter().filter(|r| r.owner.is_some()).collect();
