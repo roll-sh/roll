@@ -87,6 +87,12 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
           {env.base_change?.links_added != null && ` (${env.base_change.links_added === 0 ? "none" : env.base_change.links_added} new against ${env.base_change.branch})`}
         </p>
       )}
+      {!!env.page_a11y?.seo?.length && (
+        <p className="text-[12px] text-muted">
+          SEO: {env.page_a11y.seo.join(", ")}
+          {env.base_change?.seo_added != null && ` (${env.base_change.seo_added === 0 ? "none" : env.base_change.seo_added} new against ${env.base_change.branch})`}
+        </p>
+      )}
       {env.page_a11y && a11yWords(env.page_a11y).length > 0 && (
         <p className="text-[12px] text-muted">
           Accessibility: {a11yWords(env.page_a11y).join(", ")}

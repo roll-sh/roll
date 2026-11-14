@@ -104,6 +104,15 @@ const A11Y = `JSON.stringify((() => {
 // axe-core's WCAG rules (vendor/axe-core, handed to the container in $AXE), when it's there:
 // the violations by rule (a language and a title are read as above, so not twice), else the
 // checks above. The page can't stop it loading (DevTools evaluation is outside its CSP).
+// What search engines look for on the page (Lighthouse's SEO audit): a description, a viewport,
+// one h1, and no noindex in the page's own markup (roll's header keeps previews unindexed; the
+// app's would hide production).
+const SEO = `JSON.stringify({
+  description: !!(document.querySelector('meta[name="description" i]')?.getAttribute("content") || "").trim(),
+  viewport: !!document.querySelector('meta[name="viewport" i]'),
+  h1: document.querySelectorAll("h1").length,
+  noindex: [...document.querySelectorAll('meta[name="robots" i], meta[name="googlebot" i]')].some((m) => /noindex/i.test(m.getAttribute("content") || "")),
+})`;
 const AXE_SRC = (() => {
   try {
     return process.env.AXE ? fs.readFileSync(process.env.AXE, "utf8") : "";
@@ -206,6 +215,10 @@ const still = async (sessionId) => {
   const links = await Promise.race([send("Runtime.evaluate", { expression: LINKS, awaitPromise: true, returnByValue: true }, sessionId).catch(() => null), sleep(30000).then(() => null)]);
   try {
     report.links = JSON.parse(links?.result?.value || "null");
+  } catch {}
+  const seo = await send("Runtime.evaluate", { expression: SEO, returnByValue: true }, sessionId).catch(() => null);
+  try {
+    report.seo = JSON.parse(seo?.result?.value || "null");
   } catch {}
   report.a11y = await axeReport(sessionId);
   if (!report.a11y) {

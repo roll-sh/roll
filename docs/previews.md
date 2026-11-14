@@ -977,6 +977,12 @@ type Settings = {
     comment's checks ("1 broken link, 1 new against main"). Its own requests are taken after
     what went wrong while the page loaded was copied, so they're never the page's failed
     requests (live: `/gone` 404, and the page still "0 failed").
+    And its SEO basics (Lighthouse's SEO audit): a meta description, a viewport, one `h1`, and no
+    `noindex` in the page's own markup (roll's header keeps previews unindexed; the app's own
+    would hide production too), kept with the accessibility report (`page_a11y.seo`) and
+    compared with main's by problem (`base_change.seo_added`), in roll's own words on the sheet,
+    the change page and the comment's checks (live: the bare test page has none of them, nor
+    main's: none new).
     The same session catches what went wrong while the page loaded: uncaught exceptions,
     `console.error`s, and requests that failed or answered 4xx/5xx (`page_health`, counts and the
     first of each, one bounded line each because they're the page's own words; "**While its
@@ -1109,6 +1115,7 @@ Ranked by what a person notices first. Done so far:
 - the first page's words against main's (`base_change.text`, lines gained and lost);
 - broken links on the first page (its own origin's, `HEAD` only, against main's);
 - data as of a point in time (`data_at`, where the product keeps history: Postgres, NoSQL);
+- SEO basics on the first page (a description, a viewport, one `h1`, no `noindex` of its own);
 - a phone-width screenshot with its own visual change;
 - every change compared with the default branch, whose preview roll keeps itself (`github.baseline`);
 - the comment's page checks folded under one line of counts;
@@ -1194,14 +1201,11 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **SEO basics on the first page** (Lighthouse's SEO audit): a title, a meta description, a
-   viewport, a canonical link, one `h1`, no `noindex` meant for production, said with the
-   accessibility checks and against main's.
-2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+1. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-3. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
+2. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
    a preview reaches real people, but its code can still call any API (a payment provider's
    sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
    (today), `"roll"` (only roll's own products and the preview's branches) or a list of hosts;
@@ -1211,19 +1215,19 @@ Ranked by what a person notices first. Done so far:
    host whose firewall roll mustn't touch) or an internal network with a forwarding sidecar for
    every product port (an image of its own, and roll code's runner changed); on the cloud fleet
    it's security groups, with the cloud thread.
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+5. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-7. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1236,12 +1240,12 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-8. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+7. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
    Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
    minutes even with the parent's history reporting `end` past it, where pg-control's own test
    (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
    old; the live script will check it once this is understood.
-9. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

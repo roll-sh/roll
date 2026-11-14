@@ -543,6 +543,9 @@ MAIN_LOAD=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('load_ms')")
 case "$MAIN_LOAD" in [0-9]*) ;; *) echo "the comparison with main should carry main's load time: $MAIN_LOAD"; exit 1;; esac
 # Main's page misses a language and a title too: none of that is the change's.
 A11Y_NEW=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('a11y_added')")
+# SEO basics from the same session: the bare test page has none of them, nor main's.
+SEO=$(api GET "/v1/previews/$PV" | jq_ "(lambda s: 'description %s, viewport %s, h1 %s, noindex %s' % (s['description'], s['viewport'], s['h1'], s['noindex']))(d['page_a11y']['seo']) + '; new against main: %s' % d['base_change'].get('seo_added')")
+[ "$SEO" = "description False, viewport False, h1 0, noindex False; new against main: 0" ] || { echo "the page's SEO basics should be read and compared with main's: $SEO"; exit 1; }
 [ "$A11Y_NEW" = 0 ] || { echo "the change adds no accessibility problems main doesn't have: $A11Y_NEW"; exit 1; }
 # Its page logs "boom" and main's doesn't: that one is the change's.
 ERRORS_NEW=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('errors_added')")
@@ -639,6 +642,7 @@ cat <<EOF
 | What each branch hands the preview's code | $DATA |
 | Core Web Vitals of the first page (the screenshot's load) | $VITALS |
 | The first page's words against main's | $WORDS |
+| SEO basics of the first page | $SEO |
 | The first page's broken links (HEAD only) / new against main | $LINKS / $LINKS_NEW |
 | Visual review under a 5% visual threshold | $UNDER |
 | X-Robots-Tag on the service's page / on the 401 without the link | $ROBOTS / $ROBOTS_LOCKED |

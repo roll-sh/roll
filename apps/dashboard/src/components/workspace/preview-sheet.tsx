@@ -2,7 +2,7 @@ import { Boxes, Check, Copy, Database, ExternalLink, Eye, Inbox, ListChecks, Moo
 import { useEffect, useState } from "react";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
-import { a11yWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
+import { a11yWords, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, type PreviewFeedback } from "./preview-feedback";
@@ -334,6 +334,12 @@ export function PreviewSheet({
                 {p.page_links.broken.length} broken {p.page_links.broken.length === 1 ? "link" : "links"} of {p.page_links.checked}:{" "}
                 <span className="font-mono text-[11px]">{p.page_links.broken.map((b) => `${b.path} ${b.status || "no answer"}`).join(", ")}</span>
                 {p.base_change?.links_added != null && ` (${p.base_change.links_added === 0 ? "none" : p.base_change.links_added} new against ${p.base_change.branch})`}
+              </p>
+            )}
+            {p.page_a11y?.seo && seoWords(p.page_a11y.seo).length > 0 && (
+              <p className="mt-1.5 text-[11.5px] text-muted">
+                SEO: {seoWords(p.page_a11y.seo).join(", ")}
+                {p.base_change?.seo_added != null && ` (${p.base_change.seo_added === 0 ? "none" : p.base_change.seo_added} new against ${p.base_change.branch})`}
               </p>
             )}
             {p.page_a11y && a11yWords(p.page_a11y).length > 0 && (

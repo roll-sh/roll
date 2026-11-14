@@ -419,6 +419,9 @@ pub struct PreviewBaseChange {
     /// Broken links its first page has that the branch's didn't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub links_added: Option<u32>,
+    /// SEO problems its first page has that the branch's didn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seo_added: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -448,6 +451,9 @@ pub struct PreviewPageA11y {
     pub issues: Vec<PreviewA11yIssue>,
     pub lang: bool,
     pub title: bool,
+    /// Its SEO problems, in roll's words ("no meta description").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seo: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

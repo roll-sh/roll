@@ -322,6 +322,47 @@ pub struct PageA11y {
     /// The document has a language (`<html lang>`) and a title.
     pub lang: bool,
     pub title: bool,
+    /// What search engines look for (read in the same session; kept with this report).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seo: Option<PageSeo>,
+}
+
+/// The first page's SEO basics (Lighthouse's SEO audit), from its session.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct PageSeo {
+    pub description: bool,
+    pub viewport: bool,
+    pub h1: u32,
+    /// A `noindex` in the page's own markup (not roll's header): production would be hidden too.
+    pub noindex: bool,
+}
+
+impl PageSeo {
+    /// Its problems in words, in a fixed order (what's compared with main's).
+    pub fn problems(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if !self.description {
+            out.push("no meta description");
+        }
+        if !self.viewport {
+            out.push("no viewport");
+        }
+        match self.h1 {
+            0 => out.push("no h1"),
+            1 => {}
+            _ => out.push("more than one h1"),
+        }
+        if self.noindex {
+            out.push("noindex in its markup");
+        }
+        out
+    }
+
+    /// Problems it has that `main`'s didn't.
+    pub fn added_since(&self, main: &PageSeo) -> u32 {
+        let had = main.problems();
+        self.problems().iter().filter(|p| !had.contains(p)).count() as u32
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
@@ -379,8 +420,12 @@ impl PageA11y {
         #[derive(serde::Deserialize)]
         struct Report {
             a11y: Raw,
+            #[serde(default)]
+            seo: Option<PageSeo>,
         }
-        let r = serde_json::from_str::<Report>(json.trim()).ok()?.a11y;
+        let report = serde_json::from_str::<Report>(json.trim()).ok()?;
+        let seo = report.seo.map(|s| PageSeo { h1: s.h1.min(1000), ..s });
+        let r = report.a11y;
         // The page's session wrote all of it: one printable line each, bounded.
         let text = |s: Option<String>, n: usize| s.map(|s| s.chars().map(|c| if c.is_control() { ' ' } else { c }).filter(|c| *c != '`').take(n).collect::<String>()).filter(|s| !s.trim().is_empty());
         let rule_id = |k: &str| (!k.is_empty() && k.len() <= 60 && k.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')).then(|| k.to_string());
@@ -393,7 +438,7 @@ impl PageA11y {
                     .filter_map(|r| Some(A11yIssue { kind: rule_id(&r.kind)?, count: r.count.min(10_000), first: text(r.first, 120), impact: impact(r.impact), help: text(r.help, 200) }))
                     .take(50)
                     .collect();
-                Some(PageA11y { issues, lang, title })
+                Some(PageA11y { issues, lang, title, seo })
             }
             Raw::Own { images, fields, buttons, links, lang, title } => {
                 let issues = [("images", images), ("fields", fields), ("buttons", buttons), ("links", links)]
@@ -401,7 +446,7 @@ impl PageA11y {
                     .filter(|(_, k)| k.count > 0)
                     .map(|(kind, k)| A11yIssue { kind: kind.into(), count: k.count.min(10_000), first: text(k.first, 120), impact: None, help: None })
                     .collect();
-                Some(PageA11y { issues, lang, title })
+                Some(PageA11y { issues, lang, title, seo })
             }
         }
     }
@@ -536,6 +581,8 @@ pub struct BaseChange {
     pub errors_added: Option<u32>,
     /// Its first page's words against the branch's (lines added and removed).
     pub text: Option<TextDiff>,
+    /// SEO problems its first page has that the branch's didn't.
+    pub seo_added: Option<u32>,
     /// Broken links its first page has that the branch's didn't.
     pub links_added: Option<u32>,
 }
@@ -831,13 +878,18 @@ mod tests {
         assert_eq!(a.issues[1].first.as_deref(), Some("<button> </button>"));
         assert!(!a.lang && a.title);
         // Against main's page: only what this one added (more images, the language lost).
-        let main = PageA11y { issues: vec![A11yIssue { kind: "images".into(), count: 2, first: None, impact: None, help: None }], lang: true, title: true };
+        let main = PageA11y { issues: vec![A11yIssue { kind: "images".into(), count: 2, first: None, impact: None, help: None }], lang: true, title: true, seo: None };
         assert_eq!((a.problems(), a.added_since(&main)), (5, 3));
         assert_eq!(main.added_since(&a), 0);
         // axe-core's rules: ids and impacts as axe names them, anything else from the page dropped.
         let x = PageA11y::parse(r#"{"a11y":{"issues":[{"kind":"color-contrast","count":4,"first":"<p class=\"x\">","impact":"serious","help":"Elements must meet minimum color contrast ratio thresholds"},{"kind":"](javascript:x)","count":1,"first":null},{"kind":"region","count":2,"first":null,"impact":"<b>"}],"lang":true,"title":true}}"#).unwrap();
         assert_eq!(x.issues.iter().map(|i| (i.kind.as_str(), i.count, i.impact.as_deref())).collect::<Vec<_>>(), [("color-contrast", 4, Some("serious")), ("region", 2, None)]);
         assert_eq!(x.problems(), 6);
+        // SEO basics ride along with the report, compared with main's by problem.
+        let s = PageA11y::parse(r#"{"a11y":{"issues":[],"lang":true,"title":true},"seo":{"description":false,"viewport":true,"h1":2,"noindex":true}}"#).unwrap().seo.unwrap();
+        assert_eq!(s.problems(), ["no meta description", "more than one h1", "noindex in its markup"]);
+        let main_seo = PageSeo { description: false, viewport: true, h1: 1, noindex: false };
+        assert_eq!(s.added_since(&main_seo), 2);
         let health = |errors, failed| PageHealth { errors, first_error: None, failed, first_failed: None };
         assert_eq!((health(3, 1).added_since(&health(2, 4)), health(0, 0).added_since(&health(5, 5))), (1, 0));
         assert_eq!(PageSpeed::parse(""), None);

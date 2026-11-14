@@ -1885,6 +1885,7 @@ impl Store {
             a11y_added: page_a11y.as_ref().zip(b.a11y.as_ref()).map(|(ours, main)| ours.added_since(main)),
             errors_added: page_health.as_ref().zip(b.health.as_ref()).map(|(ours, main)| ours.added_since(main)),
             text: b.text,
+            seo_added: page_a11y.as_ref().and_then(|a| a.seo.as_ref()).zip(b.a11y.as_ref().and_then(|a| a.seo.as_ref())).map(|(ours, main)| ours.added_since(main)),
             links_added: page_links.as_ref().zip(b.links.as_ref()).map(|(ours, main)| ours.added_since(main)),
         });
         let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, f.head)?;

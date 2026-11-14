@@ -558,6 +558,15 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
         }
         summary.push(part);
         details.push_str(&a11y_line(a));
+        if !a.seo.is_empty() {
+            let mut part = plural(a.seo.len() as u64, "SEO problem", "SEO problems");
+            if let Some((branch, added)) = e.base_change.as_ref().and_then(|b| Some((branch_name(&b.branch), b.seo_added?))) {
+                part.push_str(&if added == 0 { format!(", none new against {branch}") } else { format!(", {added} new against {branch}") });
+            }
+            summary.push(part);
+            // roll's own words, never the page's.
+            details.push_str(&format!("**SEO:** {}.\n\n", a.seo.iter().map(|s| s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == ' ').collect::<String>()).collect::<Vec<_>>().join(", ")));
+        }
     }
     if let Some(l) = e.page_links.as_ref().filter(|l| !l.broken.is_empty()) {
         let mut part = plural(l.broken.len() as u64, "broken link", "broken links");
@@ -870,15 +879,15 @@ mod preview_tests {
         assert_eq!(health_line(&h(2, 1)), "**While its first page loaded:** 2 errors (first: `TypeError: x is undefined`); 1 failed request (first: `500 http://x/api`).\n\n");
         assert_eq!(health_line(&h(0, 0)), "Its first page loaded without errors.\n\n");
         let issue = |kind: &str, count, first: &str| crate::model::PreviewA11yIssue { kind: kind.into(), count, first: Some(first.into()), impact: None, help: None };
-        let a = crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img src=`x`>"), issue("buttons", 1, "<button></button>")], lang: false, title: true };
+        let a = crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img src=`x`>"), issue("buttons", 1, "<button></button>")], lang: false, title: true, seo: vec![] };
         assert_eq!(a11y_line(&a), "**Accessibility:** 3 images without alt text (first: `<img src=x>`); 1 button without a name (first: `<button></button>`); no page language.\n\n");
-        assert_eq!(a11y_line(&crate::model::PreviewPageA11y { issues: vec![], lang: true, title: true }), "No accessibility problems found on its first page.\n\n");
+        assert_eq!(a11y_line(&crate::model::PreviewPageA11y { issues: vec![], lang: true, title: true, seo: vec![] }), "No accessibility problems found on its first page.\n\n");
         // An axe-core rule: its id and impact, never the words its page-side run reported.
         let mut contrast = issue("color-contrast", 4, "<p>");
         (contrast.impact, contrast.help) = (Some("serious".into()), Some("[click](javascript:x)".into()));
-        let ax = crate::model::PreviewPageA11y { issues: vec![contrast], lang: true, title: true };
+        let ax = crate::model::PreviewPageA11y { issues: vec![contrast], lang: true, title: true, seo: vec![] };
         assert_eq!(a11y_line(&ax), "**Accessibility:** 4 elements failing `color-contrast`, serious (first: `<p>`).\n\n");
-        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None };
+        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None };
         assert_eq!(base_line(&b), "Against `mainx`, the page differs by 8.0%, at a phone's width the same.\n\n");
         // Its words against main's: a diff block nothing in the page can close.
         let words = crate::model::PreviewTextDiff { added: vec!["Pay ```now".into()], removed: vec!["Checkout".into()], added_n: 1, removed_n: 1 };
@@ -917,7 +926,7 @@ mod preview_tests {
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, over its budget</summary>"));
         // Against main's load where it was compared: only a difference past the noise counts.
         timed.speed_budget = None;
-        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None });
+        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None });
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, 300 ms slower than main</summary>"));
         // Core Web Vitals: in the line, against main's paint, and in the budget.
         let ps = timed.page_speed.as_mut().unwrap();
@@ -940,9 +949,11 @@ mod preview_tests {
         assert!(!page_checks(&timed).unwrap().contains("Where it differs"));
         timed.diff_url = None;
         // Accessibility against main: what the change added.
-        timed.page_a11y = Some(crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img>")], lang: true, title: true });
-        timed.base_change.as_mut().unwrap().a11y_added = Some(1);
-        assert!(page_checks(&timed).unwrap().contains("3 accessibility problems, 1 new against main"), "{}", page_checks(&timed).unwrap());
+        timed.page_a11y = Some(crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img>")], lang: true, title: true, seo: vec!["no meta description".into()] });
+        (timed.base_change.as_mut().unwrap().a11y_added, timed.base_change.as_mut().unwrap().seo_added) = (Some(1), Some(1));
+        let checks = page_checks(&timed).unwrap();
+        assert!(checks.contains("3 accessibility problems, 1 new against main · 1 SEO problem, 1 new against main"), "{checks}");
+        assert!(checks.contains("**SEO:** no meta description.\n\n"), "{checks}");
         timed.page_health = Some(h(2, 0));
         timed.base_change.as_mut().unwrap().errors_added = Some(0);
         assert!(page_checks(&timed).unwrap().contains("Page checks: 2 errors, none new against main · "), "{}", page_checks(&timed).unwrap());
