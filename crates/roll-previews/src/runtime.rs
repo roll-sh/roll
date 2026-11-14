@@ -956,6 +956,9 @@ impl Runtime {
         args.extend(["--env".into(), format!("PAGES={}", serde_json::to_string(&pages)?)]);
         let hide: Vec<&String> = opts.hide.iter().filter(|s| crate::settings::selector_ok(s)).take(crate::settings::MAX_HIDE).collect();
         args.extend(["--env".into(), format!("HIDE={}", serde_json::to_string(&hide)?)]);
+        if let Some(path) = opts.openapi.as_deref().filter(|p| crate::settings::page_path_ok(p)) {
+            args.extend(["--env".into(), format!("OPENAPI={path}")]);
+        }
         // The PNG on the first line, the timings (if the command wrote them) on the second, the
         // phone-width PNG (if it took one) on the third, then the other pages: what each said,
         // and their PNGs a line each.
@@ -995,7 +998,7 @@ impl Runtime {
         let png = b64e.decode(b64.trim()).map_err(|e| anyhow::anyhow!("the screenshot isn't a PNG: {e}"))?;
         anyhow::ensure!(png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX, "the screenshot isn't a PNG of at most {SCREENSHOT_MAX} bytes");
         let phone = b64e.decode(phone.trim()).ok().filter(|p| p.starts_with(b"\x89PNG") && p.len() <= SCREENSHOT_MAX);
-        Ok(crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed), a11y: crate::PageA11y::parse(speed), text: crate::page_text(speed), links: crate::PageLinks::parse(speed), phone, pages: page_shots(&pages, said, lines) })
+        Ok(crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed), a11y: crate::PageA11y::parse(speed), text: crate::page_text(speed), links: crate::PageLinks::parse(speed), api: crate::page_api(speed), phone, pages: page_shots(&pages, said, lines) })
     }
 
     async fn seed_job(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {

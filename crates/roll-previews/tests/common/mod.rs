@@ -213,6 +213,9 @@ pub struct FakeApps {
     pub on_deploy: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     /// The PNG every screenshot is (unset: the backend can't take one), and the previews taken.
     pub shot: Mutex<Option<Vec<u8>>>,
+    /// The API operations a screenshot reads when it's asked to (`github.openapi`), by a
+    /// revision the preview runs.
+    pub api: Mutex<HashMap<String, Vec<String>>>,
     /// Each service's last deploy asked for the feedback button.
     pub feedback: Mutex<HashMap<(String, String), bool>>,
     pub shots: Mutex<Vec<String>>,
@@ -272,11 +275,14 @@ impl Apps for FakeApps {
         self.runs.lock().push((job.seed.run.clone(), job.revision.clone(), at_rev));
         Ok((self.seed_exit.load(Ordering::SeqCst), "seed output".into()))
     }
-    async fn screenshot(&self, preview: &str, _: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
+    async fn screenshot(&self, preview: &str, _service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
         let Some(png) = self.shot.lock().clone() else { return Ok(None) };
+        // The API the preview serves: by any revision it runs (whichever service is first).
+        let revs: Vec<String> = self.deployed.lock().iter().filter(|((p, _), _)| p == preview).map(|(_, r)| r.clone()).collect();
+        let api = opts.openapi.as_ref().and_then(|_| revs.iter().find_map(|r| self.api.lock().get(r).cloned()));
         self.shots.lock().push(preview.to_string());
         let pages = opts.pages.iter().map(|p| roll_previews::ports::PageShot { path: p.clone(), png: png.clone(), errors: 0, report: Default::default() }).collect();
-        Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None, pages, text: None, links: None }))
+        Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None, pages, text: None, links: None, api }))
     }
     fn status(&self, _: &str, _: &str) -> Option<ServiceState> {
         None

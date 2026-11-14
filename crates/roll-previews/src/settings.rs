@@ -184,6 +184,11 @@ pub struct GithubRule {
     /// a run's five other pages with `pages`.
     #[serde(default)]
     pub widths: Vec<u32>,
+    /// A path of the first service's serving its OpenAPI document as JSON (`/openapi.json`,
+    /// `/v3/api-docs`): read with the screenshot, its operations are compared with main's (Optic's
+    /// and Bump's API diff), an operation main has and the change doesn't named as breaking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openapi: Option<String>,
 }
 
 /// The unix second `data_at` means at `now` (unix seconds): `-24h`/`-30m`/`-7d` back from now, or
@@ -303,7 +308,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new() }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None }
     }
 }
 
@@ -466,6 +471,9 @@ impl Settings {
             return bad(format!(
                 "github.pages: at most {MAX_PAGES} different paths besides /, each starting with / or naming a service (admin:/users), up to 200 characters, no #, quotes or spaces"
             ));
+        }
+        if self.github.openapi.as_deref().is_some_and(|p| !page_path_ok(p)) {
+            return bad("github.openapi: a path of the first service's (/openapi.json), up to 200 characters, no #, quotes or spaces".into());
         }
         Ok(())
     }

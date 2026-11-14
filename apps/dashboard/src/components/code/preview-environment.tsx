@@ -133,6 +133,7 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
         </p>
       )}
       {env.base_change?.text && <TextAgainst diff={env.base_change.text} branch={env.base_change.branch} />}
+      {env.base_change?.api && <TextAgainst diff={env.base_change.api} branch={env.base_change.branch} what="api" />}
       {env.visual_review && env.visual_review.state !== "unchanged" && <VisualReview previewId={env.id} review={env.visual_review} />}
       {env.release_ms != null && (
         <p className="font-mono text-[11px] text-subtle tabular-nums" title="The project's release (migrations), run on the preview's data">

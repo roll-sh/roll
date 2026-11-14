@@ -552,14 +552,14 @@ impl Engine {
     /// backend that can't, a failure) is remembered for the head, and the last one taken stays.
     pub(super) async fn take_screenshot(&self, r: &Row) -> bool {
         let Ok(Some(first)) = self.store.services(&r.id).map(|v| v.into_iter().next()) else { return false };
-        let (entries, hide, widths) = self.store.settings(&r.project_id).map(|s| (s.github.pages, s.github.hide, s.github.widths)).unwrap_or_default();
+        let (entries, hide, widths, openapi) = self.store.settings(&r.project_id).map(|s| (s.github.pages, s.github.hide, s.github.widths, s.github.openapi)).unwrap_or_default();
         // The first page at the project's other widths: entries of their own (`@768`).
         let width_keys: Vec<String> = widths.iter().map(|w| format!("@{w}")).collect();
         // The first service's own pages go in its run; another service's in a run of its own.
         let mine = |svc: Option<&str>| svc.is_none_or(|s| s == first.name);
         let mut first_paths: Vec<String> = width_keys.clone();
         first_paths.extend(entries.iter().filter_map(|e| crate::settings::page_entry(e)).filter(|(s, p)| mine(*s) && *p != "/").map(|(_, p)| p.to_string()));
-        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone() };
+        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi };
         match self.apps.screenshot(&r.id, &first.name, &opts).await {
             Ok(Some(shot)) => {
                 // Kept under the entry that asked for each (`/pricing`, or `web:/pricing`).
@@ -587,7 +587,7 @@ impl Engine {
                 let (store, id, head) = (self.store.clone(), r.id.clone(), r.build().to_string());
                 let kept = tokio::task::spawn_blocking(move || {
                     store.set_screenshot(&id, &head, &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok()
-                        && store.set_page_report(&id, shot.health.as_ref(), shot.a11y.as_ref(), shot.text.as_deref(), shot.links.as_ref()).is_ok()
+                        && store.set_page_report(&id, shot.health.as_ref(), shot.a11y.as_ref(), shot.text.as_deref(), shot.links.as_ref(), shot.api.as_deref()).is_ok()
                         && store.set_page_shots(&id, &head, &pages, &wanted).is_ok()
                 })
                 .await
@@ -647,7 +647,7 @@ impl Engine {
             if !services.iter().any(|s| s.name == svc) {
                 continue;
             }
-            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec() };
+            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), openapi: None };
             match self.apps.screenshot(&r.id, svc, &opts).await {
                 Ok(Some(shot)) => {
                     if paths.contains(&"/") {

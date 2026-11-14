@@ -844,7 +844,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number } };   // all true but screenshot; pages, hide: []; budget 0s (none)
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -987,7 +987,17 @@ type Settings = {
     gained and lost (`base_change.text`: in page order, 20 each, with counts), on the sheet, the
     change page and folded in the comment as a diff block nothing on the page can close ("text +1
     −1 against main"). It's the page's own text, shown as text (live: the change's line in,
-    `main` out). GitHub's branch protection can require
+    `main` out).
+    Its API too (Optic's and Bump's API diff), when the project names its OpenAPI document
+    (`github.openapi`, a JSON path of the first service's: `/openapi.json`, `/v3/api-docs`): the
+    same session fetches it from the page's own origin (at most 4 MB, 5 s) in the checks' world and
+    keeps every `METHOD /path` it declares (at most 1000, each `METHOD /path` or dropped), with the
+    screenshot and with main's at each head; a comparison with main says which operations it
+    adds and which it removes (`base_change.api`), a removed one being breaking for whoever calls
+    main's. It's unfolded in the pull request comment ("Its API against `main`: removes `DELETE
+    /users/{id}` (breaking for callers of `main`'s); adds `POST /orders`", each in a code span the
+    document can't close) and shown on the sheet and the change page (live: the operation the
+    change removes and the one it adds). GitHub's branch protection can require
     `roll/visual`; with `required` roll's own landing does too (a `visual` blocker in
     `Code::blockers`, from the project's rule, never the change's). A review is someone else's:
     the change's author can't accept it (403 in roll, ignored from GitHub, and an older such
@@ -1178,6 +1188,8 @@ Ranked by what a person notices first. Done so far:
 - a look at the sheet from screenshots of a live preview with today's checks (desktop and phone):
   the data branch rows kept their names whole and their notes in word groups;
 - caught mail bounded by bytes (10 MiB a preview) as well as count;
+- the API against main (Optic's and Bump's API diff): `github.openapi`'s operations compared with
+  main's, a removed one named as breaking, unfolded in the pull request comment;
 - migration risks named over the schema changes (a dropped table or column, a type change, a
   column made NOT NULL), on the sheet and unfolded in the pull request comment;
 - replies on a page's notes (Vercel Comments' threads): comment reviews naming the note, listed

@@ -278,6 +278,7 @@ export function PreviewSheet({
 
             {p.screenshot_at ? <Screenshot id={p.id} at={p.screenshot_at} change={p.visual_change} phone={p.phone_screenshot} base={p.base_change} pages={p.pages} /> : null}
             {p.base_change?.text && <TextAgainst diff={p.base_change.text} branch={p.base_change.branch} />}
+            {p.base_change?.api && <TextAgainst diff={p.base_change.api} branch={p.base_change.branch} what="api" />}
             {p.visual_review && p.visual_review.state !== "unchanged" && (
               <div className="mt-1.5 flex items-center gap-2 text-[11.5px]">
                 {p.visual_review.state === "accepted" ? (
@@ -862,13 +863,14 @@ function PageChecks({ page, branch }: { page: PageCheck; branch: string }) {
 
 /** The first page's words against the default branch's (Chromatic's DOM snapshots, in words):
  * lines it lost and gained, as text. */
-export function TextAgainst({ diff, branch }: { diff: TextDiff; branch: string }) {
+export function TextAgainst({ diff, branch, what = "words" }: { diff: TextDiff; branch: string; what?: "words" | "api" }) {
   if (diff.added_n + diff.removed_n === 0) return null;
   const more = diff.added_n + diff.removed_n - diff.added.length - diff.removed.length;
+  const label = what === "api" ? `Its API against ${branch}` : `Its words against ${branch}`;
   return (
-    <div className="mt-1.5 text-[11.5px]" aria-label={`Its words against ${branch}`}>
-      <p className="text-muted">
-        Its words against {branch}: {diff.added_n} new, {diff.removed_n} gone
+    <div className="mt-1.5 text-[11.5px]" aria-label={label}>
+      <p className={what === "api" && diff.removed_n > 0 ? "text-danger" : "text-muted"}>
+        {what === "api" ? `${label}: ${diff.added_n} added, ${diff.removed_n} removed${diff.removed_n > 0 ? " (breaking for its callers)" : ""}` : `${label}: ${diff.added_n} new, ${diff.removed_n} gone`}
       </p>
       <ul className="mt-0.5 space-y-0.5 font-mono text-[11px] [overflow-wrap:anywhere]">
         {diff.removed.map((l, i) => (

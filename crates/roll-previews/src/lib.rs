@@ -644,6 +644,9 @@ pub struct BaseChange {
     pub seo_added: Option<u32>,
     /// Broken links its first page has that the branch's didn't.
     pub links_added: Option<u32>,
+    /// Its API's operations against the branch's (`github.openapi`): added, and removed (what
+    /// a caller of main's would find gone).
+    pub api: Option<TextDiff>,
 }
 
 /// The first page's own links that answered 4xx/5xx or nothing (`status` 0), of `checked`
@@ -706,6 +709,31 @@ pub fn page_text(json: &str) -> Option<String> {
         .take(400)
         .collect();
     Some(lines.join("\n"))
+}
+
+/// The most API operations kept from a service's OpenAPI document.
+pub const MAX_API_OPERATIONS: usize = 1000;
+
+/// A service's API operations from what its screenshot run wrote (`{"api": ["GET /users", …]}`,
+/// read from its OpenAPI document): each `METHOD /path`, printable and at most 300 characters,
+/// sorted, each once, at most [`MAX_API_OPERATIONS`]. The document is the change's code's, so
+/// anything else in it is dropped.
+pub fn page_api(json: &str) -> Option<Vec<String>> {
+    const METHODS: [&str; 8] = ["GET", "PUT", "POST", "DELETE", "PATCH", "OPTIONS", "HEAD", "TRACE"];
+    let v: serde_json::Value = serde_json::from_str(json.trim()).ok()?;
+    let mut ops: Vec<String> = v
+        .get("api")?
+        .as_array()?
+        .iter()
+        .filter_map(|o| o.as_str())
+        .filter(|o| o.split_once(' ').is_some_and(|(m, p)| METHODS.contains(&m) && p.starts_with('/') && !p.contains(char::is_whitespace)))
+        .map(crate::schema::printable)
+        .filter(|o| o.chars().count() <= 300)
+        .take(MAX_API_OPERATIONS)
+        .collect();
+    ops.sort();
+    ops.dedup();
+    Some(ops)
 }
 
 /// An earlier push of a change's service, still reachable at a URL of its own (on the preview's
@@ -914,6 +942,15 @@ mod tests {
         // Never copied.
         assert_eq!(Data::of(Kind::Queue, Mode::Branch, 0), Data::None);
         assert_eq!(Data::of(Kind::Tasks, Mode::Branch, 0), Data::None);
+    }
+
+    /// A service's OpenAPI operations read back as `METHOD /path`, sorted, each once; anything
+    /// else its document could hold (another method, no path, a newline to fake a line) doesn't.
+    #[test]
+    fn api_operations_are_only_methods_and_paths() {
+        let ops = super::page_api(r#"{"api": ["POST /orders", "GET /users", "GET /users", "FETCH /x", "GET users", "GET /a\nDELETE /b", 7]}"#).unwrap();
+        assert_eq!(ops, ["GET /users", "POST /orders"]);
+        assert_eq!(super::page_api(r#"{"seo": {}}"#), None, "no document read");
     }
 
     /// What the browser writes reads back; numbers past reason, or anything else, don't.

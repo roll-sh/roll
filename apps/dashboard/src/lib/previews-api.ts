@@ -99,7 +99,7 @@ export interface Preview {
   /** How much the page changed since the screenshot at an earlier head (`since`). */
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
   /** How much its page differs from the project's preview of the default branch. */
-  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: TextDiff | null; links_added?: number | null; seo_added?: number | null } | null;
+  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: TextDiff | null; links_added?: number | null; seo_added?: number | null; api?: TextDiff | null } | null;
   /** The project's other pages (`github.pages`) at the latest screenshot. */
   pages?: PageCheck[];
   /** Its visual review (`github.visual_review`): whether how its pages look against the baseline was accepted at this head. */
@@ -306,7 +306,7 @@ export interface PreviewSettings {
   secrets: { base: string; allow_production: boolean };
   /** A patch replaces the whole map. */
   env: Record<string, string>;
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[] };
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null };
   /** "link": a preview's URLs need its link (its access token once, then a cookie). */
   access: "link" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */

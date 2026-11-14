@@ -127,6 +127,33 @@ const SEO = `JSON.stringify({
   h1: document.querySelectorAll("h1").length,
   noindex: [...document.querySelectorAll('meta[name="robots" i], meta[name="googlebot" i]')].some((m) => /noindex/i.test(m.getAttribute("content") || "")),
 })`;
+// The service's API, when the project names its OpenAPI document ($OPENAPI, a path on the page's
+// own origin, JSON): every `METHOD /path` it declares (Optic's and Bump's API diff), at most 1000,
+// from a document of at most 4 MB.
+const OPENAPI = /^\/[^\s#"'`]{0,199}$/.test(process.env.OPENAPI || "") ? process.env.OPENAPI : null;
+const API = OPENAPI && `(async () => {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), 5000);
+  try {
+    const r = await fetch(new URL(${JSON.stringify(OPENAPI)}, location.origin), { credentials: "same-origin", signal: c.signal });
+    if (!r.ok) return null;
+    const body = await r.text();
+    if (body.length > 4e6) return null;
+    const doc = JSON.parse(body);
+    const ops = [];
+    for (const [path, item] of Object.entries(doc && typeof doc.paths === "object" ? doc.paths : {})) {
+      for (const m of ["get", "put", "post", "delete", "patch", "options", "head", "trace"]) {
+        if (item && typeof item === "object" && item[m]) ops.push(m.toUpperCase() + " " + path);
+      }
+      if (ops.length >= 1000) break;
+    }
+    return JSON.stringify(ops.slice(0, 1000));
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+})()`;
 const AXE_SRC = (() => {
   try {
     return process.env.AXE ? fs.readFileSync(process.env.AXE, "utf8") : "";
@@ -236,6 +263,12 @@ const still = async (sessionId) => {
   try {
     report.seo = JSON.parse(seo?.result?.value || "null");
   } catch {}
+  if (API) {
+    const api = await Promise.race([check({ expression: API, awaitPromise: true, returnByValue: true }, sessionId), sleep(6000).then(() => null)]);
+    try {
+      report.api = JSON.parse(api?.result?.value || "null");
+    } catch {}
+  }
   report.a11y = await axeReport(sessionId);
   if (!report.a11y) {
     const a11y = await check({ expression: A11Y, returnByValue: true }, sessionId);

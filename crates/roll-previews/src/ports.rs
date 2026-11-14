@@ -168,6 +168,8 @@ pub struct Shot {
     pub text: Option<String>,
     /// Its own links that are broken (`PageLinks::parse`).
     pub links: Option<crate::PageLinks>,
+    /// The service's API operations (`GET /users/{id}`, sorted), from its OpenAPI document.
+    pub api: Option<Vec<String>>,
 }
 
 /// What a screenshot run takes: the project's other pages, and what it blanks first.
@@ -175,6 +177,8 @@ pub struct Shot {
 pub struct ShotOptions {
     pub pages: Vec<String>,
     pub hide: Vec<String>,
+    /// The first service's OpenAPI document's path (`github.openapi`), read in the same session.
+    pub openapi: Option<String>,
 }
 
 /// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.

@@ -438,6 +438,11 @@ pub struct PreviewBaseChange {
     /// SEO problems its first page has that the branch's didn't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seo_added: Option<u32>,
+    /// Its API's operations (`GET /users/{id}`) against the branch's, from the OpenAPI document
+    /// roll previews reads (`github.openapi`): `removed` is what callers of the branch's find
+    /// gone. Untrusted: the change's own document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<PreviewTextDiff>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

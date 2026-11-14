@@ -73,7 +73,10 @@ say "a repo with a service, and one of each data resource"
 api POST /v1/code/owners '{"name":"acme","kind":"org"}' >/dev/null
 api POST /v1/code/repos '{"owner":"acme","name":"web","source":"native"}' >/dev/null
 TOML='[preview]\nimage = \"'"$IMAGE"'\"\nrun = \"env > env.txt && python -m http.server $PORT\"\nport = 8000\nhealth = \"/\"\nmemory = 128\ncpus = 0.25\n'
-api POST /v1/code/repos/acme/web/land "{\"message\":\"init\",\"files\":{\"roll.toml\":{\"content\":\"$TOML\"},\"index.html\":{\"content\":\"main\"}}}" >/dev/null
+# The service's API, as an OpenAPI document (github.openapi): the change removes one operation and adds one.
+OPENAPI_MAIN='{\"paths\":{\"/users\":{\"get\":{}},\"/users/{id}\":{\"delete\":{}}}}'
+OPENAPI_CHG='"openapi.json":{"content":"{\"paths\":{\"/users\":{\"get\":{}},\"/orders\":{\"post\":{}}}}"}'
+api POST /v1/code/repos/acme/web/land "{\"message\":\"init\",\"files\":{\"roll.toml\":{\"content\":\"$TOML\"},\"index.html\":{\"content\":\"main\"},\"openapi.json\":{\"content\":\"$OPENAPI_MAIN\"}}}" >/dev/null
 # A second service, from a second repo (its default branch in every preview): its pages too.
 api POST /v1/code/repos '{"owner":"acme","name":"wiki","source":"native"}' >/dev/null
 api POST /v1/code/repos/acme/wiki/land "{\"message\":\"init\",\"files\":{\"roll.toml\":{\"content\":\"$TOML\"},\"index.html\":{\"content\":\"the wiki\"}}}" >/dev/null
@@ -139,7 +142,7 @@ KEY_MASK=$(curl -s -o /tmp/roll-previews-keymask.json -w '%{http_code}' -X PUT "
 
 say "open a change"
 T0=$(now_ms)
-CHG=$(api POST /v1/code/repos/acme/web/changes '{"title":"New page","message":"New page","base":"main","files":{"index.html":{"content":"preview of change 1"}}}' | jq_ "d['id']")
+CHG=$(api POST /v1/code/repos/acme/web/changes '{"title":"New page","message":"New page","base":"main","files":{"index.html":{"content":"preview of change 1"},'"$OPENAPI_CHG"'}}' | jq_ "d['id']")
 PV=""
 for _ in $(seq 1 240); do
   L=$(api GET "/v1/previews?project=$PRJ")
@@ -331,7 +334,7 @@ ACTIVE=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
 
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
-api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000}}}' >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json"}}' >/dev/null
 # roll keeps a preview of the default branch (github.baseline): the change's screenshots are
 # compared with its.
 MAINPV=""
@@ -404,7 +407,7 @@ if [ -n "$PG_BRANCH" ]; then
   APP_ROLE=$(echo "$APP_DB2" | sed -E 's#^postgres://([^:]+):.*#\1#')
   PLANTED=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB2" -Atc "CREATE FUNCTION public.pg_get_indexdef(oid) RETURNS text LANGUAGE plpgsql AS \$f\$ BEGIN EXECUTE 'ALTER ROLE $APP_ROLE SUPERUSER'; RETURN 'x'; END \$f\$; ALTER DATABASE main SET search_path = public, pg_catalog" 2>&1 | tail -1 || true)
   [ "$PLANTED" = "ALTER DATABASE" ] || { echo "the hostile function should have been planted: $PLANTED (env.txt: $(echo "$ENV_TXT" | head -c 300))"; exit 1; }
-  api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"New page, again","files":{"index.html":{"content":"preview of change 1, again"}}}' >/dev/null
+  api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"New page, again","files":{"index.html":{"content":"preview of change 1, again"},'"$OPENAPI_CHG"'}}' >/dev/null
   SCHEMA=""
   for _ in $(seq 1 120); do
     SCHEMA=$(api GET "/v1/previews/$PV" | jq_ "'\\n'.join(d.get('schema_changes') or [])")
@@ -451,7 +454,7 @@ until_head() { # until_head <change head>: the preview is for it
   echo "the preview should follow the change to $1"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1
 }
 BUILD=$(api GET "/v1/previews/$PV" | jq_ "d['head']")
-api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"Docs","files":{"index.html":{"content":"preview of change 1, again"},"docs/setup.md":{"content":"how to run it"}}}' >/dev/null
+api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"Docs","files":{"index.html":{"content":"preview of change 1, again"},"docs/setup.md":{"content":"how to run it"},'"$OPENAPI_CHG"'}}' >/dev/null
 DOCS_HEAD=$(api GET "/v1/code/changes/$CHG" | jq_ "d['head']")
 until_head "$DOCS_HEAD"
 RUNS=$(api GET "/v1/previews/$PV" | jq_ "d.get('runs') or ''")
@@ -554,6 +557,9 @@ api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
 # Main's load where it was compared comes along (to say "300 ms slower than main").
 # Its words against main's: the change's line in, main's out.
 WORDS=$(api GET "/v1/previews/$PV" | jq_ "(lambda t: '+%s -%s' % (t['added'], t['removed']))(d['base_change'].get('text') or {'added': [], 'removed': []})")
+# Its API against main's, read from each one's OpenAPI document (github.openapi).
+API_DIFF=$(api GET "/v1/previews/$PV" | jq_ "(lambda t: '+%s -%s' % (t['added'], t['removed']))(d['base_change'].get('api') or {'added': [], 'removed': []})")
+[ "$API_DIFF" = "+['POST /orders'] -['DELETE /users/{id}']" ] || { echo "the change's API against main's should name the operation it removes and the one it adds: $API_DIFF"; exit 1; }
 case "$WORDS" in "+['preview of change 1"*"-['main']") ;; *) echo "the page's words should be compared with main's: $WORDS"; exit 1;; esac
 MAIN_LOAD=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('load_ms')")
 case "$MAIN_LOAD" in [0-9]*) ;; *) echo "the comparison with main should carry main's load time: $MAIN_LOAD"; exit 1;; esac
@@ -666,6 +672,7 @@ cat <<EOF
 | What each branch hands the preview's code | $DATA |
 | Core Web Vitals of the first page (the screenshot's load) | $VITALS |
 | The first page's words against main's | $WORDS |
+| Its API against main's (from each one's OpenAPI document) | $API_DIFF |
 | SEO basics of the first page | $SEO |
 | /pricing's own checks (against main's /pricing) | $PRICING |
 | The first page's broken links (HEAD only) / new against main | $LINKS / $LINKS_NEW |
