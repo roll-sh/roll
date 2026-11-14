@@ -1605,17 +1605,14 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **`roll ssh`** (on #45), as Vault's `vault ssh` and Teleport's `tsh ssh`: resolve an
-   environment's SSH certificate and key into a private temporary directory and run `ssh` with
-   them, deleting both when it exits, so a person never handles either.
-2. **AWS through roll's issuer** (once #38 and #43 land): `AssumeRoleWithWebIdentity` with roll's
+1. **AWS through roll's issuer** (once #38 and #43 land): `AssumeRoleWithWebIdentity` with roll's
    own token, so roll needs no AWS keys of its own and the trust policy pins `sub` as GCP's and
    Azure's do.
-3. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
+2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
    customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
-4. **Products say who owns a resource**, so a person's project can link their own databases,
+3. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams. Waits on products serving signed-in people.
-5. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
+4. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
    besides its owner.
 
 Open pull requests after this one:
@@ -1641,7 +1638,8 @@ Open pull requests after this one:
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
 - **#45, SSH certificates** (after #44): a project's SSH CA signs short-lived user certificates
-  for the logins it allows; OpenSSH's formats, checked with `ssh-keygen` and a real `sshd` login.
+  for the logins it allows, and `roll ssh` uses them for one session; OpenSSH's formats, checked
+  with `ssh-keygen` and a real `sshd` login.
 - **#44, a project's own certificate authority** (after #20): short-lived TLS certificates for the
   names its name-constrained CA allows, dynamic or managed; checked with a real TLS handshake.
 - **#43, dynamic GCP and Azure credentials** (after #20): roll as an OIDC issuer
