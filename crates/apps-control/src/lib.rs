@@ -181,6 +181,8 @@ pub struct Apps {
     /// Jobs running on this node: id → its environment (`env_key`). Bounded per environment and
     /// per node, and canceled when the environment goes from this node.
     running_jobs: Mutex<HashMap<String, String>>,
+    /// Cron runs this process runs now (a takeover's cleanup spares them).
+    pub(crate) running_runs: Mutex<std::collections::HashSet<String>>,
     /// Job containers this node runs at once, whatever jobs they belong to ([`jobs`]).
     job_slots: Arc<tokio::sync::Semaphore>,
     /// Services whose project reached its spend limit this month (`spend`), as last read.
@@ -307,6 +309,7 @@ impl Apps {
             queues: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
             running_jobs: Mutex::new(HashMap::new()),
+            running_runs: Mutex::default(),
             job_slots: Arc::new(tokio::sync::Semaphore::new(jobs::MAX_CONTAINERS)),
             capped: Mutex::new(Default::default()),
             notes: std::sync::OnceLock::new(),

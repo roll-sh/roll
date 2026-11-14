@@ -1575,10 +1575,24 @@ impl Store {
     }
 
     /// Jobs a node that stopped had running: their containers went with it.
-    pub fn fail_running_jobs(&self, service: &str) -> Result<()> {
+    /// A service's cron runs and jobs still `running` that no process runs any more (their node
+    /// stopped; `spare`: those this one does): failed, each with its `cron.failed`/`job.failed`
+    /// event in the same transaction. How many.
+    pub fn fail_orphans(&self, service: &str, spare: &[String]) -> Result<usize> {
         let now = self.now()?;
-        self.db.execute("UPDATE jobs SET status = 'failed', finished_at = ? WHERE service = ? AND status = 'running'", params![now, service])?;
-        Ok(())
+        Ok(self.db.write(|c| {
+            let mut n = 0;
+            for (table, kind, key) in [("runs", "cron.failed", "run"), ("jobs", "job.failed", "job")] {
+                let rows: Vec<(String, String, String)> = c.query(&format!("SELECT id, env, deployment FROM {table} WHERE service = ? AND status = 'running'"), [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+                for (id, env, dep) in rows.into_iter().filter(|(id, ..)| !spare.contains(id)) {
+                    c.execute(&format!("UPDATE {table} SET status = 'failed', finished_at = ? WHERE id = ? AND status = 'running'"), params![now, id])?;
+                    let data = serde_json::json!({ key: id, "status": "failed", "exit_code": null, "why": "its node stopped before it finished" });
+                    insert_event(c, now, kind, service, &env, Some(&dep), &data)?;
+                    n += 1;
+                }
+            }
+            Ok::<_, code_sql::Error>(n)
+        })?)
     }
 
     pub fn jobs(&self, service: &str, env: &str, limit: usize) -> Result<Vec<Job>> {

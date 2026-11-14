@@ -1184,9 +1184,13 @@ impl Apps {
             }
             self.deps.runtime.remove(&name).await;
         }
-        // Jobs an earlier process ran had their containers removed just above.
+        // Cron runs and jobs an earlier process ran had their containers removed just above: they
+        // failed (and say so), and a run left `running` no longer holds the schedule back.
+        let spare: Vec<String> = self.running_jobs.lock().keys().cloned().chain(self.running_runs.lock().iter().cloned()).collect();
         let sid = service.to_string();
-        let _ = self.db(move |s| s.fail_running_jobs(&sid)).await;
+        if self.db(move |s| s.fail_orphans(&sid, &spare)).await.is_ok_and(|n| n > 0) {
+            self.changed(service);
+        }
         let sid = service.to_string();
         let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { return };
         for e in envs {
@@ -1774,6 +1778,7 @@ impl Apps {
         }
         let live = self.load_live(service, env).await?;
         let (this, id, sid, e, dep) = (self.clone(), run.id.clone(), service.to_string(), env.to_string(), active.clone());
+        self.running_runs.lock().insert(id.clone());
         tokio::spawn(async move {
             let (status, code) = match live.run_once(timeout).await {
                 Ok((_, _, true)) => (RunStatus::TimedOut, None),
@@ -1786,7 +1791,9 @@ impl Apps {
             };
             let failed = matches!(status, RunStatus::Failed | RunStatus::TimedOut);
             let data = serde_json::json!({ "run": id, "status": status.as_str(), "exit_code": code });
-            let _ = this.db(move |s| s.finish_run(&id, status, code)).await;
+            let id2 = id.clone();
+            let _ = this.db(move |s| s.finish_run(&id2, status, code)).await;
+            this.running_runs.lock().remove(&id);
             // A failed or timed-out run is an incident's start: an event (notified by default).
             if failed {
                 let _ = this.db(move |s| s.add_event("cron.failed", &sid, &e, Some(&dep), &data)).await;

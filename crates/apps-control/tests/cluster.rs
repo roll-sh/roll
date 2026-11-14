@@ -428,6 +428,9 @@ async fn a_cron_service_runs_on_the_node_that_takes_it_over() {
     }
     let key = apps_control::lease_key(&id);
     let owner = f.nodes.iter().position(|n| n.apps.deps.cluster.owns(&key)).unwrap();
+    // A run the owner was in the middle of when it died.
+    let (sid, d) = (id.clone(), dep.clone());
+    let orphan = f.nodes[owner].apps.db(move |s| s.start_run(&sid, "production", &d, 3_600_000)).await.unwrap();
     let dead = f.nodes.remove(owner);
     dead.server.abort();
     dead.apps.deps.cluster.fault_kill();
@@ -454,6 +457,12 @@ async fn a_cron_service_runs_on_the_node_that_takes_it_over() {
     }
     assert_eq!((last["status"].as_str(), last["exit_code"].as_i64()), (Some("succeeded"), Some(0)), "{last}");
     assert!(apps_control::runtime::fake::Fake::count(&left.fake.counts.creates) > made, "the run's container was made on the node left");
+    // The dead owner's run failed, said so, and didn't hold the schedule back (not skipped).
+    let runs = call(&left.api, "GET", &format!("{base}/runs"), None).await.1;
+    let o = runs.as_array().unwrap().iter().find(|r| r["id"] == orphan.id.as_str()).cloned().unwrap_or_default();
+    assert_eq!(o["status"], "failed", "{runs}");
+    let events = call(&left.api, "GET", "/v1/apps/events", None).await.1;
+    assert!(events["events"].as_array().unwrap().iter().any(|e| e["kind"] == "cron.failed" && e["data"]["run"] == orphan.id.as_str()), "{events}");
     drop(dead);
 }
 
