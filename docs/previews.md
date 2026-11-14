@@ -339,6 +339,13 @@ a terminal), lines cut at 300 characters, 200 lines at most; the comment keeps t
 they can't close. A failure to read is
 logged and read again on the next converge; it never fails the preview.
 
+Search branches the same way: each one's `_mapping` and its parent's, read through roll search's
+operator console request (no cluster password), become `index <name>` and `field <index>.<path>
+<type>` lines (nested fields and multi-fields by path, system indices left out), so a change
+whose code adds or retypes a field says so (live: `+ field products.price float` after the
+preview wrote a document with a price). With several such resources, each one's lines follow a
+`# <kind>:<ref>` heading.
+
 ## Safety
 
 - **Forks.** A change with `trusted: false` (a PR from a fork) gets a preview only for a head a
@@ -907,6 +914,7 @@ Ranked by what a person notices first. Done so far:
 - roll apps end to end;
 - previews spread across a cluster's nodes, a lease each (tested);
 - roll apps' `pv-…` environments private, their 401 page linked through roll;
+- search mapping changes with the Postgres schema changes;
 - NoSQL column masks per preview, and search field masks (`search:<cluster>`, rewritten in the
   branch only);
 - copy-on-write stream branches (shared chunks, refcounted deletes) and Postgres `schema` mode;
@@ -1036,39 +1044,35 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Search mapping changes, as Postgres schema changes are shown**: a change whose migration
-   adds or retypes a field in an index's mapping says nothing about it. The branch's mappings
-   against the parent's (`GET _mapping` on both, after the seed and release), as `+ field
-   products.price float` lines in the comment's folded "Schema changes", the sheet and the change.
-2. **Screenshots of roll apps' services**: `RollApps::screenshot` takes nothing, so a project on
+1. **Screenshots of roll apps' services**: `RollApps::screenshot` takes nothing, so a project on
    roll apps has no screenshots, comparisons or visual reviews (and gets no baseline). roll apps'
    #26 adds `apps_control::Apps::reachable(service, env) -> Option<Reachable { container, port }>`
    (it wakes the instance and holds it awake while the value lives; `None` on Fargate; a
    `Conflict` for a worker, a cron or a static site). Once #26 is on main: `RollApps::screenshot`
    joins `container` as the runtime's screenshot does (`--network container:…`, the same
    hardening), loads `http://127.0.0.1:<port>/`, and lets the baseline be made on roll apps.
-3. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-4. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-6. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-7. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

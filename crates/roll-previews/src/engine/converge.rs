@@ -670,20 +670,21 @@ impl Engine {
         Ok(())
     }
 
-    /// The Postgres branches' schema against their parents' (`schema::diff`), kept for `head`.
-    /// A failure is logged and read again on the next converge.
+    /// The Postgres branches' schema, and the search branches' mappings, against their parents'
+    /// (`schema::diff`), kept for `head`. A failure is logged and read again on the next converge.
     async fn read_schema(&self, r: &Row) {
         let read = async {
             let mut all: Option<Vec<String>> = None;
             let resources = self.store.resources(&r.id)?;
-            let several = resources.iter().filter(|x| x.kind == Kind::Postgres).count() > 1;
-            for res in resources.iter().filter(|x| x.kind == Kind::Postgres) {
+            let has_schema = |k: Kind| matches!(k, Kind::Postgres | Kind::Search);
+            let several = resources.iter().filter(|x| has_schema(x.kind)).count() > 1;
+            for res in resources.iter().filter(|x| has_schema(x.kind)) {
                 let Some(branch) = &res.r#ref else { continue };
                 let Some((parent, mine)) = self.brancher(res.kind)?.schema(&res.parent, branch).await? else { continue };
                 let lines = crate::schema::diff(&parent, &mine);
                 let out = all.get_or_insert_with(Vec::new);
                 if several && !lines.is_empty() {
-                    out.push(format!("# {}", res.parent));
+                    out.push(format!("# {}:{}", res.kind.as_str(), res.parent));
                 }
                 out.extend(lines);
             }

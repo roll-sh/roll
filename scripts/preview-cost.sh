@@ -194,7 +194,9 @@ ES_READ=$(curl -sf "$APP_ES/products/_doc/1" | jq_ "d['_source']['name']")
 [ "$ES_READ" = "[masked]" ] || { echo "the search branch should read the parent's document with products.name masked, not $ES_READ"; exit 1; }
 ES_PARENT=$(curl -sf "$SEARCH_URL_PARENT/products/_doc/1" | jq_ "d['_source']['name']")
 [ "$ES_PARENT" = "parent" ] || { echo "masking the branch shouldn't touch the parent's document: $ES_PARENT"; exit 1; }
-curl -sf -XPUT "$APP_ES/products/_doc/2?refresh=true" -H 'content-type: application/json' -d '{"name":"branch"}' >/dev/null
+# A field only the branch's documents have (price): its mapping gains it, and the next head's
+# schema changes say so.
+curl -sf -XPUT "$APP_ES/products/_doc/2?refresh=true" -H 'content-type: application/json' -d '{"name":"branch","price":9.5}' >/dev/null
 ES_PARENT_SEES=$(curl -s -o /dev/null -w '%{http_code}' "$SEARCH_URL_PARENT/products/_doc/2")
 [ "$ES_PARENT_SEES" = 404 ] || { echo "a write to the search branch reached the parent ($ES_PARENT_SEES)"; exit 1; }
 APP_WAL=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT length(pg_read_binary_file('pg_wal/' || pg_walfile_name(pg_current_wal_lsn())))" 2>&1 | head -1 || true)
@@ -319,6 +321,7 @@ if [ -n "$PG_BRANCH" ]; then
     sleep 0.5
   done
   case "$SCHEMA" in *"+ table public.preview_only"*) ;; *) echo "the schema changes should name the new table: $SCHEMA"; exit 1;; esac
+  case "$SCHEMA" in *"+ field products.price "*) ;; *) echo "the schema changes should name the search branch's new field: $SCHEMA"; exit 1;; esac
   ESCALATED=$(api POST "/v1/endpoints/$PG_EP/query" "{\"sql\":\"SELECT rolsuper FROM pg_roles WHERE rolname = '$APP_ROLE'\"}" | jq_ "d['results'][0]['rows'][0][0]")
   [ "$ESCALATED" = f ] || { echo "the branch's role became a superuser ($ESCALATED)"; exit 1; }
   say "$SCHEMA"

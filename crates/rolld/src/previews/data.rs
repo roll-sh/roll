@@ -696,6 +696,30 @@ for (int i = 0; i < p.length - 1; i++) { if (!(m instanceof Map) || !m.containsK
 def k = p[p.length - 1]; if (!(m instanceof Map) || !m.containsKey(k)) { return; } \
 if (params.rule == 'remove') { m.remove(k); } else if (params.rule == 'email') { m.put(k, 'user-' + ctx._id + '@example.invalid'); } else { m.put(k, '[masked]'); }";
 
+/// A `_mapping` answer as lines: each index (not the system ones, `.…`), and each field with its
+/// type, nested ones by path (`field users.address.city text`) and multi-fields too. Bounded.
+fn mapping_lines(v: &Value) -> Vec<String> {
+    fn walk(props: &Value, prefix: &str, depth: usize, out: &mut Vec<String>) {
+        let Some(props) = props.as_object() else { return };
+        for (name, f) in props {
+            if out.len() >= 5000 || depth > 20 {
+                return;
+            }
+            let path = format!("{prefix}.{name}");
+            let ty = f["type"].as_str().unwrap_or(if f.get("properties").is_some() { "object" } else { "?" });
+            out.push(format!("field {path} {ty}"));
+            walk(&f["properties"], &path, depth + 1, out);
+            walk(&f["fields"], &path, depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    for (index, m) in v.as_object().into_iter().flatten().filter(|(i, _)| !i.starts_with('.')) {
+        out.push(format!("index {index}"));
+        walk(&m["mappings"]["properties"], index, 0, &mut out);
+    }
+    out
+}
+
 fn percent_decode(s: &str) -> String {
     urlencoding::decode(s).map(|c| c.into_owned()).unwrap_or_else(|_| s.to_string())
 }
@@ -767,6 +791,18 @@ impl Brancher for Search {
         Ok(kept.as_object().into_iter().flatten().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect())
     }
 
+    /// Both clusters' mappings as lines (`index products`, `field products.price float`), through
+    /// the operator's console request (no cluster password needed).
+    async fn schema(&self, parent: &str, branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
+        let read = |id: String| async move {
+            let v = self.0.post(&format!("/v1/search/clusters/{}/request", seg(&id)), json!({ "method": "GET", "path": "/_mapping" })).await?;
+            anyhow::ensure!(v["status"].as_u64() == Some(200), "reading {id}'s mappings: {}", v["status"]);
+            let body: Value = serde_json::from_str(v["body"].as_str().unwrap_or("{}"))?;
+            anyhow::Ok(mapping_lines(&body))
+        };
+        Ok(Some((read(parent.to_string()).await?, read(branch.to_string()).await?)))
+    }
+
     /// Rewrite the masked fields in the branch's documents (`_update_by_query`, Painless): the
     /// parent's segments are shared, so the branch's rewritten documents are its own and the
     /// parent keeps its values. Run again it's harmless: masked values stay masked.
@@ -814,6 +850,21 @@ impl Brancher for Search {
 #[cfg(test)]
 mod tests {
     use super::bucket_name;
+
+    #[test]
+    fn a_search_mapping_becomes_lines() {
+        let v = serde_json::json!({
+            ".kibana": { "mappings": { "properties": { "x": { "type": "text" } } } },
+            "products": { "mappings": { "properties": {
+                "name": { "type": "text", "fields": { "raw": { "type": "keyword" } } },
+                "seller": { "properties": { "city": { "type": "text" } } }
+            } } }
+        });
+        assert_eq!(
+            super::mapping_lines(&v),
+            ["index products", "field products.name text", "field products.name.raw keyword", "field products.seller object", "field products.seller.city text"]
+        );
+    }
 
     #[test]
     fn bucket_branches_are_named_after_their_parent() {
