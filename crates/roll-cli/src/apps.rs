@@ -444,9 +444,14 @@ pub enum AppsCmd {
         #[arg(long, value_name = "JOB")]
         cancel: Option<String>,
     },
-    /// What a build would detect in a roll code repo (no build): the provider, its commands,
-    /// the port and why. Default: the service's own repo.
+    /// What a build would detect (no build): the provider, its commands, the port and why. A
+    /// directory here is read on this machine (`roll up`'s tree, before it's uploaded); `--repo`
+    /// or a repo service asks roll for its tree in roll code. Default: the service's repo, else
+    /// this directory. A roll.toml `[app]` (builder, commands) isn't applied to a local tree.
     Plan {
+        /// A directory to read here.
+        #[arg(conflicts_with_all = ["repo", "revision"])]
+        dir: Option<PathBuf>,
         #[command(flatten)]
         target: Target,
         /// `owner/name` in roll code.
@@ -1312,6 +1317,13 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
         (Some(_), _) => service(api, &u.target).await?,
         (None, Some(l)) => api.get(&format!("/v1/apps/services/{}", enc(&s(&l["service"])))).await?,
         (None, None) => {
+            // Read here first: a tree nothing builds makes no service (a roll.toml `[app]` can
+            // name its builder, so with one it's only said).
+            match local_plan(&dir) {
+                Ok(p) => eprintln!("detected {}{}", serde_json::to_value(&p)?["provider"].as_str().unwrap_or("?"), p.framework.as_deref().map(|f| format!(" ({f})")).unwrap_or_default()),
+                Err(e) if dir.join("roll.toml").exists() => eprintln!("{e} (its roll.toml may say how)"),
+                Err(e) => bail!("{e}"),
+            }
             // First time here: a project and an upload service named after the directory.
             let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("app").to_ascii_lowercase();
             let name: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>().trim_matches('-').chars().take(32).collect();
@@ -1414,6 +1426,14 @@ fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Val
         }
     }
     out
+}
+
+/// What a build would make of `dir`, read here, as a new web service's would (a Procfile's
+/// `web:`); a roll.toml `[app]` isn't applied.
+fn local_plan(dir: &Path) -> anyhow::Result<apps_build::Plan> {
+    anyhow::ensure!(dir.is_dir(), "{} isn't a directory", dir.display());
+    let o = apps_build::Overrides { process: Some("web".into()), ..Default::default() };
+    apps_build::plan(&apps_build::DirTree::new(dir), &o).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result<()> {
@@ -2107,25 +2127,39 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::Plan { target, repo, root, revision, dockerfile } => {
-            let (repo, root) = match repo {
-                Some(r) => (r, root),
-                None => {
+        AppsCmd::Plan { dir, target, repo, root, revision, dockerfile } => {
+            // A repo's tree is roll's to read; anything else is this machine's.
+            let remote = match (&dir, repo) {
+                (Some(_), _) => None,
+                (None, Some(r)) => Some((r, root.clone())),
+                (None, None) if target.service.is_none() && find_link(&std::env::current_dir()?).is_none() => None,
+                (None, None) => {
                     let svc = service(api, &target).await?;
                     match svc["source"]["kind"].as_str() {
-                        Some("repo") => (s(&svc["source"]["repo"]), root.or_else(|| svc["source"]["root"].as_str().map(str::to_string))),
-                        _ => bail!("{} isn't built from a repo: name one with --repo owner/name", s(&svc["name"])),
+                        Some("repo") => Some((s(&svc["source"]["repo"]), root.clone().or_else(|| svc["source"]["root"].as_str().map(str::to_string)))),
+                        _ => None,
                     }
                 }
             };
-            let mut req = json!({ "repo": repo });
-            if let Some(r) = root {
-                req["root"] = json!(r);
-            }
-            if let Some(r) = revision {
-                req["revision"] = json!(r);
-            }
-            let plan = api.post("/v1/apps/plan", req).await?;
+            let plan = match remote {
+                Some((repo, root)) => {
+                    let mut req = json!({ "repo": repo });
+                    if let Some(r) = root {
+                        req["root"] = json!(r);
+                    }
+                    if let Some(r) = revision {
+                        req["revision"] = json!(r);
+                    }
+                    api.post("/v1/apps/plan", req).await?
+                }
+                None => {
+                    let mut at = dir.unwrap_or(std::env::current_dir()?);
+                    if let Some(r) = root {
+                        at = at.join(r);
+                    }
+                    serde_json::to_value(local_plan(&at)?)?
+                }
+            };
             if !json_out {
                 let framework = plan["framework"].as_str().map(|f| format!(" ({f})")).unwrap_or_default();
                 println!("{}{framework}{}", s(&plan["provider"]), plan["language_version"].as_str().map(|v| format!("  {v}")).unwrap_or_default());

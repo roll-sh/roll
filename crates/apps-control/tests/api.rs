@@ -2334,8 +2334,21 @@ async fn a_crowd_wakes_one_instance_and_a_slow_start_says_when_to_retry() {
     let id = svc["id"].as_str().unwrap().to_string();
     assert_eq!(settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
     let h = host(&svc["environments"][0]["url"]);
+    // The deploy reads as active once the store switched; its instance joins the live state a
+    // moment later (its commit). Until then a request (this test's reads too) adopts the
+    // deployment with a warm, never-started one, and a crowd waking that keeps the deploy's own
+    // up: so this waits for the deploy's, the one its health check started.
+    let live = w.apps.live(&id, "production");
+    let joined = || live.instances().iter().any(|i| i.started_at().is_some());
+    for _ in 0..500 {
+        if joined() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(joined(), "the deploy's instance joined: {:?}", live.instances().iter().map(|i| (i.name.clone(), i.state())).collect::<Vec<_>>());
     // Asleep first, and stopped (a rested instance may be frozen, which resumes at once).
-    w.apps.live(&id, "production").sleep().await;
+    live.sleep().await;
     get_until(&w.api, &format!("/v1/apps/services/{id}/environments/production"), |e| e["state"] == "stopped").await;
     let get = || async {
         let req = Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap();

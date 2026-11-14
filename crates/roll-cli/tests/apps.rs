@@ -147,3 +147,19 @@ async fn settings_through_the_cli() {
     let (code, _, err) = t.run_up().await;
     assert!(code != Some(0) && err.contains("roll deploy"), "{err}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_local_tree_is_planned_before_anything_is_made() {
+    let t = start().await;
+    let app = t.work.path().join("web");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("package.json"), r#"{"scripts":{"start":"node server.js"}}"#).unwrap();
+    let plan = t.json(&["plan", "web"]).await;
+    assert_eq!((plan["provider"].as_str(), plan["start"].as_str()), (Some("node"), Some("node server.js")), "{plan}");
+    // A tree nothing builds: said before any project or service is made.
+    std::fs::create_dir_all(t.work.path().join("empty")).unwrap();
+    std::fs::write(t.work.path().join("empty/notes.txt"), "hi").unwrap();
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).args(["up", "empty", "-p", "acme"]).current_dir(t.work.path()).env("ROLL_API_URL", &t.api).env_remove("ROLL_API_KEY").output().await.unwrap();
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("couldn't tell how to build"), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(t.json(&["list"]).await, serde_json::json!([]), "nothing made");
+}

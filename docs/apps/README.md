@@ -1505,6 +1505,12 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
 
 ## Builds in detail (apps-build)
 
+`roll apps plan [DIR]` reads a tree on this machine with the same detection (`apps_build::plan`
+over a `DirTree`, as a new web service's build would read it, a Procfile's `web:` included), and
+`roll up` does so before it makes a service: a tree nothing builds is said before any project or
+service exists (with a roll.toml, whose `[app]` can name the builder, it's only said). A repo
+service's plan (`--repo`, or a linked repo service) is roll's, from its tree in roll code.
+
 - Node yields to another language: a tree with a Gemfile, composer.json, requirements.txt,
   pyproject.toml, manage.py, go.mod, Cargo.toml, pom.xml or build.gradle isn't a Node app even
   with a package.json; a package.json with a `build` script there adds a Node `assets` stage.
@@ -1740,63 +1746,50 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (a second product review of the experience, a product review of what one engineer can close here now, bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **The plan of a local tree** before `roll up` uploads it (`fly launch`'s scan): `roll apps
-   plan [DIR]` with `apps_build::plan` over a `DirTree`, run by `roll up` before a service is made.
-2. **Log drains that reach the usual tools**: headers (sealed, for Datadog, Better Stack, Axiom),
+1. **Log drains that reach the usual tools**: headers (sealed, for Datadog, Better Stack, Axiom),
    the environments/services/previews filter notifications have, request and build logs as
    sources, and a Test with its deliveries.
-3. **Structured logs**: JSON and logfmt lines' level read at the read (no storage change), a
+2. **Structured logs**: JSON and logfmt lines' level read at the read (no storage change), a
    `level=` filter and chips, `roll logs --level`.
-4. **A project's logs in one view** (Railway's Log Explorer): every service's stream on the
+3. **A project's logs in one view** (Railway's Log Explorer): every service's stream on the
    client, and `roll logs --all-services`.
-5. **More builds**: Elixir/Phoenix, Deno and .NET providers, and `NothingDetected` naming what it
+4. **More builds**: Elixir/Phoenix, Deno and .NET providers, and `NothingDetected` naming what it
    did find (`mix.exs`, `deno.json`, `*.csproj`).
-6. **A project as roll.toml** (Fly's `fly config save`): `roll apps export` and Project settings'
+5. **A project as roll.toml** (Fly's `fly config save`): `roll apps export` and Project settings'
    Download, parsed back with `parse_project` in its test; variables by name only.
-7. **Cron runs that retry** (Cloud Run Jobs' `--max-retries`).
-8. **A wake flake to find**: `a_crowd_wakes_one_instance_and_a_slow_start_says_when_to_retry`
-   failed once in a gate (2026-11-14, `pnpm test:apps` under load): all eight of the crowd answered
-   200 at once, so an instance was already up after `sleep()` and the environment read `stopped`.
-   0 of 138 runs since, 90 of them beside four full API runs. `sleep()` skips an instance that isn't
-   `awake()`; what else could be up (a start the reaper began, a resumed one) is one lead. The
-   other: a fake instance that stops frees its port at once, and on a loaded machine another
-   test's fake server can be handed it and answer an old address (the same gate run's
-   `a_deploy_whose_app_listens_elsewhere_says_where` failed that way: fixed by holding the port
-   bound and unlistened). Read so far, the deploy path (`prepare`, `rest_if_asleep`, `commit`)
-   leaves nothing up; the assertion now prints the instances' states before the crowd and the
-   fake's creates, starts and resumes, so the next failure says which.
-9. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+6. **Cron runs that retry** (Cloud Run Jobs' `--max-retries`).
+7. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-10. **Region**: the region shown on the overview and each environment, defaulting to the project's
+8. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-11. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+9. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-12. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+10. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-13. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+11. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-14. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+12. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-15. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-16. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+13. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+14. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-17. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+15. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-18. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+16. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-19. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+17. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-20. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+18. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
