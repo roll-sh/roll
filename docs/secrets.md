@@ -1621,7 +1621,10 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
-Reviewed again on 2026-11-14: an independent security review of #39–#41 found racing rotations
+An independent security review of #43–#45 (the issuer's keys and tokens, CA name constraints, SSH
+formats) is running. Measured again on 2026-11-14 (load about 20): values at 9,900 keys took 89–122 ms on SQLite and
+155 ms on Postgres, within the noise of the Performance table; nothing to fix. Reviewed again on
+2026-11-14: an independent security review of #39–#41 found racing rotations
 could reset the login in use (now a claim never takes a busy role), a `#` in a password shown as
 the host, Postgres connections outliving their timeout, and deleted projects leaving credentials
 unrevoked (now revoked first, the rest retried by the sweeper); all fixed and tested. Earlier,
@@ -1637,9 +1640,9 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **Dynamic GCP and Azure credentials** (Vault's GCP and Azure engines, next to #38's AWS): a
-   short-lived service-account token per lease through workload identity federation, and an Entra
-   app's client secret per lease, with the same decoy check against confused deputies.
+1. **AWS through roll's issuer** (once #38 and #43 land): `AssumeRoleWithWebIdentity` with roll's
+   own token, so roll needs no AWS keys of its own and the trust policy pins `sub` as GCP's and
+   Azure's do.
 2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
    customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
 3. **Products say who owns a resource**, so a person's project can link their own databases,
@@ -1669,6 +1672,14 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#45, SSH certificates** (after #44): a project's SSH CA signs short-lived user certificates
+  for the logins it allows, and `roll ssh` uses them for one session; OpenSSH's formats, checked
+  with `ssh-keygen` and a real `sshd` login.
+- **#44, a project's own certificate authority** (after #20): short-lived TLS certificates for the
+  names its name-constrained CA allows, dynamic or managed; checked with a real TLS handshake.
+- **#43, dynamic GCP and Azure credentials** (after #20): roll as an OIDC issuer
+  (`/v1/secrets/oidc`); GCP's workload identity federation and Azure's federated credentials trust
+  its token for one project, checked with a decoy project at registration.
 - **#42, MongoDB outside roll** (after #41): rotation and a user per lease for Atlas and replica
   sets; the primary only among the seeds, SRV targets inside their domain, SCRAM with the server's
   signature checked.
