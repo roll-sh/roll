@@ -632,7 +632,7 @@ impl Aggregator for SimpleAgg {
                 }
                 Reader::Geo(r) => {
                     for i in 0..b.len() {
-                        let n = r.points(b.docs[i]).len();
+                        let n = r.points(b.docs[i])?.len();
                         if n > 0 {
                             self.ensure(b.ords[i])?;
                             self.counts[b.ords[i] as usize] += n as u64;
@@ -1263,6 +1263,7 @@ fn value_type_description(v: crate::values::ValueType) -> &'static str {
         Date => "date",
         Ip => "ip",
         Boolean => "boolean",
+        GeoPoint => "geo_point",
     }
 }
 

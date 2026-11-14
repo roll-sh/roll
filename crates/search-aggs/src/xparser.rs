@@ -568,7 +568,8 @@ impl<'a> XParser<'a> {
             let token = self.next_token().unwrap_or(Token::EndObject);
             let Some(idx) = idx else {
                 let mut candidates: Vec<&str> = Vec::new();
-                for f in fields {
+                // Internal fields (`__roll…`) are never suggested.
+                for f in fields.iter().filter(|f| !f.name.starts_with("__roll")) {
                     candidates.push(f.name);
                     candidates.extend(f.deprecated.iter().copied());
                 }

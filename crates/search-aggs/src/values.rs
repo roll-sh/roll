@@ -33,6 +33,8 @@ pub enum ValueType {
     Date,
     Ip,
     Boolean,
+    /// `ValueType.GEOPOINT`.
+    GeoPoint,
 }
 
 impl ValueType {
@@ -47,6 +49,7 @@ impl ValueType {
             "date" => ValueType::Date,
             "ip" => ValueType::Ip,
             "boolean" => ValueType::Boolean,
+            "geo_point" => ValueType::GeoPoint,
             _ => return None,
         })
     }
@@ -60,6 +63,7 @@ impl ValueType {
             ValueType::Date => "date",
             ValueType::Ip => "ip",
             ValueType::Boolean => "boolean",
+            ValueType::GeoPoint => "geo_point",
         }
     }
 
@@ -72,6 +76,7 @@ impl ValueType {
             ValueType::Date => "date",
             ValueType::Ip => "ip",
             ValueType::Boolean => "boolean",
+            ValueType::GeoPoint => "geo_point",
         }
     }
 
@@ -83,6 +88,7 @@ impl ValueType {
             ValueType::Date => VsType::Date,
             ValueType::Ip => VsType::Ip,
             ValueType::Boolean => VsType::Boolean,
+            ValueType::GeoPoint => VsType::GeoPoint,
         }
     }
 }
@@ -154,6 +160,12 @@ impl VsType {
     }
 }
 
+/// The script search-es hands an aggregation of a runtime field in place of its `field`
+/// (`search::runtime::agg_script`). Every values source takes it, including those whose users
+/// can't give a `script` (`geo_bounds`, the geo grids, `ip_range`, `ip_prefix`); it never shows in
+/// the suggestions of an unknown field.
+pub const RUNTIME_SCRIPT: &str = "__roll_runtime_script";
+
 /// Which values-source fields an aggregation declares.
 #[derive(Clone, Copy, Debug)]
 pub struct VsOpts {
@@ -197,6 +209,7 @@ impl VsSpec {
         if o.timezone {
             f.push(Field::new("time_zone", Tokens::LONG));
         }
+        f.push(Field::new(RUNTIME_SCRIPT, Tokens::OBJECT_OR_STRING));
         f
     }
 
@@ -210,7 +223,7 @@ impl VsSpec {
                 self.value_type = Some(ValueType::lenient_parse(&t).ok_or_else(|| AggError::illegal_argument(format!("Unknown value type [{t}]")))?);
             }
             "format" => self.format = Some(p.text()?),
-            "script" => self.script = Some(Script::parse(p)?),
+            "script" | RUNTIME_SCRIPT => self.script = Some(Script::parse(p)?),
             "time_zone" => {
                 self.time_zone = Some(if p.token() == Token::String { TimeZone::parse(&p.text()?)? } else { TimeZone::of_hours(p.int_value()? as i64)? })
             }
@@ -228,7 +241,7 @@ impl VsSpec {
             if self.field.is_none() && self.script.is_none() {
                 return Err(AggError::illegal_argument("Required one of fields [field, script], but none were specified."));
             }
-        } else if self.field.is_none() {
+        } else if self.field.is_none() && self.script.is_none() {
             return Err(AggError::illegal_argument("Required one of fields [field], but none were specified."));
         }
         Ok(())
@@ -1304,30 +1317,38 @@ impl BytesReader {
     }
 }
 
-/// Geo point values of one segment (`MultiGeoPointValues`).
+/// Geo point values of one segment (`MultiGeoPointValues`), from doc values or from a runtime
+/// field's script (search-es hands those over as scripts; a user's own script can't reach a
+/// geo values source).
 pub struct GeoReader {
     dv: DvNum,
+    script: Option<Box<dyn LeafValuesScript>>,
     missing: Option<(f64, f64)>,
     buf: Vec<(f64, f64)>,
+    sbuf: Vec<ScriptValue>,
+}
+
+/// A point quantized as indexed points are (`LatLonDocValuesField`).
+fn quantized(lat: f64, lon: f64) -> (f64, f64) {
+    (encode::decode_latitude(encode::encode_latitude(lat)), encode::decode_longitude(encode::encode_longitude(lon)))
 }
 
 impl GeoReader {
     pub fn open(vs: &BoundVs, seg: &SegmentContext) -> Result<GeoReader> {
-        if vs.script.is_some() {
-            return Err(AggError::illegal_argument("value source of type [geo_point] is not supported by scripts"));
-        }
+        let script = match &vs.script {
+            Some(s) => Some(s.leaf(seg)?),
+            None => None,
+        };
         let dv = match &vs.field {
             Some(f) => DvNum::open(seg, f.number),
             None => DvNum::None,
         };
         // The missing point is quantized like indexed points.
         let missing = match &vs.missing {
-            Some(MissingValue::Geo(lat, lon)) => {
-                Some((encode::decode_latitude(encode::encode_latitude(*lat)), encode::decode_longitude(encode::encode_longitude(*lon))))
-            }
+            Some(MissingValue::Geo(lat, lon)) => Some(quantized(*lat, *lon)),
             _ => None,
         };
-        Ok(GeoReader { dv, missing, buf: Vec::new() })
+        Ok(GeoReader { dv, script, missing, buf: Vec::new(), sbuf: Vec::new() })
     }
 
     /// Drops the `missing` point: for consumers that read it unquantized (`cardinality` hashes
@@ -1339,16 +1360,32 @@ impl GeoReader {
 
     /// The points of `doc` as `(lat, lon)` (decoded `LatLonDocValuesField` values).
     #[inline]
-    pub fn points(&mut self, doc: u32) -> &[(f64, f64)] {
+    pub fn points(&mut self, doc: u32) -> Result<&[(f64, f64)]> {
         self.buf.clear();
-        let buf = &mut self.buf;
-        self.dv.for_each(doc, |v| buf.push(decode_lat_lon(v)));
+        match &mut self.script {
+            None => {
+                let buf = &mut self.buf;
+                self.dv.for_each(doc, |v| buf.push(decode_lat_lon(v)));
+            }
+            Some(script) => {
+                self.sbuf.clear();
+                script.run(doc, 0.0, None, &mut self.sbuf)?;
+                for v in &self.sbuf {
+                    match v {
+                        ScriptValue::GeoPoint(lat, lon) => self.buf.push(quantized(*lat, *lon)),
+                        ScriptValue::Null => {}
+                        other => return Err(AggError::illegal_argument(format!("value source of type [geo_point] got a non-point script value [{}]", other.to_java_string()))),
+                    }
+                }
+                self.buf.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            }
+        }
         if self.buf.is_empty()
             && let Some(m) = self.missing
         {
             self.buf.push(m);
         }
-        &self.buf
+        Ok(&self.buf)
     }
 }
 

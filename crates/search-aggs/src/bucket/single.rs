@@ -541,7 +541,7 @@ impl SingleAgg {
                         MissingReader::None => false,
                         MissingReader::Num(r) => !r.doubles(doc, b.score(i))?.is_empty(),
                         MissingReader::Bytes(r) => r.load(doc, b.score(i))? > 0,
-                        MissingReader::Geo(r) => !r.points(doc).is_empty(),
+                        MissingReader::Geo(r) => !r.points(doc)?.is_empty(),
                     };
                     if !has {
                         self.count(b.ords[i], doc);
