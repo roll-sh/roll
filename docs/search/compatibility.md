@@ -25,15 +25,22 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
 - Tests run: 3905; passed 3809, failed 1, skipped 95.
 - Of the 3808 tests that pass on Elasticsearch 9.5.5 (and run here), roll passes **3808** (100%); every x-pack clients test passes.
   <!-- test-search: roll >= 3810 -->
-- Elasticsearch's module, plugin and x-pack YAML suites outside `test/free` (66 suites, 6,044
-  tests; [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 3,579,
-  3,540 of the 5,541 that pass on Elasticsearch 9.5.5 run like each suite's own test cluster.
-  Gaps found by the module suites besides those in the table: `geo_bounds` of `geo_point`
-  runtime fields, highlighting runtime fields, the tie order of `ip` runtime field terms, nested runtime field errors as cause chains, the `registered_domain`,
-  `user_agent` and `attachment` processors, ingest node statistics and verbose simulate
-  details; in `platinum`: `geo_shape` runtime fields, `geo_bounds` of shapes crossing the
-  dateline, dateline-crossing `geohex` cells as multipolygons in the `geo_grid` processor,
-  synthetic `_source` order of `counted_keyword` values.
+- Elasticsearch's module, plugin and x-pack YAML suites outside `test/free` (67 suites, 6,349
+  tests; [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 5,128,
+  **4,967 of the 5,541** that pass on Elasticsearch 9.5.5 (90%), each run like its suite's own
+  test cluster (a full run of every suite at `a038254bd`, 2026-11-14). 28 suites pass every
+  test Elasticsearch passes. What's left, largest first: x-pack `platinum` (1,064 of 1,412;
+  machine learning is most of it), plugins roll doesn't ship (the `analysis-icu`, `-kuromoji`,
+  `-nori`, `-phonetic`, `-smartcn`, `-stempel` and `-ukrainian` analyzers, `mapper-annotated-text`,
+  `-murmur3` and `-size`, `ingest-attachment`, `ingest-otel`, `prometheus`), `apm-data`'s
+  templates and pipelines (1 of 26), cross-cluster replication, snapshot lifecycle management and
+  `reindex-management` (none), `eql` (27 of 39), `mapper-extras` and `mapper-unsigned-long` (13
+  and 12 short), `logsdb` (225 of 234: `_ignored_source` binary entries, the `@timestamp` doc
+  values skipper), runtime fields (243 of 248: `geo_bounds` of `geo_point` runtime fields,
+  highlighting them, `ip` term tie order), `ingest-common` (172 of 175: a pipeline that changes
+  the target index). In `platinum` besides machine learning: `geo_shape` runtime fields,
+  `geo_bounds` of shapes crossing the dateline, dateline-crossing `geohex` cells in the
+  `geo_grid` processor, synthetic `_source` order of `counted_keyword` values.
 - The OpenSearch 3.9.0 suite (opensearch dialect): 1455 of 1506 pass — every test that passes
   on a real single-node OpenSearch 3.9.0 (`crates/search-yaml/baseline/opensearch-3.9.0.txt`,
   re-checked against OpenSearch 3.9.0 in Docker); the other 51 are environment skips
@@ -210,13 +217,13 @@ the discovery/store plugins.
 | `data-streams` | `modules/data-streams` | security | 170 | 159 | 159 | 159 | 0 |
 | `dot-prefix-validation` | `modules/dot-prefix-validation` | security | 6 | 6 | 2 | 2 | 4 |
 | `ingest-attachment` | `modules/ingest-attachment` | plain | 10 | 10 | 0 | 0 | 10 |
-| `ingest-common` | `modules/ingest-common` | security | 176 | 175 | 102 | 102 | 73 |
+| `ingest-common` | `modules/ingest-common` | security | 176 | 175 | 172 | 172 | 3 |
 | `ingest-ip-location` | `modules/ingest-ip-location` | plain | 21 | 1 | 0 | 0 | 1 |
 | `ingest-otel` | `modules/ingest-otel` | plain | 13 | 13 | 0 | 0 | 13 |
 | `ip-location` | `modules/ip-location` | plain | 4 | 1 | 0 | 0 | 1 |
-| `lang-expression` | `modules/lang-expression` | plain | 3 | 3 | 2 | 2 | 1 |
+| `lang-expression` | `modules/lang-expression` | plain | 3 | 3 | 3 | 3 | 0 |
 | `lang-mustache` | `modules/lang-mustache` | plain | 21 | 21 | 18 | 18 | 3 |
-| `lang-painless` | `modules/lang-painless` | plain | 345 | 342 | 295 | 295 | 47 |
+| `lang-painless` | `modules/lang-painless` | plain | 345 | 342 | 337 | 337 | 5 |
 | `mapper-extras` | `modules/mapper-extras` | plain | 143 | 143 | 130 | 130 | 13 |
 | `parent-join` | `modules/parent-join` | plain | 27 | 24 | 24 | 24 | 0 |
 | `percolator` | `modules/percolator` | plain | 6 | 6 | 6 | 6 | 0 |
@@ -227,11 +234,11 @@ the discovery/store plugins.
 | `rest-root` | `modules/rest-root` | plain | 4 | 4 | 4 | 4 | 0 |
 | `runtime-fields-common` | `modules/runtime-fields-common` | plain | 248 | 248 | 243 | 243 | 5 |
 | `streams` | `modules/streams` | plain | 25 | 25 | 25 | 25 | 0 |
-| `transport-netty4` | `modules/transport-netty4` | plain | 1 | 1 | 0 | 0 | 1 |
-| `user-agent` | `modules/user-agent` | plain | 1 | 1 | 0 | 0 | 1 |
+| `transport-netty4` | `modules/transport-netty4` | plain | 1 | 1 | 1 | 1 | 0 |
+| `user-agent` | `modules/user-agent` | plain | 1 | 1 | 1 | 1 | 0 |
 | `apm-data` | `x-pack/plugin/apm-data` | plain | 28 | 26 | 1 | 1 | 25 |
 | `async-search` | `x-pack/plugin/async-search` | plain | 3 | 1 | 1 | 1 | 0 |
-| `autoscaling` | `x-pack/plugin/autoscaling` | security | 19 | 19 | 0 | 0 | 19 |
+| `autoscaling` | `x-pack/plugin/autoscaling` | security | 19 | 19 | 19 | 19 | 0 |
 | `ccr` | `x-pack/plugin/ccr` | security | 10 | 10 | 0 | 0 | 10 |
 | `core` | `x-pack/plugin/core` | security | 1 | 0 | 0 | 0 | 0 |
 | `diskbbq` | `x-pack/plugin/diskbbq` | plain | 8 | 7 | 5 | 5 | 2 |
@@ -239,9 +246,9 @@ the discovery/store plugins.
 | `downsample-with-security` | `x-pack/plugin/downsample/qa/rest:downsample-with-security` | security | 1 | 1 | 1 | 1 | 0 |
 | `ent-search` | `x-pack/plugin/ent-search` | security | 371 | 371 | 371 | 371 | 0 |
 | `eql` | `x-pack/plugin/eql/qa/rest` | basic | 39 | 39 | 27 | 27 | 12 |
-| `fleet` | `x-pack/plugin/fleet` | security-basic | 21 | 21 | 3 | 3 | 18 |
+| `fleet` | `x-pack/plugin/fleet` | security-basic | 21 | 21 | 21 | 21 | 0 |
 | `ilm` | `x-pack/plugin/ilm` | plain | 27 | 27 | 25 | 25 | 2 |
-| `kql` | `x-pack/plugin/kql` | plain | 34 | 34 | 0 | 0 | 34 |
+| `kql` | `x-pack/plugin/kql` | plain | 34 | 34 | 34 | 34 | 0 |
 | `logsdb` | `x-pack/plugin/logsdb` | security | 236 | 234 | 225 | 225 | 9 |
 | `mapper-constant-keyword` | `x-pack/plugin/mapper-constant-keyword` | plain | 5 | 5 | 5 | 5 | 0 |
 | `mapper-unsigned-long` | `x-pack/plugin/mapper-unsigned-long` | plain | 34 | 34 | 22 | 22 | 12 |
@@ -250,7 +257,7 @@ the discovery/store plugins.
 | `prometheus` | `x-pack/plugin/prometheus` | security | 6 | 6 | 0 | 0 | 6 |
 | `rank-rrf` | `x-pack/plugin/rank-rrf:linear,rrf` | plain | 136 | 96 | 96 | 96 | 0 |
 | `rank-rrf-license` | `x-pack/plugin/rank-rrf:license` | basic | 3 | 3 | 0 | 0 | 3 |
-| `searchable-snapshots` | `x-pack/plugin/searchable-snapshots/qa/rest` | security | 13 | 13 | 6 | 6 | 7 |
+| `searchable-snapshots` | `x-pack/plugin/searchable-snapshots/qa/rest` | security | 13 | 13 | 8 | 8 | 5 |
 | `search-business-rules` | `x-pack/plugin/search-business-rules` | basic | 16 | 16 | 16 | 16 | 0 |
 | `slm` | `x-pack/plugin/slm` | security | 8 | 8 | 1 | 1 | 7 |
 | `snapshot-repo-test-kit` | `x-pack/plugin/snapshot-repo-test-kit/qa/rest` | basic | 6 | 6 | 3 | 3 | 3 |
@@ -271,7 +278,7 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | 6044 | 5541 | 4304 | 4304 | 1237 |
+| **total** | | | **6,349** | **5,541** | **5,128** | **4,967** | **574** |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
@@ -305,7 +312,7 @@ the discovery/store plugins.
 <!-- test-search: mapper-version >= 6 -->
 <!-- test-search: otel-data >= 68 -->
 <!-- test-search: rank-rrf >= 96 -->
-<!-- test-search: searchable-snapshots >= 6 -->
+<!-- test-search: searchable-snapshots >= 8 -->
 <!-- test-search: search-business-rules >= 16 -->
 <!-- test-search: slm >= 1 -->
 <!-- test-search: snapshot-repo-test-kit >= 3 -->
