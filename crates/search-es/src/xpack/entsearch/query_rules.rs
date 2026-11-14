@@ -483,7 +483,6 @@ pub fn rule_matches(rule: &Value, criteria: &Map) -> EsResult<bool> {
     Ok(true)
 }
 
-/// The `rule` query as the `pinned` (and `bool` for exclusions) query it stands for.
 /// Elasticsearch fetches the rulesets of `rule` queries and retrievers while it rewrites the
 /// request on the coordinating node, so a missing ruleset fails the search with a 404 before
 /// any shard runs. Checks every `ruleset_ids` / `ruleset_id` the request body names.
@@ -514,20 +513,44 @@ pub fn check_rulesets(ctx: &Ctx, body: Option<&Value>) -> EsResult<()> {
     walk(body, &ctx.state())
 }
 
-pub fn rewrite(st: &crate::meta::ClusterState, r: &crate::query::specialized::Rule) -> EsResult<crate::query::Query> {
-    let mut pinned_ids: Vec<Value> = Vec::new();
-    let mut pinned_docs: Vec<Value> = Vec::new();
-    let mut excluded_ids: Vec<Value> = Vec::new();
-    let mut excluded_docs: Vec<Value> = Vec::new();
-    for id in &r.ruleset_ids {
+/// What the rules of rulesets matching `criteria` do: the documents they pin (ids, else docs;
+/// excluded ones dropped) and exclude (`RuleQueryBuilder.doRewrite`).
+#[derive(Debug, Default)]
+pub struct Actions {
+    pub pinned_ids: Vec<Value>,
+    pub pinned_docs: Vec<Value>,
+    pub excluded_ids: Vec<Value>,
+    pub excluded_docs: Vec<Value>,
+}
+
+impl Actions {
+    /// The pins, in order, as (index, id): the ids if any, else the docs.
+    pub fn pins(&self) -> Vec<(Option<String>, String)> {
+        if !self.pinned_ids.is_empty() {
+            return self.pinned_ids.iter().map(|v| (None, v.to_es_string())).collect();
+        }
+        self.pinned_docs.iter().map(|d| (d.get("_index").map(Value::to_es_string), d.get("_id").map(Value::to_es_string).unwrap_or_default())).collect()
+    }
+
+    /// The excluded documents as (index, id).
+    pub fn excluded(&self) -> Vec<(Option<String>, String)> {
+        let ids = self.excluded_ids.iter().map(|v| (None, v.to_es_string()));
+        ids.chain(self.excluded_docs.iter().map(|d| (d.get("_index").map(Value::to_es_string), d.get("_id").map(Value::to_es_string).unwrap_or_default()))).collect()
+    }
+}
+
+/// Evaluates the rulesets `ids` against `criteria`.
+pub fn actions(st: &crate::meta::ClusterState, ids: &[String], criteria: &Map) -> EsResult<Actions> {
+    let mut a = Actions::default();
+    for id in ids {
         let Some(rs) = st.metadata.xpack.get(RULESETS, id) else { return Err(EsError::resource_not_found(format!("query ruleset {id} not found"))) };
         for rule in rs.get("rules").and_then(Value::as_array).into_iter().flatten() {
-            if !rule_matches(rule, &r.match_criteria)? {
+            if !rule_matches(rule, criteria)? {
                 continue;
             }
             let exclude = rule.get("type").and_then(Value::as_str) == Some("exclude");
             let actions = rule.get("actions").cloned().unwrap_or(Value::Null);
-            let (ids, docs) = if exclude { (&mut excluded_ids, &mut excluded_docs) } else { (&mut pinned_ids, &mut pinned_docs) };
+            let (ids, docs) = if exclude { (&mut a.excluded_ids, &mut a.excluded_docs) } else { (&mut a.pinned_ids, &mut a.pinned_docs) };
             for v in actions.get("ids").and_then(Value::as_array).into_iter().flatten() {
                 if !ids.contains(v) {
                     ids.push(v.clone());
@@ -540,6 +563,15 @@ pub fn rewrite(st: &crate::meta::ClusterState, r: &crate::query::specialized::Ru
             }
         }
     }
+    let (excluded_ids, excluded_docs) = (a.excluded_ids.clone(), a.excluded_docs.clone());
+    a.pinned_ids.retain(|i| !excluded_ids.contains(i));
+    a.pinned_docs.retain(|d| !excluded_docs.contains(d));
+    Ok(a)
+}
+
+/// The `rule` query as the `pinned` (and `bool` for exclusions) query it stands for.
+pub fn rewrite(st: &crate::meta::ClusterState, r: &crate::query::specialized::Rule) -> EsResult<crate::query::Query> {
+    let Actions { pinned_ids, pinned_docs, excluded_ids, excluded_docs } = actions(st, &r.ruleset_ids, &r.match_criteria)?;
     let mut organic = r.organic.to_value();
     if !excluded_ids.is_empty() || !excluded_docs.is_empty() {
         let mut must_not = Vec::new();
@@ -554,8 +586,6 @@ pub fn rewrite(st: &crate::meta::ClusterState, r: &crate::query::specialized::Ru
             must_not.push(obj! { "bool" => obj! { "filter" => Value::Arr(filter) } });
         }
         organic = obj! { "bool" => obj! { "must" => crate::arr![organic], "must_not" => Value::Arr(must_not) } };
-        pinned_ids.retain(|i| !excluded_ids.contains(i));
-        pinned_docs.retain(|d| !excluded_docs.contains(d));
     }
     let mut q = if !pinned_ids.is_empty() {
         obj! { "pinned" => obj! { "ids" => Value::Arr(pinned_ids), "organic" => organic } }

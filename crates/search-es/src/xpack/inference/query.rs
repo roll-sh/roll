@@ -86,6 +86,8 @@ fn visit(q: &Query, f: &mut dyn FnMut(&Query)) {
         Query::Nested(n) => visit(&n.query, f),
         Query::HasChild(h) => visit(&h.query, f),
         Query::HasParent(h) => visit(&h.query, f),
+        Query::Pinned(p) => visit(&p.organic, f),
+        Query::Rule(r) => visit(&r.organic, f),
         Query::Knn(k) => k.filter.iter().for_each(|c| visit(c, f)),
         _ => {}
     }
@@ -99,6 +101,13 @@ pub async fn rewrite(ctx: &Ctx<'_>, q: &mut Query, targets: &Targets, size: Opti
     let mut embedded: Vec<((String, String), super::results::Results)> = Vec::new();
     for (id, text) in texts {
         if embedded.iter().any(|(k, _)| k.0 == id && k.1 == text) {
+            continue;
+        }
+        // A `sparse_vector` query's `inference_id` may name a trained model instead.
+        if super::endpoint(ctx.cluster, &ctx.state(), &id).is_none()
+            && let Some(tokens) = crate::xpack::ml::models::text_expansion(ctx.cluster, &id, &text)
+        {
+            embedded.push(((id, text), super::results::Results::Sparse(vec![super::results::Sparse { tokens: tokens?, truncated: false }])));
             continue;
         }
         let mut req = super::Request::new(vec![text.clone()], std::time::Duration::from_secs(30));
@@ -371,6 +380,8 @@ fn apply(q: &mut Query, targets: &Targets, embedded: &[((String, String), super:
         Query::Nested(n) => apply(&mut n.query, targets, embedded, size)?,
         Query::HasChild(h) => apply(&mut h.query, targets, embedded, size)?,
         Query::HasParent(h) => apply(&mut h.query, targets, embedded, size)?,
+        Query::Pinned(p) => apply(&mut p.organic, targets, embedded, size)?,
+        Query::Rule(r) => apply(&mut r.organic, targets, embedded, size)?,
         Query::Knn(k) => {
             for f in k.filter.iter_mut() {
                 apply(f, targets, embedded, size)?;

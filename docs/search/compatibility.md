@@ -232,7 +232,7 @@ the discovery/store plugins.
 | `diskbbq` | `x-pack/plugin/diskbbq` | plain | 8 | 7 | 5 | 5 | 2 |
 | `downsample` | `x-pack/plugin/downsample/qa/rest:downsample` | plain | 68 | 59 | 58 | 58 | 1 |
 | `downsample-with-security` | `x-pack/plugin/downsample/qa/rest:downsample-with-security` | security | 1 | 1 | 1 | 1 | 0 |
-| `ent-search` | `x-pack/plugin/ent-search` | security | 371 | 371 | 6 | 6 | 365 |
+| `ent-search` | `x-pack/plugin/ent-search` | security | 371 | 371 | 371 | 371 | 0 |
 | `eql` | `x-pack/plugin/eql/qa/rest` | basic | 39 | 39 | 27 | 27 | 12 |
 | `fleet` | `x-pack/plugin/fleet` | security-basic | 21 | 21 | 3 | 3 | 18 |
 | `ilm` | `x-pack/plugin/ilm` | plain | 27 | 27 | 16 | 16 | 11 |
@@ -254,7 +254,7 @@ the discovery/store plugins.
 | `watcher` | `x-pack/plugin/watcher:mustache,painless,watcher` | plain | 92 | 89 | 89 | 89 | 0 |
 | `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 9 | 9 | 0 |
 | `wildcard` | `x-pack/plugin/wildcard` | plain | 9 | 9 | 9 | 9 | 0 |
-| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 1030 | 1030 | 382 |
+| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 1059 | 1059 | 353 |
 | `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 544 | 544 | 5 |
 | `analysis-icu` | `plugins/analysis-icu` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `analysis-kuromoji` | `plugins/analysis-kuromoji` | plugins | 7 | 7 | 0 | 0 | 7 |
@@ -289,7 +289,7 @@ the discovery/store plugins.
 <!-- test-search: diskbbq >= 5 -->
 <!-- test-search: downsample >= 58 -->
 <!-- test-search: downsample-with-security >= 1 -->
-<!-- test-search: ent-search >= 366 -->
+<!-- test-search: ent-search >= 371 -->
 <!-- test-search: eql >= 27 -->
 <!-- test-search: fleet >= 21 -->
 <!-- test-search: ilm >= 16 -->
@@ -309,12 +309,12 @@ the discovery/store plugins.
 <!-- test-search: watcher >= 89 -->
 <!-- test-search: watcher-security >= 9 -->
 <!-- test-search: wildcard >= 9 -->
-<!-- test-search: platinum >= 1053 -->
+<!-- test-search: platinum >= 1059 -->
 <!-- test-search: inference >= 117 -->
 <!-- test-search: esql >= 544 -->
 
-`platinum` by directory (roll / Elasticsearch passes): `ml` 340/618, `analytics` 113/114, `spatial`
-92/105, `security` 97/101, `rollup` 52/52, `exponential_histogram` 44/44, `vector-tile` 34/34,
+`platinum` by directory (roll / Elasticsearch passes): `ml` 349/618, `analytics` 113/114, `spatial`
+92/105, `security` 96/101, `rollup` 52/52, `exponential_histogram` 44/44, `vector-tile` 34/34,
 `api_key` 32/32, `aggregate-metrics` 26/28, `inference` 22/23, `search.vectors` 22/23, `wildcard`
 22/22, `terms_enum` 20/20, `rank_vectors` 0/15, `users` 15/15, `constant_keyword` 13/13,
 `counted_keyword` 8/11, `data_streams` 11/11, `migrate` 0/11, `change_password` 8/8, `roles` 8/8,
@@ -341,7 +341,10 @@ tokens (`config/service_tokens`).
 Run-as (`es-security-runas-user`) is checked against the authenticating user's `run_as`
 privilege, then the request is authorized as the run-as user; `_authenticate` shows the
 authenticating realm as `authentication_realm` and the run-as user's as `lookup_realm`. API keys
-and service accounts ignore the header, as in Elasticsearch. A search with `ignore_unavailable`
+and service accounts ignore the header, as in Elasticsearch. An API key whose role descriptors
+carry `restriction.workflows` runs only requests of those workflows (`search_application_query`:
+a search application's `_search`, with the searches it makes), anything else fails with
+`role_restriction_exception` ("access restricted by workflow"), `_authenticate` included. A search with `ignore_unavailable`
 leaves out the explicitly named indices its user may not read (without it they are refused);
 ES|QL and SQL name their indices strictly either way.
 The `watcher` suite's webhooks and `http` inputs call the node itself: its test cluster sets
@@ -949,7 +952,11 @@ Tests: `crates/search-es/tests/inference.rs` runs every service against a mock s
   the coordinator, each endpoint and text once, and run as Elasticsearch runs them: `nested`
   (`score_mode: max`) over the chunks with `sparse_vector` or `knn` (`k` at least 10). Targets that
   map the field differently each get their clause, limited by `_index`. `sparse_vector` queries
-  with `inference_id` and `query`, and `knn` builders naming an endpoint, work on any field too.
+  with `inference_id` and `query`, and `knn` builders naming an endpoint, work on any field too,
+  also inside `pinned` and `rule` queries. An `inference_id` may name a deployed `text_expansion`
+  trained model instead: roll runs no PyTorch models, so it expands the text into the words of
+  the model's vocabulary the text holds, each weighted 1 (what Elasticsearch's tiny test models
+  do).
   `sparse_vector` queries themselves are new in roll (linear feature queries boosted by the
   tokens' weights; query-time token pruning isn't applied).
 - Authority: embedding documents and queries runs with the cluster's authority, as Elasticsearch
@@ -1211,8 +1218,10 @@ the rest are skipped by the tests' own prerequisites.
 - Segment generations in `_segments` / `_cat/segments` number the current segments.
 - Aggregations and sorting on keyed flattened sub-fields, `_index_mode` aggregations,
   nested sorts inside `top_hits`, and shard-level aggregation failures as partial results.
-- Compound retrievers (`rrf`, `linear`, `pinned`, `rescorer` over them) follow
-  Elasticsearch's rank-docs final phase, explanations and profiles; the `rrf`/`linear`
+- Compound retrievers (`rrf`, `linear`, `pinned`, `rule` and `rescorer` over them) follow
+  Elasticsearch's rank-docs final phase, explanations and profiles (a `rule` retriever over a
+  compound one applies its rules to the child's rank docs: pins on top, exclusions dropped from
+  the hits and the total); the `rrf`/`linear`
   simplified `query`/`fields` form needs inference endpoints for `semantic_text` fields, and
   a `knn` child's explanation reports its search score as the similarity (Elasticsearch
   recomputes it exactly) without its pre-filters.

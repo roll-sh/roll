@@ -201,7 +201,7 @@ Measured on the tree merged with `main` (2026-11-12), on ai-server (a shared 18-
 | Elasticsearch 9.5.5 YAML REST suite (`test/free` + clients-tests) | **3,810 of 3,905 pass**, 0 fail, 95 skipped; 0 regressions against the baseline |
 | OpenSearch 3.9.0 YAML REST suite | **1,455 of 1,506 pass**, 0 fail, 51 skipped |
 | OpenSearch SQL plugin's PPL suite | **204 of 204** |
-| extended suites (66 module, plugin and x-pack suites, each on its test cluster's settings) | **4,912 of the 5,541 tests that pass on Elasticsearch** (6,044 in all); 25 suites at 100% (KQL 34 of 34, `otel-data` 68 of 68, transforms 108 of 108, watcher 89 of 89, `watcher-security` 9 of 9), runtime fields 243 of 248, `logsdb` 225 of 234; round 6 passed 3,463. Largest gaps: x-pack `platinum` (1,030 of 1,412: rollup 52 of 52, security 97 of 101), ES\|QL (544 of 549), downsampling (58 of 59) |
+| extended suites (66 module, plugin and x-pack suites, each on its test cluster's settings) | **4,946 of the 5,541 tests that pass on Elasticsearch** (6,044 in all); 26 suites at 100% (ent-search 371 of 371, KQL 34 of 34, `otel-data` 68 of 68, transforms 108 of 108, watcher 89 of 89, `watcher-security` 9 of 9), runtime fields 243 of 248, `logsdb` 225 of 234; round 6 passed 3,463. Largest gaps: x-pack `platinum` (1,059 of 1,412: rollup 52 of 52, security 96 of 101), ES\|QL (544 of 549), downsampling (58 of 59) |
 | differential suite against Elasticsearch 9.5.5 (seed 1, 60 random workloads) | 2,325 of 2,333 steps equal (99.7%); the 8 others are 2 known differences (soft-delete tombstones in phrase-suggester and term statistics), none new or open; 69 replayed fixtures equal |
 | client matrix (unmodified official clients in Docker) | **11 of 11**: Python, JavaScript, Java, Go, Ruby and PHP clients, the OpenSearch Python and JavaScript clients, django-elasticsearch-dsl, Laravel Scout, and searchkick's own suite (540 runs, 0 failures) |
 | x-pack REST fixtures (`search-es/tests/xpack_fixtures.rs`) | 1,097 of 1,097 steps equal Elasticsearch |
@@ -263,9 +263,9 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    link user like apps'. The fleet test with every product on passed on this branch
    (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall 1.2 s in
    the rolling restart).
-5. **Compatibility gaps** from the extended suites (4,912 of the 5,541 Elasticsearch passes),
-   largest first. In progress (`wip/search-compat`): ent-search's last 5 (a `rule` retriever over
-   `rrf`/`linear`, a rule query's organic rewrite), ES|QL's last 5, file-based service tokens,
+5. **Compatibility gaps** from the extended suites (4,946 of the 5,541 Elasticsearch passes),
+   largest first. Landed: ent-search's last 5 (a `rule` retriever over `rrf`/`linear`, inference
+   inside a rule query's organic, workflow-restricted API keys). In progress (`wip/search-compat`): ES|QL's last 5, file-based service tokens,
    security's last 4, and OpenSearch Security's endpoints not built yet (`whoami`,
    `permissionsinfo`, `tenants`, `securityconfig`, `audit`, `ssl`, cache flush). Then:
    platinum's machine learning (278, a product decision: anomaly detection and

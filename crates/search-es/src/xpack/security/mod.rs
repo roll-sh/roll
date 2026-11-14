@@ -527,6 +527,44 @@ pub fn authorized_names(ctx: &Ctx) -> impl Fn(&str) -> bool {
     move |n| check.as_ref().is_none_or(|(eff, action)| eff.allows_index(action, n))
 }
 
+tokio::task_local! {
+    /// The workflow of the REST request being dispatched: its internal calls run in it too, as
+    /// Elasticsearch keeps the workflow in the thread context.
+    static WORKFLOW: Option<&'static str>;
+}
+
+/// `Workflow`s: the workflow a REST API starts (`WorkflowResolver`).
+fn workflow_of(api: &str) -> Option<&'static str> {
+    match api {
+        "search_application.search" => Some("search_application_query"),
+        _ => None,
+    }
+}
+
+/// Runs `f` (the dispatch of `ctx`'s request) in its workflow: the enclosing request's when this
+/// is an internal call, else the one its API starts.
+pub fn in_workflow<F: std::future::Future>(ctx: &Ctx<'_>, f: F) -> impl std::future::Future<Output = F::Output> {
+    let w = WORKFLOW.try_with(|w| *w).unwrap_or_else(|_| workflow_of(ctx.api.name()));
+    WORKFLOW.scope(w, f)
+}
+
+/// An API key whose role descriptors restrict it to workflows (`restriction.workflows`) may
+/// only run requests in one of them (`RoleRestriction`), whatever the request.
+fn check_workflow(ctx: &Ctx, p: &Principal) -> EsResult<()> {
+    let AuthKind::ApiKey(a) = &p.kind else { return Ok(()) };
+    let Some(descriptors) = a.role_descriptors.as_object() else { return Ok(()) };
+    let current = WORKFLOW.try_with(|w| *w).unwrap_or_else(|_| workflow_of(ctx.api.name()));
+    for d in descriptors.values() {
+        let Some(allowed) = d.pointer(&["restriction", "workflows"]).and_then(Value::as_array) else { continue };
+        if !current.is_some_and(|w| allowed.iter().any(|x| x.as_str() == Some(w))) {
+            let action = privileges::action_of(ctx.api.name()).1;
+            return Err(EsError::security(403, format!("action [{action}] is unauthorized for {}", who(p)))
+                .caused_by(EsError::new(403, "role_restriction_exception", "access restricted by workflow")));
+        }
+    }
+    Ok(())
+}
+
 /// Checks the request's action against its principal's roles, then the indices its queries
 /// read besides its targets ([`check_lookups`]). `Ok(Some(index))` asks the caller to run the
 /// request on `index` instead: its wildcards expanded to authorized indices.
@@ -579,6 +617,7 @@ pub fn check_moved_write(ctx: &Ctx, index: &str) -> EsResult<()> {
 
 fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
     let Some(p) = ctx.principal.get() else { return Ok(None) };
+    check_workflow(ctx, p)?;
     if p.is_superuser() {
         return Ok(None);
     }
