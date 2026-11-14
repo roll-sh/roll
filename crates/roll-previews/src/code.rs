@@ -128,7 +128,8 @@ impl CodeSource {
                 release_before_ms: p.release.as_ref().and_then(|x| x.before_ms),
                 expires_at: p.goes_at,
                 base_change: p.base_change.as_ref().map(|b| code_control::model::PreviewBaseChange { branch: b.branch.clone(), percent: b.percent, phone_percent: b.phone_percent, load_ms: b.load_ms, lcp_ms: b.lcp_ms, a11y_added: b.a11y_added, errors_added: b.errors_added,
-                    text: b.text.as_ref().map(|t| code_control::model::PreviewTextDiff { added: t.added.clone(), removed: t.removed.clone(), added_n: t.added_n, removed_n: t.removed_n }) }),
+                    text: b.text.as_ref().map(|t| code_control::model::PreviewTextDiff { added: t.added.clone(), removed: t.removed.clone(), added_n: t.added_n, removed_n: t.removed_n }),
+                    links_added: b.links_added }),
                 speed_budget: Some(code_control::model::PreviewSpeedBudget { load_ms: s.github.budget.load_ms, bytes: s.github.budget.bytes, lcp_ms: s.github.budget.lcp_ms, cls: s.github.budget.cls })
                     .filter(|b| b.load_ms > 0 || b.bytes > 0 || b.lcp_ms > 0 || b.cls > 0.0),
                 pages: p
@@ -155,6 +156,10 @@ impl CodeSource {
                     issues: a.issues.iter().map(|i| code_control::model::PreviewA11yIssue { kind: i.kind.clone(), count: i.count, first: i.first.clone(), impact: i.impact.clone(), help: i.help.clone() }).collect(),
                     lang: a.lang,
                     title: a.title,
+                }),
+                page_links: p.page_links.as_ref().map(|l| code_control::model::PreviewPageLinks {
+                    checked: l.checked,
+                    broken: l.broken.iter().map(|b| code_control::model::PreviewBrokenLink { path: b.path.clone(), status: b.status }).collect(),
                 }),
                 page_health: p.page_health.as_ref().map(|h| code_control::model::PreviewPageHealth { errors: h.errors, first_error: h.first_error.clone(), failed: h.failed, first_failed: h.first_failed.clone() }),
                 page_speed: p.page_speed.as_ref().map(|v| code_control::model::PreviewPageSpeed {

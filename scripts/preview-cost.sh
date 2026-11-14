@@ -442,7 +442,7 @@ RUNS=$(api GET "/v1/previews/$PV" | jq_ "d.get('runs') or ''")
 [ "$(bare "$RUNS")" = "$(bare "$BUILD")" ] || { echo "a docs-only push should keep the services on $BUILD, not $RUNS"; exit 1; }
 WAITED2=$(ROLL_API_URL="http://$API" "$ROLL_CLI" preview wait --change "$CHG" --timeout 30) || { echo "roll preview wait should pass for the docs-only head"; exit 1; }
 # This one's page logs an error, which its screenshot's load must catch.
-THIRD='preview of change 1, third<script>console.error(\"boom\")</script>'
+THIRD='preview of change 1, third<script>console.error(\"boom\")</script> <nav><a href=\"/gone\">a page that went</a></nav>'
 api POST "/v1/code/changes/$CHG/revise" "{\"base\":\"main\",\"message\":\"Code\",\"files\":{\"index.html\":{\"content\":\"$THIRD\"},\"docs/setup.md\":{\"content\":\"how to run it\"}}}" >/dev/null
 CODE_HEAD=$(api GET "/v1/code/changes/$CHG" | jq_ "d['head']")
 until_head "$CODE_HEAD"
@@ -458,7 +458,7 @@ for _ in $(seq 1 60); do
 done
 [ "$WARM" = yes ] || { echo "the service should be woken after the push, before any visit"; exit 1; }
 PAGE=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/")
-[ "$PAGE" = 'preview of change 1, third<script>console.error("boom")</script>' ] || { echo "a push that touches code should redeploy: the page says $PAGE"; exit 1; }
+[ "$PAGE" = 'preview of change 1, third<script>console.error("boom")</script> <nav><a href="/gone">a page that went</a></nav>' ] || { echo "a push that touches code should redeploy: the page says $PAGE"; exit 1; }
 KEPT="kept $(bare "$RUNS" | cut -c1-10) through a docs-only push; redeployed at $(bare "$CODE_HEAD" | cut -c1-10)"
 # The push before stays reachable at a URL of its own, on the same data (Vercel's per-push URLs).
 EARLIER_URL=$(api GET "/v1/previews/$PV" | jq_ "((d.get('earlier') or [{}])[0]).get('share_url') or ''")
@@ -490,6 +490,13 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 case "$HEALTH" in *boom*) ;; *) echo "the page's console.error should be caught: $(api GET "/v1/previews/$PV" | jq_ "d.get('page_health')")"; exit 1;; esac
+# Its link to a page that went is checked (HEAD), and broken; its 404 isn't the page's failed request.
+LINKS=$(api GET "/v1/previews/$PV" | jq_ "' '.join('%s %s' % (b['path'], b['status']) for b in (d.get('page_links') or {}).get('broken', []))")
+[ "$LINKS" = "/gone 404" ] || { echo "the page's broken link should be found: $LINKS"; exit 1; }
+# Against main's (which links nowhere): it's the change's.
+LINKS_NEW=$(api GET "/v1/previews/$PV" | jq_ "(d.get('base_change') or {}).get('links_added')")
+[ "$LINKS_NEW" = 1 ] || { echo "the broken link should be new against main: $LINKS_NEW"; exit 1; }
+case "$HEALTH" in *"; 0 failed") ;; *) echo "the link check's own requests aren't the page's: $HEALTH"; exit 1;; esac
 # The test page has no language and no title: the screenshot's browser says so.
 # By axe-core's rules (a bare text page breaks its landmark ones), with no lang and no title.
 A11Y=$(api GET "/v1/previews/$PV" | jq_ "('lang %s, title %s, axe %s: %s' % (d['page_a11y']['lang'], d['page_a11y']['title'], any(i.get('impact') for i in d['page_a11y']['issues']), ' '.join(sorted(i['kind'] for i in d['page_a11y']['issues'])))) if d.get('page_a11y') else ''")
@@ -632,6 +639,7 @@ cat <<EOF
 | What each branch hands the preview's code | $DATA |
 | Core Web Vitals of the first page (the screenshot's load) | $VITALS |
 | The first page's words against main's | $WORDS |
+| The first page's broken links (HEAD only) / new against main | $LINKS / $LINKS_NEW |
 | Visual review under a 5% visual threshold | $UNDER |
 | X-Robots-Tag on the service's page / on the 401 without the link | $ROBOTS / $ROBOTS_LOCKED |
 | The release's time on the preview's data (at its head) / on the change | $RELEASE / $CHG_RELEASE ms |

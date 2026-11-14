@@ -155,6 +155,8 @@ pub struct Shot {
     pub pages: Vec<PageShot>,
     /// The first page's visible text, as the browser read it (`page_text`).
     pub text: Option<String>,
+    /// Its own links that are broken (`PageLinks::parse`).
+    pub links: Option<crate::PageLinks>,
 }
 
 /// What a screenshot run takes: the project's other pages, and what it blanks first.

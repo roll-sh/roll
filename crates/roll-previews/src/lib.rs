@@ -234,6 +234,8 @@ pub struct Preview {
     pub page_health: Option<PageHealth>,
     /// What a screen reader can't name on that page (at the latest screenshot's head).
     pub page_a11y: Option<PageA11y>,
+    /// Its first page's own links that are broken, of those checked (with the screenshot).
+    pub page_links: Option<PageLinks>,
     /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in
     /// API answers.
     #[serde(skip)]
@@ -534,6 +536,46 @@ pub struct BaseChange {
     pub errors_added: Option<u32>,
     /// Its first page's words against the branch's (lines added and removed).
     pub text: Option<TextDiff>,
+    /// Broken links its first page has that the branch's didn't.
+    pub links_added: Option<u32>,
+}
+
+/// The first page's own links that answered 4xx/5xx or nothing (`status` 0), of `checked`
+/// (Netlify's link checker): paths only (a query can hold a token), from the page's session.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct PageLinks {
+    pub checked: u32,
+    pub broken: Vec<BrokenLink>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct BrokenLink {
+    pub path: String,
+    pub status: u16,
+}
+
+impl PageLinks {
+    /// From what the browser wrote (its `links`), if it wrote that: printable paths, bounded.
+    pub fn parse(json: &str) -> Option<PageLinks> {
+        #[derive(serde::Deserialize)]
+        struct Report {
+            links: PageLinks,
+        }
+        let r = serde_json::from_str::<Report>(json.trim()).ok()?.links;
+        let broken = r
+            .broken
+            .into_iter()
+            .filter(|b| b.path.starts_with('/') && b.status < 1000)
+            .map(|b| BrokenLink { path: b.path.chars().filter(|c| !c.is_control() && *c != '`').take(200).collect(), status: b.status })
+            .take(20)
+            .collect();
+        Some(PageLinks { checked: r.checked.min(50), broken })
+    }
+
+    /// Broken links this page has that `main`'s didn't (by path).
+    pub fn added_since(&self, main: &PageLinks) -> u32 {
+        self.broken.iter().filter(|b| !main.broken.iter().any(|m| m.path == b.path)).count() as u32
+    }
 }
 
 /// A page's visible text against another's, by line (`visual::text_diff`): the page's own words,
@@ -799,6 +841,11 @@ mod tests {
         let health = |errors, failed| PageHealth { errors, first_error: None, failed, first_failed: None };
         assert_eq!((health(3, 1).added_since(&health(2, 4)), health(0, 0).added_since(&health(5, 5))), (1, 0));
         assert_eq!(PageSpeed::parse(""), None);
+        // Its own broken links: paths only, printable, bounded; against main's, only the new.
+        let l = PageLinks::parse(r#"{"links":{"checked":7,"broken":[{"path":"/gone","status":404},{"path":"/`x`\n","status":0},{"path":"https://x/y","status":500}]}}"#).unwrap();
+        assert_eq!(l.broken.iter().map(|b| (b.path.as_str(), b.status)).collect::<Vec<_>>(), [("/gone", 404), ("/x", 0)]);
+        let main = PageLinks { checked: 3, broken: vec![BrokenLink { path: "/gone".into(), status: 404 }] };
+        assert_eq!((l.checked, l.added_since(&main)), (7, 1));
     }
 
     #[test]

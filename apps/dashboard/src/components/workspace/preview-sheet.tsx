@@ -329,6 +329,13 @@ export function PreviewSheet({
                 )}
               </div>
             )}
+            {p.page_links && p.page_links.broken.length > 0 && (
+              <p className="mt-1.5 text-[11.5px] break-words text-danger">
+                {p.page_links.broken.length} broken {p.page_links.broken.length === 1 ? "link" : "links"} of {p.page_links.checked}:{" "}
+                <span className="font-mono text-[11px]">{p.page_links.broken.map((b) => `${b.path} ${b.status || "no answer"}`).join(", ")}</span>
+                {p.base_change?.links_added != null && ` (${p.base_change.links_added === 0 ? "none" : p.base_change.links_added} new against ${p.base_change.branch})`}
+              </p>
+            )}
             {p.page_a11y && a11yWords(p.page_a11y).length > 0 && (
               <p className="mt-1.5 text-[11.5px] text-muted" title={p.page_a11y.issues.map((i) => i.first).filter(Boolean).join("\n")}>
                 Accessibility: {a11yWords(p.page_a11y).join(", ")}

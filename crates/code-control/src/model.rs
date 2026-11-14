@@ -320,6 +320,9 @@ pub struct PreviewEnvironment {
     /// What a screen reader can't name on that page, and what the document misses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_a11y: Option<PreviewPageA11y>,
+    /// Its first page's own links that are broken, of those checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_links: Option<PreviewPageLinks>,
     /// How much its page differs from the project's preview of the default branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_change: Option<PreviewBaseChange>,
@@ -413,6 +416,22 @@ pub struct PreviewBaseChange {
     /// Its first page's words against the branch's, by line (untrusted: the page's own text).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<PreviewTextDiff>,
+    /// Broken links its first page has that the branch's didn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links_added: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewPageLinks {
+    pub checked: u32,
+    /// `{path, status}` (status 0: no answer); paths are the page's own.
+    pub broken: Vec<PreviewBrokenLink>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewBrokenLink {
+    pub path: String,
+    pub status: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

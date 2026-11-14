@@ -128,6 +128,38 @@ const axeReport = async (sessionId) => {
     return null;
   }
 };
+// The page's links on its own origin, each asked with HEAD only (never followed with a GET, so a
+// `/logout` link logs nothing out), at most 50, five at a time, 5 s each: the ones that answer
+// 4xx/5xx or nothing (Netlify's link checker). A 405 means it's there.
+const LINKS = `(async () => {
+  const seen = new Set();
+  for (const a of document.querySelectorAll("a[href]")) {
+    let u;
+    try { u = new URL(a.getAttribute("href"), location.href); } catch { continue; }
+    if (u.origin !== location.origin || !/^https?:$/.test(u.protocol)) continue;
+    u.hash = "";
+    seen.add(u.href);
+    if (seen.size >= 50) break;
+  }
+  const urls = [...seen];
+  const check = async (u) => {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 5000);
+    try {
+      return (await fetch(u, { method: "HEAD", redirect: "follow", signal: c.signal, credentials: "same-origin" })).status;
+    } catch {
+      return 0;
+    } finally {
+      clearTimeout(t);
+    }
+  };
+  const broken = [];
+  for (let i = 0; i < urls.length; i += 5) {
+    const got = await Promise.all(urls.slice(i, i + 5).map(check));
+    got.forEach((s, k) => { if (s === 0 || (s >= 400 && s !== 405 && s !== 501)) broken.push({ path: new URL(urls[i + k]).pathname, status: s }); });
+  }
+  return JSON.stringify({ checked: urls.length, broken: broken.slice(0, 20) });
+})()`;
 // Before each capture: animations, transitions and the caret stopped, videos paused, and the
 // project's $HIDE selectors blanked (their box kept), so only real changes count.
 const HIDE = (() => {
@@ -168,8 +200,13 @@ const still = async (sessionId) => {
   try {
     report = JSON.parse(speed?.result?.value || "{}");
   } catch {}
-  report.errors = errors;
-  report.failed = failed;
+  // Copies: what's caught later (the link check's own requests, other pages) isn't this page's.
+  report.errors = errors.slice();
+  report.failed = failed.slice();
+  const links = await Promise.race([send("Runtime.evaluate", { expression: LINKS, awaitPromise: true, returnByValue: true }, sessionId).catch(() => null), sleep(30000).then(() => null)]);
+  try {
+    report.links = JSON.parse(links?.result?.value || "null");
+  } catch {}
   report.a11y = await axeReport(sessionId);
   if (!report.a11y) {
     const a11y = await send("Runtime.evaluate", { expression: A11Y, returnByValue: true }, sessionId).catch(() => null);

@@ -541,6 +541,7 @@ async fn blockers_keep_changes_out_of_the_queue() {
             page_speed: None,
             page_health: None,
             page_a11y: None,
+            page_links: None,
             base_change: None,
             diff_url: None,
             pages: Vec::new(),

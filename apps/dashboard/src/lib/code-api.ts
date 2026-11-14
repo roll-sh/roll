@@ -362,7 +362,7 @@ export interface PreviewEnvironment {
   /** What went wrong while that page loaded (the page's own words). */
   page_health?: { errors: number; first_error: string | null; failed: number; first_failed: string | null };
   /** How much its page differs from the project's preview of the default branch. */
-  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: { added: string[]; removed: string[]; added_n: number; removed_n: number } | null };
+  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: { added: string[]; removed: string[]; added_n: number; removed_n: number } | null; links_added?: number | null };
   /** The project's other pages (`github.pages`): errors while each loaded, change since the push before, against the default branch. */
   pages?: { path: string; errors: number; percent: number | null; base_percent: number | null }[];
   /** The `roll/visual` review (the project's `visual_review`); `required`: it keeps the change from landing too. */
@@ -377,6 +377,7 @@ export interface PreviewEnvironment {
     pages?: { path: string; percent: number; by: string | null }[];
   };
   /** What a screen reader can't name on that page. */
+  page_links?: { checked: number; broken: { path: string; status: number }[] };
   page_a11y?: { issues: { kind: string; count: number; first: string | null; impact?: "minor" | "moderate" | "serious" | "critical" | null; help?: string | null }[]; lang: boolean; title: boolean };
 }
 

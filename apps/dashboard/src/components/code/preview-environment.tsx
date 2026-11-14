@@ -80,6 +80,13 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
           {env.base_change?.errors_added != null && `; ${env.base_change.errors_added === 0 ? "none" : env.base_change.errors_added} new against ${env.base_change.branch}`}
         </p>
       )}
+      {env.page_links && env.page_links.broken.length > 0 && (
+        <p className="break-words text-[12px] text-danger">
+          {env.page_links.broken.length} broken {env.page_links.broken.length === 1 ? "link" : "links"}:{" "}
+          <span className="font-mono text-[11.5px]">{env.page_links.broken.map((b) => `${b.path} ${b.status || "no answer"}`).join(", ")}</span>
+          {env.base_change?.links_added != null && ` (${env.base_change.links_added === 0 ? "none" : env.base_change.links_added} new against ${env.base_change.branch})`}
+        </p>
+      )}
       {env.page_a11y && a11yWords(env.page_a11y).length > 0 && (
         <p className="text-[12px] text-muted">
           Accessibility: {a11yWords(env.page_a11y).join(", ")}

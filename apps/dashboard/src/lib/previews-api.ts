@@ -97,7 +97,7 @@ export interface Preview {
   /** How much the page changed since the screenshot at an earlier head (`since`). */
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
   /** How much its page differs from the project's preview of the default branch. */
-  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: TextDiff | null } | null;
+  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: TextDiff | null; links_added?: number | null } | null;
   /** The project's other pages (`github.pages`) at the latest screenshot. */
   pages?: PageCheck[];
   /** Its visual review (`github.visual_review`): whether how its pages look against the baseline was accepted at this head. */
@@ -120,6 +120,8 @@ export interface Preview {
   page_health?: { errors: number; first_error: string | null; failed: number; first_failed: string | null } | null;
   /** What a screen reader can't name on that page (`first`: its markup, shown as text only). */
   page_a11y?: { issues: A11yIssue[]; lang: boolean; title: boolean } | null;
+  /** Its first page's own links that are broken (status 0: no answer), of those checked. */
+  page_links?: { checked: number; broken: { path: string; status: number }[] } | null;
   /** Earlier pushes of the change's services, still reachable on the same data (newest first). */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number }[];
   /** When its screenshot was taken (`screenshot` below), if it has one. */

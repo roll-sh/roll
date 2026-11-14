@@ -489,6 +489,10 @@ preview wrote a document with a price). With several such resources, each one's 
     sends, so a public preview, a share link or an earlier push's URL isn't what a search
     lands on (live: both). roll apps does the same for its preview environments and a deploy's
     own URL (#26, 3b7cd1ac5; `scripts/preview-apps.sh` checks it on the stack).
+  - A scoped token without reveal on the preview gets `share_url` with `?roll_access=redacted`
+    (roll MCP's catalogue, #24): CI and agents that open previews need reveal, as
+    `previews_share` does; `roll preview open` under such a token lands on the 401 page and its
+    way in through roll.
   - The token is 120 random bits per preview, compared in constant time.
   - The token never goes where people outside roll can read it. The change, the pull request
     comment, statuses, deployments and repo webhooks get the plain URL (which answers 401 to
@@ -955,6 +959,14 @@ type Settings = {
     request comment ("4 elements failing `color-contrast`, serious"); the dashboard shows them as
     text. If axe doesn't load, the four checks above run as before. Against main the same way:
     rules main fails already aren't the change's.
+    The same session checks the first page's own links (Netlify's link checker): every
+    `<a href>` on the preview's origin, at most 50, five at a time, asked with `HEAD` only (never
+    followed with a `GET`, so a `/logout` link logs nothing out; a 405 means it's there), 5 s
+    each. Those that answer 4xx/5xx or nothing are `page_links` (paths only, a query can hold a
+    token), against main's (`base_change.links_added`), on the sheet, the change page and in the
+    comment's checks ("1 broken link, 1 new against main"). Its own requests are taken after
+    what went wrong while the page loaded was copied, so they're never the page's failed
+    requests (live: `/gone` 404, and the page still "0 failed").
     The same session catches what went wrong while the page loaded: uncaught exceptions,
     `console.error`s, and requests that failed or answered 4xx/5xx (`page_health`, counts and the
     first of each, one bounded line each because they're the page's own words; "**While its
@@ -1085,6 +1097,7 @@ Ranked by what a person notices first. Done so far:
   providers' keys removed, what was caught on the sheet);
 - feedback resolved from the page (its Resolve opens roll, where it's resolved for the page);
 - the first page's words against main's (`base_change.text`, lines gained and lost);
+- broken links on the first page (its own origin's, `HEAD` only, against main's);
 - a phone-width screenshot with its own visual change;
 - every change compared with the default branch, whose preview roll keeps itself (`github.baseline`);
 - the comment's page checks folded under one line of counts;
@@ -1170,22 +1183,18 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Broken links on the previewed pages** (Netlify's link checker): the screenshot's session
-   follows the first page's (and each other page's) links on the preview's own origin, at most
-   50, and says which answer 4xx/5xx or don't answer (`page_links`, against main's: links main
-   had broken already aren't the change's), on the sheet and in the comment's checks.
-2. **Data as of a point in time** (Neon's time-travel branches): `data_at` (a time, or `-24h`)
+1. **Data as of a point in time** (Neon's time-travel branches): `data_at` (a time, or `-24h`)
    makes a preview's branches start from the parent as it was then, where the product keeps
    history (Postgres's, NoSQL's `at`), to reproduce a bug with yesterday's data; products that
    can't say so in its activity.
-3. **SEO basics on the first page** (Lighthouse's SEO audit): a title, a meta description, a
+2. **SEO basics on the first page** (Lighthouse's SEO audit): a title, a meta description, a
    viewport, a canonical link, one `h1`, no `noindex` meant for production, said with the
    accessibility checks and against main's.
-4. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-5. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
+4. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
    a preview reaches real people, but its code can still call any API (a payment provider's
    sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
    (today), `"roll"` (only roll's own products and the preview's branches) or a list of hosts;
@@ -1195,19 +1204,19 @@ Ranked by what a person notices first. Done so far:
    host whose firewall roll mustn't touch) or an internal network with a forwarding sidecar for
    every product port (an image of its own, and roll code's runner changed); on the cloud fleet
    it's security groups, with the cloud thread.
-6. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-7. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+6. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-8. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+7. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-9. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+8. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1220,7 +1229,7 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-10. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+9. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.
