@@ -368,9 +368,11 @@ pub struct Store {
     durable: Padded<AtomicU64>,
     /// Held by the commit fsyncing the WAL for every commit appended so far.
     sync_lock: Padded<Mutex<()>>,
-    /// Commits waiting for another's fsync sleep here (`wait_durable`), woken when
-    /// `durable` advances (`made_durable`): they used to queue on `sync_lock`, spinning.
-    durable_wait: Padded<(Mutex<()>, parking_lot::Condvar)>,
+    /// Commits waiting for another's fsync (`wait_durable`): (timestamp, thread), each woken
+    /// by the fsync that covers it, and the first one it doesn't cover to fsync next
+    /// (`wake_durable`); the others sleep on. (Woken all at once, most found themselves not
+    /// covered, and each took the lock to sleep again.)
+    durable_waiters: Padded<Mutex<Vec<(u64, std::thread::Thread)>>>,
     next_id: AtomicU64,
     snapshots: Padded<Mutex<BTreeMap<u64, usize>>>,
     /// The sessions' own pins (`pin_slot`).
@@ -594,7 +596,7 @@ impl Store {
             assigned: Padded(AtomicU64::new(last_ts)),
             durable: Padded(AtomicU64::new(last_ts)),
             sync_lock: Padded(Mutex::new(())),
-            durable_wait: Padded((Mutex::new(()), parking_lot::Condvar::new())),
+            durable_waiters: Padded(Mutex::new(Vec::new())),
             next_id: AtomicU64::new(next_id),
             snapshots: Padded(Mutex::new(BTreeMap::new())),
             slots: Mutex::new(Vec::new()),
@@ -1143,17 +1145,25 @@ impl Store {
     /// appended so far when no other commit is doing it.
     fn wait_durable(&self, ts: u64) -> Result<()> {
         while self.durable.load(Ordering::Acquire) < ts {
-            // Another commit is fsyncing: sleep until it is done (it may cover this one),
-            // then sync if it didn't.
+            // Another commit is fsyncing: sleep until an fsync covers this one, or this one
+            // is to fsync next (`wake_durable`).
             let Some(_g) = self.sync_lock.try_lock() else {
-                let mut w = self.durable_wait.0.0.lock();
-                while self.durable.load(Ordering::Acquire) < ts && self.sync_lock.is_locked() {
+                self.durable_waiters.lock().push((ts, std::thread::current()));
+                // (The fsync seen going on may have ended before the entry went in: its
+                // wake missed it, and none may follow. A wake before the park makes the
+                // park return at once. An entry left behind is covered by the next fsync
+                // and woken for nothing, once.)
+                if self.durable.load(Ordering::Acquire) < ts && self.sync_lock.is_locked() {
                     // (A bound on the sleep: a store closed meanwhile wakes no one.)
-                    self.durable_wait.1.wait_for(&mut w, std::time::Duration::from_millis(50));
+                    std::thread::park_timeout(std::time::Duration::from_millis(50));
                 }
                 continue;
             };
             if self.durable.load(Ordering::Acquire) >= ts {
+                // (Waiters that went to sleep seeing this hold on `sync_lock` are woken by
+                // whoever lets go of it: the next one fsyncs.)
+                drop(_g);
+                self.wake_durable();
                 break;
             }
             // (Every record appended so far written in one write, under the commit lock as
@@ -1203,10 +1213,30 @@ impl Store {
         self.gc_horizon();
     }
 
-    /// Wake the commits sleeping in `wait_durable` (`durable` advanced, or the fsync ended).
+    /// Wake the commits sleeping in `wait_durable` that are durable now, and the first one
+    /// that isn't, to fsync next (every one, once the store is closed). Called once the fsync
+    /// is over (`sync_lock` let go).
     fn wake_durable(&self) {
-        let _w = self.durable_wait.0.0.lock();
-        self.durable_wait.1.notify_all();
+        let durable = self.durable.load(Ordering::Acquire);
+        let all = self.closed.load(Ordering::Acquire);
+        let mut woken: smallvec::SmallVec<[std::thread::Thread; 8]> = smallvec::SmallVec::new();
+        {
+            let mut q = self.durable_waiters.lock();
+            let mut i = 0;
+            while i < q.len() {
+                if all || q[i].0 <= durable {
+                    woken.push(q.swap_remove(i).1);
+                } else {
+                    i += 1;
+                }
+            }
+            if let Some(next) = (0..q.len()).min_by_key(|&i| q[i].0) {
+                woken.push(q.swap_remove(next).1);
+            }
+        }
+        for t in woken {
+            t.unpark();
+        }
     }
 
     /// `commit_with` for a commit that publishes a new catalog, group-committed as `commit`
