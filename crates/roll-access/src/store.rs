@@ -476,6 +476,12 @@ const GRANT_COLUMNS: &str = "g.id, g.name, g.kind, g.rules, g.expires_at, g.ip_a
      c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.revoked_why, g.temp_rules, g.ask_otherwise, g.not_before";
 const GRANT_FROM: &str = "grants g LEFT JOIN oauth_clients c ON c.id = g.client_id";
 
+/// The position of the `n`th column a query selects after [`GRANT_COLUMNS`]: counted from the list,
+/// so adding a grant column never shifts what another query reads.
+fn after_grant(n: usize) -> usize {
+    GRANT_COLUMNS.split(',').count() + n
+}
+
 fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
     let rules: String = r.get(3)?;
     let ip: String = r.get(5)?;
@@ -754,7 +760,7 @@ impl Store {
             c.query_row(
                 &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id LEFT JOIN oauth_clients c ON c.id = g.client_id WHERE s.hash = ?"),
                 [&h],
-                |r| Ok((grant_row(r)?, r.get::<_, String>(22)?, r.get::<_, Option<i64>>(23)?)),
+                |r| Ok((grant_row(r)?, r.get::<_, String>(after_grant(0))?, r.get::<_, Option<i64>>(after_grant(1))?)),
             )
             .optional()
         })?;
@@ -768,7 +774,7 @@ impl Store {
             c.query_row(
                 &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id LEFT JOIN oauth_clients c ON c.id = g.client_id WHERE s.hash = ?"),
                 [&h],
-                |r| Ok((grant_row(r)?, r.get::<_, String>(22)?, r.get::<_, Option<i64>>(23)?)),
+                |r| Ok((grant_row(r)?, r.get::<_, String>(after_grant(0))?, r.get::<_, Option<i64>>(after_grant(1))?)),
             )
             .optional()
         })?;
