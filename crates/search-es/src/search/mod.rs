@@ -3894,8 +3894,10 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
         && crate::xpack::inference::retrievers::uses_simplified(b)
     {
         let st = ctx.state();
+        // Only what the caller may read: another index's mapping mustn't shape the query.
+        let readable = crate::xpack::security::authorized_names(ctx);
         let names = crate::api::resolve_indices(ctx, crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN).unwrap_or_default();
-        let targets: Vec<Arc<IndexMeta>> = names.iter().filter_map(|n| st.metadata.indices.get(n).cloned()).collect();
+        let targets: Vec<Arc<IndexMeta>> = names.iter().filter(|n| readable(n)).filter_map(|n| st.metadata.indices.get(n).cloned()).collect();
         crate::xpack::inference::retrievers::expand(&targets, b)?;
     }
     let mut req = parse_request(ctx, body.as_ref(), ctx.raw_json())?;
