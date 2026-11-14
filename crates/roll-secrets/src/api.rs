@@ -488,11 +488,19 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
     // As it was after a change, or at a time: what was stored then.
     let num = |k: &str| q.get(k).map(|v| v.parse::<i64>().map_err(|_| Error::BadRequest(format!("{k} is a number")))).transpose();
     let (seq, at) = (num("seq")?, num("at")?);
-    let (v, as_of) = if seq.is_some() || at.is_some() {
+    let (v, as_of, digest) = if seq.is_some() || at.is_some() {
         let (n, v) = blocking(s, move |s| s.values_at(&project, &env, &path_of(&q), seq, at, &c)).await?;
-        (v, Some(n))
+        (v, Some(n), None)
     } else {
-        (blocking(s, move |s| s.values(&project, &env, &path_of(&q), resolve, None, &c)).await?, None)
+        // With `digest=1` (a watch): the folder's digest (`…/digest`), taken just before the read,
+        // so a write landing after it is a change. Asked for, since it costs about a read.
+        let want = flag(&q, "digest", false);
+        blocking(s, move |s| {
+            let path = path_of(&q);
+            let digest = if want { s.digest(&project, &env, &path, &c).ok() } else { None };
+            s.values(&project, &env, &path, resolve, None, &c).map(|v| (v, None, digest))
+        })
+        .await?
     };
     let r = match format {
         None if as_of.is_some() => {
@@ -500,7 +508,13 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
             j["seq"] = json!(as_of);
             ok(j)
         }
-        None => ok(&v),
+        None => {
+            let mut j = serde_json::to_value(&v).expect("JSON");
+            if let Some(d) = digest {
+                j["digest"] = json!(d);
+            }
+            ok(j)
+        }
         Some(f) => {
             let text = dotenv::format(&v.values, f, &manifest).map_err(Error::BadRequest)?;
             ([(header::CONTENT_TYPE, f.content_type())], text.to_string()).into_response()
