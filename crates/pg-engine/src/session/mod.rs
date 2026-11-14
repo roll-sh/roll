@@ -157,6 +157,9 @@ struct PlanUses {
     param_folds: Option<bool>,
     /// Its Parse binding left PL/pgSQL calls for planning (`Procs::deferred`): a Bind plans it.
     proc_deferred: bool,
+    /// A binding of it ran or left PL/pgSQL calls (`Procs`): each custom plan is bound
+    /// afresh, running them again (`litplan::param_custom`, `values_custom`).
+    procs: bool,
 }
 
 /// RevalidateCachedQuery's error: a prepared statement whose result row the catalog changed
@@ -1874,6 +1877,9 @@ impl Session {
         if cursor {
             return Ok(b);
         }
+        if b.procs.folded || b.procs.deferred {
+            p.plans.lock().procs = true;
+        }
         *p.bound.lock() = Some((version, path, who, b.clone()));
         Ok(b)
     }
@@ -2564,6 +2570,7 @@ impl Session {
             p.param_types = parsed.param_types;
             let mut plans = p.plans.lock();
             plans.proc_deferred = parsed.bq.procs.deferred;
+            plans.procs = parsed.bq.procs.deferred || parsed.bq.procs.folded;
             plans.param_oids = parsed.param_oids;
             plans.fixed_result = parsed.fixed_result;
             plans.parse_oids = Some(param_oids.into());
@@ -2607,6 +2614,7 @@ impl Session {
                     let mut plans = p.plans.lock();
                     plans.param_oids = oids;
                     plans.proc_deferred = b.procs.deferred;
+                    plans.procs = b.procs.deferred || b.procs.folded;
                     plans.fixed_result = Some(result_row(&b.cols));
                     drop(plans);
                     b.params.clone()
