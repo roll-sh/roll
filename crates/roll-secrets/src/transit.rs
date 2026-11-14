@@ -10,6 +10,11 @@
 //!   `context` bound in (a row's id, say): the same ciphertext under another context won't open.
 //! - `datakey` hands out a fresh data key and its ciphertext, for encrypting large data locally.
 //! - Encrypting and rewrapping are `write`; decrypting and data keys are `reveal`, and audited.
+//! - A key can be brought from outside (`key`, 32 bytes, on making or rotating: admin). One from
+//!   Vault's transit (`aes256-gcm96`, exported) names its Vault version, and Vault's own
+//!   ciphertexts, `vault:v<n>:<base64>`, then decrypt under it (no context: Vault's AAD is empty)
+//!   and rewrap into roll's form, so data encrypted before roll moves over without its plaintext
+//!   leaving.
 //! - Every version also signs (Ed25519) and computes HMAC-SHA256, each with its own key derived
 //!   from the version's bytes (HKDF-SHA256, one label per use), so no use's output says anything
 //!   about another's key. A signature is `roll:v<version>:<base64url>` over the input as given (no
@@ -50,12 +55,22 @@ struct Stored {
     v: u32,
     key: String,
     at: i64,
+    /// Brought from outside rather than made here.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    imported: bool,
+    /// The Vault version it was, whose `vault:v<n>:` ciphertexts it opens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vault: Option<u32>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct KeyVersion {
     pub version: u32,
     pub created_at: i64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub imported: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vault_version: Option<u32>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -67,6 +82,36 @@ pub struct TransitKey {
     pub versions: Vec<KeyVersion>,
     pub created_at: i64,
     pub created_by: String,
+}
+
+/// A key brought from outside: 32 bytes (base64), and the Vault version it was, if any.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BringKey {
+    pub key: String,
+    #[serde(default)]
+    pub vault_version: Option<u32>,
+}
+
+/// A checked [`BringKey`]: never in a `Debug` or a log.
+pub struct Brought {
+    key: zeroize::Zeroizing<[u8; 32]>,
+    vault: Option<u32>,
+}
+
+impl BringKey {
+    pub fn check(self) -> Result<Brought> {
+        let raw = zeroize::Zeroizing::new(base64::engine::general_purpose::STANDARD.decode(self.key.trim()).map_err(|_| Error::BadRequest("key is base64".into()))?);
+        let key: [u8; 32] = raw.as_slice().try_into().map_err(|_| Error::BadRequest("key is 32 bytes (AES-256), base64".into()))?;
+        if self.vault_version == Some(0) {
+            return Err(Error::BadRequest("Vault's versions start at 1".into()));
+        }
+        Ok(Brought { key: zeroize::Zeroizing::new(key), vault: self.vault_version })
+    }
+}
+
+fn vault_note(v: Option<u32>) -> String {
+    v.map(|n| format!(" (Vault's version {n})")).unwrap_or_default()
 }
 
 /// One item to encrypt: base64 plaintext, and the context bound to it.
@@ -123,6 +168,8 @@ struct Opened {
     id: String,
     versions: Vec<(u32, zeroize::Zeroizing<[u8; 32]>)>,
     min: u32,
+    /// (Vault version, roll version) for keys brought from Vault.
+    vault: Vec<(u32, u32)>,
 }
 
 impl Opened {
@@ -143,8 +190,24 @@ impl Opened {
     }
 
     fn decrypt(&self, ct: &str, context: Option<&str>) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+        if let Some(rest) = ct.trim().strip_prefix("vault:v") {
+            return self.decrypt_vault(rest, context);
+        }
         let (v, raw) = parse(ct)?;
         open_with(self.version(v)?, &data_aad(context), &raw).map_err(|_| Error::BadRequest("the ciphertext doesn't open under this key and context".into()))
+    }
+
+    /// Vault's `vault:v<n>:<base64>` (aes256-gcm96: nonce, then ciphertext and tag; no AAD).
+    fn decrypt_vault(&self, rest: &str, context: Option<&str>) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+        let bad = || Error::BadRequest("a Vault ciphertext is vault:v<version>:<base64>".into());
+        if context.is_some_and(|c| !c.is_empty()) {
+            return Err(Error::BadRequest("Vault's derived keys (a context) aren't brought over: only its plain aes256-gcm96 keys".into()));
+        }
+        let (n, b) = rest.split_once(':').ok_or_else(bad)?;
+        let n: u32 = n.parse().map_err(|_| bad())?;
+        let raw = base64::engine::general_purpose::STANDARD.decode(b).map_err(|_| bad())?;
+        let v = self.vault.iter().find(|(vv, _)| *vv == n).map(|(_, v)| *v).ok_or_else(|| Error::BadRequest(format!("no version of this key was Vault's version {n}: bring it with vault_version {n}")))?;
+        open_with(self.version(v)?, "", &raw).map_err(|_| Error::BadRequest("the ciphertext doesn't open under this key".into()))
     }
 
     fn sign(&self, input: &[u8]) -> Result<String> {
@@ -224,6 +287,7 @@ impl Secrets {
         let row: Option<(String, String, i64)> = self.db.read(|c| c.query_row("SELECT id, versions, min_decrypt_version FROM transit_keys WHERE project_id = ? AND name = ?", [project, name], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?;
         let (id, versions, min) = row.ok_or_else(|| Error::NotFound(format!("no key {name}")))?;
         let stored: Vec<Stored> = serde_json::from_str(&versions).map_err(|_| Error::Internal("a key's versions aren't JSON".into()))?;
+        let vault = stored.iter().filter_map(|s| Some((s.vault?, s.v))).collect();
         let mut out = Vec::with_capacity(stored.len());
         for s in stored {
             let sealed = URL_SAFE_NO_PAD.decode(&s.key).map_err(|_| Error::Internal("a key version is damaged".into()))?;
@@ -231,16 +295,19 @@ impl Secrets {
             let key: [u8; 32] = raw.as_slice().try_into().map_err(|_| Error::Internal("a key version is damaged".into()))?;
             out.push((s.v, zeroize::Zeroizing::new(key)));
         }
-        Ok(Opened { id, versions: out, min: min as u32 })
+        Ok(Opened { id, versions: out, min: min as u32, vault })
     }
 
-    /// A new version's key, sealed for the store.
-    fn transit_version(&self, project: &str, id: &str, v: u32) -> Result<Stored> {
+    /// A new version's key, sealed for the store: random, or the one brought.
+    fn transit_version(&self, project: &str, id: &str, v: u32, brought: Option<&Brought>) -> Result<Stored> {
         let dek = self.project(project)?;
         let mut key = zeroize::Zeroizing::new([0u8; 32]);
-        getrandom::fill(key.as_mut()).map_err(|e| Error::Internal(e.to_string()))?;
+        match brought {
+            Some(b) => key.copy_from_slice(b.key.as_ref()),
+            None => getrandom::fill(key.as_mut()).map_err(|e| Error::Internal(e.to_string()))?,
+        }
         let sealed = dek.seal(&version_aad(project, id, v), &Value::new(URL_SAFE_NO_PAD.encode(key.as_ref())));
-        Ok(Stored { v, key: URL_SAFE_NO_PAD.encode(sealed), at: self.db.now_ms()? })
+        Ok(Stored { v, key: URL_SAFE_NO_PAD.encode(sealed), at: self.db.now_ms()?, imported: brought.is_some(), vault: brought.and_then(|b| b.vault) })
     }
 
     pub fn transit_keys(&self, project: &str, caller: &Caller) -> Result<Vec<TransitKey>> {
@@ -252,19 +319,19 @@ impl Secrets {
             })?
             .into_iter()
             .map(|(id, name, versions, min, created_at, created_by)| {
-                let versions: Vec<KeyVersion> = serde_json::from_str::<Vec<Stored>>(&versions).unwrap_or_default().into_iter().map(|s| KeyVersion { version: s.v, created_at: s.at }).collect();
+                let versions: Vec<KeyVersion> = serde_json::from_str::<Vec<Stored>>(&versions).unwrap_or_default().into_iter().map(|s| KeyVersion { version: s.v, created_at: s.at, imported: s.imported, vault_version: s.vault }).collect();
                 TransitKey { id, name, latest_version: versions.last().map_or(0, |v| v.version), min_decrypt_version: min as u32, versions, created_at, created_by }
             })
             .collect())
         })
     }
 
-    pub fn add_transit_key(&self, project: &str, name: &str, caller: &Caller) -> Result<TransitKey> {
+    pub fn add_transit_key(&self, project: &str, name: &str, brought: Option<Brought>, caller: &Caller) -> Result<TransitKey> {
         caller.need(Action::Admin, &Scope::project(project))?;
         check_name(name)?;
         self.project(project)?;
         let id = names::new_id("tk", 16);
-        let first = self.transit_version(project, &id, 1)?;
+        let first = self.transit_version(project, &id, 1, brought.as_ref())?;
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM transit_keys WHERE project_id = ? AND name = ?", [project, name], |_| Ok(())).optional()?.is_some() {
@@ -274,16 +341,22 @@ impl Secrets {
                 "INSERT INTO transit_keys (id, project_id, name, versions, min_decrypt_version, created_at, created_by) VALUES (?, ?, ?, ?, 1, ?, ?)",
                 params![id, project, name, serde_json::to_string(&[&first]).expect("JSON"), now, caller.principal],
             )?;
-            audit::record(c, project, caller, "transit.add", None, None, &[], &format!("made encryption key {name}"), now)
+            let what = if first.imported { "brought" } else { "made" };
+            audit::record(c, project, caller, "transit.add", None, None, &[], &format!("{what} encryption key {name}{}", vault_note(first.vault)), now)
         })?;
         self.transit_keys(project, caller)?.into_iter().find(|k| k.name == name).ok_or_else(|| Error::Internal("the key vanished".into()))
     }
 
     /// A new version that encryptions use from now on.
-    pub fn rotate_transit_key(&self, project: &str, name: &str, caller: &Caller) -> Result<TransitKey> {
+    pub fn rotate_transit_key(&self, project: &str, name: &str, brought: Option<Brought>, caller: &Caller) -> Result<TransitKey> {
         caller.need(Action::Admin, &Scope::project(project))?;
-        let (id, latest) = self.transit_open(project, name).map(|o| (o.id.clone(), o.latest().0))?;
-        let next = self.transit_version(project, &id, latest + 1)?;
+        let (id, latest, vault) = self.transit_open(project, name).map(|o| (o.id.clone(), o.latest().0, o.vault))?;
+        if let Some(n) = brought.as_ref().and_then(|b| b.vault)
+            && vault.iter().any(|(vv, _)| *vv == n)
+        {
+            return Err(Error::Conflict("exists", format!("{name} already has Vault's version {n}")));
+        }
+        let next = self.transit_version(project, &id, latest + 1, brought.as_ref())?;
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             let versions: String = c.query_row("SELECT versions FROM transit_keys WHERE id = ?", [&id], |r| r.get(0))?;
@@ -294,7 +367,8 @@ impl Secrets {
             }
             stored.push(next.clone());
             c.execute("UPDATE transit_keys SET versions = ? WHERE id = ?", params![serde_json::to_string(&stored).expect("JSON"), id])?;
-            audit::record(c, project, caller, "transit.rotate", None, None, &[], &format!("rotated encryption key {name} to version {}", next.v), now)
+            let how = if next.imported { "brought a key for" } else { "rotated" };
+            audit::record(c, project, caller, "transit.rotate", None, None, &[], &format!("{how} encryption key {name}, version {}{}", next.v, vault_note(next.vault)), now)
         })?;
         self.transit_keys(project, caller)?.into_iter().find(|k| k.name == name).ok_or_else(|| Error::Internal("the key vanished".into()))
     }
@@ -463,6 +537,9 @@ pub struct ArchivedKey {
     pub min_decrypt_version: u32,
     /// (version, key as base64url, made at)
     pub versions: Vec<(u32, String, i64)>,
+    /// (version, Vault version) for versions brought from Vault.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vault: Vec<(u32, u32)>,
 }
 
 impl Secrets {
@@ -475,7 +552,7 @@ impl Secrets {
                 let s: String = self.db.read(|c| c.query_row("SELECT versions FROM transit_keys WHERE id = ?", [&o.id], |r| r.get(0)))?;
                 serde_json::from_str::<Vec<Stored>>(&s).unwrap_or_default().into_iter().map(|s| s.at).collect()
             };
-            out.push(ArchivedKey { name, min_decrypt_version: o.min, versions: o.versions.iter().zip(at).map(|((v, k), at)| (*v, URL_SAFE_NO_PAD.encode(k.as_ref()), at)).collect() });
+            out.push(ArchivedKey { name, min_decrypt_version: o.min, versions: o.versions.iter().zip(at).map(|((v, k), at)| (*v, URL_SAFE_NO_PAD.encode(k.as_ref()), at)).collect(), vault: o.vault.iter().map(|(vv, v)| (*v, *vv)).collect() });
         }
         Ok(out)
     }
@@ -490,7 +567,8 @@ impl Secrets {
             let mut stored = vec![];
             for (v, key, at) in &k.versions {
                 let sealed = dek.seal(&version_aad(project, &id, *v), &Value::new(key.clone()));
-                stored.push(Stored { v: *v, key: URL_SAFE_NO_PAD.encode(sealed), at: *at });
+                let vault = k.vault.iter().find(|(rv, _)| rv == v).map(|(_, vv)| *vv);
+                stored.push(Stored { v: *v, key: URL_SAFE_NO_PAD.encode(sealed), at: *at, imported: vault.is_some(), vault });
             }
             if stored.is_empty() {
                 continue;

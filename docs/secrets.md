@@ -590,6 +590,16 @@ numbers, tokens, notes) in its own database without holding a key.
   over encrypted fields (a blind index). `…/hmac/verify {input, hmac}` answers `{valid}` and is
   `write`, not `read`: it answers guesses about the input. All take batches, as encrypt does;
   retired versions (`min_decrypt_version`) no longer verify.
+- A key can be brought from outside, as Vault's and Infisical's KMS imports: `POST …/transit {name,
+  key, vault_version?}` or `…/rotate {key, vault_version?}` (admin; `roll secrets transit import NAME
+  [--vault-version N]` with the key on stdin) takes 32 bytes (base64) as the first or newest version.
+  From Vault's transit (an exportable `aes256-gcm96` key, `vault read
+  transit/export/encryption-key/NAME/<n>`), name each version's Vault number: Vault's own
+  ciphertexts, `vault:v<n>:…`, then decrypt under it (Vault's AAD is empty, so no context; derived
+  keys aren't brought over) and `…/rewrap` moves them to `roll:v…`, so data encrypted before roll
+  comes over without its plaintext leaving. Checked against Vault 1.20: its exported key brought in,
+  its `vault:v1:` and `vault:v2:` ciphertexts decrypted and rewrapped. The listing marks brought
+  versions (`imported`, `vault_version`); backups keep the Vault numbers.
 - A failed decrypt or rewrap is audited too (probing contexts leaves a trace). A backup carries every
   key's versions, in the archive sealed to its taker's key, so a restore (here or on another server)
   still opens what they encrypted; ciphertexts are bound to their context, not to the key's id.
@@ -626,6 +636,7 @@ roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
 roll secrets transit ls | add NAME | rotate NAME | encrypt NAME [--context C] | decrypt NAME [--context C] | rm NAME --confirm NAME
 roll secrets transit sign NAME | verify NAME SIGNATURE | hmac NAME | public NAME   # stdin is the input
+roll secrets transit import NAME [--vault-version N]                                # the key on stdin
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -1463,10 +1474,10 @@ isn't in the workspace is 404.
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
 | `GET /transit` | | `TransitKey[]` (`read`; versions and dates, never key material) |
-| `POST /transit` | `{name}` | 201 `TransitKey` (`admin`) |
+| `POST /transit` | `{name, key?, vault_version?}` | 201 `TransitKey` (`admin`; `key`: one brought, 32 bytes base64) |
 | `PATCH /transit/{name}` | `{min_decrypt_version}` | `TransitKey` (`admin`) |
 | `DELETE /transit/{name}?confirm=` | | 204; 400 unless `confirm` repeats the name (`admin`) |
-| `POST /transit/{name}/rotate` | | `TransitKey` (`admin`) |
+| `POST /transit/{name}/rotate` | `{key, vault_version?}` or nothing | `TransitKey` (`admin`); 409 for a Vault version it has |
 | `POST /transit/{name}/encrypt` | `{plaintext, context?}` or `{items: […]}` | `{ciphertext}` or `{items: [{ciphertext}]}` (`write`) |
 | `POST /transit/{name}/rewrap` | `{ciphertext, context?}` or `{items: […]}` | `{ciphertext}` or `{items}` (`write`) |
 | `POST /transit/{name}/decrypt` | `{ciphertext, context?}` or `{items: […]}` | `{plaintext}` or `{items}` (`reveal`, audited) |

@@ -1061,6 +1061,29 @@ async fn an_encryption_key_encrypts_for_apps_and_never_leaves_roll() {
     let back = api.call(Method::POST, &to("/transit/cards/decrypt"), Some(json!({ "ciphertext": ct2, "context": "order:42" }))).await;
     assert_eq!(back.1["plaintext"], b64(b"4111 1111 1111 1111"), "{back:?}");
     assert_eq!(api.ok(Method::POST, &to("/transit/cards/sign"), Some(json!({ "input": b64(b"invoice 7") }))).await["signature"], sig.as_str(), "and signs as it did");
+    // A key brought from Vault: Vault's own ciphertexts (aes256-gcm96, no AAD) open under the
+    // version that was Vault's, and rewrap into roll's form.
+    let vault_ct = |key: &[u8; 32], plain: &[u8]| {
+        use aes_gcm::aead::{Aead, KeyInit};
+        let nonce = [7u8; 12];
+        let mut raw = nonce.to_vec();
+        raw.extend(aes_gcm::Aes256Gcm::new_from_slice(key).unwrap().encrypt(aes_gcm::Nonce::from_slice(&nonce), plain).unwrap());
+        raw
+    };
+    let (k1, k2) = ([3u8; 32], [4u8; 32]);
+    assert_eq!(api.call(Method::POST, "/transit", Some(json!({ "name": "legacy", "key": b64(&[1u8; 16]) }))).await.0, StatusCode::BAD_REQUEST, "not 32 bytes");
+    let made = api.ok(Method::POST, "/transit", Some(json!({ "name": "legacy", "key": b64(&k1), "vault_version": 1 }))).await;
+    assert_eq!((made["versions"][0]["imported"].clone(), made["versions"][0]["vault_version"].clone()), (json!(true), json!(1)));
+    api.ok(Method::POST, "/transit/legacy/rotate", Some(json!({ "key": b64(&k2), "vault_version": 2 }))).await;
+    for (key, n, plain) in [(&k1, 1, &b"from vault v1"[..]), (&k2, 2, &b"from vault v2"[..])] {
+        let ct = format!("vault:v{n}:{}", b64(&vault_ct(key, plain)));
+        assert_eq!(api.ok(Method::POST, "/transit/legacy/decrypt", Some(json!({ "ciphertext": ct }))).await["plaintext"], b64(plain));
+        let moved = api.ok(Method::POST, "/transit/legacy/rewrap", Some(json!({ "ciphertext": ct }))).await["ciphertext"].as_str().unwrap().to_string();
+        assert!(moved.starts_with("roll:v2:"), "{moved}");
+        assert_eq!(api.ok(Method::POST, "/transit/legacy/decrypt", Some(json!({ "ciphertext": moved }))).await["plaintext"], b64(plain));
+    }
+    let wrong = format!("vault:v1:{}", b64(&vault_ct(&k2, b"x")));
+    assert_eq!(api.call(Method::POST, "/transit/legacy/decrypt", Some(json!({ "ciphertext": wrong }))).await.0, StatusCode::BAD_REQUEST);
     // Deleting makes everything unreadable for good: only with the name repeated.
     assert_eq!(api.call(Method::DELETE, "/transit/cards", None).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(api.call(Method::DELETE, "/transit/cards?confirm=cards", None).await.0, StatusCode::NO_CONTENT);

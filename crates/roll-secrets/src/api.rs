@@ -876,15 +876,30 @@ async fn transit_keys(State(s): S, Who(c): Who, Path(project): Path<String>) -> 
 #[serde(deny_unknown_fields)]
 struct NewTransitKey {
     name: String,
+    /// A key brought from outside (base64, 32 bytes).
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    vault_version: Option<u32>,
 }
 
 async fn add_transit_key(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let n: NewTransitKey = body(&b)?;
-    Ok(created(blocking(s, move |s| s.add_transit_key(&project, &n.name, &c)).await?))
+    let brought = bring(n.key, n.vault_version)?;
+    Ok(created(blocking(s, move |s| s.add_transit_key(&project, &n.name, brought, &c)).await?))
 }
 
-async fn rotate_transit_key(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>) -> crate::Result<Response> {
-    Ok(ok(blocking(s, move |s| s.rotate_transit_key(&project, &name, &c)).await?))
+fn bring(key: Option<String>, vault_version: Option<u32>) -> crate::Result<Option<crate::transit::Brought>> {
+    match (key, vault_version) {
+        (Some(key), vault_version) => Ok(Some(crate::transit::BringKey { key, vault_version }.check()?)),
+        (None, Some(_)) => Err(crate::Error::BadRequest("vault_version goes with the key it names".into())),
+        (None, None) => Ok(None),
+    }
+}
+
+async fn rotate_transit_key(State(s): S, Who(c): Who, Path((project, name)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let brought = if b.is_empty() { None } else { Some(body::<crate::transit::BringKey>(&b)?.check()?) };
+    Ok(ok(blocking(s, move |s| s.rotate_transit_key(&project, &name, brought, &c)).await?))
 }
 
 #[derive(Deserialize)]

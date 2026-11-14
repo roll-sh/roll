@@ -518,6 +518,14 @@ pub enum TransitCmd {
         #[arg(long)]
         context: Option<String>,
     },
+    /// Bring a key from outside: 32 bytes, base64, on stdin (from Vault: `vault read
+    /// transit/export/encryption-key/NAME/<n>`, with --vault-version <n>, so Vault's own
+    /// ciphertexts decrypt and rewrap). Makes the key, or adds it as its newest version.
+    Import {
+        name: String,
+        #[arg(long)]
+        vault_version: Option<u32>,
+    },
     /// Sign stdin (any bytes) with the key's newest version (Ed25519); prints the signature.
     Sign { name: String },
     /// Check a signature of stdin; fails when it doesn't match.
@@ -1239,6 +1247,20 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 let v = c.call(Method::POST, &format!("{}/transit/{}/decrypt", c.base(), enc(&name)), Some(json!({ "ciphertext": ct.trim(), "context": context }))).await?;
                 let plain = base64::engine::general_purpose::STANDARD.decode(s(&v["plaintext"])).context("the plaintext isn't base64")?;
                 std::io::stdout().write_all(&plain)?;
+            }
+            TransitCmd::Import { name, vault_version } => {
+                let mut key = String::new();
+                std::io::stdin().read_to_string(&mut key).context("reading the key from stdin")?;
+                let body = json!({ "key": key.trim(), "vault_version": vault_version });
+                let list = c.call(Method::GET, &format!("{}/transit", c.base()), None).await?;
+                let v = if list.as_array().into_iter().flatten().any(|k| k["name"] == name.as_str()) {
+                    c.call(Method::POST, &format!("{}/transit/{}/rotate", c.base(), enc(&name)), Some(body)).await?
+                } else {
+                    let mut body = body;
+                    body["name"] = json!(name);
+                    c.call(Method::POST, &format!("{}/transit", c.base()), Some(body)).await?
+                };
+                println!("{} is at version {} (brought{})", s(&v["name"]), v["latest_version"], vault_version.map(|n| format!(", Vault's version {n}")).unwrap_or_default());
             }
             TransitCmd::Sign { name } => println!("{}", transit_stdin(&c, &name, "sign", "signature").await?),
             TransitCmd::Hmac { name } => println!("{}", transit_stdin(&c, &name, "hmac", "hmac").await?),
