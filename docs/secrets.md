@@ -1225,7 +1225,9 @@ minutes.
   fetched, and only those keys verify a login (`pinned_keys` counts them). When the cluster's keys
   change, replace them (`PUT …/identities/{id}/jwks`, `roll secrets identities keys ID --jwks
   FILE`): the id, and every pod's `ROLL_IDENTITY`, stays. During a rotation, give the old and the
-  new keys in one JWKS.
+  new keys in one JWKS. Replacing them is making the identity: it then acts only while whoever
+  replaced them can sign in and reach the project, and the tokens its logins got so far are revoked
+  (workloads log in again; with #56, `roll run --watch` does it by itself on the 401).
 
   ```sh
   kubectl get --raw /openid/v1/jwks > jwks.json

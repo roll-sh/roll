@@ -235,6 +235,9 @@ impl Secrets {
 
     /// Replace an identity's pinned keys (a cluster rotated its signing key): its id, and so every
     /// workload's `ROLL_IDENTITY`, stays. During a rotation, give the old and the new keys together.
+    /// Choosing which keys it trusts is making it: it then acts only while the caller can sign in
+    /// and reach the project (`created_by`), and what it gave out under the old keys is revoked
+    /// (a rotation is often for a key that leaked; workloads log in again).
     pub fn set_identity_keys(&self, project: &str, id: &str, jwks: &str, caller: &Caller) -> Result<Identity> {
         caller.need(Action::Admin, &Scope::project(project))?;
         if caller.principal.starts_with("identity:") || caller.principal.starts_with("token:") {
@@ -247,8 +250,9 @@ impl Secrets {
         self.db.write(|c| {
             let name: Option<String> = c.query_row("SELECT name FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?;
             let name = name.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
-            c.execute("UPDATE identities SET jwks = ? WHERE id = ?", params![jwks, id])?;
-            audit::record(c, project, caller, "identity.keys", None, None, &[], &format!("identity {name} now pins {n} key{}", if n == 1 { "" } else { "s" }), now)?;
+            c.execute("UPDATE identities SET jwks = ?, created_by = ? WHERE id = ?", params![jwks, caller.principal, id])?;
+            let revoked = c.execute("UPDATE tokens SET revoked_at = ? WHERE identity = ? AND revoked_at IS NULL", params![now, id])?;
+            audit::record(c, project, caller, "identity.keys", None, None, &[], &format!("identity {name} now pins {n} key{} ({revoked} live token{} revoked)", if n == 1 { "" } else { "s" }, if revoked == 1 { "" } else { "s" }), now)?;
             Ok::<_, Error>(c.query_row(&format!("SELECT {COLUMNS} FROM identities WHERE id = ?"), [id], identity_row)?.0)
         })
     }
