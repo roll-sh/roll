@@ -1586,6 +1586,13 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
+A fifth independent review (2026-11-14, of host and user SSH certificates, ClickHouse,
+certificates ending, `--rotate-due` and the fourth review's fixes) found no high-severity issue; it
+found a CLI that would upload a private key given its path, SSH CAs that could claim a top-level
+domain, best-effort signing audits, a stale-CRL race, ClickHouse's kill-then-drop order, a
+known_hosts order and `--rotate-due --json` that didn't rotate: all fixed. Screenshots of the new
+surfaces are on #44, #45 and #48.
+
 Later still: SSH user certificates for keys people keep (#45: `…/sign-user`, `roll ssh --key`,
 checked with an agent-held key against a real `sshd`) and `roll secrets rotations --rotate-due`
 (#48).
@@ -1639,16 +1646,16 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A fifth independent review** of what came after the fourth (SSH host and user certificates,
-   ClickHouse outside roll, certificates ending in health, `--rotate-due`, the fourth review's
-   fixes), and its fixes.
-2. **Screenshots of the new surfaces** for their pull requests: Health's "Managed credentials"
-   (#48), a CA's CSR panel and certificate list (#44), an SSH CA's host domains (#45), an encryption
-   key's public key (#47).
-3. *Waits on #24/#25 meeting #47:* transit keys scoped by name. Agreed with the MCP thread:
-   `.index("name")` on the data-plane rows (encrypt, rewrap, decrypt, datakey, sign, verify, hmac,
-   hmac/verify, public), so a signing service holds `write` on `prj_…/payments` and nothing else;
-   rotate, retire and delete stay the project's admin.
+1. **`roll://` references in env files**, as 1Password's `op://`: a committed `.env` holds
+   `roll://production/DB_URL` (or `roll://<project>/<env>/<folder>/<KEY>`) beside plain values,
+   and `roll run --env-file .env`, `roll secrets render` and `roll secrets check` resolve them at
+   run time, one read per environment, so a repository carries the shape of its configuration
+   and no value.
+2. **Check-and-set writes**, as Vault KV's `cas`: `PUT …/secrets/{key}` with `if_version` (and
+   batches with each op's) answers 409 when the key moved since it was read, so the dashboard and
+   two CLIs can't overwrite each other's change unseen; the dashboard sends it when it edits.
+3. *Waits on #24/#25 meeting #47:* transit keys scoped by name (agreed with the MCP thread:
+   `.index("name")` on the data-plane rows; rotate, retire and delete stay the project's admin).
 4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
 5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
