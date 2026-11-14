@@ -1595,6 +1595,8 @@ background processes holding roll open, `--watch` dropping SIGTERM, a SIGINT jud
 a folder's admin counting toward a protected environment's own gate and an import guard outside its
 transaction (#53), a Vault refusal told by an error's text (#52), and a write during a watch's
 re-read going unnoticed (#49): all fixed and checked live, tested where a test guards behaviour.
+Since then a values answer carries the folder's digest, taken just before its read, and `--watch`
+compares from those answers, which closes the last window (#49).
 
 Then (2026-11-14, latest): `roll run` masks values in what the command prints when it isn't a
 terminal (#54), as 1Password's `op run` and GitHub Actions do; pulling into Kubernetes with External
@@ -1704,25 +1706,29 @@ user's call).
 
 1. **A tenth independent review** of ESO (#55), renewing identity logins (#56), pinned issuer keys
    (#57) and the ninth review's fixes, and its fixes.
-2. **`…/values` answers each followed digest from the same read**, so a watch that newly follows an
-   environment (a reference added) compares from that read, not a poll just after it (#49 now
-   polls every known environment before reading; only a newly referenced one is polled after).
-   **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys).
-3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
+2. **`roll run --fallback FILE`** (as Doppler's CLI): each successful read also writes the values
+   to a local file, encrypted (AES-256-GCM, a key derived from `ROLL_TOKEN` or `ROLL_FALLBACK_KEY`),
+   and when roll's API can't be reached (no connection, a timeout, a 5xx) `roll run` starts from it
+   with a warning naming its age, so an outage of roll doesn't stop deploys and restarts. Never on
+   401/403/404 (a revoked token mustn't keep working: the file is deleted), never for dynamic keys
+   (they lapse), and `--fallback-max-age` bounds how old a copy may be.
+3. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
+   #49 and #54 meet, `watch` keeps both (answered digests, streams and signals).
+4. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
-4. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
+5. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
    tools are ready), a live check of OpenSearch links (#29 and #51 in one build), and splitting the
    CLI's `secrets.rs` (2,700 lines) by command once the stacked pull requests that touch it have
    landed.
-5. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
+6. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
-6. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
+7. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
    token; the trust policy pins `sub`, as GCP's and Azure's do).
-7. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
+8. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
    notice.
-8. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
+9. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
    project can link their own databases, buckets and streams.
-9. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+10. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
    environment).
 
 Open pull requests after this one:
