@@ -768,7 +768,7 @@ async fn outcome(tool: &str, resp: Response) -> Value {
         if code == "approval_pending" {
             data["status"] = json!("approval_pending");
             let text = format!(
-                "This needs the user's approval ({}). Tell them, then call {tool} again with the same arguments and \"approval\": \"{}\" to wait for the decision.",
+                "This needs the user's approval ({}). Tell them, then call {tool} again with the same arguments and \"approval\": \"{}\" to wait for the decision (without it, the same call still finds its approval and runs once approved).",
                 body["url"].as_str().unwrap_or("the roll dashboard"),
                 body["approval"].as_str().unwrap_or("")
             );

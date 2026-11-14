@@ -568,7 +568,11 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
     if catalog::find(&found.method, &found.route, &found.path).is_some_and(|f| f.row.filters_itself) {
         return Err(Error::BadRequest("this route spans every environment: approve it once".into()));
     }
-    // The indices it was about stay part of it (`cl_1/logs-a` is cluster `cl_1`, index `logs-a`).
+    // The indices it was about stay part of it (`cl_1/logs-a` is cluster `cl_1`, index `logs-a`);
+    // a secrets request names one key, and a name that isn't one would remember as a pattern.
+    if found.scope_index.as_deref().is_some_and(|ix| !roll_auth::scope::rememberable_part(&found.product, ix)) {
+        return Err(Error::BadRequest("this request names no single encryption key: approve it once".into()));
+    }
     let selector = match found.scope_index.clone() {
         Some(ix) => roll_auth::scope::Selector::Id { id: resource.strip_suffix(&format!("/{ix}")).unwrap_or(&resource).to_string(), index: Some(ix) },
         None => roll_auth::scope::Selector::id(resource),
