@@ -102,6 +102,31 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
 
+## Terraform
+
+`sdk/terraform-provider-roll` manages roll secrets as code, as Doppler's and Infisical's providers
+do. It speaks the same HTTP API as the CLI and the clients, with a roll token or the operator's.
+
+- **`roll_secrets_environment`** ensures an environment (`PUT …/environments/{env}`) and sets its name
+  and whether it's protected. The policy is only written when `protected` changes, so approvers and
+  a notify URL set in the dashboard stay. Destroying one passes its confirmation.
+- **`roll_secret`** is one key in a folder: a value, or a `link` to a resource on the canvas. On
+  refresh it reads the stored value back (`resolve=false`, references as written; the token needs
+  `reveal`), so a change made outside Terraform shows in the plan. A key that only shows through a
+  base or an import isn't the resource's. In a protected environment a write opens a change
+  request instead, which Terraform reports as an error.
+- **`roll_secrets_identity`** is a workload identity (CI's OIDC login) and **`roll_secrets_sync`** a
+  sync to a platform. roll changes neither in place, so every attribute replaces them. roll makes
+  identities for people and the operator only, never for a token. A sync's target is listed by host
+  only, so a target changed outside Terraform isn't seen; its signing secret (webhooks) is shown
+  once and kept, sensitive, in the state.
+- **`roll_secrets_token`** is a token for CI or a service: a roll token with one rule on the
+  project's secrets, made through `POST /v1/access/tokens` as the dashboard's New token. Its
+  secret is in the state (sensitive). Any change replaces it, and destroying it revokes it.
+- **`data.roll_secrets_values`** is an environment's resolved values, for another provider.
+
+Values land in Terraform's state, as with every provider: keep the state as private as the values.
+
 ## Where it runs
 
 roll secrets is always on, like workspace projects: it is not a product in `ROLL_PRODUCTS`.

@@ -337,6 +337,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     `packages/secrets` (TypeScript), `sdk/go/secrets` (Go, standard library only) and
     `sdk/python/roll_secrets` (Python, `cryptography` only for sealed resolves); keep their
     surfaces the same, and the sealed box test vector from the TypeScript one opening in the others.
+    The Terraform provider is `sdk/terraform-provider-roll` (`TF_ACC=1 go test ./...` drives it
+    against a fake rolld).
   - Values are encrypted with the project's data key, sealed by `ROLL_SECRET_KEY`, and bound to
     their row (project, secret, version) as associated data. A value never goes in a log, a
     `Debug`, an error, an audit row, a change's or request's diff, or a command line: `Value`

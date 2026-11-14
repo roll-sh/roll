@@ -111,6 +111,27 @@ jobs:
           pip install -q cryptography
           PYTHONPATH=src python -m unittest discover -s tests
 
+  # The roll Terraform provider (sdk/terraform-provider-roll): Terraform drives it against a fake
+  # rolld in memory.
+  terraform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    defaults:
+      run:
+        working-directory: sdk/terraform-provider-roll
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: sdk/terraform-provider-roll/go.mod
+          cache-dependency-path: sdk/terraform-provider-roll/go.sum
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: TF_ACC=1 go test -count=1 ./...
+
   scripts:
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -132,7 +153,7 @@ jobs:
           fi
 
   ci:
-    needs: [rust, web, dashboard, sdk, scripts]
+    needs: [rust, web, dashboard, sdk, scripts, terraform]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2
