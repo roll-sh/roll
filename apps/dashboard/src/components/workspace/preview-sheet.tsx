@@ -175,7 +175,7 @@ export function PreviewSheet({
             ) : (
               <p className="text-[11.5px] text-subtle">No services: a repo in this project runs here once its roll.toml has a [preview] section.</p>
             )}
-            {(p.state === "ready" || p.state === "sleeping") && <Promote preview={p} />}
+            {(p.state === "ready" || p.state === "sleeping") && p.trusted && <Promote preview={p} />}
             {!!p.earlier?.length && (
               <>
                 <Label>Earlier pushes</Label>
@@ -927,16 +927,23 @@ export function Endpoints({ items, branch }: { items: EndpointTime[]; branch: st
  * variables (roll apps' `…/environments/production/promote`). It's the person's own call to roll
  * apps, which decides who may deploy production; previews holds no power of its own here. */
 function Promote({ preview: p }: { preview: Preview }) {
-  const [services, setServices] = useState<{ id: string; name: string }[]>([]);
-  const [asking, setAsking] = useState<{ id: string; name: string } | null>(null);
+  // Each roll apps service of the preview, with the deployment its environment ran when the
+  // sheet opened: what was looked at is what's promoted (a newer push since is refused).
+  const [services, setServices] = useState<{ id: string; name: string; seen: string | null }[]>([]);
+  const [asking, setAsking] = useState<{ id: string; name: string; seen: string | null } | null>(null);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const names = p.services.map((s) => s.name).join(",");
   useEffect(() => {
     let live = true;
+    const env = `pv-${p.id.replace(/^pv_/, "")}`;
     appsApi.services(p.project).then(
-      (all) => live && setServices(all.filter((s) => names.split(",").includes(s.name)).map((s) => ({ id: s.id, name: s.name }))),
+      async (all) => {
+        const mine = all.filter((s) => s.project === p.project && names.split(",").includes(s.name));
+        const seen = await Promise.all(mine.map((s) => appsApi.environments(s.id).then((es) => es.find((e) => e.name === env)?.active?.id ?? null, () => null)));
+        if (live) setServices(mine.map((s, i) => ({ id: s.id, name: s.name, seen: seen[i] })).filter((s) => s.seen));
+      },
       () => live && setServices([]),
     );
     return () => {
@@ -972,6 +979,8 @@ function Promote({ preview: p }: { preview: Preview }) {
             setBusy(true);
             setError(null);
             try {
+              const now = (await appsApi.environments(asking.id)).find((e) => e.name === env)?.active?.id ?? null;
+              if (now !== asking.seen) throw new Error("A newer push deployed to this preview since you opened it: look at it again before promoting it.");
               await appsApi.promote(asking.id, "production", env);
               setDone(asking.name);
               setAsking(null);

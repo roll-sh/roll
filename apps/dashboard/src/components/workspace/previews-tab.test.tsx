@@ -16,7 +16,7 @@ vi.mock("@/lib/previews-api", async (orig) => {
 
 vi.mock("@/lib/apps-api", async (orig) => {
   const real = await orig<typeof import("@/lib/apps-api")>();
-  return { ...real, appsApi: { ...real.appsApi, services: vi.fn(), promote: vi.fn() } };
+  return { ...real, appsApi: { ...real.appsApi, services: vi.fn(), environments: vi.fn(), promote: vi.fn() } };
 });
 
 vi.mock("@/lib/code-api", async (orig) => {
@@ -116,6 +116,7 @@ describe("the Previews tab", () => {
   it("promotes a roll apps service's build to production after its name is typed", async () => {
     const u = userEvent.setup({ delay: null });
     vi.mocked(appsApi.services).mockResolvedValue([{ id: "svc_web", project: "prj_shop", name: "web" }] as never);
+    vi.mocked(appsApi.environments).mockResolvedValue([{ name: "pv-abc", active: { id: "dep_1", revision: "a1b2", created_at: 1 } }] as never);
     vi.mocked(appsApi.promote).mockResolvedValue({} as never);
     view();
     const list = await screen.findByRole("list", { name: "Previews" });
@@ -127,6 +128,14 @@ describe("the Previews tab", () => {
     await u.click(confirm);
     expect(appsApi.promote).toHaveBeenCalledWith("svc_web", "production", "pv-abc");
     expect(await screen.findByText(/Promoting web to production/)).toBeInTheDocument();
+    // A newer push deployed since the sheet opened: refused, nothing promoted.
+    vi.mocked(appsApi.environments).mockResolvedValue([{ name: "pv-abc", active: { id: "dep_2", revision: "c3d4", created_at: 2 } }] as never);
+    vi.mocked(appsApi.promote).mockClear();
+    await u.click(screen.getByRole("button", { name: "Promote web to production" }));
+    await u.type(screen.getByRole("textbox", { name: /to confirm/ }), "web");
+    await u.click(screen.getByRole("button", { name: "Promote to production" }));
+    expect(await screen.findByText(/A newer push deployed/)).toBeInTheDocument();
+    expect(appsApi.promote).not.toHaveBeenCalled();
   });
 
   it("lists the previews waiting for a visual review first, tagged", async () => {
