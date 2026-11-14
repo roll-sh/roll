@@ -266,6 +266,9 @@ previews are listed once those products are on.
 | `postgres_delete_branch` | Delete a branch and its compute. | `DELETE /v1/projects/{project}/branches/{branch}` |
 | `postgres_branch_history` | The range a branch can be restored to or branched from. | `GET /v1/projects/{project}/branches/{branch}/history` |
 | `postgres_restore_branch` | Rewind a branch in place to a past point (the current state is kept as a branch). | `POST /v1/projects/{project}/branches/{branch}/restore` |
+| `postgres_reset_branch` | A branch back to its parent's current state, in place (Neon's reset from parent). | `POST /v1/projects/{id}/branches/{branch}/reset` |
+| `postgres_get_endpoint` | An endpoint's compute state and limits. | `GET /v1/endpoints/{id}` |
+| `postgres_update_endpoint` | An endpoint's autoscaling limits and suspend timeout. | `PATCH /v1/endpoints/{id}` |
 | `postgres_query` | Run read-only SQL on an endpoint: it runs in a read-only transaction, so writes fail. Returns columns and rows. | `POST /v1/endpoints/{endpoint}/query` |
 | `postgres_execute` | Run SQL that may change data or schema (INSERT, UPDATE, DDL) on an endpoint. | `POST /v1/endpoints/{endpoint}/query` |
 | `postgres_describe_schema` | Every table's columns and types on an endpoint (read-only). | `POST /v1/endpoints/{endpoint}/query` |
@@ -278,6 +281,7 @@ previews are listed once those products are on.
 | `redis_delete_database` | Delete a database and its data. Irreversible. | `DELETE /v1/redis/databases/{database}` |
 | `redis_create_branch` | A fork of a database's data, now or at a point in time. | `POST /v1/redis/databases/{database}/branches` |
 | `redis_command` | Run one command on a database, e.g. ["GET", "key"]. Read-only commands are reads; FLUSHDB and FLUSHALL delete. | `POST /v1/redis/databases/{database}/command` |
+| `redis_restore` | Rewind a database in place to a point in time. | `POST /v1/redis/databases/{id}/restore` |
 | `redis_usage` | A database's usage report. | `GET /v1/redis/databases/{database}/usage` |
 | `storage_list_buckets` | S3-compatible buckets. | `GET /v1/storage/buckets` |
 | `storage_get_bucket` | A bucket's settings. | `GET /v1/storage/buckets/{bucket}` |
@@ -410,6 +414,7 @@ previews are listed once those products are on.
 | `apps_metrics` | CPU, memory and requests of an environment. | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
 | `apps_plan` | How roll would build and run a repo, before making a service (a dry run). | `POST /v1/apps/plan` |
 | `apps_get_environment` | One environment: URL, state, live deploy, branch, size. | `GET /v1/apps/services/{id}/environments/{env}` |
+| `apps_delete_environment` | Delete an environment with its deploys and domains. | `DELETE /v1/apps/services/{id}/environments/{env}` |
 | `apps_link` | Give a service a roll resource's connection variables (reveal on the resource). | `PUT /v1/apps/services/{id}/links/{kind}/{ref}` |
 | `apps_unlink` | Stop giving a service a linked resource's variables. | `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` |
 | `apps_verify_domain` | Check a custom domain's DNS now. | `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/verify` |
@@ -493,8 +498,10 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); each product's routes compared
-with its tools (`tool-gaps.py`): `search_update_cluster`, `search_delete_cluster`,
+revoked as leaked, about to expire; only their own, never a secret); against Neon's MCP server and
+main's routes: `postgres_reset_branch` (reset from parent), `postgres_get_endpoint`,
+`postgres_update_endpoint`, `redis_restore`, `apps_delete_environment`; each product's routes
+compared with its tools (`tool-gaps.py`): `search_update_cluster`, `search_delete_cluster`,
 `secrets_list_rotators`, `secrets_list_syncs` and `secrets_diff` added; previews' bypass, search's
 keys, password and console, and secrets' bulk values, reviews and settings stay a person's; apps'
 missing everyday tools (`apps_create_service` takes links and run settings, an environment's state,
