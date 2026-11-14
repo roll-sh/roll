@@ -129,6 +129,38 @@ impl roll_secrets::Deliver for Sent {
 
 const ISSUER: &str = "https://token.actions.githubusercontent.com";
 
+/// A Postgres server outside roll: each role's current password and, for a dynamic login, its
+/// group and `VALID UNTIL`; the flag refuses every change.
+#[derive(Default)]
+struct Outside(std::sync::Mutex<BTreeMap<String, String>>, std::sync::atomic::AtomicBool, std::sync::Mutex<BTreeMap<String, (String, i64)>>);
+
+impl roll_secrets::outside::OutsideDb for Outside {
+    fn check(&self, url: &str, _: Option<&str>, roles: &[String], _: Option<&str>) -> Result<(), String> {
+        if url.contains("@db.example") && roles.iter().all(|r| r.starts_with("app_")) { Ok(()) } else { Err("there's no role that can log in".into()) }
+    }
+    fn set_password(&self, _: &str, _: Option<&str>, role: &str, password: &str) -> Result<(), String> {
+        if self.1.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("connection refused".into());
+        }
+        self.0.lock().unwrap().insert(role.into(), password.into());
+        Ok(())
+    }
+    fn create_login(&self, _: &str, _: Option<&str>, name: &str, password: &str, group: &str, until: i64) -> Result<(), String> {
+        self.0.lock().unwrap().insert(name.into(), password.into());
+        self.2.lock().unwrap().insert(name.into(), (group.into(), until));
+        Ok(())
+    }
+    fn extend_login(&self, _: &str, _: Option<&str>, name: &str, until: i64) -> Result<(), String> {
+        self.2.lock().unwrap().get_mut(name).ok_or("no such role")?.1 = until;
+        Ok(())
+    }
+    fn drop_login(&self, _: &str, _: Option<&str>, name: &str) -> Result<(), String> {
+        self.0.lock().unwrap().remove(name);
+        self.2.lock().unwrap().remove(name);
+        Ok(())
+    }
+}
+
 /// An ES256 key of the fake issuer, its JWKS, and tokens it signs.
 struct Issuer(ring::signature::EcdsaKeyPair);
 
@@ -240,6 +272,7 @@ struct Api {
     db: code_sql::Db,
     fake: Arc<Fake>,
     sync: Arc<FakeSync>,
+    outside: Arc<Outside>,
     project: String,
     _dir: tempfile::TempDir,
 }
@@ -259,12 +292,13 @@ impl Api {
         let sent = Arc::new(Sent::default());
         let people = Arc::new(People::default());
         let kms = Arc::new(FakeKms::default());
+        let outside = Arc::new(Outside::default());
         let sts = Arc::new(FakeSts::default());
         ws.set_owners(people.clone());
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: None, people: Some(people.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()) };
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: None, people: Some(people.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()) };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone()));
-        let mut api = Api { sent, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, sync, project: String::new(), _dir: dir };
+        let mut api = Api { sent, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, sync, outside, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -1059,6 +1093,103 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
 }
 
 #[tokio::test]
+async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
+    let api = Api::new().await;
+    // A password with a # unencoded: parsers disagree on where it ends, so it's refused, never
+    // shown as the host.
+    let (s, e) = api.call(Method::POST, "/outside-databases", Some(json!({ "name": "x", "url": "postgres://admin:abc#def@db.example/app", "roles": ["app_blue", "app_green"] }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && !e.to_string().contains("abc"), "{e}");
+    let new = json!({ "name": "billing", "url": "postgres://admin:hunter2@db.example:5432/app?sslmode=require", "roles": ["app_blue", "app_green"], "group": "app_rw" });
+    let d = api.ok(Method::POST, "/outside-databases", Some(new)).await;
+    assert_eq!((d["host"].as_str(), d.get("url")), (Some("db.example:5432"), None), "the admin URL stays sealed: {d}");
+    let link = |field: &str| json!({ "kind": "outside_database", "ref": d["id"], "field": field, "mode": "managed" });
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "DB_USER", "link": link("username") }, { "op": "set", "key": "DB_PASSWORD", "link": link("password") }] }))).await;
+    let login = || async {
+        let v = api.values("production", "/").await["values"].clone();
+        (v["DB_USER"].as_str().unwrap().to_string(), v["DB_PASSWORD"].as_str().unwrap().to_string())
+    };
+    let password = |role: &str| api.outside.0.lock().unwrap().get(role).cloned();
+    let blue = login().await;
+    assert_eq!((blue.0.as_str(), password("app_blue")), ("app_blue", Some(blue.1.clone())));
+
+    // Each rotation hands out the other role; the one in use keeps working through the grace.
+    let rotate = || api.call(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None);
+    assert!(rotate().await.0.is_success());
+    let green = login().await;
+    assert_eq!((green.0.as_str(), password("app_green"), password("app_blue")), ("app_green", Some(green.1.clone()), Some(blue.1.clone())));
+    // Both roles are taken (green in use, blue in its grace): another rotation waits, resetting
+    // nothing, even once the issue's own short hold on green is over.
+    let id = d["id"].as_str().unwrap().to_string();
+    let unhold = || {
+        let id = id.clone();
+        api.db
+            .write(move |c| {
+                let s: String = c.query_row("SELECT state FROM outside_dbs WHERE id = ?", [id.as_str()], |r| r.get(0))?;
+                let mut v: Value = serde_json::from_str(&s).unwrap();
+                v["held"] = json!({});
+                c.execute("UPDATE outside_dbs SET state = ? WHERE id = ?", [v.to_string().as_str(), id.as_str()])
+            })
+            .unwrap()
+    };
+    unhold();
+    assert_eq!(rotate().await.0, StatusCode::CONFLICT);
+    assert_eq!((login().await, password("app_blue")), (green.clone(), Some(blue.1.clone())));
+    // Blue's grace ends: its password goes, and it's free again.
+    let expire = |cond: &'static str| {
+        let p = api.project.clone();
+        api.db.write(move |c| c.execute(&format!("UPDATE leases SET expires_at = 0 WHERE project_id = ? AND {cond}"), [p.as_str()])).unwrap();
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap() }
+    };
+    expire("1 = 1").await;
+    assert_ne!(password("app_blue"), Some(blue.1.clone()));
+    // A rotation the server refused changes nothing, and the next one takes the free role.
+    api.outside.1.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(!rotate().await.0.is_success());
+    api.outside.1.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!((login().await, password("app_green")), (green.clone(), Some(green.1.clone())));
+    assert!(rotate().await.0.is_success());
+    let blue2 = login().await;
+    assert_eq!((blue2.0.as_str(), password("app_green")), ("app_blue", Some(green.1.clone())));
+    // A retirement that comes late (blue's first) doesn't undo blue's reissue.
+    let (p, late) = (api.project.clone(), json!({ "kind": "outside_database", "ref": d["id"], "field": "username", "mode": "managed" }).to_string());
+    api.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO leases (id, project_id, env_id, key, kind, link, handle, consumer, issued_at, expires_at, revoked_at) VALUES ('lse_late', ?, '', '', 'retired', ?, '{\"role\":\"app_blue\",\"generation\":1}', 'test', 0, 1, NULL)",
+                [p.as_str(), late.as_str()],
+            )
+        })
+        .unwrap();
+    expire("id = 'lse_late'").await;
+    assert_eq!(password("app_blue"), Some(blue2.1.clone()));
+    // Its two roles serve one environment.
+    let (s, v) = api.call(Method::PUT, "/environments/staging/secrets/DB_USER", Some(json!({ "link": link("username") }))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+
+    // Dynamic: each resolve is a login of its own in the group, valid until its lease ends (the
+    // server enforces it), renewed with the lease, dropped when it ends.
+    let dynamic = |field: &str| json!({ "kind": "outside_database", "ref": d["id"], "field": field, "mode": "dynamic", "options": { "ttl_minutes": 15 } });
+    api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": [{ "op": "set", "key": "TMP_USER", "link": dynamic("username") }, { "op": "set", "key": "TMP_PASSWORD", "link": dynamic("password") }] }))).await;
+    let a = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:report" }))).await;
+    let b = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:report" }))).await;
+    let user = a["values"]["TMP_USER"].as_str().unwrap().to_string();
+    assert_ne!(user, b["values"]["TMP_USER"].as_str().unwrap());
+    assert_eq!(password(&user).as_deref(), a["values"]["TMP_PASSWORD"].as_str());
+    let (group, until) = api.outside.2.lock().unwrap()[&user].clone();
+    let lease = a["leases"][0].as_str().unwrap();
+    let expires = api.ok(Method::GET, "/leases", None).await.as_array().unwrap().iter().find(|l| l["id"] == lease).unwrap()["expires_at"].as_i64().unwrap();
+    assert!(group == "app_rw" && until > expires && until <= expires + 10 * 60_000, "{group} {until} {expires}");
+    let renewed = api.ok(Method::POST, &format!("/leases/{lease}/renew"), Some(json!({ "ttl_minutes": 120 }))).await;
+    assert!(api.outside.2.lock().unwrap()[&user].1 > renewed["expires_at"].as_i64().unwrap());
+    api.ok(Method::DELETE, &format!("/leases/{lease}"), None).await;
+    assert_eq!(password(&user), None);
+
+    let (s, _) = api.call(Method::DELETE, &format!("/outside-databases/{}", d["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");
+}
+
+#[tokio::test]
 async fn reads_unlike_the_reader_are_alerted() {
     let api = Api::new().await;
     api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
@@ -1205,7 +1336,7 @@ async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_ou
     assert!(stored.starts_with("kms:v1:"), "{stored}");
     assert_eq!(api.values("production", "/").await["values"]["STRIPE_KEY"], "sk_live_123", "the values didn't change");
     let node = |keyring: Keyring| {
-        let opts = Options { keyring: Ok(keyring), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None };
+        let opts = Options { keyring: Ok(keyring), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None };
         Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap())
     };
     // The deployment key rotates: health counts the wrapped project as not resealed until the
@@ -1232,13 +1363,14 @@ async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_ou
     assert_eq!(roll_secrets::router(fresh).oneshot(Request::delete(format!("/v1/secrets/projects/{}/kms", api.project)).body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::LOCKED);
     // Back with roll alone: no KMS needed any more.
     *api.kms.revoked.lock().unwrap() = false;
-    let opts = Options { keyring: Ok(Keyring::new(&"n".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None };
+    let opts = Options { keyring: Ok(Keyring::new(&"n".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None };
     let after = Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap());
     assert!(roll_secrets::router(after.clone()).oneshot(Request::delete(format!("/v1/secrets/projects/{}/kms", api.project)).body(Body::empty()).unwrap()).await.unwrap().status().is_success());
     *api.kms.revoked.lock().unwrap() = true;
     assert!(values(after).await.1.contains("sk_live_123"));
 }
 
+#[tokio::test]
 async fn an_aws_role_gives_each_lease_a_short_lived_session() {
     let api = Api::new().await;
     let role = json!({ "name": "deploy", "role_arn": "arn:aws:iam::123456789012:role/roll" });

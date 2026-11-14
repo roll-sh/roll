@@ -536,6 +536,13 @@ impl Secrets {
                 let entry = match shared {
                     Some((_, state)) => (open_parts(&dek, project, state)?, state.clone()),
                     None => {
+                        if let Ok(p) = self.links.get(&link.kind)
+                            && p.exclusive()
+                            && let Some(other) = self.holder(project, env_slug, &link, items)?
+                        {
+                            result = Err(Error::Conflict("in_use", format!("{} {} already issues {other}'s credential: one environment per resource of this kind", link.kind, p.name(&link.r#ref).unwrap_or_else(|| link.r#ref.clone()))));
+                            break;
+                        }
                         let label = format!("roll secrets {env_slug} {}", item.key);
                         match self.links.get(&link.kind).and_then(|p| p.issue(&link.r#ref, &cred, &link, &label, None)) {
                             Ok(i) => {
@@ -570,7 +577,7 @@ impl Secrets {
     }
 
     /// What this project may link, sink to or sync to, as (kind, ref): its canvas's resources and
-    /// its own rotators, checked on every write, read, issue, rotation and delivery (a resource
+    /// its own rotators and databases outside roll, checked on every write, read, issue, rotation and delivery (a resource
     /// can move to another project).
     ///
     /// A person's project (docs/accounts.md) has only what the workspace trusts it for
@@ -581,14 +588,32 @@ impl Secrets {
         let mut out: BTreeSet<(String, String)> = p.resources.iter().filter(|r| self.workspace.trusts(&p, r.kind, &r.r#ref)).map(|r| (r.kind.as_str().to_string(), r.r#ref.clone())).collect();
         out.extend(self.rotator_refs(project)?.into_iter().map(|(id, _)| (crate::rotators::KIND.to_string(), id)));
         out.extend(self.aws_role_refs(project)?.into_iter().map(|(id, _)| (crate::aws::KIND.to_string(), id)));
+        out.extend(self.outside_db_refs(project)?.into_iter().map(|(id, _)| (crate::outside::KIND.to_string(), id)));
         Ok(out)
+    }
+
+    /// Another environment (or another credential here, not rewritten by `items`) that holds a
+    /// managed credential of `link`'s resource.
+    fn holder(&self, project: &str, env_slug: &str, link: &Link, items: &[Item]) -> Result<Option<String>> {
+        let rows: Vec<(String, String, String, String, String)> = self.db.read(|c| {
+            Ok::<_, Error>(c.query(
+                "SELECT e.slug, s.path, s.key, s.owner, s.link FROM secrets s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? AND s.link_state IS NOT NULL AND s.link LIKE ? AND s.link LIKE ?",
+                params![project, format!("%\"kind\":\"{}\"%", link.kind), format!("%\"ref\":\"{}\"%", link.r#ref)],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?)
+        })?;
+        Ok(rows.into_iter().find_map(|(env, path, key, owner, l)| {
+            let l: Link = serde_json::from_str(&l).ok()?;
+            let rewritten = env == env_slug && items.iter().any(|i| i.path == path && i.key == key && i.owner == owner);
+            (l.kind == link.kind && l.r#ref == link.r#ref && !rewritten && (env != env_slug || l.options != link.options)).then_some(env)
+        }))
     }
 
     /// Why `kind ref` isn't something `project` may reach.
     pub(crate) fn not_linkable(&self, project: &str, kind: &str, r#ref: &str) -> String {
         let personal = self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| !p.owner.is_empty() && p.resources.iter().any(|r| r.kind.as_str() == kind && r.r#ref == r#ref));
         if personal {
-            format!("{kind} {ref} is on this project's canvas, but roll can't tell it's yours: links, sinks and syncs reach roll's products only from the operator's projects and an admin's for now (a rotator or an AWS role of the project's own works anywhere)", ref = r#ref)
+            format!("{kind} {ref} is on this project's canvas, but roll can't tell it's yours: links, sinks and syncs reach roll's products only from the operator's projects and an admin's for now (a rotator, an AWS role or a database outside roll that's the project's own works anywhere)", ref = r#ref)
         } else {
             format!("{kind} {ref} isn't in this project", ref = r#ref)
         }

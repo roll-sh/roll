@@ -3,6 +3,7 @@ import { useState } from "react";
 import { FOLDER_PATH, SECRET_KEY, type NewSync, type Sync, type SyncKind, type SyncPreview } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, label, primary, Section, Teach, useLoad } from "./ui";
+import { OutsideDatabases } from "./outside-databases";
 import { AwsRoles } from "./aws-roles";
 import { Rotators } from "./rotators";
 
@@ -66,6 +67,7 @@ export function SyncsView() {
           )
         )}
       </Section>
+      <OutsideDatabases />
       <Rotators />
       <AwsRoles />
     </div>

@@ -282,6 +282,10 @@ pub enum Secrets {
     Tokens(Tokens),
     /// Where a key is set, in every project you can read (`STRIPE_*` for a prefix). Never values.
     Find { key: String },
+    /// Postgres and MySQL databases outside roll whose logins roll rotates or issues per lease:
+    /// list, add, remove.
+    #[command(subcommand)]
+    Databases(DatabasesCmd),
     /// AWS roles for dynamic AWS credentials: list, add (roll assumes it to check), remove.
     #[command(subcommand, name = "aws-roles")]
     AwsRoles(AwsRolesCmd),
@@ -520,6 +524,26 @@ pub enum AwsRolesCmd {
     /// Register a role: its trust policy lets roll's role assume it with
     /// `sts:ExternalId = roll-secrets:<project>`.
     Add { name: String, role_arn: String },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum DatabasesCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register a database: its admin URL (postgres://admin:…@host:5432/db, mysql://…, sqlserver://…, clickhouse://… or rabbitmq://…) on stdin; two login
+    /// roles that take turns (managed links), a group dynamic logins join, or both.
+    Add {
+        name: String,
+        #[arg(long = "role", num_args = 1)]
+        roles: Vec<String>,
+        /// The role each dynamic lease's login joins (its grants).
+        #[arg(long)]
+        group: Option<String>,
+        /// The server's CA certificates (PEM file), when the system's don't cover it (Amazon RDS).
+        #[arg(long)]
+        ca: Option<std::path::PathBuf>,
+    },
     Rm { id: String },
 }
 
@@ -1199,6 +1223,37 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             println!("{} is {}", s(&v["id"]), s(&v["state"]));
         }
+        Secrets::Databases(d) => match d {
+            DatabasesCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/outside-databases", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for d in v.as_array().into_iter().flatten() {
+                    let roles: Vec<&str> = d["roles"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    let group = d["group"].as_str().map(|g| format!("  dynamic in {g}")).unwrap_or_default();
+                    println!("{}  {:<16} {:<32} {}{group}", s(&d["id"]), s(&d["name"]), s(&d["host"]), roles.join(" "));
+                }
+            }
+            DatabasesCmd::Add { name, roles, group, ca } => {
+                // The admin URL holds a password: never an argument.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("Admin URL (postgres://admin:…@host:5432/db, mysql://…, sqlserver://…, clickhouse://… or rabbitmq://…), then Enter and Ctrl-D: ");
+                }
+                let mut url = String::new();
+                std::io::stdin().read_to_string(&mut url).context("reading the admin URL from stdin")?;
+                let ca = ca.map(|p| std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))).transpose()?;
+                let v = c.call(Method::POST, &format!("{}/outside-databases", c.base()), Some(json!({ "name": name, "url": url.trim(), "roles": roles, "group": group, "ca": ca }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link DB_USER and DB_PASSWORD to it, managed (the roles take turns) or dynamic (a login per lease).", s(&v["name"]), s(&v["id"]));
+            }
+            DatabasesCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/outside-databases/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
         Secrets::Kms { cmd } => {
             let v = match cmd {
                 None => c.call(Method::GET, &format!("{}/kms", c.base()), None).await?,
