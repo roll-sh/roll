@@ -250,14 +250,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    A/B; Rally rerun pending) and `terms_enum`; a full rerun of every Rally track with variance;
    one allocator policy (rolld's against search-dev's purge governor); `terms_enum`'s per-request
    overhead.
-2. **Elasticsearch's lifecycles: what's left.** The data stream lifecycle (rollover, retention,
-   failure stores, the error store) and ILM run now (`api/data_stream_lifecycle.rs`,
-   `xpack/ilm_run.rs`; compatibility.md, "Known gaps"). They run time-based work at its due time
-   and wake a sleeping cluster only for that. Left: ILM's `shrink` to fewer shards and
-   `downsample` (roll has both APIs; the steps that swap the new index in aren't written),
-   `searchable_snapshot`, `wait_for_snapshot` (needs SLM), and the `ilm-history-*` data stream.
-   The data stream lifecycle's force merges and downsampling rounds aren't run either.
-3. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
+2. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
    Elasticsearch 9.5.5 and OpenSearch 3.9). Roll leads on indexing (4,735 docs/s against 3,585
    and 2,978 at 8 clients), merged `knn` (1.9 ms CPU against 6.1 and 4.9), `rrf` (3.2 against 13.8
    and 8.3), cold start (36 ms to the first `knn` against a ~25-29 s node start) and memory
@@ -270,7 +263,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    halves CPU but drops recall to 0.43), AVX-512 distances for float HNSW indexing (1,250 against
    1,174 µs/doc), searching unmerged segments in parallel (filtered latency 2-3x Elasticsearch's
    there).
-4. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (in progress). Landed: the
+3. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (in progress). Landed: the
    index browser and console on the per-index routes, an API keys panel in Settings, the mapping
    view as a field table, OpenSearch-flavor clusters' own clients and `OPENSEARCH_*` variables,
    and importing a file into an index from the Indices tab (Kibana's "Upload a file"): NDJSON, a
@@ -286,11 +279,12 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    a Data streams panel (backing indices, documents, size, the lifecycle's retention set in place
    or the ILM policy that manages the stream), and a profiled console search (`"profile": true`)
    drawn as Kibana's Search Profiler draws it (per shard: the query tree, collectors,
-   aggregations and fetch with times and shares). Next: index templates listed per index, saved
-   console requests. Signed-in users who aren't admins follow
+   aggregations and fetch with times and shares), and an Index templates panel (what each matches,
+   its priority and what it sets; the built-in ones on request). Next: saved console requests,
+   ISM policies on OpenSearch-flavor clusters' data streams. Signed-in users who aren't admins follow
    accounts' phase 2: today every product but code, agents and projects answers them 403
    (docs/accounts.md), search included.
-5. **Compatibility gaps** from the extended suites (4,956 of the 5,541 Elasticsearch passes),
+4. **Compatibility gaps** from the extended suites (4,956 of the 5,541 Elasticsearch passes),
    largest first. Landed: ent-search's last 5 (a `rule` retriever over `rrf`/`linear`, inference
    inside a rule query's organic, workflow-restricted API keys), ES|QL's last 5 (`TOP_SNIPPETS`,
    `CATEGORIZE`, approximation's columns, `LIMIT n BY`, `unsigned_long` past `i64::MAX`),
@@ -304,6 +298,13 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    fields); downsample's last one (allocation filtering). In the opensearch dialect, pick
    `auto_date_histogram`'s rounding from the bounds as OpenSearch's rewrite does where it differs
    from collecting (roll counts with Elasticsearch's choice in both dialects).
+5. **Elasticsearch's lifecycles: what's left.** The data stream lifecycle (rollover, retention,
+   failure stores, the error store) and ILM run now (`api/data_stream_lifecycle.rs`,
+   `xpack/ilm_run.rs`; compatibility.md, "Known gaps"). They run time-based work at its due time
+   and wake a sleeping cluster only for that. Left: ILM's `shrink` to fewer shards and
+   `downsample` (roll has both APIs; the steps that swap the new index in aren't written),
+   `searchable_snapshot`, `wait_for_snapshot` (needs SLM), and the `ilm-history-*` data stream.
+   The data stream lifecycle's force merges and downsampling rounds aren't run either.
 6. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
    endpoints, creates them (OpenAI or any compatible URL, Cohere, Anthropic; the API key sent
    once, sealed, never shown back), tests them with a sample, deletes them, and opens a
