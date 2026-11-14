@@ -396,9 +396,7 @@ impl Ctx {
     /// Whether the caller might use a tool for this product and these actions at all, and asked
     /// for its toolset.
     fn may(&self, product: &str, actions: &[Action]) -> bool {
-        let on = self.asked(product) && (product == "access" || product == "workspace" || self.m.config.products.iter().any(|p| p == product));
-        let reached = !self.as_user || product == "access" || roll_access::USER_REACH.contains(&product);
-        on && reached && match &self.principal {
+        self.on(product) && self.reaches(product) && match &self.principal {
             Principal::Operator => true,
             // A token that asks for anything else may use any tool (some of them by asking).
             Principal::Grant(g) => g.ask_otherwise || actions.iter().any(|a| g.scope.may(product, *a)),
@@ -414,14 +412,25 @@ impl Ctx {
         }
     }
 
+    /// A person's own token reaches only what their session can (`USER_REACH`).
+    fn reaches(&self, product: &str) -> bool {
+        !self.as_user || product == "access" || roll_access::USER_REACH.contains(&product)
+    }
+
+    /// Whether this rolld runs the product and the connection asked for its toolset.
+    fn on(&self, product: &str) -> bool {
+        self.asked(product) && (product == "access" || product == "workspace" || self.m.config.products.iter().any(|p| p == product))
+    }
+
     /// Whether the connection asked for this product's toolset (the access tools always).
     fn asked(&self, product: &str) -> bool {
         product == "access" || self.toolsets.as_ref().is_none_or(|t| t.iter().any(|p| p == product))
     }
 
     fn usable(&self, t: &tools::Tool) -> bool {
+        // One any token may call is still its product's: listed only where the product runs.
         if t.open() {
-            return self.asked(t.product);
+            return self.on(t.product) && self.reaches(t.product);
         }
         self.may(t.product, &t.actions())
     }
