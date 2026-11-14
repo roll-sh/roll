@@ -538,7 +538,7 @@ tokens are account-wide; a roll token's rules already name projects, and the bui
 start from one. `outputSchema` per tool: it would double `tools/list` for clients that read
 `structuredContent` as JSON anyway.
 
-Done lately: the approval of people's tokens checked live with accounts and mail
+Done lately: the sixteenth review's #25 findings fixed: a person's OAuth connection past the policy waits too (it didn't), a waiting token's rules are frozen until an admin decides (an approval took whatever it had become), widening and waiting again are one transaction, admins' mail is cleaned names and once an hour per token, and tokens made before the policy show as `unapproved` in an admin's checkup; the approval of people's tokens checked live with accounts and mail
 (`users-live/approval.sh`: waits, 401 `pending_approval`, the admin mailed, approved from the CLI,
 the person mailed, then 200); a person's pending token leads an admin's checkup ("Needs attention":
 approve or deny), and stays out of the person's own (#25); admins are mailed when a person's token

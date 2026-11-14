@@ -147,6 +147,7 @@ mod policy_tests {
             expires_at: None,
             not_before: None,
             pending: false,
+            approved_at: None,
             ip_allow: vec![],
             created_by: "operator".into(),
             created_at: created,
@@ -761,8 +762,9 @@ impl Access {
         rt.spawn(async move {
             match people.admins().await {
                 Ok(admins) => {
+                    // Once an hour per token and admin: editing a waiting token doesn't flood them.
                     for admin in admins {
-                        me.tell(Some(&admin), Some((&key, 0)), subject.clone(), text.clone());
+                        me.tell(Some(&admin), Some((&format!("{key}:{admin}"), 3_600_000)), subject.clone(), text.clone());
                     }
                 }
                 Err(e) => tracing::warn!(error = %e, "listing admins to tell"),

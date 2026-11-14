@@ -12,7 +12,7 @@ pub const UNUSED_DAYS: i64 = 30;
 /// One thing to look at, most serious first by kind.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Finding {
-    /// `pending`, `everything`, `never_expires`, `unused`, `narrower` or `roams`.
+    /// `pending`, `unapproved`, `everything`, `never_expires`, `unused`, `narrower` or `roams`.
     pub kind: &'static str,
     /// In words, for the person.
     pub why: String,
