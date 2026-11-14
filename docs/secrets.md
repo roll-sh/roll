@@ -129,8 +129,17 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
   project's secrets, made through `POST /v1/access/tokens` as the dashboard's New token. Its
   secret is in the state (sensitive). Any change replaces it, and destroying it revokes it.
 - **`data.roll_secrets_values`** is an environment's resolved values, for another provider.
+- **Without values in the state** (Terraform 1.10 and 1.11+), as Vault's and AWS' providers allow:
+  - **`ephemeral "roll_secrets_values"`** reads an environment for one run, never into the plan or
+    the state; it feeds another provider's configuration or a write-only argument. Strict: a key
+    that doesn't resolve fails the run. With `dynamic = true` a dynamic link issues a credential for
+    the run, and closing the run revokes its lease.
+  - **`value_wo`** on `roll_secret` writes a value write-only: it's sent and never kept, and
+    `value_wo_version` is bumped to write a new one (Terraform can't see a write-only value
+    change). Such a value isn't read back, so a change made outside Terraform isn't seen.
 
-Values land in Terraform's state, as with every provider: keep the state as private as the values.
+`value` and the data source still land in Terraform's state, as with every provider: keep that
+state as private as the values, or use the two above.
 ## GitHub Actions
 `sdk/github-action` puts an environment into a job, as Doppler's and Infisical's actions do:
 ```yaml
@@ -2722,10 +2731,10 @@ user's call).
 3. **Conditional reads and caching in the SDKs** (#65, on #62): `ETag` and `If-None-Match` on
    `…/values` (a 304 reads, issues and audits nothing; never for dynamic credentials), and a TTL
    cache in the TypeScript, Go and Python clients that revalidates with it.
-4. **Terraform without values in state**: an `ephemeral "roll_secrets_values"` resource and a
-   write-only `value_wo` (Vault's, AWS', Infisical's providers have both); resources for CAs, SSH
-   CAs, encryption keys and outside databases; transit in the Go and Python clients (the
-   TypeScript one has it).
+4. **Terraform without values in state** (#66, on #62): an `ephemeral "roll_secrets_values"`
+   resource (dynamic credentials revoked when the run closes) and a write-only `value_wo`. Next:
+   resources for CAs, SSH CAs, encryption keys and outside databases; transit in the Go and Python
+   clients (the TypeScript one has it).
 5. **AWS through roll's own issuer** (`AssumeRoleWithWebIdentity` with roll's token, the trust
    policy pinning `sub`, as GCP and Azure already work): no roll credential in AWS at all.
 6. **The operator restarts what reads a Secret** when it changes (`spec.rolloutRestart`, as
