@@ -11,7 +11,7 @@ import { Table2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { appsApi, formatMs, type Metrics as MetricsData } from "@/lib/apps-api";
 import { formatBytes } from "@/lib/roll-api";
-import { btn, panel } from "../ui";
+import { btn, CopyButton, panel, useCopy } from "../ui";
 import { usePageVisible } from "./live";
 import { clock, message } from "./shared";
 
@@ -154,6 +154,8 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
   const per = size === 1 ? "min" : `${size} min`;
   const [error, setError] = useState<string | null>(null);
   const [table, setTable] = useState(false);
+  const { copied, copy } = useCopy();
+  const scrape = appsApi.prometheusUrl(service, env);
 
   const visible = usePageVisible();
   useEffect(() => {
@@ -273,6 +275,14 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
           ))}
         </div>
       )}
+      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-subtle">
+        <span>For a scraper:</span>
+        <code className="min-w-0 truncate font-mono text-[11.5px] text-muted">{scrape}</code>
+        <CopyButton id="scrape" text={scrape} copied={copied} onCopy={copy} />
+        <span>
+          the last finished minute as Prometheus text, read with a token that may read the service (<code className="font-mono">roll token create</code>).
+        </span>
+      </p>
     </div>
   );
 }

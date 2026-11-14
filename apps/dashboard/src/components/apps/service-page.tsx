@@ -284,6 +284,8 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
   const [rev, setRev] = useState("");
   const [noTraffic, setNoTraffic] = useState(false);
   const [noCache, setNoCache] = useState(false);
+  const [image, setImage] = useState("");
+  const [note, setNote] = useState("");
   useEffect(() => {
     appsApi.overview().then(setOverview, () => {});
   }, []);
@@ -390,7 +392,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
               <button className={`${primary} !rounded-r-none !py-1 !text-[12px]`} disabled={busy} onClick={() => deploy()} title="Build the source and roll it out">
                 <Rocket className="size-3.5" /> Deploy
               </button>
-              <button className={`${primary} !rounded-l-none border-l border-bg/20 !px-1.5 !py-1 !text-[12px]`} disabled={busy} aria-expanded={opts} aria-label="Deploy options" title="A revision, no traffic, without the cache" onClick={() => setOpts((o) => !o)}>
+              <button className={`${primary} !rounded-l-none border-l border-bg/20 !px-1.5 !py-1 !text-[12px]`} disabled={busy} aria-expanded={opts} aria-label="Deploy options" title={service.source.kind === "image" ? "Another tag, a message, no traffic" : "A revision, a message, no traffic, without the cache"} onClick={() => setOpts((o) => !o)}>
                 <ChevronDown className="size-3.5" />
               </button>
             </span>
@@ -458,10 +460,19 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           className="rise mt-3 flex flex-wrap items-end gap-3 rounded-xl border border-line bg-panel px-4 py-3"
           onSubmit={async (e) => {
             e.preventDefault();
-            const body: NewDeploy = { ...(rev.trim() ? { revision: rev.trim() } : {}), ...(noTraffic ? { no_traffic: true } : {}), ...(noCache ? { no_cache: true } : {}) };
+            const built = service.source.kind === "repo";
+            const body: NewDeploy = {
+              ...(built && rev.trim() ? { revision: rev.trim() } : {}),
+              ...(!built && image.trim() ? { image: image.trim() } : {}),
+              ...(note.trim() ? { message: note.trim() } : {}),
+              ...(noTraffic ? { no_traffic: true } : {}),
+              ...(built && noCache ? { no_cache: true } : {}),
+            };
             if (await deploy(body)) {
               setOpts(false);
               setRev("");
+              setImage("");
+              setNote("");
             }
           }}
         >
@@ -471,14 +482,26 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
               <input value={rev} onChange={(e) => setRev(e.target.value)} placeholder="the branch's head" spellCheck={false} className={`${input} w-56 font-mono text-[12px]`} />
             </label>
           )}
+          {service.source.kind === "image" && (
+            <label className="flex flex-col gap-1 text-[12px] text-muted" title="This deploy only: the service's image stays as Settings has it">
+              Image
+              <input value={image} onChange={(e) => setImage(e.target.value)} placeholder={service.source.image} spellCheck={false} className={`${input} w-72 font-mono text-[12px]`} />
+            </label>
+          )}
+          <label className="flex flex-col gap-1 text-[12px] text-muted">
+            Message
+            <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={service.source.kind === "repo" ? "the commit's subject" : "what this deploy is"} maxLength={500} className={`${input} w-64 text-[12px]`} />
+          </label>
           <label className="inline-flex items-center gap-1.5 pb-2 text-[12px] text-muted" title="Built and health-checked at its own URL; put it live from the deployments list">
             <input type="checkbox" checked={noTraffic} onChange={(e) => setNoTraffic(e.target.checked)} />
             No traffic (try it first)
           </label>
-          <label className="inline-flex items-center gap-1.5 pb-2 text-[12px] text-muted" title="No cached layer; base images pulled again">
-            <input type="checkbox" checked={noCache} onChange={(e) => setNoCache(e.target.checked)} />
-            Without the cache
-          </label>
+          {service.source.kind === "repo" && (
+            <label className="inline-flex items-center gap-1.5 pb-2 text-[12px] text-muted" title="No cached layer; base images pulled again">
+              <input type="checkbox" checked={noCache} onChange={(e) => setNoCache(e.target.checked)} />
+              Without the cache
+            </label>
+          )}
           <button type="submit" className={primary} disabled={busy}>
             Deploy
           </button>
@@ -590,7 +613,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         ) : tab === "jobs" ? (
           <JobsTab service={service.id} env={envName} runner={runner} cron={service.run.type === "cron"} />
         ) : tab === "shell" ? (
-          <ShellTab service={service.id} env={envName} />
+          <ShellTab service={service.id} env={envName} instances={env?.instances} />
         ) : tab === "domains" ? (
           <DomainsTab service={service.id} env={env!} runner={runner} />
         ) : tab === "usage" ? (

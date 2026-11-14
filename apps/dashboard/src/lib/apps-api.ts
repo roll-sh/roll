@@ -689,7 +689,8 @@ export const appsApi = {
   removeEnvironment: (id: string, e: string) => call<null>("DELETE", env(id, e)),
 
   deploy: (id: string, e: string, body: NewDeploy = {}) => call<Deployment>("POST", `${env(id, e)}/deploys`, body),
-  deploys: (id: string, e: string) => call<Deployment[]>("GET", `${env(id, e)}/deploys`),
+  /** Newest first, 100 at most; `before` (the last one's `created_at`): the page after it. */
+  deploys: (id: string, e: string, before?: number) => call<Deployment[]>("GET", `${env(id, e)}/deploys${qs({ before })}`),
   deployment: (id: string, e: string, d: string) => call<Deployment>("GET", dep(id, e, d)),
   /** What a repo deployment brings over the live one (for the live one, the one before it). */
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
@@ -757,7 +758,10 @@ export const appsApi = {
   cancelJob: (id: string, e: string, j: string) => call<Job>("POST", `${env(id, e)}/jobs/${encodeURIComponent(j)}/cancel`),
 
   /** A shell in a running instance over HTTP (a browser can't send the token on a WebSocket). */
-  openShell: (id: string, e: string, size: { cols: number; rows: number }) => call<{ id: string }>("POST", `${env(id, e)}/shell/sessions`, size),
+  /** `instance`: that one (default: one that's running, or a woken one). */
+  openShell: (id: string, e: string, body: { cols: number; rows: number; instance?: string }) => call<{ id: string }>("POST", `${env(id, e)}/shell/sessions`, body),
+  /** The environment's last finished minute as Prometheus text, for a scraper with a token that may read it. */
+  prometheusUrl: (id: string, e: string) => `${ROLL_API}${env(id, e)}/metrics?format=prometheus`,
   shellKeys: (id: string, e: string, sh: string, data: string) => call<null>("POST", `${env(id, e)}/shell/sessions/${encodeURIComponent(sh)}/keys`, { data }),
   resizeShell: (id: string, e: string, sh: string, size: { cols: number; rows: number }) => call<null>("POST", `${env(id, e)}/shell/sessions/${encodeURIComponent(sh)}/resize`, size),
   closeShell: (id: string, e: string, sh: string) => call<null>("DELETE", `${env(id, e)}/shell/sessions/${encodeURIComponent(sh)}`),

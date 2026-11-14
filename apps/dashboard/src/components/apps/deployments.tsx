@@ -1,11 +1,14 @@
 import { HorizonMark } from "@roll/brand";
 import { ExternalLink, Rocket, RotateCcw, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { appsApi, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type DeployCommits, type Environment, type LogLine } from "@/lib/apps-api";
 import { btn, panel } from "../ui";
 import { PlanDetails } from "./new-service";
 import { usePageVisible } from "./live";
 import { clock, DeployBadge, LogView, since, SureButton, type Runner } from "./shared";
+
+/** The API's page of deployments. */
+const PAGE = 100;
 
 const MAX_LINES = 5000;
 
@@ -57,8 +60,32 @@ export function Deployments({
   // A rollback brings its variables back as they were (Heroku's, Railway's), unless they're kept
   // as they are now: after a leaked secret's rotation, the old value must not come back.
   const [keepVars, setKeepVars] = useState(false);
+  // Pages past the newest 100, loaded on asking (the newest keep refreshing above them).
+  const [older, setOlder] = useState<Deployment[]>([]);
+  const [more, setMore] = useState<"idle" | "loading" | "done">("idle");
+  useEffect(() => {
+    setOlder([]);
+    setMore("idle");
+  }, [service, env.name]);
+  const list = useMemo(() => {
+    if (!deploys) return null;
+    const seen = new Set(deploys.map((d) => d.id));
+    return [...deploys, ...older.filter((d) => !seen.has(d.id))];
+  }, [deploys, older]);
+  const loadOlder = async () => {
+    const last = list?.at(-1);
+    if (!last) return;
+    setMore("loading");
+    try {
+      const page = await appsApi.deploys(service, env.name, last.created_at);
+      setOlder((o) => [...o, ...page]);
+      setMore(page.length < PAGE ? "done" : "idle");
+    } catch {
+      setMore("idle");
+    }
+  };
   // The newest opens by itself, so a deploy that just started shows its build.
-  const shown = deploys?.find((d) => d.id === open) ?? deploys?.[0] ?? null;
+  const shown = list?.find((d) => d.id === open) ?? list?.[0] ?? null;
   const activeId = env.active?.id ?? null;
   const now = Date.now();
 
@@ -80,7 +107,7 @@ export function Deployments({
           Rollbacks keep today's variables
         </label>
         <ul className="divide-y divide-line">
-          {deploys.map((d) => {
+          {list!.map((d) => {
             const active = d.id === activeId;
             const selected = shown?.id === d.id;
             return (
@@ -156,6 +183,13 @@ export function Deployments({
             );
           })}
         </ul>
+        {deploys.length >= PAGE && more !== "done" && (
+          <div className="border-t border-line px-4 py-2.5">
+            <button type="button" className={btn} disabled={more === "loading"} onClick={() => void loadOlder()}>
+              {more === "loading" ? <span className="shimmer">Loading…</span> : "Older deployments"}
+            </button>
+          </div>
+        )}
       </section>
       {shown && <BuildLog key={shown.id} service={service} env={env.name} d={shown} />}
     </div>

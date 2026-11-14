@@ -61,6 +61,7 @@ export function NewServiceSheet({
   const [name, setName] = useState("");
   const [named, setNamed] = useState(false);
   const [port, setPort] = useState("");
+  const [health, setHealth] = useState("");
   const [kind, setKind] = useState<ServiceType>("web");
   const [schedule, setSchedule] = useState("");
   const [env, setEnv] = useState("");
@@ -151,7 +152,8 @@ export function NewServiceSheet({
   const portOk = portN === undefined || (Number.isInteger(portN) && portN > 0 && portN < 65536);
   const parsed = useMemo(() => parseEnv(env), [env]);
   const scheduleOk = kind !== "cron" || schedule.trim().split(/\s+/).length === 5;
-  const ready = !!source && SERVICE_NAME.test(name) && portOk && scheduleOk && parsed.errors.length === 0 && !busy;
+  const healthOk = !health.trim() || health.trim().startsWith("/");
+  const ready = !!source && SERVICE_NAME.test(name) && portOk && healthOk && scheduleOk && parsed.errors.length === 0 && !busy;
 
   const create = async () => {
     if (!source) return;
@@ -159,7 +161,8 @@ export function NewServiceSheet({
     setError(null);
     try {
       const variables = Object.keys(parsed.vars).length ? { variables: parsed.vars } : {};
-      const run = kind === "web" ? (portN ? { port: portN } : undefined) : kind === "cron" ? { type: kind, schedule: schedule.trim() } : { type: kind };
+      const web = { ...(portN ? { port: portN } : {}), ...(health.trim() ? { health_path: health.trim() } : {}) };
+      const run = kind === "web" ? (Object.keys(web).length ? web : undefined) : kind === "cron" ? { type: kind, schedule: schedule.trim() } : { type: kind };
       const registry = from === "image" && regUser.trim() && regPassword ? { registry: { username: regUser.trim(), password: regPassword } } : {};
       // The new databases first, each placed beside the service, so their variables are in the
       // first deploy. One made before a failure stays in the project, and a retry links it.
@@ -311,6 +314,10 @@ export function NewServiceSheet({
                   Port <span className="font-normal">{from === "repo" && plan?.plan ? `detected ${plan.plan.port}` : "default 8080"}</span>
                 </Label>
                 <input value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} placeholder={String(plan?.plan?.port ?? 8080)} inputMode="numeric" className={field} />
+                <Label>
+                  Health check path <span className="font-normal">optional; none: the port accepting</span>
+                </Label>
+                <input value={health} onChange={(e) => setHealth(e.target.value)} placeholder="/healthz" spellCheck={false} className={`${field} font-mono ${health && !health.startsWith("/") ? "border-danger/60" : ""}`} />
               </>
             )}
             {kind === "cron" && (
