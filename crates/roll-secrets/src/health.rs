@@ -24,6 +24,9 @@ pub enum Issue {
     Missing,
     /// A protected environment's value, also set in an unprotected one.
     Exposed,
+    /// A server's credential under a name a framework puts in the browser bundle
+    /// (`NEXT_PUBLIC_`, `VITE_`…): whoever loads the site can read it.
+    Public,
     /// A credential easy to guess (shown to whoever may reveal it).
     Weak,
     /// Its value stops working outside roll within two weeks.
@@ -109,13 +112,13 @@ impl Secrets {
         let dek = self.project(project)?;
         let now = self.db.now_ms()?;
         let empty = dek.fingerprint("");
-        type Row = (String, String, String, String, Option<String>, Option<String>, i64, Option<i64>, Option<String>);
+        type Row = (String, String, String, String, Option<String>, Option<String>, i64, Option<i64>, Option<String>, Option<String>);
         let (envs, rows, reads) = self.db.read(|c| {
             let envs: Vec<envs::EnvRow> = envs::all(c, project)?.into_iter().filter(|e| e.kind == Kind::Standard).collect();
             let rows: Vec<Row> = c.query(
-                "SELECT env_id, path, key, fp, link, refs, updated_at, expires_at, weak FROM secrets WHERE project_id = ? AND owner = '' ORDER BY path, key",
+                "SELECT env_id, path, key, fp, link, refs, updated_at, expires_at, weak, public FROM secrets WHERE project_id = ? AND owner = '' ORDER BY path, key",
                 [project],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?)),
             )?;
             let reads: Vec<(String, String, String)> = c.query(
                 "SELECT env, path, keys FROM audit WHERE project_id = ? AND at >= ? AND action IN ('secrets.reveal', 'secrets.export', 'secrets.resolve', 'sync.push') ORDER BY id DESC LIMIT ?",
@@ -146,7 +149,7 @@ impl Secrets {
         }
         let mut out = vec![];
         let mut have: HashSet<(String, String, String)> = HashSet::new();
-        for (env_id, path, key, fp, link, refs, updated_at, expires_at, weak) in &rows {
+        for (env_id, path, key, fp, link, refs, updated_at, expires_at, weak, public) in &rows {
             let Some(e) = slug.get(env_id.as_str()) else { continue };
             have.insert((e.slug.clone(), path.clone(), key.clone()));
             if !caller.allows(Action::Read, &Scope::at(project, &e.slug, path)) {
@@ -165,6 +168,15 @@ impl Secrets {
                 && caller.allows(Action::Reveal, &Scope::at(project, &e.slug, path))
             {
                 add(Issue::Weak, w.clone());
+            }
+            // Judged at write by the value; a link's secret field (or an older row's name) here, and
+            // only for a name a framework sends to browsers.
+            let linked = || link.as_deref().and_then(|l| serde_json::from_str::<crate::Link>(l).ok());
+            let judged = || crate::strength::browser_exposure(key, None, self.secret_field(linked().as_ref()).as_deref());
+            if let Some(p) = public.clone().or_else(|| crate::strength::browser_named(key).then(judged).flatten()) {
+                // What kind of credential it is comes from the value: only for whoever may reveal it.
+                let shown = if caller.allows(Action::Reveal, &Scope::at(project, &e.slug, path)) { p } else { crate::strength::public_without_reveal(&p) };
+                add(Issue::Public, shown);
             }
             if e.protected
                 && link.is_none()

@@ -309,6 +309,8 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind:
                 let comment_now = comment.clone().or_else(|| cur.as_ref().map(|c| c.comment.clone())).unwrap_or_default();
                 let tags_now = tags.clone().or_else(|| cur.as_ref().map(|c| c.tags.clone())).unwrap_or_default();
                 let weak = stored_value.as_ref().and_then(|v| crate::strength::weakness(&item.key, v.expose()));
+                // By the value only: a link's secret field is health's to judge (it asks the provider).
+                let public = crate::strength::browser_exposure(&item.key, stored_value.as_ref().map(|v| v.expose()), None);
                 // Unless the writer said: a new certificate's own date, else the date it had.
                 let expires_now = expires_at.unwrap_or_else(|| value.as_ref().and_then(|v| certificate_expiry(v.expose())).or_else(|| cur.as_ref().and_then(|c| c.expires_at)));
                 let mut what = vec![];
@@ -364,15 +366,15 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind:
                 match &cur {
                     Some(_) => {
                         c.execute(
-                            "UPDATE secrets SET version = ?, value = ?, fp = ?, comment = ?, tags = ?, link = ?, link_state = ?, refs = ?, updated_at = ?, updated_by = ?, expires_at = ?, weak = ? WHERE id = ?",
-                            params![version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, expires_now, weak, id],
+                            "UPDATE secrets SET version = ?, value = ?, fp = ?, comment = ?, tags = ?, link = ?, link_state = ?, refs = ?, updated_at = ?, updated_by = ?, expires_at = ?, weak = ?, public = ? WHERE id = ?",
+                            params![version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, expires_now, weak, public, id],
                         )?;
                     }
                     None => {
                         c.execute(
-                            "INSERT INTO secrets (id, project_id, env_id, path, key, owner, version, value, fp, comment, tags, link, link_state, refs, updated_at, updated_by, expires_at, weak)
-                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            params![id, project, env.id, item.path, item.key, item.owner, version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, expires_now, weak],
+                            "INSERT INTO secrets (id, project_id, env_id, path, key, owner, version, value, fp, comment, tags, link, link_state, refs, updated_at, updated_by, expires_at, weak, public)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            params![id, project, env.id, item.path, item.key, item.owner, version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, expires_now, weak, public],
                         )?;
                         envs::ensure_folders(c, &env.id, &item.path, now)?;
                     }
@@ -576,6 +578,14 @@ impl Secrets {
     /// A person's project (docs/accounts.md) has only what the workspace trusts it for
     /// ([`roll_workspace::Workspace::trusts`]) and its rotators: anyone may put any resource on
     /// their own canvas, and a link reaches a resource as the operator.
+    /// A linked key's field, when its provider says it's secret: `a postgres password`.
+    pub(crate) fn secret_field(&self, link: Option<&Link>) -> Option<String> {
+        let l = link?;
+        let p = self.links.get(&l.kind).ok()?;
+        let f = p.fields().iter().find(|f| f.field == l.field && f.secret)?;
+        Some(format!("a {} {}", l.kind, f.label.to_lowercase()))
+    }
+
     pub(crate) fn members(&self, project: &str) -> Result<BTreeSet<(String, String)>> {
         let p = self.workspace.get(roll_workspace::Scope::All, project).map_err(|e| Error::Internal(e.to_string()))?;
         let mut out: BTreeSet<(String, String)> = p.resources.iter().filter(|r| self.workspace.trusts(&p, r.kind, &r.r#ref)).map(|r| (r.kind.as_str().to_string(), r.r#ref.clone())).collect();

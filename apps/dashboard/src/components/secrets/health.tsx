@@ -10,6 +10,7 @@ const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: b
   { issue: "expired", title: "Expired", what: "Their values stopped working outside roll.", serious: true },
   { issue: "missing", title: "Missing", what: "Required keys an environment doesn't define.", serious: true },
   { issue: "exposed", title: "Exposed", what: "A protected environment's value, also set where more people and less vetted code read it.", serious: true },
+  { issue: "public", title: "In the browser", what: "Server credentials under a name a framework puts in the JavaScript it sends to every visitor (NEXT_PUBLIC_, VITE_, PUBLIC_…): rename the key, or keep the value on the server.", serious: true },
   { issue: "weak", title: "Weak", what: "Credentials easy to guess: New value replaces one with 48 random characters.", serious: false },
   { issue: "expiring", title: "Expiring", what: "Values that stop working outside roll within two weeks.", serious: false },
   { issue: "stale", title: "Stale", what: "Unchanged for longer than their environment allows.", serious: false },

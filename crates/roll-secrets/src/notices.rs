@@ -85,8 +85,8 @@ impl Secrets {
             let findings: Vec<&crate::health::Finding> = health[&project].iter().filter(|f| f.environment == slug && !matches!(f.issue, Issue::Weak | Issue::Unread)).collect();
             let link = self.web_url.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?view=health", w.trim_end_matches('/')));
             let mut parts = vec![];
-            for issue in [Issue::Expired, Issue::Missing, Issue::Exposed, Issue::Expiring, Issue::Stale] {
-                let these: Vec<String> = findings.iter().filter(|f| f.issue == issue).map(|f| format!("{} ({}{})", f.key, f.detail, f.owner.as_ref().map(|o| format!("; ask {o}")).unwrap_or_default())).collect();
+            for issue in [Issue::Expired, Issue::Missing, Issue::Exposed, Issue::Public, Issue::Expiring, Issue::Stale] {
+                let these: Vec<String> = findings.iter().filter(|f| f.issue == issue).map(|f| format!("{} ({}{})", f.key, shown(f), f.owner.as_ref().map(|o| format!("; ask {o}")).unwrap_or_default())).collect();
                 if these.is_empty() {
                     continue;
                 }
@@ -99,7 +99,7 @@ impl Secrets {
                 if let Some(l) = &link {
                     text.push_str(&format!(" {l}"));
                 }
-                let list: Vec<Json> = findings.iter().map(|f| json!({ "issue": f.issue, "path": f.path, "key": f.key, "detail": f.detail })).collect();
+                let list: Vec<Json> = findings.iter().map(|f| json!({ "issue": f.issue, "path": f.path, "key": f.key, "detail": shown(f) })).collect();
                 json!({ "text": text, "content": text, "allowed_mentions": { "parse": [] }, "project": project, "environment": slug, "findings": list, "link": link })
             });
             // The day is claimed either way: health is worked out once a day per environment.
@@ -175,3 +175,9 @@ pub(crate) fn notify_aad(project: &str, env_id: &str) -> String {
     format!("roll-secrets:notify:{project}:{env_id}")
 }
 
+
+/// A finding's detail as a channel may see it: a `public` one says the framework, not what kind of
+/// credential the value is (whoever reads the channel may not reveal it).
+fn shown(f: &crate::health::Finding) -> String {
+    if f.issue == Issue::Public { crate::strength::public_without_reveal(&f.detail) } else { f.detail.clone() }
+}
