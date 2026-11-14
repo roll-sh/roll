@@ -1010,6 +1010,7 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
 async fn a_projects_ca_signs_short_lived_certificates_for_its_names_only() {
     use x509_parser::prelude::*;
     let api = Api::new().await;
+    api.secrets.set_public_api("https://roll.example".into());
     let ca = api.ok(Method::POST, "/cas", Some(json!({ "name": "internal", "domains": ["svc.internal"] }))).await;
     let ca_pem = ca["certificate"].as_str().unwrap().to_string();
     let link = |field: &str, mode: &str, names: Value| json!({ "kind": "pki", "ref": ca["id"], "field": field, "mode": mode, "options": { "names": names, "ttl_minutes": 60, "rotate_days": 7 } });
@@ -1067,6 +1068,27 @@ async fn a_projects_ca_signs_short_lived_certificates_for_its_names_only() {
     assert_eq!((leaf.validity().not_after.timestamp() - leaf.validity().not_before.timestamp()) / 86_400, 3);
     assert_eq!(sign(csr(&["sensor-7.example.com"]), 3).await.0, StatusCode::BAD_REQUEST, "a name outside the CA's domains");
     assert_eq!(sign(csr(&["sensor-7.svc.internal"]), 91).await.0, StatusCode::BAD_REQUEST, "longer than the CA allows");
+    // Revoking: a lost device's certificate by hand, a lease's when it ends. The CA's CRL (public)
+    // lists both, and every certificate names where it is.
+    let id = ca["id"].as_str().unwrap();
+    let crl_url = format!("https://roll.example/v1/secrets/crl/{id}");
+    assert!(der.contents.windows(crl_url.len()).any(|w| w == crl_url.as_bytes()), "the CRL distribution point");
+    let listed = api.ok(Method::GET, &format!("/cas/{id}/certificates"), None).await;
+    assert!(listed.as_array().unwrap().iter().any(|c| c["serial"] == signed["serial"] && c["source"] == "csr") && listed.as_array().unwrap().iter().any(|c| c["source"] == "link"), "{listed}");
+    let revoke_at = format!("/cas/{id}/revoke");
+    let revoke = |serial: Value| api.call(Method::POST, &revoke_at, Some(json!({ "serial": serial })));
+    assert_eq!(revoke(signed["serial"].clone()).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(revoke(json!("00")).await.0, StatusCode::NOT_FOUND);
+    let lease_cert = parse_x509_pem(cert.as_bytes()).unwrap().1;
+    let lease_serial = parse_x509_certificate(&lease_cert.contents).unwrap().1.raw_serial().to_vec();
+    assert_eq!(api.call(Method::DELETE, &format!("/leases/{}", r["leases"][0].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
+    let (s, crl) = api.call(Method::GET, &format!("/v1/secrets/crl/{id}?format=pem"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, pem) = parse_x509_pem(crl.as_str().unwrap().as_bytes()).unwrap();
+    let (_, crl) = parse_x509_crl(&pem.contents).unwrap();
+    crl.verify_signature(ca_cert.public_key()).expect("signed by the CA");
+    let revoked: Vec<Vec<u8>> = crl.iter_revoked_certificates().map(|r| r.raw_serial().to_vec()).collect();
+    assert!(revoked.contains(&leaf.raw_serial().to_vec()) && revoked.contains(&lease_serial), "both revoked: {revoked:?}");
     // A CA a key links to stays.
     assert_eq!(api.call(Method::DELETE, &format!("/cas/{}", ca["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
 }

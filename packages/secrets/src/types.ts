@@ -246,6 +246,8 @@ export type ProjectFindings = { project: string; project_name: string; findings:
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
 /** A project's certificate authority: what it signs for, and its certificate (PEM) for clients to trust. */
 /** A certificate a CA signed for a CSR (`POST …/cas/{id}/sign`): the device keeps its key. */
+/** A certificate a CA signed and that hasn't expired (`GET …/cas/{id}/certificates`). */
+export type CaCertificate = { serial: string; names: string[]; source: "csr" | "link"; not_after: number; issued_at: number; issued_by: string; revoked_at?: number };
 export type SignedCertificate = { certificate: string; ca: string; serial: string; names: string[]; not_after: number };
 export type Ca = { id: string; name: string; certificate: string; domains: string[]; allow_ip: boolean; max_days: number; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };

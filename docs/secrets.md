@@ -584,9 +584,18 @@ TLS certificates for services (mTLS between them), with no CA to run.
   minutes to `max_days`) and everything else are the CA's own, whatever the CSR asks (being a CA
   itself, signing code). It answers `{certificate, ca, serial, names, not_after}`. Checked with
   OpenSSL's CSRs (P-256 and RSA): `openssl verify -x509_strict` passes against the CA.
-- A certificate can't be taken back: there are no revocation lists, so lifetimes stay short, and a
-  lease that ends leaves its certificate valid until it expires. A CA a key links to can't be
-  deleted; deleting one leaves what it signed valid until it expires.
+- Every certificate a CA signs is listed until it expires (`GET …/cas/{id}/certificates`: serial,
+  names, `csr` or `link`, its end, who asked, when it was revoked; `roll secrets cas certs NAME`).
+  `…/cas/{id}/revoke {serial}` (`write`, audited; `roll secrets cas revoke NAME SERIAL`, the
+  dashboard's Revoke) takes one back, a lost device's, say; roll revokes a lease's certificate
+  when the lease ends and a managed one's when its grace runs out. The CA signs a CRL of the
+  revoked certificates that haven't expired, made on each request and good for an hour:
+  `GET /v1/secrets/crl/{id}` (DER, `application/pkix-crl`; `?format=pem`), without a token, as any
+  CRL is fetched. Every certificate names it in its CRL distribution point (rolld's
+  `ROLL_CODE_PUBLIC_URL`). Checked with OpenSSL: `openssl verify -crl_check` refuses a revoked one
+  (`certificate revoked`) and passes the rest. Clients that don't check CRLs still trust a revoked
+  certificate until it ends, so lifetimes stay short. A CA a key links to can't be deleted;
+  deleting one leaves what it signed valid until it expires.
 
 ## Consumption
 
@@ -616,7 +625,8 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
-roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain] | rm ID
+roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain]
+                     | certs ID | revoke ID SERIAL | rm ID
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -1456,6 +1466,9 @@ isn't in the workspace is 404.
 | `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
 | `POST /cas` | `{name, domains, allow_ip?, max_days?}` | 201 `Ca` (`admin`) |
 | `DELETE /cas/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `GET /cas/{id}/certificates` | | `CaCertificate[]`: `{serial, names, source, not_after, issued_at, issued_by, revoked_at?}`, what it signed that hasn't expired, newest first (`read`) |
+| `POST /cas/{id}/revoke` | `{serial}` | 204; 404 for a serial it didn't sign or that has expired (`write`, audited) |
+| `GET /v1/secrets/crl/{id}` | | the CA's CRL, DER (`application/pkix-crl`) or `?format=pem`; no token |
 | `POST /cas/{id}/sign` | `{csr, days?, ttl_minutes?}` | `{certificate, ca, serial, names, not_after}` (`write`, audited); 400 for a name outside the policy or a lifetime past `max_days` |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |

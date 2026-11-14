@@ -312,6 +312,7 @@ async fn every_control_plane_route_needs_the_operator_token() {
         ("/v1/accounts", "people's accounts: sign-in, sessions and invites are a person's, never a token's"),
         ("/v1/secrets/shares/{id}", "a one-time share: the link's key is the credential"),
         ("/v1/secrets/login", "workload identities: the workload's OIDC token is the credential"),
+        ("/v1/secrets/crl/{id}", "a CA's revocation list: public, as any CRL"),
     ];
     let unscoped: Vec<_> = scoped
         .lock()
