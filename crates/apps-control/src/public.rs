@@ -362,7 +362,13 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
         h.insert(header::CONTENT_RANGE, HeaderValue::from_str(&cr).expect("ascii"));
     }
     h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("ascii"));
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static(if ctype.starts_with("text/html") { "no-cache" } else { "public, max-age=300" }));
+    let cache = match () {
+        _ if ctype.starts_with("text/html") => "no-cache",
+        // Its name changes whenever its bytes do.
+        _ if status / 100 == 2 && crate::sites::fingerprinted(name) => "public, max-age=31536000, immutable",
+        _ => "public, max-age=300",
+    };
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     h.insert(HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff"));
     // Its own `_headers` over roll's (each checked when the file was read).
     let mut set = std::collections::HashSet::new();

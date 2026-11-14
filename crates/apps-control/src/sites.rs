@@ -37,6 +37,26 @@ const GZIP_KEPT: usize = 32 << 20;
 /// Files smaller than this aren't worth it.
 pub const GZIP_MIN: u64 = 1024;
 
+/// Whether a file's name says it never changes: a build's own asset directory (Vite's
+/// `assets/`, Astro's `_astro/`, CRA's `static/`) and a content hash in its name
+/// (`index-BxR2a9Kd.js`, `main.8f3a2b1c.css`), or anything under Next's `_next/static/`. Such a
+/// file is cached for a year (a site's `_headers` can say otherwise).
+pub fn fingerprinted(name: &str) -> bool {
+    if name.starts_with("_next/static/") {
+        return true;
+    }
+    if !["assets/", "_astro/", "static/js/", "static/css/", "static/media/"].iter().any(|d| name.starts_with(d)) {
+        return false;
+    }
+    let file = name.rsplit('/').next().unwrap_or(name);
+    let stem = file.split_once('.').map_or(file, |(s, _)| s);
+    // The hash is a segment of its own, after `-` or `.`: 8 to 64 letters and digits, both.
+    let rest = &file[stem.len()..];
+    stem.split('-').skip(1).chain(rest.split('.')).any(|seg| {
+        (8..=64).contains(&seg.len()) && seg.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') && seg.bytes().any(|b| b.is_ascii_digit()) && seg.bytes().any(|b| b.is_ascii_alphabetic())
+    })
+}
+
 /// Whether a type shrinks when compressed (text, scripts, data, SVG, WebAssembly, older
 /// fonts); images, video, woff2 and archives already are.
 pub fn compressible(ctype: &str) -> bool {
@@ -279,6 +299,16 @@ pub fn resolve<'a>(site: &'a Site, path: &str, spa: bool) -> Option<(&'a str, u1
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fingerprinted_files_are_the_builds_hashed_assets() {
+        for yes in ["assets/index-BxR2a9Kd.js", "assets/logo-a1b2c3d4.svg", "_astro/index.DjX3kL9p.css", "static/js/main.8f3a2b1c.js", "static/media/font.5e6f7a8b9c.woff2", "_next/static/chunks/app.js", "_next/static/abc/_buildManifest.js"] {
+            assert!(fingerprinted(yes), "{yes}");
+        }
+        for no in ["index.html", "assets/app.js", "assets/jquery-3.7.1.min.js", "assets/report-20240101.pdf", "img/photo-a1b2c3d4.png", "assets/polyfills-legacy.js", "static/robots.txt"] {
+            assert!(!fingerprinted(no), "{no}");
+        }
+    }
 
     #[test]
     fn a_sites_index_leaves_out_what_isnt_a_plain_file() {
