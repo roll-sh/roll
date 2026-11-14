@@ -258,10 +258,19 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `_ilm/explain` and `_lifecycle/explain` as Elasticsearch prints them, waking a sleeping
    cluster only when an action falls due. The dashboard's Data streams panel already sets a
    stream's retention (and shows ILM-managed streams' policy); it takes effect once this lands.
-3. **Vector search's cost and speed** (scale to zero meets HNSW): RAM loaded and idle, cold start
-   to the first `knn` answer, indexing, latency and recall@10 (filtered, in `rrf`), store bytes,
-   against Elasticsearch 9.5.5 and OpenSearch 3.9 on 1M × 384 dims; then fix where roll loses. In
-   progress (`wip/search-vectors`).
+3. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
+   Elasticsearch 9.5.5 and OpenSearch 3.9). Roll leads on indexing (4,735 docs/s against 3,585
+   and 2,978 at 8 clients), merged `knn` (1.9 ms CPU against 6.1 and 4.9), `rrf` (3.2 against 13.8
+   and 8.3), cold start (36 ms to the first `knn` against a ~25-29 s node start) and memory
+   (34 MiB idle against 2.5 and 4.1 GiB); filtered `knn` now reads its filter as a bitset (about
+   half the CPU, identical hits). It loses on store bytes (2.67 GB against Elasticsearch's 1.71):
+   vectors are stored twice, in the vector field and in `_source`. In progress
+   (`wip/search-source-vectors`): `_source` stored without them under
+   `index.mapping.exclude_source_vectors` (Elasticsearch 9's default) and rebuilt from the vector
+   field for every reader. Then: 1-bit quantization quality (rescoring only the best candidates
+   halves CPU but drops recall to 0.43), AVX-512 distances for float HNSW indexing (1,250 against
+   1,174 µs/doc), searching unmerged segments in parallel (filtered latency 2-3x Elasticsearch's
+   there).
 4. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (in progress). Landed: the
    index browser and console on the per-index routes, an API keys panel in Settings, the mapping
    view as a field table, OpenSearch-flavor clusters' own clients and `OPENSEARCH_*` variables,
