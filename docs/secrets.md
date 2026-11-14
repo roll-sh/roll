@@ -575,6 +575,11 @@ numbers, tokens, notes) in its own database without holding a key.
   `…/rewrap` (`write`) re-encrypts under the newest without the plaintext leaving roll, and
   `PATCH …/transit/{name} {min_decrypt_version}` retires older versions. `DELETE …/transit/{name}?confirm=<name>`
   deletes a key for good: what it encrypted can't be decrypted again.
+- A failed decrypt or rewrap is audited too (probing contexts leaves a trace). A backup carries every
+  key's versions, in the archive sealed to its taker's key, so a restore (here or on another server)
+  still opens what they encrypted; ciphertexts are bound to their context, not to the key's id.
+- Nonces are random (96-bit): rotate a key well before 2³² encryptions under one version, the bound
+  AES-GCM sets for random nonces (`…/rotate`, then `…/rewrap` what matters).
 
 ## Consumption
 

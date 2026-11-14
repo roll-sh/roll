@@ -84,8 +84,10 @@ fn version_aad(project: &str, id: &str, v: u32) -> String {
     format!("roll-secrets:transit:{project}:{id}:{v}")
 }
 
-fn data_aad(id: &str, context: Option<&str>) -> String {
-    format!("roll-transit:{id}:{}", context.unwrap_or(""))
+/// What a ciphertext is bound to besides its key: the context. Not the key's id, which a restore
+/// into another project changes (the key's bytes, random per version, keep keys apart).
+fn data_aad(context: Option<&str>) -> String {
+    format!("roll-transit:v1:{}", context.unwrap_or(""))
 }
 
 fn check_name(n: &str) -> Result<()> {
@@ -131,12 +133,12 @@ impl Opened {
 
     fn encrypt(&self, plain: &[u8], context: Option<&str>) -> String {
         let (v, key) = self.latest();
-        format!("roll:v{v}:{}", URL_SAFE_NO_PAD.encode(seal_with(key, &data_aad(&self.id, context), plain)))
+        format!("roll:v{v}:{}", URL_SAFE_NO_PAD.encode(seal_with(key, &data_aad(context), plain)))
     }
 
     fn decrypt(&self, ct: &str, context: Option<&str>) -> Result<zeroize::Zeroizing<Vec<u8>>> {
         let (v, raw) = parse(ct)?;
-        open_with(self.version(v)?, &data_aad(&self.id, context), &raw).map_err(|_| Error::BadRequest("the ciphertext doesn't open under this key and context".into()))
+        open_with(self.version(v)?, &data_aad(context), &raw).map_err(|_| Error::BadRequest("the ciphertext doesn't open under this key and context".into()))
     }
 }
 
@@ -274,16 +276,21 @@ impl Secrets {
         caller.need(Action::Reveal, &Scope::project(project))?;
         batch_limits(items.iter().map(|i| i.ciphertext.len()))?;
         let key = self.transit_open(project, name)?;
-        let out: Vec<Value> = items
+        let out: Result<Vec<Value>> = items
             .iter()
             .map(|i| {
                 check_context(i.context.as_deref())?;
                 let plain = key.decrypt(&i.ciphertext, i.context.as_deref())?;
                 Ok(Value::new(base64::engine::general_purpose::STANDARD.encode(plain.as_slice())))
             })
-            .collect::<Result<_>>()?;
-        self.audit_now(project, caller, "transit.decrypt", None, None, &[], &format!("decrypted {} with {name}", crate::write::plural(out.len(), "ciphertext")));
-        Ok(out)
+            .collect();
+        // A failure is audited too: probing contexts or ciphertexts leaves a trace.
+        let summary = match &out {
+            Ok(v) => format!("decrypted {} with {name}", crate::write::plural(v.len(), "ciphertext")),
+            Err(_) => format!("failed to decrypt with {name} ({} given)", crate::write::plural(items.len(), "ciphertext")),
+        };
+        self.audit_now(project, caller, "transit.decrypt", None, None, &[], &summary);
+        out
     }
 
     /// Re-encrypt under the newest version, without the plaintext leaving roll.
@@ -291,14 +298,18 @@ impl Secrets {
         caller.need(Action::Write, &Scope::project(project))?;
         batch_limits(items.iter().map(|i| i.ciphertext.len()))?;
         let key = self.transit_open(project, name)?;
-        items
+        let out: Result<Vec<String>> = items
             .iter()
             .map(|i| {
                 check_context(i.context.as_deref())?;
                 let plain = key.decrypt(&i.ciphertext, i.context.as_deref())?;
                 Ok(key.encrypt(&plain, i.context.as_deref()))
             })
-            .collect()
+            .collect();
+        if out.is_err() {
+            self.audit_now(project, caller, "transit.rewrap", None, None, &[], &format!("failed to rewrap with {name} ({} given)", crate::write::plural(items.len(), "ciphertext")));
+        }
+        out
     }
 
     /// A fresh 256-bit data key and its ciphertext under this key, for envelope encryption done
@@ -312,6 +323,64 @@ impl Secrets {
         let ciphertext = key.encrypt(data.as_ref(), context.as_deref());
         self.audit_now(project, caller, "transit.datakey", None, None, &[], &format!("made a data key with {name}"));
         Ok(json!({ "plaintext": base64::engine::general_purpose::STANDARD.encode(data.as_ref()), "ciphertext": ciphertext }))
+    }
+}
+
+/// A key in a backup (backup.rs): its versions' bytes, in an archive sealed to its taker's key, so
+/// a restore opens what it encrypted.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ArchivedKey {
+    pub name: String,
+    pub min_decrypt_version: u32,
+    /// (version, key as base64url, made at)
+    pub versions: Vec<(u32, String, i64)>,
+}
+
+impl Secrets {
+    pub(crate) fn transit_export(&self, project: &str) -> Result<Vec<ArchivedKey>> {
+        let names: Vec<String> = self.db.read(|c| c.query("SELECT name FROM transit_keys WHERE project_id = ? ORDER BY name", [project], |r| r.get(0)))?;
+        let mut out = vec![];
+        for name in names {
+            let o = self.transit_open(project, &name)?;
+            let at: Vec<i64> = {
+                let s: String = self.db.read(|c| c.query_row("SELECT versions FROM transit_keys WHERE id = ?", [&o.id], |r| r.get(0)))?;
+                serde_json::from_str::<Vec<Stored>>(&s).unwrap_or_default().into_iter().map(|s| s.at).collect()
+            };
+            out.push(ArchivedKey { name, min_decrypt_version: o.min, versions: o.versions.iter().zip(at).map(|((v, k), at)| (*v, URL_SAFE_NO_PAD.encode(k.as_ref()), at)).collect() });
+        }
+        Ok(out)
+    }
+
+    /// Load archived keys; a name the project already has is a warning, not a second key.
+    pub(crate) fn transit_import(&self, project: &str, keys: Vec<ArchivedKey>, caller: &Caller) -> Result<Vec<String>> {
+        let dek = self.project(project)?;
+        let now = self.db.now_ms()?;
+        let mut warnings = vec![];
+        for k in keys {
+            let id = names::new_id("tk", 16);
+            let mut stored = vec![];
+            for (v, key, at) in &k.versions {
+                let sealed = dek.seal(&version_aad(project, &id, *v), &Value::new(key.clone()));
+                stored.push(Stored { v: *v, key: URL_SAFE_NO_PAD.encode(sealed), at: *at });
+            }
+            if stored.is_empty() {
+                continue;
+            }
+            let done = self.db.write(|c| {
+                if c.query_row("SELECT 1 FROM transit_keys WHERE project_id = ? AND name = ?", [project, k.name.as_str()], |_| Ok(())).optional()?.is_some() {
+                    return Ok::<_, Error>(false);
+                }
+                c.execute(
+                    "INSERT INTO transit_keys (id, project_id, name, versions, min_decrypt_version, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    params![id, project, k.name, serde_json::to_string(&stored).expect("JSON"), k.min_decrypt_version, now, caller.principal],
+                )?;
+                Ok(true)
+            })?;
+            if !done {
+                warnings.push(format!("encryption key {}: the project has one by that name", k.name));
+            }
+        }
+        Ok(warnings)
     }
 }
 

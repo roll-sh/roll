@@ -23,6 +23,9 @@ pub struct Archive {
     pub environments: Vec<ArchivedEnvironment>,
     #[serde(default)]
     pub required: Vec<Required>,
+    /// Encryption keys (transit.rs): their bytes, so a restore still opens what they encrypted.
+    #[serde(default)]
+    pub encryption_keys: Vec<crate::transit::ArchivedKey>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -129,8 +132,10 @@ impl Secrets {
                     secrets: out,
                 });
             }
-            Ok::<_, Error>(Archive { v: V, project: project.to_string(), at: now, environments, required: crate::required::of(c, project)? })
+            Ok::<_, Error>(Archive { v: V, project: project.to_string(), at: now, environments, required: crate::required::of(c, project)?, encryption_keys: vec![] })
         })?;
+        let mut archive = archive;
+        archive.encryption_keys = self.transit_export(project)?;
         let plain = zeroize::Zeroizing::new(serde_json::to_vec(&archive).expect("JSON"));
         let sealed = crate::crypto::seal_to(recipient, &context(project), &plain).map_err(Error::BadRequest)?;
         let n: usize = archive.environments.iter().map(|e| e.secrets.len()).sum();
@@ -232,6 +237,7 @@ impl Secrets {
                 warnings.push(format!("{} policy: {err}", e.slug));
             }
         }
+        warnings.extend(self.transit_import(project, archive.encryption_keys, caller)?);
         let now = self.db.now_ms()?;
         self.db.write(|c| audit::record(c, project, caller, "project.restore", None, None, &[], &format!("restored {environments} environments and {secrets} keys from {}'s backup", archive.project), now))?;
         Ok(Restored { environments, secrets, warnings })

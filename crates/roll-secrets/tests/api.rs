@@ -1034,6 +1034,16 @@ async fn an_encryption_key_encrypts_for_apps_and_never_leaves_roll() {
     let dk = api.ok(Method::POST, "/transit/cards/datakey", Some(json!({}))).await;
     assert_eq!(base64::engine::general_purpose::STANDARD.decode(dk["plaintext"].as_str().unwrap()).unwrap().len(), 32);
     assert_eq!(api.call(Method::POST, "/transit/cards/decrypt", Some(json!({ "ciphertext": dk["ciphertext"] }))).await.1["plaintext"], dk["plaintext"]);
+    // A backup carries the key: restored into another project, it still opens what it encrypted.
+    let secret = [9u8; 32];
+    let b = api.ok(Method::POST, "/backup", Some(json!({ "recipient": roll_secrets::crypto::public_key(&secret) }))).await;
+    let sealed: roll_secrets::crypto::Sealed = serde_json::from_value(b["sealed"].clone()).unwrap();
+    let archive: Value = serde_json::from_slice(&roll_secrets::crypto::open_sealed(&secret, b["context"].as_str().unwrap(), &sealed).unwrap()).unwrap();
+    let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "restored" }))).await;
+    let to = |p: &str| format!("/v1/secrets/projects/{}{p}", other["id"].as_str().unwrap());
+    api.ok(Method::POST, &to("/restore"), Some(archive)).await;
+    let back = api.call(Method::POST, &to("/transit/cards/decrypt"), Some(json!({ "ciphertext": ct2, "context": "order:42" }))).await;
+    assert_eq!(back.1["plaintext"], b64(b"4111 1111 1111 1111"), "{back:?}");
     // Deleting makes everything unreadable for good: only with the name repeated.
     assert_eq!(api.call(Method::DELETE, "/transit/cards", None).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(api.call(Method::DELETE, "/transit/cards?confirm=cards", None).await.0, StatusCode::NO_CONTENT);

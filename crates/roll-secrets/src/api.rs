@@ -22,6 +22,9 @@ use std::sync::Arc;
 type S = State<Arc<Secrets>>;
 type Q = Query<HashMap<String, String>>;
 
+/// A transit batch: 4 MiB of plaintext as base64 in JSON.
+const TRANSIT_BODY: usize = 6 << 20;
+
 pub fn router(s: Arc<Secrets>) -> Router {
     const P: &str = "/v1/secrets/projects/{project}";
     const E: &str = "/v1/secrets/projects/{project}/environments/{env}";
@@ -87,9 +90,9 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/transit"), get(transit_keys).post(add_transit_key))
         .route(&format!("{P}/transit/{{name}}"), axum::routing::patch(config_transit_key).delete(delete_transit_key))
         .route(&format!("{P}/transit/{{name}}/rotate"), post(rotate_transit_key))
-        .route(&format!("{P}/transit/{{name}}/encrypt"), post(transit_encrypt))
-        .route(&format!("{P}/transit/{{name}}/decrypt"), post(transit_decrypt))
-        .route(&format!("{P}/transit/{{name}}/rewrap"), post(transit_rewrap))
+        .route(&format!("{P}/transit/{{name}}/encrypt"), post(transit_encrypt).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/decrypt"), post(transit_decrypt).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
+        .route(&format!("{P}/transit/{{name}}/rewrap"), post(transit_rewrap).layer(axum::extract::DefaultBodyLimit::max(TRANSIT_BODY)))
         .route(&format!("{P}/transit/{{name}}/datakey"), post(transit_datakey))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
