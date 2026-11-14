@@ -362,6 +362,14 @@ impl Secrets {
     /// Every effective value of a folder (`…/values`, `roll run`, an app's start). Audited as
     /// `action` by `consumer`.
     pub fn values(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, caller: &Caller) -> Result<Values> {
+        self.values_for(project, slug, path, resolve, consumer, true, caller)
+    }
+
+    /// [`Secrets::values`], with `dynamic: false` for a reader that can't renew a lease (External
+    /// Secrets Operator, a cron): a dynamic key is left out (and named in `dynamic`) instead of
+    /// issuing a fresh credential each read.
+    #[allow(clippy::too_many_arguments)]
+    pub fn values_for(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, caller: &Caller) -> Result<Values> {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         let narrowed = self.caller_for(project, slug, caller)?;
@@ -370,6 +378,7 @@ impl Secrets {
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let who = consumer.unwrap_or(&caller.principal).to_string();
         let mut r = Resolver::new(self, project, &dek, caller, resolve, &who);
+        r.no_dynamic = !dynamic;
         let mut values = BTreeMap::new();
         let mut problems = vec![];
         let mut withheld = vec![];
@@ -377,6 +386,9 @@ impl Secrets {
         for e in &entries {
             if names::sensitive(&e.row.tags) && !caller.runtime {
                 withheld.push(e.row.key.clone());
+                continue;
+            }
+            if !dynamic && e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic) {
                 continue;
             }
             let (v, problem) = r.entry(e);
@@ -781,7 +793,7 @@ pub(crate) struct Resolver<'a> {
     /// Dynamic credentials issued during this resolve, by (environment, kind, ref, credential).
     issued: BTreeMap<(String, String, String, String), std::result::Result<IssuedDynamic, String>>,
     /// Refuse dynamic links instead of issuing (syncs: a short-lived credential would expire at
-    /// the target).
+    /// the target; readers that ask for `dynamic=false`).
     pub no_dynamic: bool,
 }
 
@@ -868,7 +880,7 @@ impl<'a> Resolver<'a> {
                 let p = self.s.links.get(&l.kind).map_err(|e| e.to_string())?;
                 p.read(&l.r#ref, &l.field, l).map_err(|err| format!("{} {}: {err}", l.kind, l.r#ref))
             }
-            Some(l) if l.mode == Mode::Dynamic && self.no_dynamic => Err(format!("{} {} is dynamic: short-lived credentials aren't synced", l.kind, l.r#ref)),
+            Some(l) if l.mode == Mode::Dynamic && self.no_dynamic => Err(format!("{} {} is dynamic: short-lived credentials aren't issued to a sync or a read with dynamic=false", l.kind, l.r#ref)),
             Some(l) if l.mode == Mode::Dynamic => {
                 let cred = self.s.links.credential(l).unwrap_or("default").to_string();
                 let group = (e.row.env_id.clone(), l.kind.clone(), l.r#ref.clone(), format!("{cred}:{}", json(&l.options)));

@@ -507,6 +507,9 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
     // As it was after a change, or at a time: what was stored then.
     let num = |k: &str| q.get(k).map(|v| v.parse::<i64>().map_err(|_| Error::BadRequest(format!("{k} is a number")))).transpose();
     let (seq, at) = (num("seq")?, num("at")?);
+    // A reader that mustn't take a partial answer (External Secrets Operator writes what it gets):
+    // any problem fails the read, so it keeps what it had.
+    let strict = flag(&q, "strict", false);
     let (v, as_of, digest) = if seq.is_some() || at.is_some() {
         let (n, v) = blocking(s, move |s| s.values_at(&project, &env, &path_of(&q), seq, at, &c)).await?;
         (v, Some(n), None)
@@ -514,13 +517,25 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
         // With `digest=1` (a watch): the folder's digest (`…/digest`), taken just before the read,
         // so a write landing after it is a change. Asked for, since it costs about a read.
         let want = flag(&q, "digest", false);
+        let dynamic = flag(&q, "dynamic", true);
         blocking(s, move |s| {
             let path = path_of(&q);
             let digest = if want { s.digest(&project, &env, &path, &c).ok() } else { None };
-            s.values(&project, &env, &path, resolve, None, &c).map(|v| (v, None, digest))
+            let v = s.values_for(&project, &env, &path, resolve, None, dynamic, &c)?;
+            if strict && !v.problems.is_empty() {
+                // Nothing is answered, so nothing this read issued may outlive it.
+                for lease in &v.leases {
+                    s.revoke_leases_where("id = ?", lease);
+                }
+            }
+            Ok::<_, Error>((v, None, digest))
         })
         .await?
     };
+    if strict && !v.problems.is_empty() {
+        let keys: Vec<&str> = v.problems.iter().map(|p| p.key.as_str()).collect();
+        return Err(Error::Conflict("unresolved", format!("{} didn't resolve: {} (strict: nothing is answered)", keys.len(), keys.join(", "))));
+    }
     let r = match format {
         None if as_of.is_some() => {
             let mut j = serde_json::to_value(&v).expect("JSON");

@@ -815,6 +815,19 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     let renewed = api.ok(Method::POST, &format!("/leases/{lease}/renew"), Some(json!({ "ttl_minutes": 120 }))).await;
     assert!(renewed["expires_at"].as_i64().unwrap() > before + 60 * 60_000);
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
+    // A reader that can't renew (External Secrets Operator) asks for none: the key is left out
+    // (named in `dynamic`), no lease. With `strict`, a key that doesn't resolve fails the whole
+    // read, so the reader keeps what it had instead of writing an empty value.
+    let pulled = api.ok(Method::GET, "/environments/staging/values?dynamic=false&strict=1", None).await;
+    assert!(pulled["values"].get("TEMP_KEY").is_none() && pulled["dynamic"] == json!(["TEMP_KEY"]), "{pulled}");
+    assert_eq!((pulled["leases"].as_array().map(Vec::len), api.fake.live_keys.lock().unwrap().len()), (Some(0), 3));
+    api.set("staging", "BROKEN", "${NOPE}").await;
+    let (s, e) = api.call(Method::GET, "/environments/staging/values?dynamic=false&strict=1", None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("unresolved")), "{e}");
+    // Dynamic keys asked for, and the read refused: what it issued is revoked, nothing outlives it.
+    let (s, _) = api.call(Method::GET, "/environments/staging/values?strict=1", None).await;
+    assert_eq!((s, api.fake.live_keys.lock().unwrap().len()), (StatusCode::CONFLICT, 3));
+    api.ok(Method::DELETE, "/environments/staging/secrets/BROKEN", None).await;
 
     // An environment that goes takes its managed credentials with it.
     api.ok(Method::POST, "/environments", Some(json!({ "slug": "tmp" }))).await;

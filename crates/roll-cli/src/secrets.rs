@@ -239,6 +239,24 @@ pub enum Secrets {
         #[arg(long, conflicts_with = "paths")]
         staged: bool,
     },
+    /// Pull the environment's folder into Kubernetes with External Secrets Operator: makes a token
+    /// for it and prints the token's Secret, a SecretStore and an ExternalSecret (`| kubectl apply -f -`).
+    Kubernetes {
+        /// The Secret ESO writes, and the prefix of the others (default: the environment's).
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        namespace: Option<String>,
+        /// How often ESO reads again (each read is audited).
+        #[arg(long, default_value = "1h")]
+        refresh: String,
+        /// roll's URL as the cluster reaches it (default: this CLI's).
+        #[arg(long)]
+        url: Option<String>,
+        /// Days until the token expires.
+        #[arg(long)]
+        ttl_days: Option<i64>,
+    },
     /// Print the resolved values: dotenv, json, shell, yaml, docker (`--env-file`) or kubernetes (a Secret manifest).
     Export {
         #[arg(long, default_value = "dotenv")]
@@ -1441,6 +1459,57 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 bail!("{what} in {files} {}: move {it} out of the code (roll run puts values in the environment)", if files == 1 { "file" } else { "files" });
             }
             eprintln!("No values of this project in {} {}", files.len(), if files.len() == 1 { "file" } else { "files" });
+        }
+        Secrets::Kubernetes { name, namespace, refresh, url, ttl_days } => {
+            let name = name.unwrap_or_else(|| c.at.env.to_ascii_lowercase().replace('_', "-"));
+            let dns = |v: &str, max: usize| v.len() <= max && !v.is_empty() && v.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') && !v.starts_with('-') && !v.ends_with('-');
+            if !dns(&name, 63 - "-roll-token".len()) || namespace.as_deref().is_some_and(|n| !dns(n, 63)) {
+                bail!("--name and --namespace are lowercase letters, digits and '-' (pass --name when the environment's slug isn't one)");
+            }
+            if !refresh.chars().last().is_some_and(|u| "smh".contains(u)) || refresh[..refresh.len() - 1].parse::<u32>().is_err() {
+                bail!("--refresh is a number of s, m or h (1h)");
+            }
+            let server = url.unwrap_or_else(|| c.api.base.clone());
+            let server = server.trim_end_matches('/');
+            if let Ok(u) = reqwest::Url::parse(server)
+                && u.host_str().is_some_and(|h| h == "localhost" || h.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()))
+            {
+                eprintln!("note: {server} is this machine's own address; pass --url with one the cluster reaches");
+            }
+            let mut body = json!({ "name": format!("k8s-{name}"), "actions": ["read", "reveal"], "environments": [c.at.env] });
+            if c.at.path != "/" {
+                body["paths"] = json!([c.at.path]);
+            }
+            if let Some(d) = ttl_days {
+                body["ttl_days"] = json!(d);
+            }
+            let token = c.call(Method::POST, &format!("{}/tokens", c.base()), Some(body)).await?;
+            let mut query = "dynamic=false&strict=1".to_string();
+            if c.at.path != "/" {
+                query.push_str(&format!("&path={}", enc(&c.at.path)));
+            }
+            let q = |v: &str| serde_json::to_string(v).expect("a string");
+            let ns = namespace.map(|n| format!("\n  namespace: {n}")).unwrap_or_default();
+            // `urlquery`: a key can't add its own query (`staging/values?dynamic=true&x=`).
+            let store = format!("{server}{}/environments/{{{{ .remoteRef.key | urlquery }}}}/values?{query}", c.base());
+            println!(
+                "# roll secrets {}:{} ({}), pulled by External Secrets Operator (docs/secrets.md).\n\
+                 apiVersion: v1\nkind: Secret\nmetadata:\n  name: {name}-roll-token{ns}\n  labels:\n    external-secrets.io/type: webhook\n\
+                 stringData:\n  token: {}\n---\n\
+                 apiVersion: external-secrets.io/v1\nkind: SecretStore\nmetadata:\n  name: {name}-roll{ns}\nspec:\n  provider:\n    webhook:\n\
+                 \x20     url: {}\n      headers:\n        Authorization: \"Bearer {{{{ .auth.token }}}}\"\n\
+                 \x20     result:\n        jsonPath: \"$.values{{{{ with .remoteRef.property }}}}.{{{{ . }}}}{{{{ end }}}}\"\n\
+                 \x20     secrets:\n        - name: auth\n          secretRef:\n            name: {name}-roll-token\n---\n\
+                 apiVersion: external-secrets.io/v1\nkind: ExternalSecret\nmetadata:\n  name: {name}{ns}\nspec:\n  refreshInterval: {refresh}\n\
+                 \x20 secretStoreRef:\n    name: {name}-roll\n    kind: SecretStore\n  target:\n    name: {name}\n  dataFrom:\n    - extract:\n        key: {}",
+                c.at.env,
+                c.at.path,
+                c.project,
+                q(&s(&token["token"])),
+                q(&store),
+                q(&c.at.env),
+            );
+            eprintln!("Made token {} for {}:{}; it's only in the output above. Apply it with: | kubectl apply -f -", s(&token["id"]), c.at.env, c.at.path);
         }
         Secrets::Export { format, name, namespace, change, at } => {
             let at = at.as_deref().map(when).transpose()?;
