@@ -583,6 +583,7 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
+roll secrets kubernetes [--name N] [--namespace NS] [--refresh 1h] [--url URL]   # ESO manifests
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -1066,8 +1067,12 @@ restart or a reloader picks up a change.
 
 A cluster whose API server isn't public (a private EKS endpoint, a cluster on a private network)
 can pull instead, with [External Secrets Operator](https://external-secrets.io)'s webhook
-provider: the cluster calls roll, and roll never calls the cluster. One `SecretStore` per project
-serves a whole environment (`dataFrom`) and single keys (`data` with `property`):
+provider: the cluster calls roll, and roll never calls the cluster.
+`roll secrets -e production [--path /api] kubernetes [--namespace shop] [--url https://…] | kubectl
+apply -f -` makes a token for the environment and folder and prints all three objects below; the
+dashboard's Export menu has the same ("External Secrets Operator…", the manifests shown once). One
+`SecretStore` per project serves a whole environment (`dataFrom`) and single keys (`data` with
+`property`):
 
 ```yaml
 apiVersion: v1
