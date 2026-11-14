@@ -667,6 +667,7 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
     assert_eq!(call(other, "/v1/previews".into()).await, (200, "[]".to_string()));
     assert_eq!(call(other, format!("/v1/previews/{}", p.id)).await.0, 404);
     assert_eq!(call(other, format!("/v1/previews/{}/env", p.id)).await.0, 404);
+    assert_eq!(call(other, format!("/v1/previews/{}/qr.png", p.id)).await.0, 404, "its link with the access token, as a QR code");
     assert_eq!(call(other, format!("/v1/previews/projects/{}/settings", e.project)).await.0, 404);
     // Their own project's: there.
     let mine = e.ws.create("usr_b", "mine", "", None).unwrap();
@@ -674,6 +675,8 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
     // A token (no signed-in person) and an admin see it.
     assert_eq!(call(None, format!("/v1/previews/{}", p.id)).await.0, 200);
     assert_eq!(call(Some(("usr_c", true)), format!("/v1/previews/{}", p.id)).await.0, 200);
+    let (status, png) = call(None, format!("/v1/previews/{}/qr.png", p.id)).await;
+    assert_eq!((status, png.contains("PNG")), (200, true), "a phone opens it by scanning");
 }
 
 /// A variable set while a deploy is still going, then removed, is removed from the backend too:

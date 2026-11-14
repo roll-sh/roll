@@ -1,8 +1,8 @@
-import { ArrowUpRight, ExternalLink } from "lucide-react";
+import { ArrowUpRight, ExternalLink, Smartphone } from "lucide-react";
 import { useState } from "react";
 import type { PreviewEnvironment } from "@/lib/code-api";
 import type { PreviewKind } from "@/lib/previews-api";
-import { PREVIEW_KIND_ICON } from "../workspace/preview-sheet";
+import { PhoneCode, PREVIEW_KIND_ICON } from "../workspace/preview-sheet";
 import { host, money, STATE_LABEL, StateDot } from "../workspace/previews-common";
 import { a11yWords, previewsApi, thanMain } from "@/lib/previews-api";
 import { errorText } from "../workspace/previews-common";
@@ -12,6 +12,8 @@ import { errorText } from "../workspace/previews-common";
  * it costs, and the way to its project's Previews tab. The change page's panel and its aside.
  */
 export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewEnvironment; compact?: boolean }) {
+  // The service whose link is shown as a QR code, to open on a phone.
+  const [phoneFor, setPhoneFor] = useState<string | null>(null);
   return (
     <div className={compact ? "space-y-2" : "space-y-3"}>
       <p className="flex items-center gap-2 text-[12px] text-muted">
@@ -22,13 +24,28 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
       {env.services.length > 0 && (
         <ul className="space-y-1">
           {env.services.map((s) => (
-            <li key={s.name} className="flex min-w-0 items-center gap-2 text-[12px]">
-              <StateDot state={s.state} />
-              <span className="shrink-0 text-muted">{s.name}</span>
-              <a href={s.url} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-1 font-mono text-[12px] text-accent hover:underline">
-                <span className="truncate">{host(s.url)}</span>
-                <ExternalLink className="size-3 shrink-0" />
-              </a>
+            <li key={s.name} className="text-[12px]">
+              <div className="flex min-w-0 items-center gap-2">
+                <StateDot state={s.state} />
+                <span className="shrink-0 text-muted">{s.name}</span>
+                <a href={s.url} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-1 font-mono text-[12px] text-accent hover:underline">
+                  <span className="truncate">{host(s.url)}</span>
+                  <ExternalLink className="size-3 shrink-0" />
+                </a>
+                {env.id && (
+                  <button
+                    type="button"
+                    onClick={() => setPhoneFor((x) => (x === s.name ? null : s.name))}
+                    aria-pressed={phoneFor === s.name}
+                    aria-label={`Open ${s.name} on a phone`}
+                    title="Open it on a phone: scan the code"
+                    className="ml-auto shrink-0 text-muted hover:text-fg aria-pressed:text-fg"
+                  >
+                    <Smartphone className="size-3.5" strokeWidth={1.5} />
+                  </button>
+                )}
+              </div>
+              {env.id && phoneFor === s.name && <PhoneCode id={env.id} service={s.name} />}
             </li>
           ))}
         </ul>

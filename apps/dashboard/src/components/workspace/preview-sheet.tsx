@@ -1,7 +1,7 @@
-import { Boxes, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
+import { Boxes, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Smartphone, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Confirm } from "@/components/ui";
-import { a11yWords, duration, followLogs, openUrl, previewsApi, screenshotUrl, resourceId, thanMain, type PageCheck, type Preview, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
+import { a11yWords, duration, followLogs, openUrl, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type PageCheck, type Preview, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, type PreviewFeedback } from "./preview-feedback";
@@ -65,6 +65,8 @@ export function PreviewSheet({
 }) {
   const [tab, setTab] = useState<"Overview" | "Activity" | "Logs">("Overview");
   const [busy, setBusy] = useState<string | null>(null);
+  // The service whose link is shown as a QR code, to open on a phone.
+  const [phoneFor, setPhoneFor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const gone = p.desired === "deleted";
@@ -139,10 +141,23 @@ export function PreviewSheet({
                       <span className="text-[11px] text-subtle">{s.state}</span>
                       {s.deployed && <span className="ml-auto font-mono text-[10.5px] text-subtle">{s.deployed.slice(0, 8)}</span>}
                     </div>
-                    <a href={openUrl(s)} target="_blank" rel="noreferrer" className="mt-0.5 flex items-center gap-1 font-mono text-[11px] text-accent hover:underline">
-                      <span className="truncate">{host(s.url)}</span>
-                      <ExternalLink className="size-3 shrink-0" />
-                    </a>
+                    <div className="mt-0.5 flex items-center gap-2">
+                      <a href={openUrl(s)} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-1 font-mono text-[11px] text-accent hover:underline">
+                        <span className="truncate">{host(s.url)}</span>
+                        <ExternalLink className="size-3 shrink-0" />
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => setPhoneFor((x) => (x === s.name ? null : s.name))}
+                        aria-pressed={phoneFor === s.name}
+                        aria-label={`Open ${s.name} on a phone`}
+                        title="Open it on a phone: scan the code"
+                        className="ml-auto shrink-0 text-muted hover:text-fg aria-pressed:text-fg"
+                      >
+                        <Smartphone className="size-3.5" strokeWidth={1.5} />
+                      </button>
+                    </div>
+                    {phoneFor === s.name && <PhoneCode id={p.id} service={s.name} />}
                     {s.error && <p className="mt-0.5 text-[11px] break-words text-danger">{s.error}</p>}
                   </div>
                 ))}
@@ -758,6 +773,36 @@ function Screenshot({
         <p className="text-[11.5px] text-muted">No screenshot of {path} yet.</p>
       )}
     </>
+  );
+}
+
+/** A service's link, with the preview's access, as a QR code to scan (Vercel's toolbar): fetched
+ * when asked, released when closed. */
+export function PhoneCode({ id, service }: { id: string; service: string }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let url: string | null = null;
+    let live = true;
+    qrUrl(id, service).then(
+      (u) => {
+        url = u;
+        if (live) setSrc(u);
+        else URL.revokeObjectURL(u);
+      },
+      (e) => live && setError(errorText(e)),
+    );
+    return () => {
+      live = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [id, service]);
+  if (error) return <p className="mt-1 text-[11px] text-danger">{error}</p>;
+  return (
+    <div className="mt-1.5 flex items-center gap-2.5">
+      {src ? <img src={src} alt={`A QR code that opens ${service} on a phone`} className="size-28 rounded-md bg-white p-1" /> : <div className="size-28 rounded-md bg-white/[0.04]" />}
+      <p className="text-[11px] text-subtle">Scan it with a phone's camera: it opens with the preview's access, so share it only with people who may see it.</p>
+    </div>
   );
 }
 

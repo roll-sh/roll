@@ -303,6 +303,14 @@ function query(params: Record<string, string | number | undefined>) {
 /** The preview's screenshot as an object URL (the operator's headers, which an <img> can't send);
  * revoke it when done. */
 /** The preview's screenshot as an object URL; `previous`: the one at the head before; `phone`: at a phone's width; `base`: the default branch's preview's; `page`: another of the project's pages. */
+/** A service's link with the preview's access as a QR code (an object URL; revoke it when done): a phone opens it by scanning. */
+export async function qrUrl(id: string, service?: string): Promise<string> {
+  const res = await fetch(`${ROLL_API}${one(id)}/qr.png${service ? `?service=${encodeURIComponent(service)}` : ""}`, { headers: apiHeaders(), cache: "no-store" });
+  onApiStatus(res.status);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
+  return URL.createObjectURL(await res.blob());
+}
+
 export async function screenshotUrl(id: string, previous = false, phone = false, base = false, page?: string, diff?: "base" | "previous"): Promise<string> {
   const q = [previous ? "previous=1" : "", phone ? "view=phone" : "", base ? "base=1" : "", page ? `page=${encodeURIComponent(page)}` : "", diff ? `diff=${diff}` : ""].filter(Boolean).join("&");
   const res = await fetch(`${ROLL_API}${one(id)}/screenshot${q ? `?${q}` : ""}`, { headers: apiHeaders(), cache: "no-store" });

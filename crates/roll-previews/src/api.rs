@@ -29,6 +29,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/shares", get(shares).post(share))
         .route("/v1/previews/{id}/shares/{share}", axum::routing::delete(unshare))
         .route("/v1/previews/{id}/screenshot", get(screenshot))
+        .route("/v1/previews/{id}/qr.png", get(qr))
         .route("/v1/previews/{id}/screenshot.png", get(screenshot_link))
         .route("/v1/previews/{id}/reset", post(reset))
         // These act on running services, which live on the preview's holder in a cluster.
@@ -295,6 +296,25 @@ async fn put_vars(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Res
 
 /// The preview's screenshot (a PNG), taken once per head when the project's rules ask.
 /// `?previous=1`: the one before it, at an earlier head (to compare).
+/// The preview's link with its access (`share_url`; `service=` another service's) as a QR code,
+/// so a phone opens it by scanning (Vercel's toolbar): it carries the access token, so it's never
+/// cached.
+async fn qr(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::collections::HashMap<String, String>>) -> crate::Result<Response> {
+    check_id(&id)?;
+    let service = q.get("service").cloned();
+    let png = blocking(e, move |e| {
+        let p = e.store.view(e.store.row(&id)?)?;
+        let url = match &service {
+            Some(name) => p.services.iter().find(|s| &s.name == name).and_then(|s| s.share_url.clone()),
+            None => p.share_url.clone(),
+        };
+        let url = url.ok_or_else(|| Error::NotFound("the preview has no link for that yet".into()))?;
+        roll_auth::totp::qr_png(&url).ok_or_else(|| Error::Internal("the link is too long for a QR code".into()))
+    })
+    .await?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "no-store")], png).into_response())
+}
+
 async fn screenshot(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::collections::HashMap<String, String>>) -> crate::Result<Response> {
     check_id(&id)?;
     let previous = q.get("previous").is_some_and(|v| v == "1" || v == "true");

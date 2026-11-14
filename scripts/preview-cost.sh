@@ -185,6 +185,9 @@ for _ in $(seq 1 60); do
   sleep 0.5
 done
 case "$CHG_RELEASE" in [0-9]*) ;; *) echo "the change should carry the release's time: $CHG_RELEASE"; exit 1;; esac
+# Its link with access as a QR code, for a phone (a PNG, never cached: it carries the token).
+QR=$(curl -sS -D "$HOME_DIR/qr.h" "http://$API/v1/previews/$PV/qr.png" | head -c 8 | od -An -c | tr -d ' \n')
+grep -qi '^cache-control: no-store' "$HOME_DIR/qr.h" && [ "$QR" = '211PNG\r\n032\n' ] || { echo "the preview's link should come as a QR code PNG, never cached: $QR"; exit 1; }
 # The preview's NoSQL branch reads masked; the parent's policy is untouched.
 BRANCH_NOSQL=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='nosql'][0]")
 MASKED=$(api GET "/v1/nosql/databases/$BRANCH_NOSQL" | jq_ "d['masking'].get('app.users.email')")
@@ -594,6 +597,7 @@ cat <<EOF
 | Visual review under a 5% visual threshold | $UNDER |
 | X-Robots-Tag on the service's page / on the 401 without the link | $ROBOTS / $ROBOTS_LOCKED |
 | The release's time on the preview's data (at its head) / on the change | $RELEASE / $CHG_RELEASE ms |
+| The preview's link as a QR code (PNG, no-store) | $QR |
 | Postgres users.email in the branch / in the parent | $PG_MASKED / $PG_PARENT |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |
