@@ -188,10 +188,17 @@ impl Secrets {
         Err(Error::Unauthorized("roll secrets needs the operator token or a secrets token (rlst_…)".into()))
     }
 
-    /// The peer's address, or the first X-Forwarded-For one behind a proxy rolld trusts.
+    /// The client's address: as rolld's gate saw it (`roll_auth::ClientIp`, which requests made on
+    /// a caller's behalf, such as MCP's, carry on), else the peer's, or behind a proxy rolld trusts
+    /// the last X-Forwarded-For entry: the one that proxy appended. Entries before it are the
+    /// client's own to write (ALB, Cloudflare and nginx append to what the client sent), so a pinned
+    /// address or a read alert never takes them.
     pub(crate) fn client_ip(&self, parts: &axum::http::request::Parts) -> Option<String> {
+        if let Some(roll_auth::ClientIp(ip)) = parts.extensions.get::<roll_auth::ClientIp>() {
+            return Some(ip.to_string());
+        }
         let forwarded = || {
-            parts.headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.split(',').next()).map(|s| s.trim().chars().take(64).collect::<String>()).filter(|s| !s.is_empty())
+            parts.headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.rsplit(',').next()).map(|s| s.trim().chars().take(64).collect::<String>()).filter(|s| !s.is_empty())
         };
         let peer = || parts.extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_string());
         if self.trust_forwarded_for { forwarded().or_else(peer) } else { peer() }

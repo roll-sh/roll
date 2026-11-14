@@ -745,6 +745,16 @@ async fn scoped_tokens_reach_only_their_environments_paths_and_actions() {
     assert_eq!(pinned["allowed_ips"], json!(["203.0.113.0/24"]));
     let (s, _) = api.req(Method::GET, "/environments", None, pinned["token"].as_str()).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "from an address outside its list");
+    // Behind a proxy rolld trusts, the address is the X-Forwarded-For entry that proxy appended:
+    // one the client wrote ahead of it isn't believed.
+    let proxied = {
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: true, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, clouds: None };
+        roll_secrets::router(Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap()))
+    };
+    for (xff, want) in [("203.0.113.7, 198.51.100.1", StatusCode::FORBIDDEN), ("198.51.100.1, 203.0.113.7", StatusCode::OK)] {
+        let req = Request::get(format!("/v1/secrets/projects/{}/environments", api.project)).header("authorization", format!("Bearer {}", pinned["token"].as_str().unwrap())).header("x-forwarded-for", xff).body(Body::empty()).unwrap();
+        assert_eq!(proxied.clone().oneshot(req).await.unwrap().status(), want, "{xff}");
+    }
     let (s, v) = api.req(Method::GET, "/environments/production/values?path=/api", None, Some(token)).await;
     assert_eq!((s, v["values"]["STRIPE"].as_str()), (StatusCode::OK, Some("sk_live")));
     for (method, path, body) in [

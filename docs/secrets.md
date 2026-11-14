@@ -2197,8 +2197,10 @@ environment's.
 ### Audit log
 
 Every read of values and every write is recorded: time, principal (`operator`, `token:tok_…`,
-`app:…`), action, environment, path, keys, a summary and the client address (the peer's, or the
-first `X-Forwarded-For` one with `ROLL_CODE_TRUST_FORWARDED_FOR`). A value never is.
+`app:…`), action, environment, path, keys, a summary and the client address (as rolld's gate saw
+it, MCP's calls included; else the peer's, or with `ROLL_CODE_TRUST_FORWARDED_FOR` the last
+`X-Forwarded-For` entry, the one the trusted proxy appended: earlier ones are the client's to
+write). A value never is.
 Listing metadata isn't audited. Revealing, exporting, resolving and every write are.
 `GET …/audit?env=&key=&actor=&action=&before=&limit=` reads it newest first. Rows are kept for 400
 days.
