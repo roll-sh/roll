@@ -419,6 +419,8 @@ previews are listed once those products are on.
 | `secrets_transit_sign` | An Ed25519 signature by a project's signing key. | `POST /v1/secrets/projects/{project}/transit/{name}/sign` |
 | `secrets_transit_verify` | Whether a signature is the key's. | `POST /v1/secrets/projects/{project}/transit/{name}/verify` |
 | `secrets_transit_public_key` | A signing key's public keys (raw, PEM, JWK). | `GET /v1/secrets/projects/{project}/transit/{name}/public` |
+| `secrets_reach` | Who reaches a folder or key, where it flows, who read it (names only; admin): after a leak. | `GET /v1/secrets/projects/{project}/environments/{env}/reach` |
+| `secrets_folder_policies` | An environment's approval policies per folder. | `GET /v1/secrets/projects/{project}/environments/{env}/folder-policies` |
 | `secrets_list_rotators` | Which secrets roll rotates, how often. | `GET /v1/secrets/projects/{project}/rotators` |
 | `secrets_list_syncs` | Where a project's environments are pushed. | `GET /v1/secrets/projects/{project}/syncs` |
 | `secrets_diff` | A local .env against an environment, by fingerprint (names only). | `POST /v1/secrets/projects/{project}/environments/{env}/diff` |
@@ -543,38 +545,39 @@ tokens capped per owner and a person's listed before the limit; a refresh token'
 grace audited; apps settings that change what production runs, its source, build, start and
 pre-deploy commands, schedule, kind, port, volume and `run.public`, are deploy; `create_grant`
 refuses extensions that name no caller; the expiry digest leaves out tokens made for a day or less);
-rotating a token can keep the old secret working a while (`keep_old_for_s`, at most a week: Stripe's
-roll key), from the dashboard's Rotate and `roll token rotate --keep-old 1h`, so deployments switch
-without an outage; `postgres_typescript_types` (Supabase's generated types, written by one read-only
-query: enums as unions, arrays, nullable) and the `compare_branch_schemas` prompt (Neon's schema
-compare: both branches described, the difference listed, advisors on the branch); open
-registration's limit is a sliding minute per network (a fixed minute let twice the limit through at
-its edge, and its test failed when a run crossed one); a token used before its start says so (401
-`not_yet_valid`, "this token works from <time>", with `not_before`; the token list and page show the
-start); a token can start later (`not_before`, Cloudflare's TTL start): refused until then as an
-unknown token, the dashboard's "Starts" and `roll token create --starts 2h` (the expiry counts from
-the start), changeable and clearable; a person's own token's page tested to show only their reach;
-`roll token list --product/--resource` and `--workloads`; a workload token makes no tokens; workload
-tokens (`Access::mint_workload`: minutes, within an identity's scope, owned by its maker, out of the
-list and caps) for secrets' identity logins; a person's own tokens' news is mailed to them (an
-approval waiting on them, used from a new network, revoked as leaked, about to expire; only their
-own, never a secret); `previews_resolve_note` (a preview page's note, write by the prefix;
-previews-next), and `apps_logs` takes `before`, `instance`, `deployment` and `stream` (apps-next);
-Postgres analysis as Neon's and Supabase's MCP servers have it: `postgres_explain`,
-`postgres_slow_queries`, `postgres_advisors`, `postgres_list_extensions` (read-only SQL through the
-query route, checked on Postgres 18); names people choose can't hide text: a token's name with
-invisible characters is refused, OAuth clients' names (registered or from a metadata document) drop
-them, and `initialize`'s instructions escape them; `apps_set_environment` takes response header
-rules (`headers`, apps-next); a cron run's logs are read again, as apps-next decided (its lines were
-always in the read-level environment log); `apps_restart_instance` (apps-next, reviewed under the
-environment prefix: deploy in production); invisible characters (tag characters, zero-width and bidi
-controls, variation selectors) escaped in results' text, so instructions hidden in other people's
-text stay visible to the model; plain-read answers checked for credentials (key listings: streams'
-are usernames, storage's skip the secret, tasks' are hashes and prefixes); the fifteenth review: a
-list's credentials redacted item by item (a token with reveal on one Postgres database and read on
-all saw every database's password in `GET /v1/projects`; the same for every list with credential
-fields), a preview's `share_url` redacted without reveal (its access token: the QR code's reveal row
-protected nothing), and a cron run's logs reveal on this branch too; `previews_list_notes` and
+`secrets_reach` and `secrets_folder_policies` (secrets #61, #53); rotating a token can keep the old
+secret working a while (`keep_old_for_s`, at most a week: Stripe's roll key), from the dashboard's
+Rotate and `roll token rotate --keep-old 1h`, so deployments switch without an outage;
+`postgres_typescript_types` (Supabase's generated types, written by one read-only query: enums as
+unions, arrays, nullable) and the `compare_branch_schemas` prompt (Neon's schema compare: both
+branches described, the difference listed, advisors on the branch); open registration's limit is a
+sliding minute per network (a fixed minute let twice the limit through at its edge, and its test
+failed when a run crossed one); a token used before its start says so (401 `not_yet_valid`, "this
+token works from <time>", with `not_before`; the token list and page show the start); a token can
+start later (`not_before`, Cloudflare's TTL start): refused until then as an unknown token, the
+dashboard's "Starts" and `roll token create --starts 2h` (the expiry counts from the start),
+changeable and clearable; a person's own token's page tested to show only their reach; `roll token
+list --product/--resource` and `--workloads`; a workload token makes no tokens; workload tokens
+(`Access::mint_workload`: minutes, within an identity's scope, owned by its maker, out of the list
+and caps) for secrets' identity logins; a person's own tokens' news is mailed to them (an approval
+waiting on them, used from a new network, revoked as leaked, about to expire; only their own, never
+a secret); `previews_resolve_note` (a preview page's note, write by the prefix; previews-next), and
+`apps_logs` takes `before`, `instance`, `deployment` and `stream` (apps-next); Postgres analysis as
+Neon's and Supabase's MCP servers have it: `postgres_explain`, `postgres_slow_queries`,
+`postgres_advisors`, `postgres_list_extensions` (read-only SQL through the query route, checked on
+Postgres 18); names people choose can't hide text: a token's name with invisible characters is
+refused, OAuth clients' names (registered or from a metadata document) drop them, and `initialize`'s
+instructions escape them; `apps_set_environment` takes response header rules (`headers`, apps-next);
+a cron run's logs are read again, as apps-next decided (its lines were always in the read-level
+environment log); `apps_restart_instance` (apps-next, reviewed under the environment prefix: deploy
+in production); invisible characters (tag characters, zero-width and bidi controls, variation
+selectors) escaped in results' text, so instructions hidden in other people's text stay visible to
+the model; plain-read answers checked for credentials (key listings: streams' are usernames,
+storage's skip the secret, tasks' are hashes and prefixes); the fifteenth review: a list's
+credentials redacted item by item (a token with reveal on one Postgres database and read on all saw
+every database's password in `GET /v1/projects`; the same for every list with credential fields), a
+preview's `share_url` redacted without reveal (its access token: the QR code's reveal row protected
+nothing), and a cron run's logs reveal on this branch too; `previews_list_notes` and
 `previews_resolve_note` (a preview page's note, write by the prefix; previews-next), and `apps_logs`
 takes `before`, `instance`, `deployment` and `stream` (apps-next); apps-next's cron runs as tools
 (`apps_get_cron_run`, `apps_cron_run_logs`, `apps_cancel_cron_run`); a preview's caught mail as
