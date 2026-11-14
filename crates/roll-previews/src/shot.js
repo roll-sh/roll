@@ -2,7 +2,8 @@
 // page in the headless Chromium shell, driven over the DevTools protocol on a pipe (no port).
 // Writes the PNG to $OUT, and to $OUT.json the timings and what went wrong while it loaded
 // (uncaught exceptions, console errors, failed or 4xx/5xx requests). The page is the preview's code: what it
-// reports about itself is bounded by roll, never trusted for more than showing.
+// reports about itself is bounded by roll, never trusted for more than showing; roll's checks of
+// it run where its code can't reach them.
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const chrome = spawn(process.env.CHROME, ["--headless", "--no-sandbox", "--hide-scrollbars", "--window-size=1280,800", "--remote-debugging-pipe", "about:blank"], {
@@ -86,6 +87,19 @@ listeners.add((m) => {
   else if (m.method === "Network.responseReceived" && p.response?.status >= 400) keep(failed, `${p.response.status} ${p.response.url}`);
   else if (m.method === "Network.loadingFailed" && !p.canceled) keep(failed, `${p.errorText} ${p.requestId}`);
 });
+// Every check below runs in a world of its own (an isolated world, as an extension's content
+// scripts do): the page's DOM, but none of its JavaScript, so its code can't replace JSON,
+// String, PerformanceObserver or axe and report what it likes. Without that world, no check.
+const WORLD = "roll";
+let mainFrame = null;
+let world = null;
+listeners.add((m) => {
+  const p = m.params || {};
+  if (m.method === "Runtime.executionContextCreated" && p.context?.name === WORLD && p.context.auxData?.frameId === mainFrame) world = p.context.id;
+  else if (m.method === "Runtime.executionContextDestroyed" && p.executionContextId === world) world = null;
+  else if (m.method === "Runtime.executionContextsCleared") world = null;
+});
+const check = (params, sessionId) => (world == null ? Promise.resolve(null) : send("Runtime.evaluate", { ...params, contextId: world }, sessionId).catch(() => null));
 // What a screen reader can't name, and what a document misses (WCAG's most common failures).
 const A11Y = `JSON.stringify((() => {
   const named = (el) => (el.getAttribute("aria-label") || "").trim() || el.getAttribute("aria-labelledby") || (el.getAttribute("title") || "").trim();
@@ -128,9 +142,9 @@ const AXE_RUN = `axe.run(document, { resultTypes: ["violations"] }).then((r) => 
 }))`;
 const axeReport = async (sessionId) => {
   if (!AXE_SRC) return null;
-  const loaded = await send("Runtime.evaluate", { expression: AXE_SRC + "\n;typeof axe === 'object'", returnByValue: true }, sessionId).catch(() => null);
+  const loaded = await check({ expression: AXE_SRC + "\n;typeof axe === 'object'", returnByValue: true }, sessionId);
   if (loaded?.result?.value !== true) return null;
-  const ran = await Promise.race([send("Runtime.evaluate", { expression: AXE_RUN, awaitPromise: true, returnByValue: true }, sessionId).catch(() => null), sleep(20000).then(() => null)]);
+  const ran = await Promise.race([check({ expression: AXE_RUN, awaitPromise: true, returnByValue: true }, sessionId), sleep(20000).then(() => null)]);
   try {
     return JSON.parse(ran?.result?.value || "null");
   } catch {
@@ -196,12 +210,14 @@ const still = async (sessionId) => {
   await send("Page.enable", {}, sessionId);
   await send("Runtime.enable", {}, sessionId);
   await send("Network.enable", {}, sessionId);
-  await send("Page.addScriptToEvaluateOnNewDocument", { source: VITALS }, sessionId).catch(() => null);
+  mainFrame = (await send("Page.getFrameTree", {}, sessionId)).frameTree.frame.id;
+  // In the checks' world, made with each document before its first script.
+  await send("Page.addScriptToEvaluateOnNewDocument", { source: VITALS, worldName: WORLD }, sessionId).catch(() => null);
   const loaded = once("Page.loadEventFired");
   await send("Page.navigate", { url: process.env.URL }, sessionId);
   await Promise.race([loaded, sleep(45000)]);
   await sleep(300);
-  const speed = await send("Runtime.evaluate", { expression: SPEED, returnByValue: true }, sessionId).catch(() => null);
+  const speed = await check({ expression: SPEED, returnByValue: true }, sessionId);
   await still(sessionId);
   const shot = await send("Page.captureScreenshot", { format: "png" }, sessionId);
   fs.writeFileSync(process.env.OUT, Buffer.from(shot.data, "base64"));
@@ -212,17 +228,17 @@ const still = async (sessionId) => {
   // Copies: what's caught later (the link check's own requests, other pages) isn't this page's.
   report.errors = errors.slice();
   report.failed = failed.slice();
-  const links = await Promise.race([send("Runtime.evaluate", { expression: LINKS, awaitPromise: true, returnByValue: true }, sessionId).catch(() => null), sleep(30000).then(() => null)]);
+  const links = await Promise.race([check({ expression: LINKS, awaitPromise: true, returnByValue: true }, sessionId), sleep(30000).then(() => null)]);
   try {
     report.links = JSON.parse(links?.result?.value || "null");
   } catch {}
-  const seo = await send("Runtime.evaluate", { expression: SEO, returnByValue: true }, sessionId).catch(() => null);
+  const seo = await check({ expression: SEO, returnByValue: true }, sessionId);
   try {
     report.seo = JSON.parse(seo?.result?.value || "null");
   } catch {}
   report.a11y = await axeReport(sessionId);
   if (!report.a11y) {
-    const a11y = await send("Runtime.evaluate", { expression: A11Y, returnByValue: true }, sessionId).catch(() => null);
+    const a11y = await check({ expression: A11Y, returnByValue: true }, sessionId);
     try {
       report.a11y = JSON.parse(a11y?.result?.value || "null");
     } catch {}
@@ -260,7 +276,7 @@ const still = async (sessionId) => {
       const page = { path, errors: errors.length + failed.length - before };
       // The same checks as the first page's, each bounded in time.
       const value = async (expression, wait) => {
-        const r = await Promise.race([send("Runtime.evaluate", { expression, awaitPromise: !!wait, returnByValue: true }, sessionId).catch(() => null), sleep(wait || 5000).then(() => null)]);
+        const r = await Promise.race([check({ expression, awaitPromise: !!wait, returnByValue: true }, sessionId), sleep(wait || 5000).then(() => null)]);
         try {
           return JSON.parse(r?.result?.value || "null");
         } catch {
