@@ -511,30 +511,25 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Gate throughput, A/B when the machine is quiet** (`gate-latency-ab.sh`, load under 10): at load
-   40–47 on 2026-11-14 the same commit gave 67.7k and 30.4k token requests a second (32 at once),
-   so this round's 16.9k–29.7k against 30.4k–67.7k says nothing yet. Latency held: one resource
-   p50 84–97 µs against 114–133 µs before. If it's slower, find which of this round's per-request
-   additions costs it (checksum, `in_grace` on access routes, pending, per-item redaction).
-2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+1. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25), and compare each product's routes with its tools
    (an everyday route with no tool is a gap: apps' were found this way).
-3. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+2. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
    lands after #20, #25 and #30): kept merged both ways (secrets' head of 2026-11-14 merged: a
    forgotten project's credentials revoked first and retried by the sweeper, with the integration's
    `identity_logins` kept in what's forgotten). The canvas check costs nothing measurable
    (`gate_latency`, release, pinned, A/B twice: 83–115 µs p50 with it, 105–116 µs without).
-4. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
+3. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
    `.index("name")` on the per-key routes and `Scope.key` in their own check (`GrantGrants` sets
    `id` since #30's fix). The tools and the builder's key picker are in; check both live once the
    rows land (a token on `prj_x/one-key` signs with it and is refused another key and the
    project's environments).
-5. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+4. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Considered and left out: a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset, or search-then-call meta-tools (see Toolsets: clients handle long lists or have a picker, and meta-tools would hide each tool's hints); a connection narrowed to one project (Supabase's `project_ref`): their
@@ -562,9 +557,12 @@ tokens capped per owner and a person's listed before the limit; a refresh token'
 grace audited; apps settings that change what production runs, its source, build, start and
 pre-deploy commands, schedule, kind, port, volume and `run.public`, are deploy; `create_grant`
 refuses extensions that name no caller; the expiry digest leaves out tokens made for a day or less);
-`apps_set_environment` takes `paused` and `apps_create_service` a repo's `branch` (apps-next); every
-answer to an expiring token says when (`Roll-Token-Expiration`, GitHub's
-`GitHub-Authentication-Token-Expiration`), and the CLI warns a week ahead; `apps_import` (a
+this round's gate additions cost nothing measurable (`gate_latency`, release, pinned, eight
+alternating runs each at load ~44: CPU 2.88 s against 2.96 s, within ±0.25 s run to run; 32-at-once
+token throughput median ~60k against ~55k, ranges 35–89k and 23–86k overlapping; one resource p50
+84–97 µs against 114–133 µs); `apps_set_environment` takes `paused` and `apps_create_service` a
+repo's `branch` (apps-next); every answer to an expiring token says when (`Roll-Token-Expiration`,
+GitHub's `GitHub-Authentication-Token-Expiration`), and the CLI warns a week ahead; `apps_import` (a
 roll.toml or compose file checked before `roll up --all`; apps-next); the approval UI checked in a
 browser against `users-live` (the policy's checkboxes, a waiting token's badge with an admin's
 Approve and Deny, "Needs attention" leading with it, the person's view without them), which moved
