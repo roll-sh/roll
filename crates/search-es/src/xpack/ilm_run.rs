@@ -333,9 +333,12 @@ pub(crate) fn step_exists(phase: &str, action: &str, step: &str, rec: Option<&Va
         || (phase == "new" && has(None))
 }
 
+/// A step of a phase: its action and name.
+type StepRef = (String, &'static str);
+
 /// The step after the current one, and the first step of the next action (`None`: the
 /// current step isn't in the phase).
-fn following(e: &Exec) -> Option<((String, &'static str), (String, &'static str))> {
+fn following(e: &Exec) -> Option<(StepRef, StepRef)> {
     let (phase, action, step) = e.key()?;
     let steps = phase_steps(phase, current_def(e));
     let i = steps.iter().position(|(a, s)| a == action && *s == step)?;
@@ -360,6 +363,16 @@ fn managed(st: &ClusterState) -> impl Iterator<Item = (&IndexMeta, &str)> {
     st.metadata.indices.values().filter_map(|i| policy_name(i).map(|p| (&**i, p)))
 }
 
+/// Every managed index's due time and poll flag ([`index_due`]), each policy looked up once.
+fn dues(st: &ClusterState, now: i64) -> impl Iterator<Item = (&IndexMeta, &str, (Option<i64>, bool))> {
+    let mut policies: std::collections::HashMap<&str, Option<Value>> = std::collections::HashMap::new();
+    managed(st).map(move |(i, p)| {
+        let rec = policies.entry(p).or_insert_with(|| ilm::policy(st, p));
+        let due = index_due(st, i, rec.as_ref(), now);
+        (i, p, due)
+    })
+}
+
 /// When the rollover's time-based conditions are all met (`max_age`, and `min_age` if set);
 /// `None` without a `max_age`/`min_age`.
 fn rollover_time(idx: &IndexMeta, conf: &Value) -> Option<i64> {
@@ -373,11 +386,10 @@ fn rollover_time(idx: &IndexMeta, conf: &Value) -> Option<i64> {
 
 /// When the index's next step can run: `Some(t)` at a known time, `None` when only a write or a
 /// retry can move it; and whether it waits on something only a poll sees.
-fn index_due(st: &ClusterState, idx: &IndexMeta, policy: &str, now: i64) -> (Option<i64>, bool) {
+fn index_due(st: &ClusterState, idx: &IndexMeta, rec: Option<&Value>, now: i64) -> (Option<i64>, bool) {
     if idx.settings.get("index.lifecycle.skip") == Some("true") {
         return (None, false);
     }
-    let rec = ilm::policy(st, policy);
     let Some(e) = exec_of(st, idx).filter(|e| e.step.is_some()) else {
         // Not initialized (a policy that appeared since): now.
         return (rec.is_some().then_some(now), false);
@@ -386,7 +398,7 @@ fn index_due(st: &ClusterState, idx: &IndexMeta, policy: &str, now: i64) -> (Opt
     let Some((phase, action, step)) = e.key() else { return (None, false) };
     match step {
         ERROR => (None, e.auto_retryable == Some(true)),
-        COMPLETE if action == COMPLETE => match next_phase(&rec, phase) {
+        COMPLETE if action == COMPLETE => match next_phase(rec, phase) {
             Some(next) => {
                 let min_age = rec.pointer(&["policy", "phases", next, "min_age"]).map(time_ms).unwrap_or(0);
                 (Some(lifecycle_date(idx, &e).unwrap_or(now).saturating_add(min_age)), false)
@@ -402,6 +414,9 @@ fn index_due(st: &ClusterState, idx: &IndexMeta, policy: &str, now: i64) -> (Opt
         }
         "check-ts-end-time-passed" => (Some(ts_end(idx).filter(|t| *t > now).unwrap_or(now)), false),
         "check-not-write-index" => (write_index_of(st, idx).is_none().then_some(now), false),
+        // A step the runner can't move on from (one its cached phase lacks, the terminal
+        // `completed` step) never comes due.
+        _ if following(&e).is_none() => (None, false),
         _ => (Some(now), false),
     }
 }
@@ -417,7 +432,7 @@ pub fn next_due(st: &ClusterState) -> Option<i64> {
     match ilm::mode(st).as_str() {
         "STOPPING" => Some(now),
         "STOPPED" => None,
-        _ => managed(st).filter_map(|(i, p)| index_due(st, i, p, now).0).min(),
+        _ => dues(st, now).filter_map(|(_, _, d)| d.0).min(),
     }
 }
 
@@ -428,7 +443,7 @@ pub fn polls(st: &ClusterState) -> bool {
         return false;
     }
     let now = crate::time::now_millis();
-    managed(st).any(|(i, p)| index_due(st, i, p, now).1)
+    dues(st, now).any(|(_, _, d)| d.1)
 }
 
 // ------------------------------------------------------------------------------ init
@@ -914,19 +929,23 @@ async fn pass(cluster: &Cluster, now: i64) {
         let _ = cluster.update(|st| ilm::put_mode(st, "STOPPED", now)).await;
         return;
     }
-    let due: Vec<(String, String, String, Exec)> = managed(&st)
-        .filter(|(i, p)| {
-            let (at, poll) = index_due(&st, i, p, now);
-            at.is_some_and(|t| t <= now) || poll
-        })
-        .filter_map(|(i, p)| Some((i.name.clone(), i.uuid.clone(), p.to_string(), exec_of(&st, i)?)))
+    let due: Vec<(String, String, String, Option<Exec>)> = dues(&st, now)
+        .filter(|(_, _, (at, poll))| at.is_some_and(|t| t <= now) || *poll)
+        .map(|(i, p, _)| (i.name.clone(), i.uuid.clone(), p.to_string(), exec_of(&st, i).filter(|e| e.step.is_some())))
         .collect();
-    drop(st);
     let mut updates: Vec<(String, String, Exec)> = Vec::new();
-    for (index, uuid, policy, e) in due {
-        if e.step.is_none() {
-            continue;
+    // Managed indices without a state (kept before ILM ran, or whose policy appeared since)
+    // start from the beginning, as `reconcile` starts a newly managed one.
+    for (index, uuid, policy, e) in &due {
+        if e.is_none()
+            && let (Some(idx), Some(rec)) = (st.metadata.indices.get(index), ilm::policy(&st, policy))
+        {
+            updates.push((index.clone(), uuid.clone(), initialized(idx, policy, &rec, now)));
         }
+    }
+    drop(st);
+    for (index, uuid, policy, e) in due {
+        let Some(e) = e else { continue };
         let owner = ilm::policy(&cluster.state(), &policy).and_then(|r| r.pointer(&["_roll", "user"]).and_then(internal::principal_of));
         let env = Env { cluster, index: index.clone(), policy, now };
         if let Some(next) = internal::as_principal(owner, advance(&env, e)).await {
@@ -975,7 +994,7 @@ mod tests {
     }
 
     fn step(v: &Value) -> String {
-        format!("{}/{}/{}", at(&v, &["phase"]).as_str().unwrap_or("-"), at(&v, &["action"]).as_str().unwrap_or("-"), at(&v, &["step"]).as_str().unwrap_or("-"))
+        format!("{}/{}/{}", at(v, &["phase"]).as_str().unwrap_or("-"), at(v, &["action"]).as_str().unwrap_or("-"), at(v, &["step"]).as_str().unwrap_or("-"))
     }
 
     async fn cluster() -> Arc<Cluster> {
@@ -1022,7 +1041,9 @@ mod tests {
         assert_eq!(st.metadata.indices["logs-000001"].settings.get("index.lifecycle.indexing_complete"), Some("true"));
         drop(st);
         // The new index has hot work due now; the old one's warm phase is 2d after the rollover.
-        let old_due = super::index_due(&c.state(), &c.state().metadata.indices["logs-000001"], "p", rolled).0;
+        let st = c.state();
+        let old_due = super::index_due(&st, &st.metadata.indices["logs-000001"], super::ilm::policy(&st, "p").as_ref(), rolled).0;
+        drop(st);
         assert_eq!(old_due, Some(rolled + 2 * DAY));
         super::run(&c, rolled + 2 * DAY).await;
         let v = explain(&c, "logs-000001").await;

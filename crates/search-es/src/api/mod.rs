@@ -58,6 +58,8 @@ pub fn extra_params(api: Api) -> &'static [&'static str] {
         Api::Update => &["version", "version_type"],
         // Read only to be rejected (`RestSubmitAsyncSearchAction` parses it like `_search`).
         Api::AsyncSearchSubmit => &["scroll"],
+        // `RestGetSourceAction` reads it though the spec leaves it out.
+        Api::GetSource | Api::ExistsSource => &["_source_exclude_vectors"],
         Api::CatTasks => &["ts", "pri", "size", "detailed"],
         a if a.name().starts_with("cat.") => &["ts", "pri", "size"],
         _ => &[],

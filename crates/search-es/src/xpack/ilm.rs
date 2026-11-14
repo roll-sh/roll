@@ -56,6 +56,11 @@ pub(crate) fn policy(st: &crate::meta::ClusterState, name: &str) -> Option<Value
     st.metadata.xpack.get(POLICIES, name).cloned().or_else(|| builtin().get(name).cloned())
 }
 
+/// How many policies the cluster has (Elasticsearch's registries install the built-in ones).
+pub(crate) fn policy_count(st: &crate::meta::ClusterState) -> usize {
+    builtin().len() + st.metadata.xpack.iter(POLICIES).filter(|(k, _)| !builtin().contains_key(*k)).count()
+}
+
 /// Nested `[l:c] [parser] failed to parse field [f]` errors down to `cause`, all at the
 /// location of `path`'s last field (its name, or its value with `value`).
 fn nested(ctx: &Ctx, path: &[(&str, &str)], cause: EsError) -> EsError {
@@ -202,6 +207,14 @@ fn parse_policy(ctx: &Ctx, p: &Value) -> EsResult<Value> {
     if !errors.is_empty() {
         return Err(EsError::action_request_validation(&errors));
     }
+    // `PutLifecycleRequest.validate`: the policy's rules, then the phase timings (whose error
+    // replaces the other).
+    if let Some(e) = phase_timing_error(&phases) {
+        return Err(EsError::action_request_validation(&[e]));
+    }
+    if let Some(e) = policy_rule_error(&phases) {
+        return Err(EsError::action_request_validation(&[e]));
+    }
     let mut policy = Map::new();
     policy.insert("phases".into(), Value::Obj(crate::json::java_hash_map(phases, 16)));
     if let Some(m) = pm.get("_meta") {
@@ -211,6 +224,86 @@ fn parse_policy(ctx: &Ctx, p: &Value) -> EsResult<Value> {
         policy.insert("deprecated".into(), d.clone());
     }
     Ok(Value::Obj(policy))
+}
+
+fn min_age_of(phase: &Value) -> crate::units::TimeValue {
+    let s = phase.get("min_age").map(Value::to_es_string).unwrap_or_default();
+    crate::units::TimeValue::parse(&s, "min_age").unwrap_or(crate::units::TimeValue::ZERO)
+}
+
+/// `TimeseriesLifecycleType.validateMonotonicallyIncreasingPhaseTimings`.
+fn phase_timing_error(phases: &Map) -> Option<String> {
+    let mut errors = Vec::new();
+    let mut invalid: Vec<&str> = Vec::new();
+    let configured = |name: &str| phases.get(name).map(min_age_of).filter(|t| t.as_millis() != 0);
+    for (i, name) in PHASES.iter().enumerate() {
+        let Some(age) = configured(name) else { continue };
+        if invalid.contains(name) {
+            continue;
+        }
+        let bad: Vec<(&str, crate::units::TimeValue)> = PHASES[i + 1..].iter().filter_map(|p| configured(p).filter(|t| t.as_millis() < age.as_millis()).map(|t| (*p, t))).collect();
+        if bad.is_empty() {
+            continue;
+        }
+        invalid.extend(bad.iter().map(|(p, _)| *p));
+        let cited: Vec<String> = bad.iter().map(|(p, t)| format!("the {p} phase (min_age: {})", t.human())).collect();
+        let list = match cited.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+            _ => cited.join(""),
+        };
+        errors.push(format!(
+            "Your policy is configured to run {list} before the {name} phase (min_age: {}). You should change the phase timing so that the phases will execute in the order of hot, warm, then cold.",
+            age.human()
+        ));
+    }
+    (!errors.is_empty()).then(|| errors.join(","))
+}
+
+/// The rest of `TimeseriesLifecycleType.validate`: actions the hot phase only takes with a
+/// rollover, a migrate beside allocation rules, the frozen phase's searchable snapshot, and
+/// growing downsampling intervals.
+fn policy_rule_error(phases: &Map) -> Option<String> {
+    let actions = |p: &str| phases.get(p).and_then(|v| v.get("actions")).and_then(Value::as_object);
+    if let Some(hot) = actions("hot")
+        && !hot.contains_key("rollover")
+    {
+        let needing: Vec<&str> = ["readonly", "shrink", "forcemerge", "downsample", "searchable_snapshot"].into_iter().filter(|a| hot.contains_key(*a)).collect();
+        if !needing.is_empty() {
+            return Some(format!("the [{}] action(s) may not be used in the [hot] phase without an accompanying [rollover] action", needing.join(", ")));
+        }
+    }
+    let conflicting: Vec<&str> = PHASES
+        .iter()
+        .copied()
+        .filter(|p| {
+            let Some(a) = actions(p) else { return false };
+            let migrate = a.get("migrate").is_some_and(|m| m.get("enabled").and_then(Value::as_bool) != Some(false));
+            let rules = a.get("allocate").is_some_and(|al| ["include", "exclude", "require"].iter().any(|k| al.get(k).and_then(Value::as_object).is_some_and(|m| !m.is_empty())));
+            migrate && rules
+        })
+        .collect();
+    if !conflicting.is_empty() {
+        return Some(format!(
+            "phases [{}] specify an enabled migrate action and an allocate action with allocation rules. specify only a single data migration in each phase",
+            conflicting.join(",")
+        ));
+    }
+    if phases.contains_key("frozen") && !actions("frozen").is_some_and(|a| a.contains_key("searchable_snapshot")) {
+        return Some("policy specifies the [frozen] phase without a corresponding [searchable_snapshot] action, but a searchable snapshot action is required in the frozen phase".into());
+    }
+    let downsamples: Vec<(&str, String)> = PHASES.iter().filter_map(|p| Some((*p, actions(p)?.get("downsample")?.get("fixed_interval")?.to_es_string()))).collect();
+    let ms = |i: &str| crate::units::TimeValue::parse(i, "fixed_interval").map(|t| t.as_millis()).unwrap_or(0).max(1);
+    if let Some(((first_phase, first), rest)) = downsamples.split_first() {
+        for (phase, interval) in rest {
+            if ms(first) >= ms(interval) {
+                return Some(format!("Downsampling interval [{interval}] for phase [{phase}] must be greater than the interval [{first}] for phase [{first_phase}]"));
+            }
+            if ms(interval) % ms(first) != 0 {
+                return Some(format!("Downsampling interval [{interval}] for phase [{phase}] must be a multiple of the interval [{first}] for phase [{first_phase}]"));
+            }
+        }
+    }
+    None
 }
 
 pub async fn put_lifecycle(ctx: &Ctx<'_>) -> EsResult<Reply> {
@@ -293,6 +386,9 @@ pub fn get_lifecycle(ctx: &Ctx) -> EsResult<Reply> {
             }
         }
         Some(names) => {
+            if names.len() > 1 && names.iter().any(|n| n.contains('*')) {
+                return Err(EsError::illegal_argument("wildcard only supports a single value, please use comma-separated values or a single wildcard value"));
+            }
             for n in names {
                 let mut found = false;
                 for (k, v) in &all {

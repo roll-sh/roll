@@ -889,11 +889,11 @@ pub fn explain_lifecycle(ctx: &Ctx) -> EsResult<Reply> {
                 let created = idx.creation_date();
                 m.insert("index_creation_date_millis".into(), Value::from(created));
                 m.insert("time_since_index_creation".into(), Value::from(TimeValue::millis((ctx.now_ms - created).max(0)).human_with(2)));
-                if let Some(r) = idx.rollover_info.get(&d.name) {
-                    m.insert("rollover_date_millis".into(), Value::from(r.time));
-                    m.insert("time_since_rollover".into(), Value::from(TimeValue::millis((ctx.now_ms - r.time).max(0)).human_with(2)));
+                if let Some(r) = super::data_stream_lifecycle::rollover_time(&st, d, idx) {
+                    m.insert("rollover_date_millis".into(), Value::from(r));
+                    m.insert("time_since_rollover".into(), Value::from(TimeValue::millis((ctx.now_ms - r).max(0)).human_with(2)));
                 }
-                if let Some(g) = super::data_stream_lifecycle::generation_date(d, idx) {
+                if let Some(g) = super::data_stream_lifecycle::generation_date(&st, d, idx) {
                     m.insert("generation_time".into(), Value::from(TimeValue::millis((ctx.now_ms - g).max(0)).human_with(2)));
                 }
                 let lifecycle = if d.failure_indices.contains(&n) {

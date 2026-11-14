@@ -77,12 +77,25 @@ pub(crate) fn managed_by_dsl(ds: &DataStream, idx: &IndexMeta) -> bool {
 
 /// `DataStream.getGenerationLifecycleDate`: none for a write index; else the origination date,
 /// else the rollover time, else the creation time.
-pub(crate) fn generation_date(ds: &DataStream, idx: &IndexMeta) -> Option<i64> {
+pub(crate) fn generation_date(st: &ClusterState, ds: &DataStream, idx: &IndexMeta) -> Option<i64> {
     if ds.write_index() == Some(idx.name.as_str()) || ds.failure_write_index() == Some(idx.name.as_str()) {
         return None;
     }
     let origination = idx.settings.get("index.lifecycle.origination_date").and_then(|v| v.parse::<i64>().ok()).filter(|d| *d != -1);
-    Some(origination.or_else(|| idx.rollover_info.get(&ds.name).map(|r| r.time)).unwrap_or_else(|| idx.creation_date()))
+    Some(origination.or_else(|| rollover_time(st, ds, idx)).unwrap_or_else(|| idx.creation_date()))
+}
+
+/// When the index was rolled over for its data stream. An index rolled over before roll kept
+/// rollover times has none: the next generation's creation stands in for it (it was created
+/// by that rollover), rather than the index's own creation, which would let a retention delete
+/// it a whole generation early.
+pub(crate) fn rollover_time(st: &ClusterState, ds: &DataStream, idx: &IndexMeta) -> Option<i64> {
+    if let Some(r) = idx.rollover_info.get(&ds.name) {
+        return Some(r.time);
+    }
+    let list = if ds.failure_indices.contains(&idx.name) { &ds.failure_indices } else { &ds.indices };
+    let next = list.iter().skip_while(|i| **i != idx.name).nth(1)?;
+    st.metadata.indices.get(next).map(|n| n.creation_date())
 }
 
 fn skipped(idx: &IndexMeta) -> bool {
@@ -171,8 +184,8 @@ fn age_due(st: &ClusterState, t: &Target<'_>) -> Option<i64> {
 
 /// When the index may be deleted: its generation date plus the retention, but not before a
 /// time series index's end time.
-fn deletion_due(ds: &DataStream, idx: &IndexMeta, retention: &TimeValue) -> Option<i64> {
-    let due = generation_date(ds, idx)?.saturating_add(retention.as_millis());
+fn deletion_due(st: &ClusterState, ds: &DataStream, idx: &IndexMeta, retention: &TimeValue) -> Option<i64> {
+    let due = generation_date(st, ds, idx)?.saturating_add(retention.as_millis());
     let end = idx.settings.get("index.time_series.end_time").and_then(|v| crate::meta::index_settings::parse_date_setting(v).ok());
     Some(end.map_or(due, |e| due.max(e)))
 }
@@ -183,7 +196,14 @@ fn retention_candidates<'a>(st: &'a ClusterState, ds: &'a DataStream) -> impl It
     let (data, failures) = retentions(st, ds);
     let backing = ds.indices.iter().filter_map(move |n| Some((n, data?)));
     let failure = ds.failure_indices.iter().filter_map(move |n| Some((n, failures?)));
-    backing.chain(failure).filter_map(|(n, r)| st.metadata.indices.get(n).map(|i| (&**i, r))).filter(|(i, _)| !skipped(i) && managed_by_dsl(ds, i))
+    // An index being downsampled is deleted once that finishes.
+    let downsampling = |i: &IndexMeta| i.settings.get("index.downsample.status") == Some("started");
+    backing.chain(failure).filter_map(|(n, r)| st.metadata.indices.get(n).map(|i| (&**i, r))).filter(move |(i, _)| !skipped(i) && !downsampling(i) && managed_by_dsl(ds, i))
+}
+
+/// Whether an operation on the index failed (it is retried on the next poll, not at a time).
+fn failed(st: &ClusterState, idx: &IndexMeta) -> bool {
+    error_of(st, idx).is_some()
 }
 
 fn active(st: &ClusterState) -> bool {
@@ -204,10 +224,14 @@ pub fn next_due(st: &ClusterState) -> Option<i64> {
     };
     for ds in st.metadata.data_streams.values() {
         for t in targets(st, ds) {
-            at(age_due(st, &t));
+            if !failed(st, t.write) {
+                at(age_due(st, &t));
+            }
         }
         for (idx, retention) in retention_candidates(st, ds) {
-            at(deletion_due(ds, idx, &retention));
+            if !failed(st, idx) {
+                at(deletion_due(st, ds, idx, &retention));
+            }
         }
     }
     due
@@ -252,11 +276,7 @@ async fn pass(cluster: &Cluster, now: i64) {
             }
         }
         for (idx, retention) in retention_candidates(&st, ds) {
-            // An index being downsampled is deleted once that finishes.
-            if idx.settings.get("index.downsample.status") == Some("started") {
-                continue;
-            }
-            if deletion_due(ds, idx, &retention).is_some_and(|d| now >= d) {
+            if deletion_due(&st, ds, idx, &retention).is_some_and(|d| now >= d) {
                 work.deletes.push(idx.name.clone());
             }
         }
@@ -405,7 +425,7 @@ mod tests {
         // An empty write index: its max_age (1d) is when the lifecycle has work.
         assert_eq!(super::next_due(&c.state()), Some(created + DAY));
         super::run(&c, created + DAY).await;
-        assert_eq!(backing(&c), [first.clone()], "min_docs=1: an empty index isn't rolled over");
+        assert_eq!(backing(&c), std::slice::from_ref(&first), "min_docs=1: an empty index isn't rolled over");
         assert_eq!(super::next_due(&c.state()), None, "only a write can roll it over now");
         assert!(super::polls(&c.state()));
         let (s, v) = call(&c, "POST", "/logs-app/_doc?refresh=true", r#"{"@timestamp":"2026-01-01T00:00:00Z"}"#).await;

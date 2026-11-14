@@ -1271,6 +1271,36 @@ the rest are skipped by the tests' own prerequisites.
   than one job or live indices in one search, a date histogram's empty buckets are those each
   response filled itself, and a live index's `avg` keeps the rolled average where both have
   one.
+- The lifecycles run on the job scheduler too (`xpack/ilm_run.rs`,
+  `api/data_stream_lifecycle.rs`). The data stream lifecycle rolls a write index (and a
+  failure store's) over with `cluster.lifecycle.default.rollover` (`max_age=auto` from the
+  effective retention, as `RolloverConfiguration` derives it) and deletes the backing and
+  failure indices whose generation date (`index.lifecycle.origination_date`, else the rollover
+  time, else the creation time) is past the effective retention (`data_retention` within
+  `data_streams.lifecycle.retention.max`/`.default`; failure stores keep 30 days unless
+  configured). It never deletes a write index, and leaves `index.lifecycle.skip`, ILM-preferred,
+  still-writable time series and downsampling indices alone. Failures go to the error store that
+  `_lifecycle/explain` (`error`) and `_lifecycle/stats` print. Its force merges and downsampling
+  rounds aren't run. ILM moves managed indices through hot, warm, cold, frozen and delete as
+  `min_age` passes (from the creation date, the rollover date, or
+  `index.lifecycle.origination_date`), with Elasticsearch's step names and order (`unfollow`
+  and `migrate` injected as it injects them). It runs `rollover` (all conditions, `min_*`
+  included, with the `min_docs: 1` and `max_primary_shard_docs` defaults; aliases and data
+  streams), `set_priority`, `readonly`, `forcemerge` (`index_codec` too), `allocate`,
+  `migrate`, `delete` (a data stream's last index deletes the stream) and `freeze` (a no-op, as
+  in Elasticsearch 8 and later). `shrink` completes when the index is already at its target
+  shard count. `_ilm/explain` prints the execution state (`phase_execution` with the cached
+  phase, `step_info`, `failed_step`, retry counts; a missing policy reads as `ERROR`). Failed
+  steps are retried on each poll; `_ilm/retry`, `_ilm/move` and `_ilm/stop` (`STOPPING`, then
+  `STOPPED`) act on that state. A new managed index is initialized in the state change that
+  made it managed. Steps run as the user who last put the policy. Not run: `shrink` to fewer
+  shards, `downsample`, `searchable_snapshot` and `wait_for_snapshot` (no SLM). These end in the
+  `ERROR` step with the reason. ILM history (`ilm-history-*`) isn't written. Elasticsearch polls
+  every `indices.lifecycle.poll_interval` and `data_streams.lifecycle.poll_interval`. roll runs
+  time-based work (a phase's `min_age`, a rollover's `max_age`, a retention running out, a time
+  series end time) at its due time, and wakes a sleeping cluster for it. It polls at those
+  intervals only while a write could meet a size or document condition, or a failure is
+  retried, and that poll never wakes a cluster.
 - x-pack (`crates/search-es/src/xpack/`): security (native realm, API keys, tokens, role
   mappings, privileges, request authorization), ES|QL, SQL, EQL, enrich, transforms, async
   search, ILM, search applications, query rules, connectors, graph, terms enum, text structure
