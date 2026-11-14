@@ -20,6 +20,8 @@ GET /v1/apps/services/{id}/environments/{env}/jobs
 POST /v1/apps/services/{id}/environments/{env}/jobs
 GET /v1/apps/services/{id}/environments/{env}/jobs/{job}
 POST /v1/apps/services/{id}/environments/{env}/jobs/{job}/cancel
+GET /v1/apps/services/{id}/environments/{env}/runs/{run}
+POST /v1/apps/services/{id}/environments/{env}/runs/{run}/cancel
 GET /v1/apps/services/{id}/environments/{env}/logs
 GET /v1/apps/services/{id}/environments/{env}/metrics
 POST /v1/apps/services/{id}/environments/{env}/promote
