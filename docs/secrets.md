@@ -613,6 +613,28 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
   execs the command. It writes no file, and it fails before running anything if a reference is
   unresolved. Variables already set in the shell keep their value unless `--override` is passed.
 
+### Running through an outage
+
+`roll run --fallback FILE` (or `ROLL_FALLBACK`) also writes every cleanly resolved fetch to `FILE`,
+as Doppler's CLI does. When rolld can't be reached, or answers with a 5xx, `roll run` starts from
+the file, saying how old it is. A refusal (a revoked token, a 403, an environment that doesn't
+exist) never falls back, and neither does a file older than `--fallback-max-age` (default 7 days).
+
+- The file is AES-256-GCM, with a key derived (HKDF-SHA256, the file's own salt, info
+  `roll-fallback-v1`) from `ROLL_FALLBACK_KEY` (at least 32 characters: a copied file can be tried
+  offline), else from the token. A workload identity's tokens change at every login, so it needs
+  `ROLL_FALLBACK_KEY`, and a login that gets no answer goes on to the file.
+- "Can't be reached" is a network error or a 5xx, from the login, the project's lookup or the
+  values; a 4xx (a revoked token, a customer's key that refused: 423) or an answer that isn't
+  roll's never falls back. With `--fallback`, rolld gets 5 s to connect and 30 s to answer.
+- The project as asked for (`-p`), the project, environment, folder and fetch time are associated
+  data: a file can't be swapped for another project's or environment's, or edited to look fresher.
+- It's written 0600 through a new file renamed over the old one. Only what resolved cleanly is
+  kept. A dynamic credential in it may have ended with its lease.
+- When the project can only be found by asking rolld (a name, or the token's own), the file's own
+  project is used, and checked again when it's opened. `--watch` started from a fallback reloads
+  the command once rolld answers.
+
 ### Runtime resolve for services (roll apps)
 
 roll apps (docs/apps/) deploys a service into an environment and injects that environment's
