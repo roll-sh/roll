@@ -3886,6 +3886,8 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
         None
     };
     let mut req = parse_request(ctx, body.as_ref(), ctx.raw_json())?;
+    // Queries that need inference (`semantic`, and others on `semantic_text` fields).
+    crate::xpack::inference::query::rewrite_request(ctx, &mut req).await?;
     crate::xpack::entsearch::query_rules::check_rulesets(ctx, body.as_ref())?;
     let phase_took = crate::opensearch::phase_took_requested(ctx)?;
     // OpenSearch's `verbose_pipeline` (the URL parameter wins over the body's).

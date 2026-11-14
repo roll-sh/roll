@@ -44,6 +44,7 @@ pub fn to_query(ctx: &QueryCtx, q: &Query) -> EsResult<QueryRef> {
         Query::FunctionScore(f) => function_score(ctx, f),
         Query::DistanceFeature(d) => distance_feature(ctx, d),
         Query::RankFeature(r) => rank_feature(ctx, r),
+        Query::SparseVector(s) => sparse_vector(ctx, s),
         Query::TermsSet(t) => terms_set(ctx, t),
         Query::Knn(k) => knn_query(ctx, k),
         Query::OsKnn(k) => crate::opensearch::knn::to_query(ctx, k),
@@ -373,6 +374,29 @@ fn rank_feature(ctx: &QueryCtx, r: &crate::query::specialized::RankFeature) -> E
         F::Sigmoid { pivot, exponent } => search_index::query::FeatureQuery::sigmoid(field, feature.into_bytes(), 1.0, *pivot, *exponent),
     };
     q.map_err(index_err)
+}
+
+/// `sparse_vector` (`SparseVectorQueryBuilder` with its tokens): a disjunction of linear
+/// feature queries, one per token, each weighted by the token's weight
+/// (`WeightedTokensUtils.queryBuilderWithAllTokens`). A query text is turned into tokens by its
+/// endpoint before the search (`xpack::inference::query`); query-time token pruning isn't
+/// applied (every token is scored).
+fn sparse_vector(ctx: &QueryCtx, s: &crate::query::specialized::SparseVector) -> EsResult<QueryRef> {
+    let Some(tokens) = &s.query_vector else {
+        return Err(EsError::illegal_argument("[sparse_vector] requires one of [query_vector] or [inference_id] with [query]"));
+    };
+    let number = match ctx.field(&s.field) {
+        Some(f) if matches!(f.kind, Kind::SparseVector | Kind::RankFeatures) => f.number,
+        Some(f) => return Err(EsError::illegal_argument(format!("field [{}] must be type [sparse_vector] but is type [{}]", s.field, f.ty))),
+        None => return Ok(match_none("unmapped")),
+    };
+    let mut b = search_index::query::BooleanQuery::new();
+    for (token, weight) in tokens {
+        // `ft.termQuery(token)` is a linear feature query of weight 1, boosted by the token's.
+        let q = search_index::query::FeatureQuery::linear(number, token.clone().into_bytes(), 1.0).map_err(index_err)?;
+        b = b.add(search_index::query::Occur::Should, arc(search_index::query::BoostQuery::new(q, *weight)));
+    }
+    Ok(arc(b))
 }
 
 /// A `minimum_should_match_script`, described as `TermsSetQueryBuilder.ScriptLongValueSource`

@@ -19,6 +19,7 @@
 
 pub mod chunking;
 pub mod http;
+pub mod query;
 pub mod region;
 pub mod results;
 pub mod semantic;
