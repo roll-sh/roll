@@ -2744,9 +2744,10 @@ user's call).
    gateways).
 11. **ACME on project CAs**, starting with external account binding (Vault PKI, step-ca).
 12. *The user's call:* land the stack (#62).
-13. *Waits on roll MCP's #25 on `main`:* #30 onto #62 (roll-access's tokens replace `rlst_`;
-   renewed logins and pinned keys mint workload tokens; reach lists grants; `Caller` keeps
-   `runtime`; `NewGrant { …, ..Default::default() }`), then a workload identity a person creates
+13. *Waits on roll MCP's #25 on `main`:* #30 is on #62 as `feature/roll-secrets-landing-access`
+   (roll-access's tokens replace `rlst_`; re-keyed identities revoke their workload tokens; reach
+   lists roll-access's tokens; `Caller` keeps `runtime`; every suite passes), to land after #25,
+   with `NewGrant { …, ..Default::default() }` once #25's newer roll-access meets it; then a workload identity a person creates
    asks roll-access's policy (held until an admin approves, `policy_now().needs_approval(&scope,
    false)`, admins told through `Access::tell_admins`), and the Access tab shows tokens waiting
    for approval and rotations that keep the old secret (`keep_old_for_s`).

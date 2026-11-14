@@ -327,13 +327,16 @@ impl roll_secrets::aws::Sts for FakeSts {
 #[derive(Default)]
 struct Gate {
     tokens: Mutex<BTreeMap<String, roll_auth::Grant>>,
+    /// Grants made so far: ids stay unique after revocations.
+    made: std::sync::atomic::AtomicUsize,
 }
 
 impl Gate {
     /// A grant's secret and id.
     fn grant(&self, name: &str, rule: roll_auth::scope::Rule, user: Option<&str>) -> (String, String) {
         let mut tokens = self.tokens.lock().unwrap();
-        let (secret, id) = (format!("rlt_test{}", tokens.len()), format!("tok_{}", tokens.len()));
+        let n = self.made.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (secret, id) = (format!("rlt_test{n}"), format!("tok_{n}"));
         let grant = roll_auth::Grant { ask_otherwise: false, user: user.map(Into::into), id: id.clone().into(), name: name.into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) };
         tokens.insert(secret.clone(), grant);
         (secret, id)
@@ -366,6 +369,9 @@ impl roll_secrets::Workloads for Gate {
         let (secret, id) = self.grant(name, rule, owner);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
         Ok(roll_secrets::Minted { id, secret, expires_at: now + minutes as i64 * 60_000 })
+    }
+    fn grants(&self) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
+        Ok(self.tokens.lock().unwrap().values().cloned().collect())
     }
     fn revoke(&self, id: &str) -> roll_secrets::Result<()> {
         self.tokens.lock().unwrap().retain(|_, g| &*g.id != id);
@@ -448,7 +454,8 @@ impl Api {
     fn token(&self, scope: Value) -> String {
         let list = |k: &str| scope[k].as_array().map(|a| a.iter().map(|v| v.as_str().unwrap().to_string()).collect::<Vec<_>>());
         let actions: Vec<roll_secrets::Action> = serde_json::from_value(scope["actions"].clone()).unwrap();
-        self.gate.issue("test", roll_secrets::access::rule(&self.project, list("environments"), list("paths"), &actions), None)
+        let name = scope["name"].as_str().unwrap_or("test");
+        self.gate.issue(name, roll_secrets::access::rule(&self.project, list("environments"), list("paths"), &actions), None)
     }
 
     /// As `usr_ada`, signed in and not an admin (the gate put her session on the request).
@@ -789,10 +796,10 @@ async fn protected_environments_take_change_requests_that_another_principal_appr
     // Protected as well: an admin of /payments only approves for its folder's gate, never for the
     // environment's.
     api.ok(Method::PUT, "/environments/staging/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
-    let folder_admin = api.ok(Method::POST, "/tokens", Some(json!({ "name": "payments", "environments": ["staging"], "paths": ["/payments"], "actions": ["read", "write", "admin"] }))).await;
+    let folder_admin = api.token(json!({ "name": "payments", "environments": ["staging"], "paths": ["/payments"], "actions": ["read", "write", "admin"] }));
     let r = api.ok(Method::POST, "/environments/staging/requests", Some(json!({ "path": "/payments/eu", "ops": [{ "op": "set", "key": "STRIPE", "value": "sk_2" }] }))).await;
     let id = r["id"].as_str().unwrap();
-    let (s, r) = api.req(Method::POST, &format!("/environments/staging/requests/{id}/review"), Some(json!({ "verdict": "approve" })), folder_admin["token"].as_str()).await;
+    let (s, r) = api.req(Method::POST, &format!("/environments/staging/requests/{id}/review"), Some(json!({ "verdict": "approve" })), Some(&folder_admin)).await;
     assert_eq!((s, r["state"].as_str()), (StatusCode::OK, Some("open")), "{r}");
     assert_eq!(r["gates"].as_array().unwrap().iter().map(|g| g["approved"].as_i64().unwrap()).collect::<Vec<_>>(), [0, 1], "the environment's gate, then /payments'");
     api.ok(Method::PUT, "/environments/staging/policy", Some(json!({ "protected": false }))).await;
@@ -1244,8 +1251,8 @@ async fn health_lists_every_finding_in_every_environment_worst_first() {
     let public: Vec<String> = api.ok(Method::GET, "/health", None).await.as_array().unwrap().iter().filter(|f| f["issue"] == "public").map(|f| f["key"].as_str().unwrap().to_string()).collect();
     assert_eq!(public, ["NEXT_PUBLIC_STRIPE_KEY"]);
     // What kind of credential it is comes from the value: not for a caller who can't reveal it.
-    let reader = api.ok(Method::POST, "/tokens", Some(json!({ "name": "reader", "actions": ["read"] }))).await;
-    let (_, seen) = api.req(Method::GET, "/health", None, reader["token"].as_str()).await;
+    let reader = api.token(json!({ "name": "reader", "actions": ["read"] }));
+    let (_, seen) = api.req(Method::GET, "/health", None, Some(&reader)).await;
     let detail = seen.as_array().unwrap().iter().find(|f| f["issue"] == "public").map(|f| f["detail"].clone());
     assert_eq!(detail, Some(json!("NEXT_PUBLIC_ keys go into the browser bundle (Next.js), and this one holds a server credential")));
 }
@@ -2348,10 +2355,10 @@ async fn a_key_is_found_in_every_project_the_caller_may_read() {
 async fn reach_names_who_and_what_can_read_a_folder() {
     let api = Api::new().await;
     api.set("production", "STRIPE_KEY", "sk_live_1").await;
-    let deploy = api.ok(Method::POST, "/tokens", Some(json!({ "name": "deploy", "environments": ["production"], "actions": ["read", "reveal"] }))).await;
-    api.ok(Method::POST, "/tokens", Some(json!({ "name": "staging-ci", "environments": ["staging"], "actions": ["read", "reveal"] }))).await;
+    let deploy = api.token(json!({ "name": "deploy", "environments": ["production"], "actions": ["read", "reveal"] }));
+    api.token(json!({ "name": "staging-ci", "environments": ["staging"], "actions": ["read", "reveal"] }));
     api.ok(Method::PUT, "/environments/staging/imports?path=/", Some(json!([{ "environment": "production", "path": "/" }]))).await;
-    api.req(Method::GET, "/environments/production/values", None, deploy["token"].as_str()).await;
+    api.req(Method::GET, "/environments/production/values", None, Some(&deploy)).await;
     // A read of staging reads production's key through the import: counted, and said so; so is
     // one of development, which imports staging (a chain).
     api.ok(Method::PUT, "/environments/development/imports?path=/", Some(json!([{ "environment": "staging", "path": "/" }]))).await;
@@ -2375,6 +2382,6 @@ async fn reach_names_who_and_what_can_read_a_folder() {
     by.sort();
     assert_eq!(by, ["development:/", &format!("project {platform}"), "staging:/"], "{r}");
     // It lists the project's credentials: a project admin's.
-    let (s, _) = api.req(Method::GET, "/environments/production/reach", None, deploy["token"].as_str()).await;
+    let (s, _) = api.req(Method::GET, "/environments/production/reach", None, Some(&deploy)).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
 }

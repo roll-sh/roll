@@ -1121,6 +1121,8 @@ static ROWS: &[Row] = &[
     // Identities mint tokens, as `tokens` does: seeing or changing them is the project admin's.
     row("*", "/v1/secrets/projects/{project}/identities", "secrets", ADMIN, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/identities/", "secrets", ADMIN, one(&["project"], "project")),
+    // Which keys an identity trusts decides who logs in as it.
+    row("PUT", "/v1/secrets/projects/{project}/identities/{id}/jwks", "secrets", ADMIN, one(&["project"], "project")),
     // Renewing a lease extends a credential whoever could read it holds.
     row("POST", "/v1/secrets/projects/{project}/leases/{id}/renew", "secrets", REVEAL, one(&["project"], "project")),
     // Exporting an environment's folder shares it with another project.

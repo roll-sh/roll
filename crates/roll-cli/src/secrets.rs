@@ -4061,7 +4061,7 @@ mod relogin_tests {
                     }
                     let mut s = s.lock().unwrap();
                     s.push(b["token"].as_str().unwrap_or_default().to_string());
-                    (axum::http::StatusCode::OK, axum::Json(json!({ "token": format!("rlst_{}", s.len()), "expires_at": now_ms() + 3_600_000 })))
+                    (axum::http::StatusCode::OK, axum::Json(json!({ "token": format!("rlt_{}", s.len()), "expires_at": now_ms() + 3_600_000 })))
                 }),
             )
             .route(
@@ -4089,24 +4089,24 @@ mod relogin_tests {
         let auth = |v: Value| v["auth"].as_str().unwrap().to_string();
         let due = || async { login.held.lock().await.renew = std::time::Instant::now() };
 
-        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_1");
-        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_1", "not yet");
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_1");
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_1", "not yet");
         std::fs::write(&file, "jwt-2\n").unwrap();
         due().await;
         // Renewed in the background: this request goes on with the current token, the next has the new one.
-        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_1");
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_1");
         login.settle().await;
-        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_2");
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_2");
         // roll is down when it's time to renew: the current token goes on.
         down.store(true, Ordering::SeqCst);
         due().await;
-        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_2");
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_2");
         login.settle().await;
-        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_2");
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_2");
         // A 401 (its clock ran ahead): logs in again and the request goes through.
         down.store(false, Ordering::SeqCst);
-        *refuse.lock().unwrap() = "Bearer rlst_2".into();
-        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_3");
+        *refuse.lock().unwrap() = "Bearer rlt_2".into();
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_3");
         assert_eq!(*seen.lock().unwrap(), ["jwt-1", "jwt-2", "jwt-2"]);
         // Started through an outage (`roll run --fallback`): no login yet. While roll is down a
         // request is no answer (so the fallback is used), and the first one it answers logs in.
@@ -4115,6 +4115,6 @@ mod relogin_tests {
         down.store(true, Ordering::SeqCst);
         assert!(no_answer(&api.get("/v1/echo").await.unwrap_err()));
         down.store(false, Ordering::SeqCst);
-        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_4");
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_4");
     }
 }
