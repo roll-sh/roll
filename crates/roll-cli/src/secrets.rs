@@ -644,6 +644,15 @@ pub struct Run {
     pub watch: bool,
     #[arg(long, default_value_t = 5, requires = "watch")]
     pub interval: u64,
+    /// Mask values in both of the command's streams, wherever they go (also `ROLL_MASK=1`, for a
+    /// pod, a unit or Jenkins, whose step log is a file). By default: stderr when it isn't a
+    /// terminal, and stdout only in CI and never into a file, since stdout is often data
+    /// (`pg_dump > dump.sql`).
+    #[arg(long, conflicts_with = "no_mask")]
+    pub mask: bool,
+    /// Never mask values in what the command prints.
+    #[arg(long)]
+    pub no_mask: bool,
     /// The command and its arguments.
     #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
@@ -2379,8 +2388,12 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     let project = project(api, at.project.as_deref()).await?;
     let c = Client { project, api, at: at.clone() };
     let (env, leases) = run_env(&c, &at, &r).await?;
+    let streams = crate::mask::Streams::choose(r.mask, r.no_mask);
     if r.watch {
-        return watch(&c, &at, &r, env, leases).await;
+        return watch(&c, &at, &r, env, leases, streams).await;
+    }
+    if streams.any() {
+        return run_masked(&r, &env, streams).await;
     }
     let mut cmd = std::process::Command::new(&r.command[0]);
     cmd.args(&r.command[1..]).envs(env);
@@ -2397,23 +2410,68 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     }
 }
 
+/// `roll run` with masked output: the command as a child (roll can't exec it and still read its
+/// output), exiting as it did. Signals are passed on ([`crate::mask::Signals`]).
+async fn run_masked(r: &Run, env: &[(String, String)], streams: crate::mask::Streams) -> anyhow::Result<()> {
+    let mut run = crate::mask::spawn(&r.command, env, streams).with_context(|| format!("running {}", r.command[0]))?;
+    #[cfg(unix)]
+    {
+        let mut signals = crate::mask::Signals::new()?;
+        loop {
+            tokio::select! {
+                status = run.child.wait() => {
+                    let status = status?;
+                    run.drain().await;
+                    crate::mask::exit_as(status);
+                }
+                sig = signals.next() => crate::mask::Signals::pass(&run.child, sig),
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let status = run.child.wait().await?;
+        run.drain().await;
+        crate::mask::exit_as(status);
+    }
+}
+
 /// `roll run --watch`: the command as a child, restarted (SIGTERM, then SIGKILL after 10 s) when
-/// the environment changes. A change that doesn't resolve keeps the running command. Exits with
-/// the command's own code when it exits by itself.
-async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>, mut leases: Vec<String>) -> anyhow::Result<()> {
+/// the environment changes. A change that doesn't resolve keeps the running command. Signals are
+/// passed on as `roll run`'s are, and it exits as the command did.
+async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>, mut leases: Vec<String>, streams: crate::mask::Streams) -> anyhow::Result<()> {
     let digest_path = format!("{}/digest?{}", c.env(&at.env), c.q());
     let mut last = c.call(Method::GET, &digest_path, None).await?["digest"].clone();
     let every = std::time::Duration::from_secs(r.interval.max(1));
     // Dynamic credentials outlive their first lease: renewed every 10 minutes while it runs.
     let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
+    #[cfg(unix)]
+    let mut signals = crate::mask::Signals::new()?;
     loop {
-        let mut child = tokio::process::Command::new(&r.command[0]).args(&r.command[1..]).envs(env.iter().cloned()).spawn().with_context(|| format!("running {}", r.command[0]))?;
+        let mut run = crate::mask::spawn(&r.command, &env, streams).with_context(|| format!("running {}", r.command[0]))?;
         loop {
+            #[cfg(unix)]
+            let signal = signals.next();
+            #[cfg(not(unix))]
+            let signal = async {
+                let _ = tokio::signal::ctrl_c().await;
+                0
+            };
             tokio::select! {
-                status = child.wait() => std::process::exit(status?.code().unwrap_or(1)),
-                _ = tokio::signal::ctrl_c() => {
-                    stop(&mut child).await;
-                    std::process::exit(130);
+                status = run.child.wait() => {
+                    let status = status?;
+                    run.drain().await;
+                    crate::mask::exit_as(status);
+                }
+                // Passed on: the command's exit ends roll.
+                sig = signal => {
+                    #[cfg(unix)]
+                    crate::mask::Signals::pass(&run.child, sig);
+                    #[cfg(not(unix))]
+                    {
+                        let _ = sig;
+                        stop(&mut run.child).await;
+                    }
                 }
                 _ = renew.tick(), if !leases.is_empty() => {
                     for l in &leases {
@@ -2439,7 +2497,8 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>,
                             eprintln!("roll run: {}:{} changed, restarting {}", at.env, at.path, r.command[0]);
                             env = next;
                             leases = next_leases;
-                            stop(&mut child).await;
+                            stop(&mut run.child).await;
+                            run.drain().await;
                             break;
                         }
                         Err(e) => eprintln!("roll run: {} changed, but {e}; keeping the running command", at.env),

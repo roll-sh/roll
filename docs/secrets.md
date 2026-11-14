@@ -583,7 +583,7 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
-roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
+roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] [--mask | --no-mask] -- <command…>
 ```
 
 - The project is `-p`/`ROLL_PROJECT` (a name or id), the environment `-e`/`ROLL_ENV`, the path
@@ -612,6 +612,38 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
 - `roll run` fetches the resolved values (`…/values`), adds them to the child's environment and
   execs the command. It writes no file, and it fails before running anything if a reference is
   unresolved. Variables already set in the shell keep their value unless `--override` is passed.
+- What the command prints is masked in logs, as 1Password's `op run` does and GitHub Actions does
+  for its own secrets: roll keeps the command as a child, reads the stream, and writes
+  `<concealed by roll>` in place of any value it added, so a debug print doesn't put a key in a
+  build log. By default stderr when it isn't a terminal, or in CI (`CI` set, where a PTY is a log
+  too): it's diagnostics, never data. stdout is data as often as a log (`pg_dump > dump.sql`,
+  `| gzip`, a dump over ssh), so it's masked only in CI and never into a file: nothing written as
+  data is ever changed unasked. `--mask`, or `ROLL_MASK=1` in a pod's or a unit's environment
+  where stdout is the log, masks both streams wherever they go; `--no-mask` neither. **Jenkins**
+  writes a step's output to a log file, which roll can't tell from `> dump.sql`: set `ROLL_MASK=1`
+  in the job's environment (`environment { ROLL_MASK = '1' }`), or stdout reaches its log unmasked
+  while stderr is masked. A value is
+  matched as it is, its JSON and URL encodings, each line of a multi-line one that has no spaces (a
+  PEM key's lines, not a JSON file's `"type": …` lines), and, in a JSON value (a cloud key file,
+  minified or not), the fields named as secrets (`private_key`, `client_secret`, not `token_uri`);
+  values under 8 characters (`true`, a port) aren't masked. Output passes through as it comes, except a tail that
+  could start a value, held until more comes or the stream ends (never on a timer: a
+  block-buffered program can pause in the middle of a value).
+- Masking is a guard against accidents, not a boundary. The command can print a value some other
+  way (reversed, split, base64, Python's `ensure_ascii` JSON, `%2f`, `+` for spaces), and where
+  two values overlap in the output only the first is concealed whole.
+- A masked command runs as roll's child. The exit is the command's: its code, or the same SIGINT,
+  SIGTERM or SIGHUP re-raised, so a shell loop stops on Ctrl-C. SIGTERM and SIGHUP (`docker stop`,
+  systemd) are passed on, with or without `--watch`, and SIGINT unless roll's terminal sent it to
+  the command too (so a `kill -INT` aimed at roll while it's in the terminal's foreground isn't
+  passed on: send SIGTERM, or signal the command). A process the command leaves in the background gets 1 s of output after the
+  command exits (then roll exits and its pipe closes): run daemons with `--no-mask`
+  (`roll-cli/src/mask.rs`).
+  Measured (release build, 2026-11-14, 400 MB through `cat`): with 300 values of 32 characters
+  and a 3 KB key, about 330 MB/s on real logs and docs and 240 MB/s on random base64 (the
+  worst case: every byte can start a value); about 1.2 GB/s with a handful of values. Unmasked,
+  the same `cat` runs at about 3.5 GB/s. No command prints anywhere near that, so masking costs a
+  real command nothing it notices; memory stays under 30 MB.
 
 ### Docker builds and Compose
 

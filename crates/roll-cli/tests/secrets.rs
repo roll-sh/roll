@@ -80,13 +80,19 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     assert!(ls.contains("DATABASE_URL") && !ls.contains("s3cret"), "values are masked: {ls}");
 
     // The child sees resolved values; the shell's own variables win unless --override.
-    let out = ok(&api, &[("PORT", "6000")], &["run", "-p", "shop", "-e", "production", "--", "sh", "-c", "echo $DATABASE_URL $PORT"], None).await;
+    let out = ok(&api, &[("PORT", "6000")], &["run", "-p", "shop", "-e", "production", "--no-mask", "--", "sh", "-c", "echo $DATABASE_URL $PORT"], None).await;
     assert_eq!(out.trim(), "postgres://app:s3cret@db.internal:5432/shop 6000");
+    // In CI, output that isn't a terminal or a file (a build log) goes through roll, which
+    // conceals the values it added; the command's exit code is still roll's.
+    let logged = roll(&api, &[("PORT", "6000"), ("CI", "true")], &["run", "-p", "shop", "-e", "production", "--", "sh", "-c", "echo $DATABASE_URL $PORT >&2; echo $HOST"], None).await;
+    assert_eq!((logged.code, logged.stdout.trim(), logged.stderr.trim()), (Some(0), "<concealed by roll>", "<concealed by roll> 6000"));
+    let failed = roll(&api, &[], &["run", "-p", "shop", "-e", "production", "--", "sh", "-c", "exit 3"], None).await;
+    assert_eq!(failed.code, Some(3));
 
     // A scoped token implies its project and reaches only its environments.
     let token = ok(&api, &[], &["secrets", "-p", "shop", "tokens", "create", "ci", "--for-env", "production"], None).await;
     let t = [("ROLL_TOKEN", token.trim())];
-    assert_eq!(ok(&api, &t, &["run", "-e", "production", "--", "sh", "-c", "echo $HOST"], None).await.trim(), "db.internal");
+    assert_eq!(ok(&api, &t, &["run", "-e", "production", "--no-mask", "--", "sh", "-c", "echo $HOST"], None).await.trim(), "db.internal");
     let denied = roll(&api, &t, &["run", "-e", "staging", "--", "true"], None).await;
     assert_ne!(denied.code, Some(0));
 
@@ -98,7 +104,7 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let cfg = home.path().join("config");
     let (app, web, cfg) = (app.to_str().unwrap(), web.to_str().unwrap(), cfg.to_str().unwrap());
     ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", app)], &["secrets", "setup", "-p", "shop", "-e", "production"], None).await;
-    let here = ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", web)], &["run", "--", "sh", "-c", "echo $HOST"], None).await;
+    let here = ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", web)], &["run", "--no-mask", "--", "sh", "-c", "echo $HOST"], None).await;
     assert_eq!(here.trim(), "db.internal");
     let doctor = ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", web)], &["secrets", "doctor"], None).await;
     assert!(doctor.contains("ok   this directory is set up for shop production:/") && !doctor.contains("FAIL"), "{doctor}");
@@ -157,6 +163,6 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     assert!(!std::fs::read_to_string(file).unwrap().contains("s3cret"), "sealed at rest");
     projects.create("", "copy", "", None).unwrap();
     ok(&api, &[], &["secrets", "-p", "copy", "restore", file, "--key", key], None).await;
-    let restored = ok(&api, &[], &["run", "-p", "copy", "-e", "production", "--allow-unresolved", "--", "sh", "-c", "echo $HOST $PASSWORD"], None).await;
+    let restored = ok(&api, &[], &["run", "-p", "copy", "-e", "production", "--allow-unresolved", "--no-mask", "--", "sh", "-c", "echo $HOST $PASSWORD"], None).await;
     assert_eq!(restored.trim(), "db.internal s3cret");
 }
