@@ -1458,6 +1458,9 @@ pub struct CronRun {
     pub exit_code: Option<i32>,
     pub started_at: i64,
     pub finished_at: Option<i64>,
+    /// Its container's name: its lines in the environment's log are its own ([`crate::Apps::run_logs`]).
+    #[serde(skip)]
+    pub instance: Option<String>,
 }
 
 /// `<prefix>_` and 12 random characters of lowercase base32.

@@ -95,6 +95,9 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/metrics"), get(metrics))
         .route(&format!("{env}/usage"), get(usage))
         .route(&format!("{env}/runs"), get(runs).post(run_now))
+        .route(&format!("{env}/runs/{{run}}"), get(get_run))
+        .route(&format!("{env}/runs/{{run}}/logs"), get(run_logs))
+        .route(&format!("{env}/runs/{{run}}/cancel"), post(cancel_run))
         .route(&format!("{env}/shell"), get(shell))
         .route(&format!("{env}/tunnel"), get(tunnel))
         .route(&format!("{env}/shell/sessions"), post(open_session))
@@ -970,6 +973,41 @@ async fn runs(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     apps.environment(&id, &env).await?;
     let (s, e) = (id.clone(), env.clone());
     ok(apps.db(move |st| st.runs(&s, &e, 50)).await?)
+}
+
+async fn get_run(State(apps): S, Path((id, env, run)): Path<(String, String, String)>) -> R {
+    ok(apps.cron_run(&id, &env, &run).await?)
+}
+
+async fn cancel_run(State(apps): S, Path((id, env, run)): Path<(String, String, String)>) -> R {
+    ok(apps.cancel_run(&id, &env, &run).await?)
+}
+
+/// A cron run's output: its container's lines in the environment's log; `follow` streams them
+/// until the run ends.
+async fn run_logs(State(apps): S, Path((id, env, run)): Path<(String, String, String)>, Query(q): Query<LogQuery>, ext: Extensions) -> R {
+    let r = apps.cron_run(&id, &env, &run).await?;
+    apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
+    let Some(instance) = r.instance.clone() else { return ok(Vec::<LogLine>::new()) };
+    let (tx, rx) = tokio::sync::watch::channel(r.status != crate::model::RunStatus::Running);
+    if r.status == crate::model::RunStatus::Running {
+        let (apps2, id2, env2, run2) = (apps.clone(), id.clone(), env.clone(), run.clone());
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                match apps2.cron_run(&id2, &env2, &run2).await {
+                    Ok(r) if r.status == crate::model::RunStatus::Running => {}
+                    _ => break,
+                }
+                if tx.is_closed() {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _ = tx.send(true);
+        });
+    }
+    stream_log(&apps, format!("env:{id}/{env}"), q, Some(rx), Some(Box::new(move |l: &LogLine| l.instance.as_deref() == Some(instance.as_str())))).await
 }
 
 async fn run_now(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {

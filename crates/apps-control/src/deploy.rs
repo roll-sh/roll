@@ -1834,26 +1834,57 @@ impl Apps {
         let live = self.load_live(service, env).await?;
         let (this, id, sid, e, dep) = (self.clone(), run.id.clone(), service.to_string(), env.to_string(), active.clone());
         self.running_runs.lock().insert(id.clone());
+        let cancel = CancellationToken::new();
+        self.cancels.lock().insert(id.clone(), cancel.clone());
         tokio::spawn(async move {
-            let (status, code) = match live.run_once(timeout).await {
-                Ok((_, _, true)) => (RunStatus::TimedOut, None),
-                Ok((_, Some(0), _)) => (RunStatus::Succeeded, Some(0)),
-                Ok((_, code, _)) => (RunStatus::Failed, code),
+            // Its output stays in the environment's log (drains read it there); its container's
+            // name, kept, is what picks its own lines out.
+            let (t2, i2) = (this.clone(), id.clone());
+            let made = move |name: &str| {
+                let name = name.to_string();
+                tokio::spawn(async move {
+                    let _ = t2.db(move |s| s.set_run_instance(&i2, &name)).await;
+                });
+            };
+            let (status, code) = match live.run_to_exit(None, &[], timeout, None, cancel, made).await {
+                Ok(x) if x.canceled => (RunStatus::Canceled, None),
+                Ok(x) if x.timed_out => (RunStatus::TimedOut, None),
+                Ok(x) if x.code == Some(0) => (RunStatus::Succeeded, Some(0)),
+                Ok(x) => (RunStatus::Failed, x.code),
                 Err(e) => {
                     live.log.stream(Stream::System).line(format!("the run didn't start: {e}"));
                     (RunStatus::Failed, None)
                 }
             };
+            this.cancels.lock().remove(&id);
             let failed = matches!(status, RunStatus::Failed | RunStatus::TimedOut);
             let data = serde_json::json!({ "run": id, "status": status.as_str(), "exit_code": code });
             let id2 = id.clone();
             let _ = this.db(move |s| s.finish_run(&id2, status, code)).await;
             this.running_runs.lock().remove(&id);
+            this.changed(&sid);
             // A failed or timed-out run is an incident's start: an event (notified by default).
             if failed {
                 let _ = this.db(move |s| s.add_event("cron.failed", &sid, &e, Some(&dep), &data)).await;
             }
         });
+        Ok(run)
+    }
+
+    pub async fn cron_run(self: &Arc<Self>, service: &str, env: &str, id: &str) -> Result<CronRun> {
+        let (sid, e, i) = (service.to_string(), env.to_string(), id.to_string());
+        self.db(move |s| s.run(&sid, &e, &i)).await
+    }
+
+    /// `POST …/runs/{run}/cancel`: a hung run stops (and the schedule's next one isn't held back).
+    pub async fn cancel_run(self: &Arc<Self>, service: &str, env: &str, id: &str) -> Result<CronRun> {
+        let run = self.cron_run(service, env, id).await?;
+        if run.status != RunStatus::Running {
+            return Err(Error::Conflict(format!("{id} is {}: only a running run can be canceled", run.status.as_str())));
+        }
+        if let Some(t) = self.cancels.lock().get(id) {
+            t.cancel();
+        }
         Ok(run)
     }
 

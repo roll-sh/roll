@@ -81,6 +81,9 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/usage?days=` | | `Usage` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/runs` | | `CronRun[]` | read |
 | `POST /v1/apps/services/{id}/environments/{env}/runs` | | 202 `CronRun` (run now) | deploy* |
+| `GET /v1/apps/services/{id}/environments/{env}/runs/{run}` | | `CronRun` | read |
+| `GET /v1/apps/services/{id}/environments/{env}/runs/{run}/logs?follow=&tail=` | | `LogLine[]` or SSE (ends with the run): its container's lines | reveal (a run's output can be the variables) |
+| `POST /v1/apps/services/{id}/environments/{env}/runs/{run}/cancel` | | `CronRun` (409 unless it's running) | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/shell?instance=&cols=&rows=` | WebSocket | a terminal: binary both ways, text `{"resize":[cols,rows]}` | admin (a shell runs anything with the environment's variables, as agents' shells) |
 | `GET /v1/apps/services/{id}/environments/{env}/tunnel` | WebSocket | one TCP connection to the web service's own port, binary both ways (`roll apps proxy`); wakes an instance and holds it while open; at most 20 per environment (409); 409 for a worker, a cron service or a static site | admin (it reaches the port past the allow list, access and maintenance) |
 | `POST /v1/apps/services/{id}/environments/{env}/shell/sessions` | `{ instance?, cols?, rows? }` | 201 `{ id }` (a shell over HTTP: the dashboard's terminal) | admin (a shell runs anything with the environment's variables, as agents' shells) |

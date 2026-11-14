@@ -1418,6 +1418,12 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     }
     assert_eq!((last["status"].as_str(), last["exit_code"].as_i64()), (Some("succeeded"), Some(0)), "{last}");
     assert!(!call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1.to_string().contains("cron.failed"));
+    // A run is read on its own, and its output is its own (not the environment's whole log).
+    let rid = last["id"].as_str().unwrap().to_string();
+    assert_eq!(call(&w.api, "GET", &format!("{base}/runs/{rid}"), None).await.1["status"], "succeeded");
+    let out = get_until(&w.api, &format!("{base}/runs/{rid}/logs"), |l| l.as_array().is_some_and(|a| !a.is_empty())).await;
+    assert!(out.as_array().unwrap().iter().all(|l| l["text"] == "job ran"), "{out}");
+    assert_eq!(call(&w.api, "POST", &format!("{base}/runs/{rid}/cancel"), None).await.0, StatusCode::CONFLICT, "only a running one");
     // A run that fails is an event (notified by default), with its exit code.
     call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_EXIT": "3"}}))).await;
     let (_, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
@@ -1426,6 +1432,18 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     let ev = get_until(&w.api, "/v1/apps/events?after=0", |v| v.to_string().contains("cron.failed")).await;
     let failed = ev["events"].as_array().unwrap().iter().find(|e| e["kind"] == "cron.failed").unwrap();
     assert_eq!((failed["data"]["exit_code"].as_i64(), failed["data"]["status"].as_str()), (Some(3), Some("failed")), "{failed}");
+    // One that hangs is canceled, and the schedule's next run isn't held back by it.
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"unset": ["FAKE_EXIT"]}))).await;
+    let (_, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    settled(&w, &cid, "production", d["id"].as_str().unwrap()).await;
+    let (_, hung) = call(&w.api, "POST", &format!("{base}/runs"), None).await;
+    let hid = hung["id"].as_str().unwrap().to_string();
+    assert_eq!(hung["status"], "running", "{hung}");
+    assert_eq!(call(&w.api, "POST", &format!("{base}/runs/{hid}/cancel"), None).await.0, StatusCode::OK);
+    get_until(&w.api, &format!("{base}/runs/{hid}"), |r| r["status"] == "canceled").await;
+    let (_, next) = call(&w.api, "POST", &format!("{base}/runs"), None).await;
+    assert_eq!(next["status"], "running", "not skipped: {next}");
+    call(&w.api, "POST", &format!("{base}/runs/{}/cancel", next["id"].as_str().unwrap()), None).await;
     let _ = Ordering::SeqCst;
 }
 

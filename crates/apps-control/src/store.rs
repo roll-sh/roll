@@ -525,6 +525,18 @@ fn spend_row(r: &code_sql::Row<'_>) -> code_sql::Result<crate::spend::Limits> {
     Ok(crate::spend::Limits { alert_usd: r.get(0)?, hard_usd: r.get(1)?, alerted: r.get(2)?, capped: r.get(3)? })
 }
 
+fn run_row(r: &code_sql::Row<'_>) -> code_sql::Result<CronRun> {
+    Ok(CronRun {
+        id: r.get(0)?,
+        deployment: r.get(1)?,
+        status: RunStatus::parse(&r.get::<_, String>(2)?),
+        exit_code: r.get::<_, Option<i64>>(3)?.map(|c| c as i32),
+        started_at: r.get(4)?,
+        finished_at: r.get(5)?,
+        instance: r.get(6)?,
+    })
+}
+
 fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
     let status: String = r.get(3)?;
     let plan: Option<String> = r.get(8)?;
@@ -586,6 +598,7 @@ impl Store {
         db.add_column("env_access", "bypass_hash", "TEXT")?;
         db.add_column("deployments", "actor", "TEXT")?;
         db.add_column("deployments", "pruned_at", "INTEGER")?;
+        db.add_column("runs", "instance", "TEXT")?;
         db.add_column("environments", "wait_for_ci", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "run", "TEXT NOT NULL DEFAULT '{}'")?;
         db.add_column("environments", "hook_hash", "TEXT")?;
@@ -1517,19 +1530,22 @@ impl Store {
 
     pub fn runs(&self, service: &str, env: &str, limit: usize) -> Result<Vec<CronRun>> {
         Ok(self.db.query(
-            "SELECT id, deployment, status, exit_code, started_at, finished_at FROM runs WHERE service = ? AND env = ? ORDER BY started_at DESC, id DESC LIMIT ?",
+            "SELECT id, deployment, status, exit_code, started_at, finished_at, instance FROM runs WHERE service = ? AND env = ? ORDER BY started_at DESC, id DESC LIMIT ?",
             params![service, env, limit as i64],
-            |r| {
-                Ok(CronRun {
-                    id: r.get(0)?,
-                    deployment: r.get(1)?,
-                    status: RunStatus::parse(&r.get::<_, String>(2)?),
-                    exit_code: r.get::<_, Option<i64>>(3)?.map(|c| c as i32),
-                    started_at: r.get(4)?,
-                    finished_at: r.get(5)?,
-                })
-            },
+            run_row,
         )?)
+    }
+
+    pub fn run(&self, service: &str, env: &str, id: &str) -> Result<CronRun> {
+        self.db
+            .query_row("SELECT id, deployment, status, exit_code, started_at, finished_at, instance FROM runs WHERE service = ? AND env = ? AND id = ?", params![service, env, id], run_row)
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("no run {id}")))
+    }
+
+    pub fn set_run_instance(&self, id: &str, instance: &str) -> Result<()> {
+        self.db.execute("UPDATE runs SET instance = ? WHERE id = ?", params![instance, id])?;
+        Ok(())
     }
 
     /// A run, `running`, or `skipped` when one is still going (any of them, not just the newest:
@@ -1549,7 +1565,7 @@ impl Store {
                 "INSERT INTO runs (id, service, env, deployment, status, exit_code, started_at, finished_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)",
                 params![id, service, env, deployment, status.as_str(), now, finished],
             )?;
-            Ok(CronRun { id: id.clone(), deployment: deployment.into(), status, exit_code: None, started_at: now, finished_at: finished })
+            Ok(CronRun { id: id.clone(), deployment: deployment.into(), status, exit_code: None, started_at: now, finished_at: finished, instance: None })
         })
     }
 

@@ -661,6 +661,8 @@ export const appsApi = {
 
   runs: (id: string, e: string) => call<CronRun[]>("GET", `${env(id, e)}/runs`),
   runNow: (id: string, e: string) => call<CronRun>("POST", `${env(id, e)}/runs`),
+  run: (id: string, e: string, r: string) => call<CronRun>("GET", `${env(id, e)}/runs/${encodeURIComponent(r)}`),
+  cancelRun: (id: string, e: string, r: string) => call<CronRun>("POST", `${env(id, e)}/runs/${encodeURIComponent(r)}/cancel`),
   jobs: (id: string, e: string) => call<Job[]>("GET", `${env(id, e)}/jobs`),
   startJob: (id: string, e: string, body: { command: string; timeout_s?: number; tasks?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
   job: (id: string, e: string, j: string) => call<Job>("GET", `${env(id, e)}/jobs/${encodeURIComponent(j)}`),
@@ -744,7 +746,11 @@ export function followChanges(service: string, opts: { onChange: () => void; onO
 }
 
 export function followLog(
-  kind: { runtime: { service: string; env: string; http?: boolean } } | { build: { service: string; env: string; deployment: string } } | { job: { service: string; env: string; job: string } },
+  kind:
+    | { runtime: { service: string; env: string; http?: boolean } }
+    | { build: { service: string; env: string; deployment: string } }
+    | { job: { service: string; env: string; job: string } }
+    | { run: { service: string; env: string; run: string } },
   opts: { tail?: number; onLine: (l: LogLine) => void; onReset: () => void; onOpen?: (open: boolean) => void },
 ): () => void {
   const path =
@@ -752,7 +758,9 @@ export function followLog(
       ? `${env(kind.runtime.service, kind.runtime.env)}/logs`
       : "job" in kind
         ? `${env(kind.job.service, kind.job.env)}/jobs/${encodeURIComponent(kind.job.job)}/logs`
-        : `${dep(kind.build.service, kind.build.env, kind.build.deployment)}/logs`;
+        : "run" in kind
+          ? `${env(kind.run.service, kind.run.env)}/runs/${encodeURIComponent(kind.run.run)}/logs`
+          : `${dep(kind.build.service, kind.build.env, kind.build.deployment)}/logs`;
   const http = "runtime" in kind && kind.runtime.http ? true : undefined;
   return streamSse(`${ROLL_API}${path}${qs({ follow: true, tail: opts.tail ?? 500, http })}`, {
     headers: operatorHeaders,

@@ -289,6 +289,20 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// A cron service's runs, newest first; `--now` starts one, `--logs RUN` prints one's output
+    /// (`--follow` until it ends), `--cancel RUN` stops one.
+    Runs {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, conflicts_with_all = ["logs", "cancel"])]
+        now: bool,
+        #[arg(long, value_name = "RUN", conflicts_with = "cancel")]
+        logs: Option<String>,
+        #[arg(long, requires = "logs")]
+        follow: bool,
+        #[arg(long, value_name = "RUN")]
+        cancel: Option<String>,
+    },
     /// Reach the service's port from this machine, a private one too (Fly's `fly proxy`):
     /// connections to `127.0.0.1:<local port>` go to it through roll, a tunnel each, waking it
     /// and keeping it up while they're open. Ctrl-C ends it.
@@ -1946,6 +1960,43 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             v
+        }
+        AppsCmd::Runs { target, now, logs, follow, cancel } => {
+            let svc = service(api, &target).await?;
+            let base = format!("{}/runs", env_path(&svc, &target.env));
+            if now {
+                api.post(&base, json!({})).await?
+            } else if let Some(run) = cancel {
+                api.post(&format!("{base}/{}/cancel", enc(&run)), json!({})).await?
+            } else if let Some(run) = logs {
+                let path = format!("{base}/{}/logs", enc(&run));
+                if follow {
+                    return follow_matching(api, &format!("{path}?follow=1&tail=2000"), None).await;
+                }
+                let lines = api.get(&format!("{path}?tail=2000")).await?;
+                if !json_out {
+                    for l in lines.as_array().into_iter().flatten() {
+                        print_line(l);
+                    }
+                    return Ok(());
+                }
+                lines
+            } else {
+                let v = api.get(&base).await?;
+                if !json_out {
+                    for r in v.as_array().into_iter().flatten() {
+                        let at = r["started_at"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
+                        let took = match (r["started_at"].as_i64(), r["finished_at"].as_i64()) {
+                            (Some(a), Some(b)) => format!("{} s", ((b - a) / 1000).max(1)),
+                            _ => "-".into(),
+                        };
+                        let code = r["exit_code"].as_i64().map(|c| format!("exit {c}")).unwrap_or_default();
+                        println!("{}  {:<10} {at}  {took:<6} {code}", s(&r["id"]), s(&r["status"]));
+                    }
+                    return Ok(());
+                }
+                v
+            }
         }
         AppsCmd::Ssh { target, instance } => {
             let svc = service(api, &target).await?;
