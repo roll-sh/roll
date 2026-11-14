@@ -2706,44 +2706,64 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A landing branch** (`feature/roll-secrets-landing`): every stacked pull request merged on #20
-   in order, conflicts resolved, the whole suite passing, so the stack can land in one step. A
-   rehearsal (2026-11-14) merged each onto the others in order: twelve merge cleanly; twenty
-   conflict with an earlier sibling, nearly all additively (routes in `api.rs`, rows in
-   `catalog.rs`, types in `types.ts`/`secrets-api.ts`, sections of this doc, `rolld/src/secrets.rs`'s
-   providers), and #30 (#20 with roll MCP's #25) touches the most.
-2. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
-   #49 and #54 meet, `watch` keeps both (answered digests, streams and signals).
-3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
+1. **Land the stack**: `feature/roll-secrets-landing` is #20 with all 31 pull requests stacked on
+   it (#31–#61) merged in order, conflicts resolved and the suites run (see "Landing" below). #30
+   isn't in it: it targets `main` and carries roll MCP's #24/#25, which are still moving. Merging
+   the landing branch is the user's call.
+2. **#30 onto the landing branch, once #25 is on `main`**: roll-access's tokens replace `rlst_`,
+   and the stack's later token users move with it: renewed logins (#56) and pinned keys (#57) mint
+   workload tokens, reach (#61) lists roll-access grants, `Caller` keeps `runtime` (#46). Write
+   `NewGrant { name, rules, ip_allow, ..Default::default() }` (#24 derives `Default`).
+3. **A workload identity a person creates asks roll-access's policy** (roll MCP's review, after #25):
+   an identity hands its maker's reach to every login, so a non-admin's identity is held, issuing
+   no logins, until an admin approves when `access.policy_now().needs_approval(&scope, false)` says
+   so, as that person's own tokens are (admins told through `Access::tell_admins`, which #25 makes
+   public when this needs it).
+4. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
-4. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
+5. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
    tools are ready), a live check of OpenSearch links (#29 and #51 in one build), and splitting the
-   CLI's `secrets.rs` (2,700 lines) by command once the stacked pull requests that touch it have
-   landed.
-5. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
-   already seals such variables). One line once both are on #20.
-6. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
-   token; the trust policy pins `sub`, as GCP's and Azure's do).
-7. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
+   CLI's `secrets.rs` (3,900 lines on the landing branch) by command once the stack has landed.
+6. *Waits on #31 and #46 landing:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive`
+   (apps already seals such variables; deploys already get sensitive values, as a runtime).
+7. *Waits on #38 and #43 landing:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with
+   roll's own token; the trust policy pins `sub`, as GCP's and Azure's do).
+8. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
    notice.
-8. *Waits on #30 meeting #24/#25:* the Access tab shows roll-access tokens waiting for an admin's
-   approval (`pending`) and rotations that keep the old secret working (`keep_old_for_s`), and
-   reach (#61) lists roll-access grants too.
-9. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
+9. *Waits on #30 meeting #24/#25:* the Access tab shows roll-access tokens waiting for an admin's
+   approval (`pending`) and rotations that keep the old secret working (`keep_old_for_s`).
+10. `roll run --fallback` with `--env-file`: an env file's `roll://` references still need rolld;
+   the fallback file could keep them too.
+11. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
    installs list Slack user ids and act as the owner's automation; a review must count as the
    person who pressed the button (their permissions, the request's gates), never as the app.
-10. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
+12. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
    project can link their own databases, buckets and streams.
-11. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+13. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
    environment).
-1. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
-   and the deploy notice when apps reads secrets (#31), refreshed once those land.
-2. **Products say who owns a resource**, so a person's project can link their own databases,
-   buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
-   Waits on products serving signed-in people (today they're the operator's).
-3. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
-   a project has members besides its owner. Tokens already ask through roll-access (`ask` rules,
-   approvals for a while); a project's one owner reaches all of it.
+
+### Landing
+
+Merging the stack in order (2026-11-14) found what no single pull request could:
+
+- **Customer-managed keys (#37) and the providers built beside it.** Databases outside roll (#39),
+  CAs (#44) and SSH CAs (#45) opened a project's data key with the deployment key alone, so their
+  links failed on a project whose key a customer's KMS wraps. They unwrap first, as rotators do.
+- **`roll run`**, which four pull requests changed: the fallback (#35), references in env files
+  (#49), masking (#54) and the strict read (#55) now work together. A run started from the
+  fallback follows a digest no folder has, so the first answer from rolld reloads it, and leases
+  are kept as their renew routes.
+- **Relogin (#56) and the fallback (#35)** both changed the API client: a 401 for a workload's
+  login logs in again inside `answer`, which the fallback reads through.
+- **Lines three pull requests changed alike** kept only the last one's version: health's finding kinds
+  lost `rotation_failing`, `revoke_failing` (#48) and `certificate_expiring` (#44), and the
+  registries a forgotten project drops lost `cloud_accounts` (#43). Every pull request's added lines
+  were checked against the landing branch afterwards; everything else is there or extended.
+- Additive everywhere else: routes, catalogue rows, `Options` fields, types and this document.
+
+The landing branch passes roll-secrets' tests (SQLite and Postgres), roll-cli's, rolld's auth and
+secrets tests, roll-access's, clippy with `-D warnings`, `pnpm typecheck`, the dashboard's 719
+tests, `@roll/secrets`' and the VS Code extension's.
 
 Open pull requests after this one:
 
