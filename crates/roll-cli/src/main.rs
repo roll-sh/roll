@@ -258,14 +258,14 @@ impl Api {
     }
 
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
-        let (mut status, mut text) = self.send(method.clone(), path, body.as_ref()).await?;
+        let (mut status, mut text, used) = self.send(method.clone(), path, body.as_ref()).await?;
         // A workload identity's login the server no longer takes (its clock ran ahead of ours, or
         // it was revoked): log in again, once.
         if status == reqwest::StatusCode::UNAUTHORIZED
             && let Some(l) = &self.login
         {
-            l.refused().await;
-            (status, text) = self.send(method, path, body.as_ref()).await?;
+            l.refused(used.as_deref().unwrap_or_default()).await;
+            (status, text, _) = self.send(method, path, body.as_ref()).await?;
         }
         if !status.is_success() {
             // Errors are `{"error": ...}`, but whatever answered may not be the roll API at all.
@@ -283,9 +283,11 @@ impl Api {
         }
         serde_json::from_str(&text).with_context(|| format!("{} didn't answer with JSON: {}", self.base, text.chars().take(200).collect::<String>()))
     }
-    async fn send(&self, method: reqwest::Method, path: &str, body: Option<&Value>) -> anyhow::Result<(reqwest::StatusCode, String)> {
+    /// One request; its status, its body, and the token it carried.
+    async fn send(&self, method: reqwest::Method, path: &str, body: Option<&Value>) -> anyhow::Result<(reqwest::StatusCode, String, Option<String>)> {
         let mut req = self.http.request(method, format!("{}{path}", self.base));
-        if let Some(k) = &self.bearer().await? {
+        let used = self.bearer().await?;
+        if let Some(k) = &used {
             req = req.bearer_auth(k);
         }
         for (k, v) in &self.headers {
@@ -296,7 +298,7 @@ impl Api {
         }
         let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
         let status = res.status();
-        Ok((status, res.text().await?))
+        Ok((status, res.text().await?, used))
     }
     /// The token to send: a workload identity's login, logging in again when it's near its end.
     async fn bearer(&self) -> anyhow::Result<Option<String>> {

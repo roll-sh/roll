@@ -1926,6 +1926,9 @@ struct Held {
     retry: Option<std::time::Instant>,
     /// A login running in the background.
     renewing: Option<tokio::task::JoinHandle<()>>,
+    /// Counts the logins stored: a background login that finishes after a newer one doesn't
+    /// overwrite it.
+    generation: u64,
 }
 
 const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1937,7 +1940,14 @@ impl Held {
         let life = std::time::Duration::from_millis((expires_at - now_ms()).clamp(60_000, 3_660_000) as u64);
         let now = std::time::Instant::now();
         let ends = now + life;
-        Held { token, renew: ends - (life / 4).max(std::time::Duration::from_secs(30)), ends, retry: None, renewing: None }
+        Held { token, renew: ends - (life / 4).max(std::time::Duration::from_secs(30)), ends, retry: None, renewing: None, generation: 0 }
+    }
+
+    /// A new login in place of this one.
+    fn store(&mut self, token: String, expires_at: i64) {
+        let generation = self.generation + 1;
+        *self = Held::new(token, expires_at);
+        self.generation = generation;
     }
 }
 
@@ -1965,14 +1975,19 @@ impl Relogin {
         if now >= held.ends {
             // Ended (or refused): nothing to go on with. Log in now.
             let (token, expires_at) = login_within(api, &self.identity).await.map_err(|e| anyhow::anyhow!("logging in again as {} failed ({e:#})", self.identity))?;
-            *held = Held::new(token, expires_at);
+            held.store(token, expires_at);
         } else if now >= held.renew && held.retry.is_none_or(|r| now >= r) && held.renewing.as_ref().is_none_or(|h| h.is_finished()) {
             let (me, anon) = (self.clone(), Api { base: api.base.clone(), http: api.http.clone(), key: None, headers: api.headers.clone(), login: None });
+            let started = held.generation;
             held.renewing = Some(tokio::spawn(async move {
                 let got = login_within(&anon, &me.identity).await;
                 let mut held = me.held.lock().await;
+                if held.generation != started {
+                    // A newer login was stored meanwhile (one in the foreground): it stays.
+                    return;
+                }
                 match got {
-                    Ok((token, expires_at)) => *held = Held::new(token, expires_at),
+                    Ok((token, expires_at)) => held.store(token, expires_at),
                     Err(e) => {
                         eprintln!("roll: logging in again as {} failed ({e:#}); the current login lasts a while yet", me.identity);
                         held.retry = Some(std::time::Instant::now() + RETRY);
@@ -1983,10 +1998,13 @@ impl Relogin {
         Ok(held.token.clone())
     }
 
-    /// The server refused the token (401): log in again before the next request.
-    pub async fn refused(&self) {
+    /// The server refused `token` (401): log in again before the next request, unless a newer
+    /// login has replaced it already (a late answer to a request sent with the old one).
+    pub async fn refused(&self, token: &str) {
         let mut held = self.held.lock().await;
-        held.ends = std::time::Instant::now();
+        if held.token == token {
+            held.ends = std::time::Instant::now();
+        }
     }
 
     /// Waits for a background login (tests).
