@@ -289,6 +289,10 @@ previews are listed once those products are on.
 | `postgres_query` | Run read-only SQL on an endpoint: it runs in a read-only transaction, so writes fail. Returns columns and rows. | `POST /v1/endpoints/{endpoint}/query` |
 | `postgres_execute` | Run SQL that may change data or schema (INSERT, UPDATE, DDL) on an endpoint. | `POST /v1/endpoints/{endpoint}/query` |
 | `postgres_describe_schema` | Every table's columns and types on an endpoint (read-only). | `POST /v1/endpoints/{endpoint}/query` |
+| `postgres_explain` | A statement's plan as JSON, without running it (Neon's explain). | `POST /v1/endpoints/{id}/query` (read-only, `EXPLAIN (FORMAT JSON)`) |
+| `postgres_slow_queries` | The 20 slowest statements by mean time (Neon's slow queries; `pg_stat_statements`). | `POST /v1/endpoints/{id}/query` (read-only) |
+| `postgres_advisors` | Unused indexes, unindexed foreign keys, tables without a primary key, sequential scans (Supabase's advisors). | `POST /v1/endpoints/{id}/query` (read-only) |
+| `postgres_list_extensions` | Extensions installed and available. | `POST /v1/endpoints/{id}/query` (read-only) |
 | `postgres_start_endpoint` | Wake an endpoint's compute. | `POST /v1/endpoints/{endpoint}/start` |
 | `postgres_suspend_endpoint` | Suspend an endpoint's compute. | `POST /v1/endpoints/{endpoint}/suspend` |
 | `postgres_usage` | Compute and storage use of a project, with cost estimates. | `GET /v1/projects/{project}/usage` |
@@ -540,19 +544,21 @@ by its maker, out of the list and caps) for secrets' identity logins; a person's
 mailed to them (an approval waiting on them, used from a new network, revoked as leaked, about to
 expire; only their own, never a secret); `previews_resolve_note` (a preview page's note, write by
 the prefix; previews-next), and `apps_logs` takes `before`, `instance`, `deployment` and `stream`
-(apps-next); names people choose can't hide text: a token's name with invisible characters is
-refused, OAuth clients' names (registered or from a metadata document) drop them, and `initialize`'s
-instructions escape them; `apps_set_environment` takes response header rules (`headers`, apps-next);
-a cron run's logs are read again, as apps-next decided (its lines were always in the read-level
-environment log); `apps_restart_instance` (apps-next, reviewed under the environment prefix: deploy
-in production); invisible characters (tag characters, zero-width and bidi controls, variation
-selectors) escaped in results' text, so instructions hidden in other people's text stay visible to
-the model; plain-read answers checked for credentials (key listings: streams' are usernames,
-storage's skip the secret, tasks' are hashes and prefixes); the fifteenth review: a list's
-credentials redacted item by item (a token with reveal on one Postgres database and read on all saw
-every database's password in `GET /v1/projects`; the same for every list with credential fields), a
-preview's `share_url` redacted without reveal (its access token: the QR code's reveal row protected
-nothing), and a cron run's logs reveal on this branch too; `previews_list_notes` and
+(apps-next); Postgres analysis as Neon's and Supabase's MCP servers have it: `postgres_explain`,
+`postgres_slow_queries`, `postgres_advisors`, `postgres_list_extensions` (read-only SQL through the
+query route, checked on Postgres 18); names people choose can't hide text: a token's name with
+invisible characters is refused, OAuth clients' names (registered or from a metadata document) drop
+them, and `initialize`'s instructions escape them; `apps_set_environment` takes response header
+rules (`headers`, apps-next); a cron run's logs are read again, as apps-next decided (its lines were
+always in the read-level environment log); `apps_restart_instance` (apps-next, reviewed under the
+environment prefix: deploy in production); invisible characters (tag characters, zero-width and bidi
+controls, variation selectors) escaped in results' text, so instructions hidden in other people's
+text stay visible to the model; plain-read answers checked for credentials (key listings: streams'
+are usernames, storage's skip the secret, tasks' are hashes and prefixes); the fifteenth review: a
+list's credentials redacted item by item (a token with reveal on one Postgres database and read on
+all saw every database's password in `GET /v1/projects`; the same for every list with credential
+fields), a preview's `share_url` redacted without reveal (its access token: the QR code's reveal row
+protected nothing), and a cron run's logs reveal on this branch too; `previews_list_notes` and
 `previews_resolve_note` (a preview page's note, write by the prefix; previews-next), and `apps_logs`
 takes `before`, `instance`, `deployment` and `stream` (apps-next); apps-next's cron runs as tools
 (`apps_get_cron_run`, `apps_cron_run_logs`, `apps_cancel_cron_run`); a preview's caught mail as

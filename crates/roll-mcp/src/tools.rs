@@ -63,6 +63,8 @@ pub struct Tool {
     pub params: &'static [P],
     /// Fields always in the JSON body (`read_only: true` for read-only SQL).
     pub fixed: Option<fn() -> Value>,
+    /// The `sql` argument as the route gets it (`EXPLAIN (FORMAT JSON) <sql>`).
+    pub wrap: Option<fn(&str) -> String>,
     pub hint: Hint,
 }
 
@@ -224,6 +226,9 @@ impl Tool {
                 }
             }
         }
+        if let (Some(w), Some(sql)) = (self.wrap, body.get("sql").and_then(Value::as_str)) {
+            body["sql"] = json!(w(sql));
+        }
         let q = query.finish();
         let uri = if has_query { format!("{path}?{q}") } else { path };
         let body = match raw {
@@ -256,10 +261,14 @@ const IDEMPOTENCY: P = P { name: "idempotency_key", ty: Ty::Str, at: At::Header(
 const IN_PROJECT: P = P { name: "workspace_project", ty: Ty::Str, at: At::Header("x-roll-project"), required: false, desc: "Workspace project (prj_…) to put the new resource in" };
 
 const fn t(name: &'static str, title: &'static str, description: &'static str, product: &'static str, method: &'static str, path: &'static str, params: &'static [P]) -> Tool {
-    Tool { name, title, description, product, method, path, params, fixed: None, hint: Hint::Auto }
+    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto }
 }
 
 impl Tool {
+    const fn wraps(mut self, f: fn(&str) -> String) -> Tool {
+        self.wrap = Some(f);
+        self
+    }
     const fn fixed(mut self, f: fn() -> Value) -> Tool {
         self.fixed = Some(f);
         self
@@ -285,6 +294,45 @@ fn describe_schema() -> Value {
         "sql": "SELECT table_schema, table_name, column_name, data_type, is_nullable, column_default FROM information_schema.columns \
 WHERE table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_schema, table_name, ordinal_position",
     })
+}
+
+/// `EXPLAIN (FORMAT JSON)` of a statement: its plan, without running it.
+fn explain(sql: &str) -> String {
+    format!("EXPLAIN (FORMAT JSON) {}", sql.trim().trim_end_matches(';'))
+}
+
+/// Things worth fixing, as Supabase's advisors find them: indexes nothing uses, foreign keys no
+/// index serves, tables without a primary key, and large tables read mostly by sequential scans.
+fn advisors() -> Value {
+    json!({ "read_only": true, "sql": "SELECT kind, \"table\", detail FROM ( \
+  SELECT 'unused_index' AS kind, s.schemaname || '.' || s.relname AS \"table\", s.indexrelname || ' (' || pg_size_pretty(pg_relation_size(s.indexrelid)) || ', never used since stats were reset)' AS detail \
+  FROM pg_stat_user_indexes s JOIN pg_index i ON i.indexrelid = s.indexrelid \
+  WHERE s.idx_scan = 0 AND NOT i.indisunique AND NOT i.indisprimary \
+  UNION ALL \
+  SELECT 'unindexed_foreign_key', c.conrelid::regclass::text, c.conname || ' on (' || (SELECT string_agg(a.attname, ', ' ORDER BY a.attnum) FROM pg_attribute a WHERE a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)) || '): joins and cascading deletes scan the table' \
+  FROM pg_constraint c \
+  WHERE c.contype = 'f' AND NOT EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.conrelid AND (i.indkey::int2[])[0:cardinality(c.conkey) - 1] @> c.conkey AND (i.indkey::int2[])[0:cardinality(c.conkey) - 1] <@ c.conkey) \
+  UNION ALL \
+  SELECT 'no_primary_key', t.schemaname || '.' || t.relname, 'rows can''t be told apart for updates, replication or tools' \
+  FROM pg_stat_user_tables t \
+  WHERE NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid = t.relid AND c.contype = 'p') \
+  UNION ALL \
+  SELECT 'sequential_scans', t.schemaname || '.' || t.relname, t.seq_scan || ' sequential scans against ' || coalesce(t.idx_scan, 0) || ' index scans over ~' || t.n_live_tup || ' rows: a query may be missing an index' \
+  FROM pg_stat_user_tables t \
+  WHERE t.n_live_tup > 10000 AND t.seq_scan > 10 * coalesce(t.idx_scan, 0) \
+) a ORDER BY kind, \"table\"" })
+}
+
+/// The slowest statements by mean time (`pg_stat_statements`, which every compute preloads; the
+/// database needs `CREATE EXTENSION pg_stat_statements` once).
+fn slow_queries() -> Value {
+    json!({ "read_only": true, "sql": "SELECT left(query, 500) AS query, calls, round(mean_exec_time::numeric, 2) AS mean_ms, round(total_exec_time::numeric, 2) AS total_ms, rows, round((100.0 * shared_blks_hit / nullif(shared_blks_hit + shared_blks_read, 0))::numeric, 1) AS cache_hit_pct \
+FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND query NOT LIKE '%pg_stat_statements%' \
+ORDER BY mean_exec_time DESC LIMIT 20" })
+}
+
+fn extensions() -> Value {
+    json!({ "read_only": true, "sql": "SELECT a.name, a.default_version, e.extversion AS installed_version, a.comment FROM pg_available_extensions a LEFT JOIN pg_extension e ON e.extname = a.name ORDER BY e.extname IS NULL, a.name" })
 }
 
 const PROJECT: P = req("project", "Postgres project id (prj_…)");
@@ -357,6 +405,10 @@ static TOOLS: &[Tool] = &[
     t("postgres_query", "Query Postgres (read-only)", "Run read-only SQL on an endpoint: it runs in a read-only transaction, so writes fail. Returns columns and rows.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT, breq("sql", Ty::Str, "SQL to run")]).fixed(read_only),
     t("postgres_execute", "Execute SQL", "Run SQL that may change data or schema (INSERT, UPDATE, DDL) on an endpoint.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT, breq("sql", Ty::Str, "SQL to run")]).fixed(writes).destructive(),
     t("postgres_describe_schema", "Describe the schema", "Every table's columns and types on an endpoint (read-only).", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(describe_schema),
+    t("postgres_explain", "Explain a query", "A statement's plan as JSON (EXPLAIN, FORMAT JSON), without running it: which indexes it uses, its estimated cost and rows. For real timings, postgres_query with EXPLAIN ANALYZE.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT, breq("sql", Ty::Str, "The statement")]).fixed(read_only).wraps(explain),
+    t("postgres_slow_queries", "Slowest queries", "The 20 slowest statements by mean time, with calls, rows and cache hit rate (pg_stat_statements; if it's missing, CREATE EXTENSION pg_stat_statements once with postgres_execute).", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(slow_queries),
+    t("postgres_advisors", "Database advice", "What's worth fixing: unused indexes, foreign keys without an index, tables without a primary key, large tables read by sequential scans.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(advisors),
+    t("postgres_list_extensions", "Extensions", "Extensions installed and available, with versions.", "postgres", "POST", "/v1/endpoints/{endpoint}/query", &[ENDPOINT]).fixed(extensions),
     t("postgres_start_endpoint", "Start an endpoint", "Wake an endpoint's compute.", "postgres", "POST", "/v1/endpoints/{endpoint}/start", &[ENDPOINT]),
     t("postgres_suspend_endpoint", "Suspend an endpoint", "Suspend an endpoint's compute.", "postgres", "POST", "/v1/endpoints/{endpoint}/suspend", &[ENDPOINT]),
     t("postgres_usage", "Postgres usage", "Compute and storage use of a project, with cost estimates.", "postgres", "GET", "/v1/projects/{project}/usage", &[PROJECT, DAYS]),
@@ -790,6 +842,12 @@ mod tests {
         assert_eq!(r.uri, "/v1/storage/buckets/a%20b/upload?key=x%2Fy.txt");
         assert!(matches!(r.body, Built::Raw(ref b, _) if b == b"hi"));
         assert!(all()[0].request(&json!({ "nope": 1 })).is_err());
+        // Explain plans the agent's statement in a read-only transaction, and runs nothing.
+        let r = all().iter().find(|t| t.name == "postgres_explain").unwrap().request(&json!({ "endpoint": "ep_1", "sql": "select * from users;" })).unwrap();
+        assert!(matches!(r.body, Built::Json(ref b) if b["sql"] == "EXPLAIN (FORMAT JSON) select * from users" && b["read_only"] == true));
+        for n in ["postgres_explain", "postgres_slow_queries", "postgres_advisors", "postgres_list_extensions"] {
+            assert_eq!(def(n)["annotations"]["readOnlyHint"], true, "{n}");
+        }
         // docs/mcp.md lists every tool.
         let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/mcp.md")).unwrap();
         let missing: Vec<_> = all().iter().filter(|t| !doc.contains(&format!("| `{}` |", t.name))).map(|t| t.name).collect();
