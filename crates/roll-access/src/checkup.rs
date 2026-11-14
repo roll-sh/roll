@@ -12,11 +12,12 @@ pub const UNUSED_DAYS: i64 = 30;
 /// One thing to look at, most serious first by kind.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Finding {
-    /// `everything`, `never_expires`, `unused`, `narrower` or `roams`.
+    /// `pending`, `everything`, `never_expires`, `unused`, `narrower` or `roams`.
     pub kind: &'static str,
     /// In words, for the person.
     pub why: String,
-    /// What fixes it: `tighten`, `expire`, `revoke` or `limit_addresses`.
+    /// What fixes it: `tighten`, `expire`, `revoke`, `limit_addresses`, or `approve` (an admin's
+    /// decision on a person's pending token).
     pub fix: &'static str,
 }
 
@@ -33,6 +34,10 @@ pub fn findings(g: &Grant, seen: &Seen, now: i64) -> Vec<Finding> {
         return Vec::new();
     }
     let mut out = Vec::new();
+    // First: a person waits on it (GitHub's pending requests).
+    if g.pending {
+        out.push(Finding { kind: "pending", why: "it waits for an admin's approval: it doesn't work until one approves or denies it".into(), fix: "approve" });
+    }
     let day = 86_400_000;
     let strong = [Action::Admin, Action::Reveal, Action::Delete];
     let everything = |s: &Scope| {

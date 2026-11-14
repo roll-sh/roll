@@ -335,7 +335,11 @@ async fn checkup(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
                 false
             };
             let seen = crate::checkup::Seen { networks: counts.get(&g.id).copied().unwrap_or(0), narrower };
-            let findings = crate::checkup::findings(&g, &seen, now);
+            let mut findings = crate::checkup::findings(&g, &seen, now);
+            // A person sees that their own waits elsewhere; deciding it isn't theirs.
+            if matches!(who, Who::User(_)) {
+                findings.retain(|f| f.kind != "pending");
+            }
             if !findings.is_empty() {
                 out.push(json!({
                     "grant": { "id": g.id, "name": g.name, "kind": g.kind, "last_used_at": g.last_used_at, "expires_at": g.expires_at, "created_at": g.created_at },

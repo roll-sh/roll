@@ -850,6 +850,12 @@ async fn a_persons_token_past_the_policy_waits_for_an_admin() {
     let (token, id) = (made["token"].as_str().unwrap().to_string(), made["grant"]["id"].as_str().unwrap().to_string());
     let (s, e) = d.call(&token, Method::GET, "/v1/workspace/projects", None).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::UNAUTHORIZED, Some("pending_approval")), "{e}");
+    // It leads an admin's checkup; hers doesn't list it (she sees it waits, and it isn't hers to decide).
+    let (_, admins) = d.call(OPERATOR, Method::GET, "/v1/access/checkup", None).await;
+    let first = admins.as_array().unwrap().iter().find(|c| c["grant"]["id"] == json!(id)).map(|c| c["findings"][0]["kind"].clone());
+    assert_eq!(first, Some(json!("pending")), "{admins}");
+    let (_, hers) = d.as_user("usr_alice", Method::GET, "/v1/access/checkup", None).await;
+    assert!(hers.as_array().unwrap().iter().all(|c| c["findings"].as_array().unwrap().iter().all(|f| f["kind"] != "pending")), "{hers}");
     // She can't approve her own, nor can a token; an admin can.
     assert_eq!(d.as_user("usr_alice", Method::POST, &format!("/v1/access/tokens/{id}/approve"), None).await.0, StatusCode::FORBIDDEN);
     assert_eq!(d.call(plain["token"].as_str().unwrap(), Method::POST, &format!("/v1/access/tokens/{id}/approve"), None).await.0, StatusCode::FORBIDDEN);
