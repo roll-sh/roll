@@ -92,6 +92,23 @@ const PROMPTS: &[Prompt] = &[
         },
     },
     Prompt {
+        name: "compare_branch_schemas",
+        title: "Compare a branch's schema with main",
+        description: "What a Postgres branch changed in the schema against main (tables and columns added, removed or changed), and what's worth fixing there: nothing is changed.",
+        args: &[Arg { name: "project", description: "Postgres project", required: true }, Arg { name: "branch", description: "The branch to compare with main", required: true }],
+        needs: &["postgres_get_project", "postgres_describe_schema", "postgres_advisors"],
+        text: |a| {
+            format!(
+                "Compare the schema of branch {} with main in Postgres project {}. postgres_get_project gives each \
+                 branch's endpoint; run postgres_describe_schema on both and list, on the branch: tables added and \
+                 removed, and columns added, removed or changed (type, nullability, default). Then \
+                 postgres_advisors on the branch for what's worth fixing before it reaches main. Change nothing.",
+                a("branch"),
+                a("project")
+            )
+        },
+    },
+    Prompt {
         name: "debug_failing_service",
         title: "Debug a failing service",
         description: "Why an app service's environment is failing: its last deploys, errors and metrics, then a fix or a rollback.",

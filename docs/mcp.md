@@ -251,6 +251,7 @@ is `-32602`.
 | `check_diff_for_secrets` | `project` | Before a commit: whether any added value is one of the project's stored secrets (by key and environment, never the value). | `secrets_scan` |
 | `fix_secrets_health` | `project` | What needs fixing in a project's secrets, most urgent first, asking before changing anything. | `secrets_health` |
 | `try_migration_on_branch` | `project` | A schema change tried on a branch first (create, migrate, compare), then on main only when it worked and you say so. | `postgres_get_project`, `postgres_create_branch`, `postgres_describe_schema`, `postgres_execute`, `postgres_delete_branch` |
+| `compare_branch_schemas` | `project`, `branch` | What a branch changed in the schema against main (Neon's schema compare), and the advisors' findings there; changes nothing. | `postgres_get_project`, `postgres_describe_schema`, `postgres_advisors` |
 | `debug_failing_service` | `service`, `env` | Why an environment is failing (deploys, deploy logs, failing requests, metrics), then a fix or a rollback it asks about first. | `apps_list_deploys`, `apps_deploy_logs`, `apps_logs`, `apps_metrics` |
 
 ## Tools
@@ -293,6 +294,7 @@ previews are listed once those products are on.
 | `postgres_slow_queries` | The 20 slowest statements by mean time (Neon's slow queries; `pg_stat_statements`). | `POST /v1/endpoints/{id}/query` (read-only) |
 | `postgres_advisors` | Unused indexes, unindexed foreign keys, tables without a primary key, sequential scans (Supabase's advisors). | `POST /v1/endpoints/{id}/query` (read-only) |
 | `postgres_list_extensions` | Extensions installed and available. | `POST /v1/endpoints/{id}/query` (read-only) |
+| `postgres_typescript_types` | TypeScript interfaces for every table (Supabase's generated types). | `POST /v1/endpoints/{id}/query` (read-only) |
 | `postgres_start_endpoint` | Wake an endpoint's compute. | `POST /v1/endpoints/{endpoint}/start` |
 | `postgres_suspend_endpoint` | Suspend an endpoint's compute. | `POST /v1/endpoints/{endpoint}/suspend` |
 | `postgres_usage` | Compute and storage use of a project, with cost estimates. | `GET /v1/projects/{project}/usage` |
@@ -505,34 +507,25 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **People's tokens above a reach need an admin's approval** (GitHub's organization approval of
-   fine-grained tokens; on #25, where people make their own). Policy: `approve_people_tokens:
-   [actions]` (e.g. reveal, admin, deploy). A person's token whose rules allow one of them is made
-   `pending`: not usable (`usable()` false, the gate answers `pending_approval`), listed for
-   admins on the access page with what it reaches, and `POST /v1/access/tokens/{id}/approve` or
-   `…/deny` (an admin's, never a token's; audited; the person mailed) decides it. Changing its
-   rules to reach more needs approval again. Tests in `roll-access/tests/access.rs` (users' part).
-2. **More of Supabase's and Neon's MCP surface**: TypeScript types from a schema, and two
-   branches' schemas compared (Neon's `compare_database_schema`).
-3. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+1. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25), and compare each product's routes with its tools
    (an everyday route with no tool is a gap: apps' were found this way).
-4. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+2. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
    lands after #20, #25 and #30): kept merged both ways (secrets' head of 2026-11-14 merged: a
    forgotten project's credentials revoked first and retried by the sweeper, with the integration's
    `identity_logins` kept in what's forgotten). The canvas check costs nothing measurable
    (`gate_latency`, release, pinned, A/B twice: 83–115 µs p50 with it, 105–116 µs without).
-5. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
+3. *Waits on secrets' transit rows (#47, added by secrets where #47 and #24/#25 first meet):*
    `.index("name")` on the per-key routes and `Scope.key` in their own check (`GrantGrants` sets
    `id` since #30's fix). The tools and the builder's key picker are in; check both live once the
    rows land (a token on `prj_x/one-key` signs with it and is refused another key and the
    project's environments).
-6. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+4. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-7. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Considered and left out: a smaller default toolset, or search-then-call meta-tools (see Toolsets: clients handle long lists or have a picker, and meta-tools would hide each tool's hints); a connection narrowed to one project (Supabase's `project_ref`): their
@@ -550,33 +543,36 @@ tokens capped per owner and a person's listed before the limit; a refresh token'
 grace audited; apps settings that change what production runs, its source, build, start and
 pre-deploy commands, schedule, kind, port, volume and `run.public`, are deploy; `create_grant`
 refuses extensions that name no caller; the expiry digest leaves out tokens made for a day or less);
-open registration's limit is a sliding minute per network (a fixed minute let twice the limit
-through at its edge, and its test failed when a run crossed one); a token used before its start says
-so (401 `not_yet_valid`, "this token works from <time>", with `not_before`; the token list and page
-show the start); a token can start later (`not_before`, Cloudflare's TTL start): refused until then
-as an unknown token, the dashboard's "Starts" and `roll token create --starts 2h` (the expiry counts
-from the start), changeable and clearable; a person's own token's page tested to show only their
-reach; `roll token list --product/--resource` and `--workloads`; a workload token makes no tokens;
-workload tokens (`Access::mint_workload`: minutes, within an identity's scope, owned by its maker,
-out of the list and caps) for secrets' identity logins; a person's own tokens' news is mailed to
-them (an approval waiting on them, used from a new network, revoked as leaked, about to expire; only
-their own, never a secret); `previews_resolve_note` (a preview page's note, write by the prefix;
-previews-next), and `apps_logs` takes `before`, `instance`, `deployment` and `stream` (apps-next);
-Postgres analysis as Neon's and Supabase's MCP servers have it: `postgres_explain`,
-`postgres_slow_queries`, `postgres_advisors`, `postgres_list_extensions` (read-only SQL through the
-query route, checked on Postgres 18); names people choose can't hide text: a token's name with
-invisible characters is refused, OAuth clients' names (registered or from a metadata document) drop
-them, and `initialize`'s instructions escape them; `apps_set_environment` takes response header
-rules (`headers`, apps-next); a cron run's logs are read again, as apps-next decided (its lines were
-always in the read-level environment log); `apps_restart_instance` (apps-next, reviewed under the
-environment prefix: deploy in production); invisible characters (tag characters, zero-width and bidi
-controls, variation selectors) escaped in results' text, so instructions hidden in other people's
-text stay visible to the model; plain-read answers checked for credentials (key listings: streams'
-are usernames, storage's skip the secret, tasks' are hashes and prefixes); the fifteenth review: a
-list's credentials redacted item by item (a token with reveal on one Postgres database and read on
-all saw every database's password in `GET /v1/projects`; the same for every list with credential
-fields), a preview's `share_url` redacted without reveal (its access token: the QR code's reveal row
-protected nothing), and a cron run's logs reveal on this branch too; `previews_list_notes` and
+`postgres_typescript_types` (Supabase's generated types, written by one read-only query: enums as
+unions, arrays, nullable) and the `compare_branch_schemas` prompt (Neon's schema compare: both
+branches described, the difference listed, advisors on the branch); open registration's limit is a
+sliding minute per network (a fixed minute let twice the limit through at its edge, and its test
+failed when a run crossed one); a token used before its start says so (401 `not_yet_valid`, "this
+token works from <time>", with `not_before`; the token list and page show the start); a token can
+start later (`not_before`, Cloudflare's TTL start): refused until then as an unknown token, the
+dashboard's "Starts" and `roll token create --starts 2h` (the expiry counts from the start),
+changeable and clearable; a person's own token's page tested to show only their reach; `roll token
+list --product/--resource` and `--workloads`; a workload token makes no tokens; workload tokens
+(`Access::mint_workload`: minutes, within an identity's scope, owned by its maker, out of the list
+and caps) for secrets' identity logins; a person's own tokens' news is mailed to them (an approval
+waiting on them, used from a new network, revoked as leaked, about to expire; only their own, never
+a secret); `previews_resolve_note` (a preview page's note, write by the prefix; previews-next), and
+`apps_logs` takes `before`, `instance`, `deployment` and `stream` (apps-next); Postgres analysis as
+Neon's and Supabase's MCP servers have it: `postgres_explain`, `postgres_slow_queries`,
+`postgres_advisors`, `postgres_list_extensions` (read-only SQL through the query route, checked on
+Postgres 18); names people choose can't hide text: a token's name with invisible characters is
+refused, OAuth clients' names (registered or from a metadata document) drop them, and `initialize`'s
+instructions escape them; `apps_set_environment` takes response header rules (`headers`, apps-next);
+a cron run's logs are read again, as apps-next decided (its lines were always in the read-level
+environment log); `apps_restart_instance` (apps-next, reviewed under the environment prefix: deploy
+in production); invisible characters (tag characters, zero-width and bidi controls, variation
+selectors) escaped in results' text, so instructions hidden in other people's text stay visible to
+the model; plain-read answers checked for credentials (key listings: streams' are usernames,
+storage's skip the secret, tasks' are hashes and prefixes); the fifteenth review: a list's
+credentials redacted item by item (a token with reveal on one Postgres database and read on all saw
+every database's password in `GET /v1/projects`; the same for every list with credential fields), a
+preview's `share_url` redacted without reveal (its access token: the QR code's reveal row protected
+nothing), and a cron run's logs reveal on this branch too; `previews_list_notes` and
 `previews_resolve_note` (a preview page's note, write by the prefix; previews-next), and `apps_logs`
 takes `before`, `instance`, `deployment` and `stream` (apps-next); apps-next's cron runs as tools
 (`apps_get_cron_run`, `apps_cron_run_logs`, `apps_cancel_cron_run`); a preview's caught mail as
