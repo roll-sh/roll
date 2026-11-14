@@ -1645,6 +1645,24 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
+Then (2026-11-14, latest): `roll://` references in files (#49: `roll run --env-file`, `render`) and
+check-and-set writes (#50: `if_version`, the dashboard's editor), each its own pull request on #20.
+
+A fifth independent review (2026-11-14, of host and user SSH certificates, ClickHouse,
+certificates ending, `--rotate-due` and the fourth review's fixes) found no high-severity issue; it
+found a CLI that would upload a private key given its path, SSH CAs that could claim a top-level
+domain, best-effort signing audits, a stale-CRL race, ClickHouse's kill-then-drop order, a
+known_hosts order and `--rotate-due --json` that didn't rotate: all fixed. Screenshots of the new
+surfaces are on #44, #45 and #48.
+
+Later still: SSH user certificates for keys people keep (#45: `…/sign-user`, `roll ssh --key`,
+checked with an agent-held key against a real `sshd`) and `roll secrets rotations --rotate-due`
+(#48).
+
+Then (2026-11-14, latest): certificates ending as health findings (#44: `certificate_expiring`)
+and ClickHouse outside roll (#39, merged up into #41 and #42: its HTTPS interface, `sha256_hash`
+passwords, checked live against ClickHouse 25.8).
+
 A fourth independent review (2026-11-14, of the rotations overview, transit signing, HMAC and
 brought keys, CSR signing, revocation and the CRL, SQL Server) found no high-severity issue; it
 found an ended SQL Server lease whose login could stay usable, generated passwords SQL Server's
@@ -1690,13 +1708,13 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **ClickHouse outside roll** (on #39): two users take turns, or a user per lease with a role, over
-   its native TLS port, through the same guards.
-2. **A certificate's own page of what's coming due**: certificates from CSRs and SSH host
-   certificates that end within two weeks as health findings (`expiring`), so a device's
-   certificate isn't found expired by an outage.
-3. **Transit keys scoped by name**: a grant's resources include one encryption key
-   (`secrets:transit/<name>`), so signing with one key doesn't need write on the project.
+1. **The grid edits with check-and-set too** (on #50): each cell carries the version it showed, so
+   comparing environments side by side can't overwrite a change made meanwhile.
+2. **OCSP for project CAs** (on #44): a public responder next to the CRL, for clients (Java,
+   browsers in some setups) that check status per certificate rather than fetching lists.
+3. *Waits on the search thread:* OpenSearch clusters' links issue an internal user (`username`,
+   `password` beside `url`, one credential), agreed with it; and *waits on #24/#25 meeting #47:*
+   transit keys scoped by name.
 4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
 5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
@@ -1730,6 +1748,10 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#50, check-and-set writes** (after #20): `if_version` on a set or delete, refused as `stale`
+  when the key moved; the dashboard's editor sends it.
+- **#49, `roll://` references in files** (after #20): `roll run --env-file` and `render` resolve
+  `roll://ENV/KEY` beside plain values, as 1Password's `op://`.
 - **#48, failing rotations in health** (after #20): `rotation_failing` and `revoke_failing`
   findings, with the reason, until roll succeeds; a rotations overview of every managed credential.
 - **#47, encryption keys** (after #20): encryption as a service, as Vault's Transit: named,
