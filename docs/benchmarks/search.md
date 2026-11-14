@@ -1184,6 +1184,358 @@ same `curl` on the woken cluster took 15.0 ms on this loaded machine), so roll's
 about 5 ms over a warm request. Elasticsearch cannot unload an index; its comparable cold
 start is a node start (JVM, cluster state, shard recovery).
 
+## Vector search (2026-11-14)
+
+`scripts/bench-search-vectors.py` generates the corpus, computes the exact answers and drives
+the three targets; `scripts/bench-search.sh start` starts them in Docker as for the other
+rounds, here with `BENCH_CPUS=10,11,28,29` (2 cores, 4 hardware threads) and `BENCH_MEM=6g`
+for each target (4 GiB left Elasticsearch and OpenSearch too little page cache for 1.5 GB of
+float vectors beside their 2 GiB heaps). Clients ran on `12,13,30,31`; one target was under load
+at a time, every target settled (under 2% of a CPU for 5 s) before the next one was measured,
+and search rounds rotated the targets. The host's load average was 20–30 on 36 threads
+throughout, so trust server CPU per request over wall time, and differences only where the
+spreads (min–max over 3 rounds of 200 queries after 30 warm-up queries) don't overlap.
+
+- **Corpus** (`bench-search-vectors.py gen`, seed 1): 1,000,000 documents with a 384-dim
+  `dense_vector` `v`, a keyword `tag` (100 values, uniform), a date `ts` and a three-word text
+  `title` drawn from its cluster's topic words. Vectors are a Gaussian mixture of 300 clusters of
+  unequal weight, each spread mostly along 16 random directions of its own plus a little
+  isotropic noise, normalized and rounded to 4 decimals (2.96 GB of JSON). 200 queries come
+  from the same mixture (another seed). The truth is the exact cosine top 100 of every query,
+  computed with numpy on the same float32 values the engines parse, for no filter, a 10% filter
+  (`terms` on ten `tag` values) and a 1% filter (`term` on one).
+- **Queries**, one client, `_source: false`, `k` 10, `num_candidates` 100 (OpenSearch:
+  `k` 10, `method_parameters.ef_search` 100): `knn` (the top-level section), `knn` with the 10%
+  and the 1% filter, and `rrf` of a `match` on `title` and the same `knn` (Elasticsearch and
+  roll: the `rrf` retriever, `rank_window_size` 100; OpenSearch: a `hybrid` query through a
+  search pipeline with the `score-ranker-processor` `rrf` technique). Recall@10 is against the
+  exact truth (`rrf` has none).
+- **Indexing**: all 1M documents in 2,000-doc bulks prepared in memory, 8 clients, then a
+  refresh; server CPU per document from the container's cgroup. Then the target settles and the
+  searches run on the segments the engine left; then `_forcemerge?max_num_segments=1` (timed),
+  and the searches again.
+- **Index settings** (one shard, no replicas, `m` 16 and `ef_construction` 100 everywhere):
+
+| config | roll | Elasticsearch 9.5.5 | OpenSearch 3.9.0 (`index.knn: true`, `space_type: cosinesimil`) |
+|---|---|---|---|
+| default (no `index_options`) | `bbq_hnsw`, `rescore_vector.oversample` 3 (Elasticsearch's default at 384 dims) | the same | `knn_vector`: faiss HNSW, float32 |
+| `hnsw` | float HNSW | float HNSW | faiss HNSW, float32 |
+| `int8_hnsw` | `int8_hnsw` (confidence interval default), no rescore option | the same | Lucene engine HNSW with its `sq` encoder, `bits` 7 (Lucene's int7) |
+| `bbq_hnsw` | = default | = default | `mode: on_disk`, `compression_level: 32x` (not run) |
+
+Roll ran `49178a66c` (plus the sort lane's uncommitted work in the tree) for the three rounds
+and `f00ed2095` for the rerun below, release builds. In the `hnsw` and `int8_hnsw` rounds roll's
+container ran with `--idle-unload-ms 2000` (left over from the cold-start measurement): an
+unloaded shard stops merging, so roll kept 60–64 segments there against 18 in the default
+round, which inflates its unmerged filtered-search CPU in those two rounds; the footprint
+rows marked † are after an unload.
+
+Reproduce (numpy for `gen`; the rounds above used small driver loops around these commands):
+
+```
+python3 scripts/bench-search-vectors.py gen ~/.cache/rsearch/vectors/c1m
+python3 scripts/bench-search-vectors.py body es default 384 > body.json     # or os; hnsw, int8_hnsw, bbq_hnsw
+BENCH_CPUS=10,11,28,29 BENCH_MEM=6g scripts/bench-search.sh start
+python3 scripts/bench-search-vectors.py ingest http://127.0.0.1:19801 ~/.cache/rsearch/vectors/c1m \
+  --index vec --body body.json --clients 8 --cgroup /sys/fs/cgroup/system.slice/docker-<id>.scope
+python3 scripts/bench-search-vectors.py search http://127.0.0.1:19801 ~/.cache/rsearch/vectors/c1m \
+  --index vec --dialect es --kind knn_f10 --cgroup ...                    # knn, knn_f10, knn_f1, rrf
+```
+
+In short:
+
+- **Indexing**: with quantized graphs roll indexes fastest and cheapest (`bbq_hnsw` 4,735 docs/s
+  at 8 clients against 3,585 and 2,978, 787 µs of CPU per document against 1,088 and 1,109;
+  one client 4,574 against 1,776 and 2,869). Float HNSW costs roll more CPU than Elasticsearch
+  (1,250 against 1,174 µs/doc).
+- **Search on one segment**: roll uses the least CPU for `knn` (1.8–2.4 ms against 6.1–9.4 for
+  Elasticsearch and 3.5–5.3 for OpenSearch) and `rrf` (2.8–3.3 against 8.4–14.1), at equal or
+  better recall than Elasticsearch in most rows: roll rescores the whole beam with floats.
+  Filtered `knn` was up to 1.4× Elasticsearch's CPU and is now at or below it (change below).
+- **Search on the segments indexing left**: plain `knn` costs about what Elasticsearch's does;
+  filtered `knn` still costs roll more CPU and 2–3× the latency, since roll searches segments
+  one after another.
+- **Footprint**: an idle roll node holds 34 MiB and answers the first `knn` 36 ms after a wake
+  (213 ms with the page cache dropped), against 25–29 s for a node start of the others. roll's
+  store is 56% larger than Elasticsearch's, all of it vectors kept in `_source`.
+
+
+### Default index options (roll and Elasticsearch: `bbq_hnsw`; OpenSearch: faiss HNSW float32)
+
+#### Indexing and footprint
+
+| measure | roll | Elasticsearch | OpenSearch |
+|---|---:|---:|---:|
+| docs/s, 1 client (first 200,000 docs) | 4,574 | 1,776 | 2,869 |
+| server CPU µs/doc, 1 client | 675 | 686 | 544 |
+| docs/s, 8 clients | 4,735 | 3,585 | 2,978 |
+| server CPU µs/doc (load) | 787 | 1,088 | 1,109 |
+| merges settling after the load (s) | 25 | 86 | 173 |
+| segments after settling | 18 | 33 | 44 |
+| peak RSS during ingest (MiB) | 2,316 | 3,675 | 4,674 |
+| RSS after ingest (MiB) | 962 | 3,062 | 3,805 |
+| RSS after the search rounds (MiB) | 2,181 | 2,827 | 5,420 |
+| store bytes, not merged | 2,659,961,089 | 1,697,391,404 | 3,276,053,557 |
+| force-merge (s) | 372 | 247 | 585 |
+| peak RSS incl. force-merge (MiB) | 5,470 | 5,908 | 6,105 |
+| store bytes, force-merged | 2,674,020,066 | 1,709,711,301 | 3,276,936,751 |
+| RSS after merged search rounds (MiB) | 1,679 | 2,598 | 4,927 |
+| JVM heap used after search rounds (MiB) | – | 866 | 863 |
+
+#### Search, as indexed (not merged)
+
+| query | measure | roll | Elasticsearch | OpenSearch |
+|---|---|---:|---:|---:|
+| knn | p50 ms | 21.7 (19.0–25.8) | 12.9 (8.4–13.6) | 15.2 (14.2–20.2) |
+| knn | p99 ms | 27.8 (25.8–72.5) | 26.9 (21.5–48.3) | 25.7 (23.1–53.7) |
+| knn | CPU ms/query | 19.78 (18.32–20.20) | 16.80 (11.54–28.25) | 21.52 (20.19–30.24) |
+| knn | recall@10 | 0.988 | 0.843 | 0.988 |
+| knn_f10 | p50 ms | 67.4 (62.0–74.3) | 13.4 (11.9–13.9) | 14.5 (13.4–17.2) |
+| knn_f10 | p99 ms | 104.0 (77.4–104.7) | 26.2 (24.2–26.2) | 25.8 (20.6–44.0) |
+| knn_f10 | CPU ms/query | 61.60 (58.68–68.38) | 16.14 (16.09–34.25) | 16.39 (13.98–33.45) |
+| knn_f10 | recall@10 | 1.000 | 0.927 | 0.983 |
+| knn_f1 | p50 ms | 41.2 (37.5–45.2) | 13.9 (13.2–15.9) | 102.2 (95.9–102.7) |
+| knn_f1 | p99 ms | 62.1 (49.1–65.0) | 31.4 (27.4–46.3) | 249.3 (219.9–497.6) |
+| knn_f1 | CPU ms/query | 37.48 (34.53–41.42) | 19.58 (19.13–35.25) | 33.58 (32.94–33.92) |
+| knn_f1 | recall@10 | 0.910 | 0.772 | 1.000 |
+| rrf | p50 ms | 21.0 (20.7–26.2) | 14.6 (12.3–17.5) | 21.8 (18.5–26.2) |
+| rrf | p99 ms | 29.2 (28.1–40.0) | 25.4 (23.4–35.7) | 39.7 (29.6–51.2) |
+| rrf | CPU ms/query | 19.36 (19.28–22.07) | 20.71 (18.80–41.89) | 24.80 (22.33–29.31) |
+
+#### Search, force-merged to one segment
+
+| query | measure | roll | Elasticsearch | OpenSearch |
+|---|---|---:|---:|---:|
+| knn | p50 ms | 2.5 (2.0–3.9) | 9.6 (4.4–10.9) | 4.5 (4.3–4.9) |
+| knn | p99 ms | 4.8 (4.6–16.1) | 31.5 (13.4–51.2) | 10.5 (8.6–11.6) |
+| knn | CPU ms/query | 1.89 (1.70–3.62) | 6.08 (5.70–7.35) | 4.94 (4.69–6.93) |
+| knn | recall@10 | 0.824 | 0.757 | 0.919 |
+| knn_f10 | p50 ms | 8.5 (6.6–8.8) | 5.0 (4.8–5.9) | 4.9 (4.7–5.0) |
+| knn_f10 | p99 ms | 15.3 (15.2–15.8) | 14.5 (12.3–16.6) | 9.3 (8.0–13.8) |
+| knn_f10 | CPU ms/query | 7.28 (6.79–8.10) | 5.29 (5.13–8.36) | 5.49 (4.57–8.28) |
+| knn_f10 | recall@10 | 0.855 | 0.757 | 0.922 |
+| knn_f1 | p50 ms | 9.2 (9.2–9.8) | 7.3 (7.0–8.3) | 5.3 (5.0–5.5) |
+| knn_f1 | p99 ms | 16.6 (13.6–17.9) | 14.9 (12.0–15.7) | 15.1 (11.5–356.8) |
+| knn_f1 | CPU ms/query | 8.11 (7.72–8.63) | 8.37 (6.59–10.62) | 6.73 (6.62–16.03) |
+| knn_f1 | recall@10 | 0.686 | 0.788 | 0.806 |
+| rrf | p50 ms | 3.8 (3.6–4.0) | 6.8 (6.5–6.9) | 6.0 (5.9–6.3) |
+| rrf | p99 ms | 7.4 (7.1–9.6) | 14.0 (11.3–20.1) | 13.6 (11.9–13.8) |
+| rrf | CPU ms/query | 3.18 (3.09–3.34) | 13.75 (9.62–16.22) | 8.25 (6.72–8.60) |
+
+### `int8_hnsw` (OpenSearch: Lucene HNSW, `sq` 7 bits)
+#### Indexing and footprint
+
+| measure | roll | Elasticsearch | OpenSearch |
+|---|---:|---:|---:|
+| docs/s, 8 clients | 5,286 | 3,662 | 2,076 |
+| server CPU µs/doc (load) | 718 | 1,072 | 1,891 |
+| merges settling after the load (s) | 20 | 51 | 51 |
+| segments after settling | 64 | 47 | 50 |
+| peak RSS during ingest (MiB) | 2,918 | 3,953 | 5,766 |
+| RSS after ingest (MiB) | 182 † | 2,843 | 2,522 |
+| RSS after the search rounds (MiB) | 102 † | 3,050 | 2,968 |
+| store bytes, not merged | 2,984,768,319 | 3,276,405,727 | 3,085,448,743 |
+| force-merge (s) | 137 | 256 | 445 |
+| peak RSS incl. force-merge (MiB) | 4,709 | 4,533 | 5,766 |
+| store bytes, force-merged | 2,998,686,635 | 2,047,669,403 | 2,032,157,748 |
+| RSS after merged search rounds (MiB) | 84 † | 3,015 | 2,926 |
+| JVM heap used after search rounds (MiB) | – | 1,093 | 957 |
+
+#### Search, as indexed (not merged)
+
+| query | measure | roll | Elasticsearch | OpenSearch |
+|---|---|---:|---:|---:|
+| knn | p50 ms | 6.6 (5.4–24.2) | 6.9 (6.9–15.0) | 7.3 (7.2–19.2) |
+| knn | p99 ms | 12.5 (9.1–54.9) | 13.1 (9.0–33.7) | 16.2 (11.8–193.6) |
+| knn | CPU ms/query | 5.63 (4.95–79.76) | 17.49 (13.12–39.45) | 16.15 (14.28–28.90) |
+| knn | recall@10 | 0.993 | 0.959 | 0.259 |
+| knn_f10 | p50 ms | 23.6 (19.6–81.5) | 8.2 (8.1–10.9) | 15.7 (14.1–23.6) |
+| knn_f10 | p99 ms | 39.2 (34.6–176.9) | 17.9 (15.8–29.1) | 30.9 (30.5–87.4) |
+| knn_f10 | CPU ms/query | 22.93 (21.47–295.91) | 21.05 (19.41–37.36) | 46.02 (41.88–66.75) |
+| knn_f10 | recall@10 | 0.998 | 0.951 | 0.466 |
+| knn_f1 | p50 ms | 24.4 (23.9–37.4) | 9.3 (9.3–12.3) | 11.3 (10.3–12.8) |
+| knn_f1 | p99 ms | 47.7 (43.2–80.2) | 20.4 (15.1–20.4) | 20.1 (19.3–24.4) |
+| knn_f1 | CPU ms/query | 26.84 (26.39–112.84) | 21.64 (18.00–36.94) | 23.35 (22.86–28.91) |
+| knn_f1 | recall@10 | 0.946 | 0.823 | 0.774 |
+| rrf | p50 ms | 7.0 (6.2–24.9) | 9.8 (9.7–12.8) | 9.6 (9.1–10.4) |
+| rrf | p99 ms | 11.4 (11.3–51.6) | 27.7 (17.8–37.3) | 14.9 (14.6–22.1) |
+| rrf | CPU ms/query | 6.40 (5.98–62.00) | 22.82 (20.29–43.99) | 18.89 (18.68–25.98) |
+
+#### Search, force-merged to one segment
+
+| query | measure | roll | Elasticsearch | OpenSearch |
+|---|---|---:|---:|---:|
+| knn | p50 ms | 2.5 (2.4–3.7) | 5.3 (4.7–5.6) | 4.9 (4.9–9.3) |
+| knn | p99 ms | 4.9 (4.6–66.8) | 8.7 (8.2–9.7) | 10.9 (8.2–21.9) |
+| knn | CPU ms/query | 2.04 (1.85–3.71) | 6.27 (5.36–8.04) | 5.34 (4.86–7.12) |
+| knn | recall@10 | 0.942 | 0.924 | 0.719 |
+| knn_f10 | p50 ms | 5.8 (5.6–5.8) | 5.5 (5.5–5.8) | 8.6 (8.2–9.1) |
+| knn_f10 | p99 ms | 13.7 (12.4–13.9) | 12.6 (10.9–14.5) | 16.1 (15.9–19.3) |
+| knn_f10 | CPU ms/query | 5.56 (5.50–5.77) | 6.70 (5.04–8.58) | 11.25 (10.01–11.64) |
+| knn_f10 | recall@10 | 0.908 | 0.871 | 0.829 |
+| knn_f1 | p50 ms | 6.0 (5.9–6.1) | 8.3 (8.2–8.5) | 22.8 (22.5–23.2) |
+| knn_f1 | p99 ms | 14.2 (12.5–15.2) | 12.1 (11.4–12.7) | 40.7 (40.0–66.9) |
+| knn_f1 | CPU ms/query | 6.03 (5.68–6.03) | 8.97 (8.88–10.76) | 24.88 (22.57–29.21) |
+| knn_f1 | recall@10 | 0.822 | 0.874 | 0.920 |
+| rrf | p50 ms | 3.3 (3.0–3.6) | 7.3 (7.1–7.8) | 6.5 (6.1–7.3) |
+| rrf | p99 ms | 7.0 (6.2–7.0) | 13.2 (12.8–13.4) | 12.0 (10.7–17.4) |
+| rrf | CPU ms/query | 2.77 (2.72–3.02) | 14.11 (10.49–14.15) | 8.79 (8.04–9.38) |
+
+OpenSearch's Lucene-engine rows (recall 0.26–0.47 before the merge) look like it took `k` as the
+candidate count and ignored `method_parameters.ef_search`; they are as measured.
+
+### `hnsw` (float32 everywhere)
+
+#### Indexing and footprint
+
+| measure | roll | Elasticsearch | OpenSearch |
+|---|---:|---:|---:|
+| docs/s, 8 clients | 3,104 | 3,312 | 3,007 |
+| server CPU µs/doc (load) | 1,250 | 1,174 | 1,074 |
+| merges settling after the load (s) | 40 | 97 | 173 |
+| segments after settling | 60 | 30 | 46 |
+| peak RSS during ingest (MiB) | 4,709 | 4,533 | 5,766 |
+| RSS after ingest (MiB) | 427 † | 2,971 | 3,358 |
+| RSS after the search rounds (MiB) | 55 † | 3,612 | 6,031 |
+| store bytes, not merged | 2,593,431,615 | 1,635,510,662 | 3,275,795,512 |
+| force-merge (s) | 667 | 463 | 612 |
+| peak RSS incl. force-merge (MiB) | 5,288 | 5,319 | 6,045 |
+| store bytes, force-merged | 2,610,193,618 | 1,647,653,338 | 3,276,890,045 |
+| RSS after merged search rounds (MiB) | 38 † | 3,797 | 5,385 |
+| JVM heap used after search rounds (MiB) | – | 1,196 | 296 |
+
+#### Search, as indexed (not merged)
+
+| query | measure | roll | Elasticsearch | OpenSearch |
+|---|---|---:|---:|---:|
+| knn | p50 ms | 9.2 (9.2–48.4) | 6.0 (5.5–34.4) | 10.6 (10.2–11.5) |
+| knn | p99 ms | 16.9 (15.7–101.4) | 14.0 (11.4–107.3) | 17.5 (16.8–23.8) |
+| knn | CPU ms/query | 9.35 (8.95–198.88) | 9.51 (9.34–34.02) | 17.74 (17.60–22.36) |
+| knn | recall@10 | 1.000 | 0.986 | 0.991 |
+| knn_f10 | p50 ms | 28.3 (27.0–93.1) | 7.6 (7.6–11.8) | 15.6 (14.4–16.2) |
+| knn_f10 | p99 ms | 44.9 (41.0–197.3) | 19.0 (15.6–280.6) | 27.6 (22.9–28.7) |
+| knn_f10 | CPU ms/query | 29.18 (27.59–389.94) | 14.57 (12.85–24.11) | 18.87 (15.18–22.48) |
+| knn_f10 | recall@10 | 1.000 | 0.961 | 0.988 |
+| knn_f1 | p50 ms | 29.9 (29.8–49.5) | 9.3 (8.1–15.7) | 47.0 (40.2–51.6) |
+| knn_f1 | p99 ms | 49.1 (49.0–99.9) | 18.7 (14.6–49.4) | 106.2 (94.7–181.0) |
+| knn_f1 | CPU ms/query | 31.75 (31.73–167.63) | 18.96 (16.48–24.35) | 17.36 (16.57–18.39) |
+| knn_f1 | recall@10 | 0.960 | 0.796 | 1.000 |
+| rrf | p50 ms | 9.8 (9.7–39.5) | 8.5 (7.9–10.1) | 13.8 (12.4–13.9) |
+| rrf | p99 ms | 16.8 (16.0–100.8) | 21.1 (19.9–28.6) | 24.2 (23.1–25.6) |
+| rrf | CPU ms/query | 9.53 (9.49–151.34) | 16.72 (15.61–18.28) | 22.57 (18.88–25.18) |
+
+#### Search, force-merged to one segment
+
+| query | measure | roll | Elasticsearch | OpenSearch |
+|---|---|---:|---:|---:|
+| knn | p50 ms | 3.0 (2.8–3.9) | 5.1 (4.2–78.2) | 3.7 (3.6–4.5) |
+| knn | p99 ms | 7.7 (5.2–11.1) | 157.8 (130.8–206.4) | 8.0 (6.9–9.4) |
+| knn | CPU ms/query | 2.44 (2.36–3.19) | 9.35 (4.98–16.88) | 3.52 (3.50–4.14) |
+| knn | recall@10 | 0.953 | 0.939 | 0.948 |
+| knn_f10 | p50 ms | 8.0 (7.2–8.8) | 4.9 (4.9–19.7) | 4.2 (4.1–4.2) |
+| knn_f10 | p99 ms | 13.8 (13.6–17.7) | 12.3 (8.0–49.3) | 8.0 (7.6–9.9) |
+| knn_f10 | CPU ms/query | 7.08 (6.99–7.79) | 4.12 (3.97–11.28) | 3.83 (3.23–5.08) |
+| knn_f10 | recall@10 | 0.942 | 0.826 | 0.940 |
+| knn_f1 | p50 ms | 8.1 (6.7–8.9) | 7.9 (7.9–10.2) | 4.8 (4.5–5.2) |
+| knn_f1 | p99 ms | 14.8 (14.1–20.8) | 33.4 (12.7–376.9) | 12.4 (10.6–511.7) |
+| knn_f1 | CPU ms/query | 7.61 (7.23–7.92) | 9.03 (8.52–16.56) | 6.33 (6.11–15.76) |
+| knn_f1 | recall@10 | 0.851 | 0.897 | 0.831 |
+| rrf | p50 ms | 3.8 (3.8–4.1) | 6.9 (6.3–7.0) | 5.6 (5.3–6.4) |
+| rrf | p99 ms | 7.9 (7.2–8.7) | 10.9 (9.9–12.3) | 9.7 (8.9–13.0) |
+| rrf | CPU ms/query | 3.33 (3.29–3.47) | 8.38 (8.21–8.64) | 5.25 (4.74–5.47) |
+
+### Cold start
+
+The default (`bbq_hnsw`) index force-merged. roll: the container restarted on the same data
+directory with `--idle-unload-ms 2000`; each sample waits 4 s (the cluster unloads), then times
+the first `knn` (the wake included) and a second one, `curl` wall time from the host, five
+samples each with the data directory in the page cache and with it dropped first
+(`posix_fadvise(DONTNEED)` on every file). Elasticsearch and OpenSearch cannot unload an index;
+their cold start is a node restart until the first `knn` answers (two samples each).
+
+| | roll, page cache warm | roll, page cache dropped | Elasticsearch (node restart) | OpenSearch (node restart) |
+|---|---:|---:|---:|---:|
+| first `knn` answer (ms) | 36 (22–194) | 213 (190–229) | 29,214 (28,962–29,214) | 25,133 (24,416–25,133) |
+| second `knn` (ms) | 19 (11–106) | 99 (88–107) | 84–204 | 34–36 |
+| RSS before the query (MiB) | 34 (unloaded) | 34 (unloaded) | – | – |
+| RSS after both queries (MiB) | 118 | 119 | 2,520 (heap 216) | 4,134 (heap 248) |
+
+A woken roll cluster maps its segments and faults in only what the query reads: 118 MiB after
+two queries over a 2.7 GB index. With the page cache dropped the first query reads from the
+(shared, busy) RAID: about 180 ms of random 4 KiB faults in the codes, the graph and the 100
+float vectors it rescores, which is still two orders of magnitude below a node start.
+
+### Footprint, in short
+
+- **RSS.** Loaded and searched, roll's process holds 1.7–2.2 GiB in the default round, almost
+  all of it file pages of its mapped segments (a woken node that has answered queries holds 13
+  MiB of anonymous memory; right after a bulk load, segments not yet flushed are on the heap); Elasticsearch 2.6–3.1 GiB and OpenSearch 3.8–6.0 GiB, with 0.9–1.6 GiB of heap
+  in use. Idle, roll unloads: 34 MiB. A force-merge of the 1M vectors peaks at 880 MiB of
+  anonymous memory in roll (`RssAnon` sampled every 0.5 s on a native instance; the 5.3 GiB
+  `VmHWM` above is mostly the mapped inputs, the spilled raw vectors and the output in the
+  page cache).
+- **Store.** roll's index is 2.66–2.67 GB against Elasticsearch's 1.70 GB and OpenSearch's
+  3.28 GB (default config). The difference to Elasticsearch is the vectors kept in roll's
+  stored `_source`: Elasticsearch 9 takes them out of `_source` at index time
+  (`index.mapping.exclude_source_vectors`) and rebuilds them from the vector field when asked;
+  roll stores them and hides them at fetch. They cost 967 bytes per document zstd-compressed
+  (20,000 documents in 16 KiB chunks: 980 bytes per document with the vector, 13 without),
+  0.97 GB here. In object storage (the data directory's `objects/`) the bytes are the same plus
+  segments that merges replaced, which the collector keeps for its one-hour grace period.
+
+### What changed
+
+| change | where | before | after |
+|---|---|---:|---:|
+| filtered k-NN reads its filter as a bitset over ordinals (`VectorsReader::ord_filter`): the filter's cardinality is a popcount of its words (was a cursor over every vector of the segment), and the graph search tests it inline (was a `dyn` closure per neighbor mapping the ordinal to a doc and checking live docs and the filter); bridges' adjacency rows are prefetched while the candidate's own neighbors are sorted out, and queued in a plain vector (was a `VecDeque`, whose `push_back` didn't inline). Hits and scores identical (all 600 responses compared byte for byte) | `search-codec` `vectors/mod.rs`, `vectors/hnsw.rs`; `search-index` `query/knn.rs` | 24 segments, server CPU per query, in two steps: the bitset, 10% filter 33.4 (32.6–33.6) ms and 1% filter 36.2 (34.6–37.1); then the prefetch and the queue, 23.8 (23.7–25.6) and 27.7 (27.7–30.1). One segment, release builds of the start and the end: 9.0 (8.7–12.7), 9.2 (9.1–9.7) | 26.2 (25.9–27.6) and 30.2 (30.1–31.3); then 22.9 (22.1–23.7) and 25.4 (25.2–26.8). One segment: 3.4 (3.4–3.6), 4.5 (4.4–4.6) |
+
+The unmerged numbers are interleaved A/B runs of two builds on a native `search-dev` over the
+same data directory (CPUs `0-5,18-23`, measured from `/proc/<pid>/stat`), so they are lower
+than the Docker rows above; plain `knn` stayed at 2.0 ms on one segment.
+
+Rerun in the Docker harness with `f00ed2095` (roll only, a fresh index of the same corpus, so
+the graph differs: HNSW construction runs on several threads and isn't deterministic, and recall
+moves both ways with it). Server CPU ms per query, median (min–max) of 3 rounds; Elasticsearch's
+column repeats the default round above:
+
+| query | segments | roll `49178a66c` | roll `f00ed2095` | Elasticsearch |
+|---|---|---:|---:|---:|
+| knn | 18 / 17 / 13 | 19.78 (18.32–20.20) | 16.59 (14.77–17.87) | 16.80 (11.54–28.25) |
+| knn_f10 | 18 / 17 / 13 | 61.60 (58.68–68.38) | 41.13 (40.74–44.41) | 16.14 (16.09–34.25) |
+| knn_f1 | 18 / 17 / 13 | 37.48 (34.53–41.42) | 24.36 (22.48–24.47) | 19.58 (19.13–35.25) |
+| knn | 1 | 1.89 (1.70–3.62) | 1.83 (1.83–2.47) | 6.08 (5.70–7.35) |
+| knn_f10 | 1 | 7.28 (6.79–8.10) | 2.98 (2.80–3.00) | 5.29 (5.13–8.36) |
+| knn_f1 | 1 | 8.11 (7.72–8.63) | 4.03 (4.02–4.18) | 8.37 (6.59–10.62) |
+
+(Recall@10 of the rerun: 0.995 / 0.998 / 0.888 not merged, 0.866 / 0.880 / 0.720 merged. Its
+8-client load ran at 4,162 docs/s and 898 µs/doc against 4,735 and 787 in the first round; the
+change touches no indexing code, and the lane's host load drifted between the two.)
+
+### Measured, not adopted
+
+| idea | result |
+|---|---|
+| Lucene's own filtered-search bookkeeping: mark every rejected neighbor visited when first seen and cap two-hop exploration at `m · 2 · multiplier` (roll explores up to twice that and lets a rejected node be reached again) | 24 segments: 10% filter 35 → 19.5 ms CPU, 1% filter 37.5 → 30.5, but recall 0.995 → 0.970 and 0.874 → 0.803 (23% fewer vectors scored). Still above Elasticsearch's 0.927 and 0.772, but lower recall at the same settings: not adopted |
+| `MADV_RANDOM` on every mapped segment file (no readahead on faults) | page cache dropped, one segment: first `knn` after a wake 274–359 ms against 296–326 (no change), file RSS after three queries 55 MiB against 124, but a cold `match` query 157–197 ms against 85–137: not adopted. Advising only the vector sections would keep the RSS half without hurting text queries; it isn't worth it while RSS is page cache the kernel reclaims |
+| rescore only the best `k · oversample` (30) of each segment's beam with floats, as Elasticsearch does (roll rescores the whole beam of 100) | one segment: CPU 4.2 → 2.1 ms, file RSS after 400 queries 1.15 → 0.44 GiB, recall 0.856 → 0.427 (Elasticsearch: 0.757 with 30 rescored). roll's one-bit estimates rank worse than Elasticsearch's optimized scalar quantization, so it needs the wider rescore |
+
+### Where roll still loses
+
+- **Store bytes**: vectors in the stored `_source` (above), +56% over Elasticsearch for this
+  corpus. Taking them out at index time needs every reader of `_source` (fetch, `get`,
+  `update`, reindex, realtime get from the buffer, scripts) to splice them back from the
+  vector field, and old segments to keep working: the next change for this lane.
+- **Float HNSW indexing**: 1,250 µs of CPU per document against Elasticsearch's 1,174 (3,104 vs
+  3,312 docs/s); with quantized graphs roll is ahead (bbq 787 vs 1,088, int8 718 vs 1,072).
+  The float distance kernels are AVX2; this Xeon has AVX-512, which Elasticsearch's Panama
+  kernels use.
+- **BBQ estimate quality**: see the rescore row above. A better one-bit quantizer (per-vector
+  optimized intervals, as Elasticsearch's) would let roll steer with fewer float reads.
+- **Filtered latency on many segments**: roll searches segments one after another, so with
+  18–64 segments its filtered p50 is 2–3× Elasticsearch's (which searches segments in
+  parallel) even where CPU per query is close; on one segment, with the change above, roll's
+  filtered `bbq_hnsw` search costs less CPU than Elasticsearch's.
+
 ## Tuning log
 
 Each change keeps results identical (unit/oracle tests, both YAML suites with 0 regressions).
@@ -1358,6 +1710,17 @@ Earlier rounds (same lane): parallel bulk preparation with ordered per-shard app
 top hits stopping once nothing can compete, numeric and keyword competitive pruning for sorts
 (points tree / terms postings), `size: 0` counts from segment statistics, and scroll
 continuation by last hit.
+
+Vector search (2026-11-14; 1M × 384 `bbq_hnsw`, see "Vector search" for the setup; native
+`search-dev` builds over the same data directory, measured interleaved, server CPU per query;
+hits and scores compared byte for byte):
+
+| change | where | before | after |
+|---|---|---:|---:|
+| filtered k-NN: the filter as a bitset over ordinals (cardinality by popcount, tested inline in the graph search), bridges' adjacency rows prefetched, a plain vector as the bridge queue | `search-codec` `vectors/mod.rs` (`OrdFilter`), `vectors/hnsw.rs`; `search-index` `query/knn.rs` | 24 segments: 10% filter 33.4 ms, 1% 36.2 (bitset: 26.2, 30.2); 1 segment: 9.0, 9.2 | 22.9, 25.4; 3.4, 4.5 |
+| (not adopted) Lucene's visited marking and exploration cap in the filtered search | `vectors/hnsw.rs` | 10% filter 35 ms, recall 0.995; 1% 37.5 ms, 0.874 | 19.5 ms, 0.970; 30.5 ms, 0.803 |
+| (not adopted) `MADV_RANDOM` on mapped segments | `search-store` `cache.rs` | cold wake, first `knn` 296–326 ms, cold `match` 85–137 ms | 274–359 ms, 157–197 ms |
+| (not adopted) rescore only the best `k · oversample` per segment | `vectors/mod.rs` | 1 segment: 4.2 ms, recall 0.856 | 2.1 ms, 0.427 |
 
 ## Fetch phase (round 6, perf-fetch lane)
 
