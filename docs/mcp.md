@@ -413,23 +413,18 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Forwarded addresses in roll code** (the thirteenth review): `code-control/src/streams.rs` and the
-   device-login caps take `X-Forwarded-For`'s left-most entry raw (`ROLL_CODE_TRUST_FORWARDED_FOR`);
-   they should share `roll_access::evaluate::forwarded_client` or the gate's `ClientIp`.
-2. **Apps-next merges with #25 again:** its head now conflicts in `crates/rolld/src/main.rs`; send the
-   thread the recipe, then run the per-method check on the merge.
-3. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+1. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
    lands after #20, #25 and #30): kept merged both ways; secrets' tenth-review fixes are in #30
    (an admin's token reaches operator projects, project-wide metadata needs a rule over the whole
    project). The canvas check costs nothing measurable (`gate_latency`, release, pinned, A/B
    twice: a token's one-resource request 83–115 µs p50 with it, 105–116 µs without).
-4. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions.
-5. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+3. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+4. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Done lately: a person's own token's page tested to show only their reach; `roll token list
@@ -443,22 +438,25 @@ start and pre-deploy commands, schedule, kind, port, volume and `run.public`, ar
 a day or less); workload tokens (`Access::mint_workload`: minutes, within an identity's scope, owned
 by its maker, out of the list and caps) for secrets' identity logins; a person's own tokens' news is
 mailed to them (an approval waiting on them, used from a new network, revoked as leaked, about to
-expire; only their own, never a secret); the thirteenth review (X-Forwarded-For only from listed
-proxies, every line, a bad entry stopping the walk, IPv4-mapped addresses matched; nothing listed,
-the header counts for nothing; MCP tool calls carry the gate's address; unconsented client ids good
-for 90 days and kept ids small enough for Postgres); `ROLL_TRUSTED_PROXIES` (X-Forwarded-For only
-from the edge's addresses, the client the right-most entry that isn't one: a direct request can't
-name its own address for IP allowlists or registration's limit); sealed apps variables explained to
-agents (apps-next #26); the prefix check per method (rolld logs each route's methods; 194 `METHOD
-route` lines reviewed, 7 newly found and looked at: a route with its own row for one method can't
-gain another a prefix decides unseen); sensitive secrets explained to agents (`secrets_reveal` and
-`roll://guide`: a 403 and `withheld` are expected; secrets #46); open registration stores nothing (a
-client's id is the client, signed; kept once a person consents, else good for a day), so a flood has
-nothing to fill; the twelfth review's contained findings (CSV cells all quoted with formulas defused
-after in-cell separators too; a completion never waits on or uses an open approval; registration's
-rate map swept once a minute and bounded; the token-page list read from the caller's address and off
-the async threads; stored grants honour the idle policy; client names as consent shows them, no
-invisible characters); a person's own token's page tested to show only their reach (#25);
+expire; only their own, never a secret); roll code's stream and device-login caps take the client
+the trusted proxy saw (the right-most `X-Forwarded-For` entry that isn't the proxy, over every line,
+only an address), not the left-most a client wrote; apps-next's head passes the per-method check
+with #25; the thirteenth review (X-Forwarded-For only from listed proxies, every line, a bad entry
+stopping the walk, IPv4-mapped addresses matched; nothing listed, the header counts for nothing; MCP
+tool calls carry the gate's address; unconsented client ids good for 90 days and kept ids small
+enough for Postgres); `ROLL_TRUSTED_PROXIES` (X-Forwarded-For only from the edge's addresses, the
+client the right-most entry that isn't one: a direct request can't name its own address for IP
+allowlists or registration's limit); sealed apps variables explained to agents (apps-next #26); the
+prefix check per method (rolld logs each route's methods; 194 `METHOD route` lines reviewed, 7 newly
+found and looked at: a route with its own row for one method can't gain another a prefix decides
+unseen); sensitive secrets explained to agents (`secrets_reveal` and `roll://guide`: a 403 and
+`withheld` are expected; secrets #46); open registration stores nothing (a client's id is the
+client, signed; kept once a person consents, else good for a day), so a flood has nothing to fill;
+the twelfth review's contained findings (CSV cells all quoted with formulas defused after in-cell
+separators too; a completion never waits on or uses an open approval; registration's rate map swept
+once a minute and bounded; the token-page list read from the caller's address and off the async
+threads; stored grants honour the idle policy; client names as consent shows them, no invisible
+characters); a person's own token's page tested to show only their reach (#25);
 `secrets_list_ssh_cas` (secrets #45); open client registration bounded (20 a minute a network; a
 flood never pushes out a client a person is connecting); `secrets_list_cas` (secrets #44); the
 prefix check skips public routes (no grant classifies what anyone may call);
