@@ -319,6 +319,13 @@ pub fn resolve<'a>(site: &'a Site, path: &str, spa: bool) -> Option<(&'a str, u1
     if let Some(k) = found(&index) {
         return Some((k, 200));
     }
+    // A page written as `about.html` (Next's static export, Astro's `build.format: "file"`,
+    // Hugo's ugly URLs) answers at `/about`, as Netlify, Cloudflare Pages and Vercel serve it.
+    if !p.is_empty()
+        && let Some(k) = found(&format!("{p}.html"))
+    {
+        return Some((k, 200));
+    }
     let last = p.rsplit('/').next().unwrap_or("");
     if spa && !last.contains('.') {
         return found("index.html").map(|k| (k, 200));
@@ -372,11 +379,13 @@ mod tests {
         assert_eq!(names, ["assets/app.js", "index.html"]);
         let (off, len) = files["assets/app.js"];
         assert_eq!(&bytes[off as usize..(off + len) as usize], b"go()");
-        let site = Site { tar: PathBuf::new(), files, rules: Default::default(), gzipped: Default::default(), used: 0.into() };
+        let mut site = Site { tar: PathBuf::new(), files, rules: Default::default(), gzipped: Default::default(), used: 0.into() };
         assert_eq!(resolve(&site, "/", false), Some(("index.html", 200)));
         assert_eq!(resolve(&site, "/settings/profile", true), Some(("index.html", 200)), "a page path in a single-page app");
         assert_eq!(resolve(&site, "/settings/profile", false), None);
         assert_eq!(resolve(&site, "/logo.png", true), None, "a missing file stays missing");
+        site.files.insert("about.html".into(), (0, 1));
+        assert_eq!((resolve(&site, "/about", false), resolve(&site, "/about/", false)), (Some(("about.html", 200)), Some(("about.html", 200))), "a clean URL");
         assert_eq!(key(&format!("nginx@sha256:{}", "A".repeat(64))), Some("a".repeat(64)));
     }
 }

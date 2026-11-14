@@ -872,7 +872,8 @@ image's digest (or a built image's tag hash), so a rollback or a promotion reuse
 proxy answers from the tar directly: an index of its regular files (name → offset and length)
 read once per node, byte ranges read per request. Nothing is extracted, so a tenant's archive
 can't place a symlink or a `..` path anywhere: anything that isn't a regular file with plain
-path components is left out of the index. GET and HEAD; a file, a directory's `index.html`, a
+path components is left out of the index. GET and HEAD; a file, a directory's `index.html`, a page's `<path>.html` (`/about` answers
+`about.html`, as Next's static export and Astro's `build.format: "file"` write pages), a
 single-page app's index for a page path, or the site's `404.html` with a 404; ETags (304s),
 `no-cache` on HTML, a year (`immutable`) on fingerprinted files and five minutes on the rest,
 `nosniff`. A file is fingerprinted when its name changes with its bytes: in a build's asset
