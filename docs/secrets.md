@@ -415,7 +415,8 @@ credential keeps working, and the sweeper tries again; cleared by the next rotat
 `revoke_failing` (a credential roll retired, or a lease that ended, that it couldn't revoke yet: it
 still works until roll can; cleared once it does; `GET …/rotations`, `roll secrets rotations` and
 the Health view's "Managed credentials" list every managed credential with its schedule and last
-failure), `missing` (a required key an environment doesn't define, through its
+failure; `roll secrets rotations --rotate-due 7` rotates every one due within a week, or failing,
+in one run, for an operator's maintenance window, and fails if one does), `missing` (a required key an environment doesn't define, through its
 imports and base), `exposed` (a protected value also in an unprotected environment), `weak`,
 `expiring`, `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
 and it's older than that). Each `Finding` names the environment, folder and key where it's set,
