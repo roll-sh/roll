@@ -183,7 +183,19 @@ impl Engine {
             };
             match &res.r#ref {
                 None => {
-                    let made = b.branch(&res.parent, &name, res.mode).await.map_err(|e| anyhow::anyhow!("branching {key}: {e:#}"))?;
+                    // As of `data_at` where the product keeps history (structure-only needs none).
+                    let at = s.data_at.as_deref().filter(|_| res.mode == Mode::Branch).and_then(|a| crate::settings::data_at_secs(a, self.store.now_ms().unwrap_or(0) / 1000));
+                    let past = match at {
+                        Some(at) => b.branch_at(&res.parent, &name, res.mode, at).await.map_err(|e| anyhow::anyhow!("branching {key} as of {at}: {e:#}"))?,
+                        None => None,
+                    };
+                    if at.is_some() && past.is_none() {
+                        self.store.log(&r.id, &format!("{key} keeps no history: branched as of now, not data_at"))?;
+                    }
+                    let made = match past {
+                        Some(m) => m,
+                        None => b.branch(&res.parent, &name, res.mode).await.map_err(|e| anyhow::anyhow!("branching {key}: {e:#}"))?,
+                    };
                     // Recorded at once (a crash mustn't lose it), Ready only once it's masked.
                     self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
                         x.r#ref = Some(made.r#ref.clone());
@@ -198,7 +210,15 @@ impl Engine {
                 }
                 Some(branch) if reset_due || asked.iter().any(|a| a == "*" || *a == key) => {
                     self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Resetting)?;
-                    let fresh = b.reset(&res.parent, branch, res.kept.as_deref(), &name, res.mode).await.map_err(|e| anyhow::anyhow!("resetting {key}: {e:#}"))?;
+                    let at = s.data_at.as_deref().filter(|_| res.mode == Mode::Branch).and_then(|a| crate::settings::data_at_secs(a, self.store.now_ms().unwrap_or(0) / 1000));
+                    let past = match at {
+                        Some(at) => b.reset_at(&res.parent, branch, res.kept.as_deref(), &name, res.mode, at).await.map_err(|e| anyhow::anyhow!("resetting {key} as of {at}: {e:#}"))?,
+                        None => None,
+                    };
+                    let fresh = match past {
+                        Some(f) => f,
+                        None => b.reset(&res.parent, branch, res.kept.as_deref(), &name, res.mode).await.map_err(|e| anyhow::anyhow!("resetting {key}: {e:#}"))?,
+                    };
                     self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
                         x.r#ref = Some(fresh.r#ref.clone());
                         x.kept = fresh.kept.clone();

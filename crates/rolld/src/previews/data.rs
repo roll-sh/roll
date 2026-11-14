@@ -13,6 +13,34 @@ use serde_json::{Value, json};
 pub struct Postgres(pub Api);
 
 impl Postgres {
+    /// A branch of `parent` named `name` (`at`: as the parent was then), with its own role; one
+    /// made just before a crash is found and finished instead.
+    async fn create(&self, parent: &str, name: &str, mode: Mode, at: Option<i64>) -> anyhow::Result<Branched> {
+        let (id, has_role) = match self.find(parent, name).await? {
+            Some(b) => {
+                let id = s(&b["id"]).unwrap_or_default();
+                // From before a crash: it may still hold rows, so empty it again (idempotent).
+                if mode == Mode::Schema {
+                    self.0.post(&format!("/v1/projects/{}/branches/{}/reset", seg(parent), seg(&id)), json!({ "schema_only": true })).await?;
+                }
+                (id, false)
+            }
+            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "schema_only": mode == Mode::Schema, "app_role": true, "at": at })).await {
+                Ok(v) => (s(&v["branch"]["id"]).ok_or_else(|| anyhow::anyhow!("a branch without an id"))?, v["app_connection_uri"].is_string()),
+                Err(e) if conflict_is_ours(&e) => {
+                    let b = self.find(parent, name).await?.ok_or(e)?;
+                    (s(&b["id"]).unwrap_or_default(), false)
+                }
+                Err(e) => return Err(e),
+            },
+        };
+        // A branch found again (a crash) gets its role now (idempotent).
+        if !has_role {
+            self.0.post(&format!("/v1/projects/{}/branches/{}/app-role", seg(parent), seg(&id)), json!({})).await?;
+        }
+        Ok(Branched { r#ref: id, kept: Some(APP_ROLE.into()) })
+    }
+
     async fn find(&self, project: &str, name: &str) -> anyhow::Result<Option<Value>> {
         let p = self.0.get(&format!("/v1/projects/{}", seg(project))).await?;
         Ok(p["branches"].as_array().and_then(|b| b.iter().find(|b| b["name"] == name).cloned()))
@@ -36,30 +64,20 @@ impl Brancher for Postgres {
     /// `Mode::Schema`: branched, then every user table emptied (`schema_only`). Either way the
     /// branch gets a role of its own for the preview's code (pg-control's `app_role`).
     async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
-        let (id, has_role) = match self.find(parent, name).await? {
-            Some(b) => {
-                let id = s(&b["id"]).unwrap_or_default();
-                // From before a crash: it may still hold rows, so empty it again (idempotent).
-                if mode == Mode::Schema {
-                    self.0.post(&format!("/v1/projects/{}/branches/{}/reset", seg(parent), seg(&id)), json!({ "schema_only": true })).await?;
-                }
-                (id, false)
-            }
-            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "schema_only": mode == Mode::Schema, "app_role": true })).await {
-                Ok(v) => (s(&v["branch"]["id"]).ok_or_else(|| anyhow::anyhow!("a branch without an id"))?, v["app_connection_uri"].is_string()),
-                Err(e) if conflict_is_ours(&e) => {
-                    let b = self.find(parent, name).await?.ok_or(e)?;
-                    (s(&b["id"]).unwrap_or_default(), false)
-                }
-                Err(e) => return Err(e),
-            },
-        };
-        // A branch found again (a crash) gets its role now (idempotent).
-        if !has_role {
-            self.0.post(&format!("/v1/projects/{}/branches/{}/app-role", seg(parent), seg(&id)), json!({})).await?;
-        }
-        Ok(Branched { r#ref: id, kept: Some(APP_ROLE.into()) })
+        self.create(parent, name, mode, None).await
     }
+
+    /// From the parent's history (pg-control's point in time: unix seconds).
+    async fn branch_at(&self, parent: &str, name: &str, mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
+        self.create(parent, name, mode, Some(at)).await.map(Some)
+    }
+
+    /// A reset in place can't go back in time: branched again from there instead.
+    async fn reset_at(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
+        self.delete(parent, branch, name).await?;
+        self.create(parent, name, mode, Some(at)).await.map(Some)
+    }
+
 
     /// In place: same branch, endpoint and `DATABASE_URL` (pg-control makes the branch's role
     /// again, same password).
@@ -293,6 +311,18 @@ impl Brancher for Nosql {
         };
         let parent_id = self.0.get(&format!("/v1/nosql/databases/{}", seg(parent))).await.map(|p| p["id"].clone()).unwrap_or(Value::Null);
         Ok((d["parent_id"] == parent_id && !parent_id.is_null()).then(|| s(&d["id"])).flatten())
+    }
+
+    /// From the parent's history (`at`, unix seconds).
+    async fn branch_at(&self, parent: &str, name: &str, mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
+        let v = self.0.post(&format!("/v1/nosql/databases/{}/branches", seg(parent)), json!({ "name": name, "schema_only": mode == Mode::Schema, "at": at })).await?;
+        Ok(Some(Branched::plain(s(&v["id"]).ok_or_else(|| anyhow::anyhow!("a database without an id"))?)))
+    }
+
+    /// In place, to the parent as it was then (same id, endpoint and credentials).
+    async fn reset_at(&self, _parent: &str, branch: &str, _kept: Option<&str>, _name: &str, _mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
+        self.0.post(&format!("/v1/nosql/databases/{}/reset", seg(branch)), json!({ "at": at })).await?;
+        Ok(Some(Branched::plain(branch)))
     }
 
     async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {

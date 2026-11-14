@@ -101,6 +101,8 @@ pub struct FakeData {
     pub schema: Mutex<Option<(Vec<String>, Vec<String>)>>,
     /// Masks applied: (branch, columns).
     pub masks: Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>,
+    /// Branched from history at (Postgres's fake keeps history; the others don't).
+    pub at: Mutex<Vec<i64>>,
 }
 
 impl FakeData {
@@ -113,6 +115,7 @@ impl FakeData {
             fail_next: AtomicUsize::new(0),
             schema: Mutex::new(None),
             masks: Mutex::new(Vec::new()),
+            at: Mutex::new(Vec::new()),
         })
     }
 }
@@ -133,6 +136,13 @@ impl Brancher for FakeData {
             self.made.fetch_add(1, Ordering::SeqCst);
         }
         Ok(Branched::plain(id))
+    }
+    async fn branch_at(&self, parent: &str, name: &str, mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
+        if self.kind != Kind::Postgres {
+            return Ok(None);
+        }
+        self.at.lock().push(at);
+        self.branch(parent, name, mode).await.map(Some)
     }
     async fn mask(&self, _parent: &str, branch: &str, _kept: Option<&str>, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
         self.masks.lock().push((branch.to_string(), columns.clone()));

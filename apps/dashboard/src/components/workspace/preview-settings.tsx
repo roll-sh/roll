@@ -233,6 +233,15 @@ function Form({
             })}
           </div>
         )}
+        <Field label="Data as of" note="Branch the data as it was then, where the product keeps history (Postgres, NoSQL): -24h, -30m, -7d or a time. Empty: now.">
+          <input
+            value={s.data_at ?? ""}
+            onChange={(e) => set("data_at", e.target.value.trim() || null)}
+            placeholder="now"
+            className={`${field} h-8 w-full font-mono text-[12px]`}
+            spellCheck={false}
+          />
+        </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Reset every" note="Hours; 0 never.">
             <Num value={s.reset_every_hours} onChange={(v) => set("reset_every_hours", v)} />

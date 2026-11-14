@@ -272,6 +272,8 @@ export interface PreviewSettings {
   visual_review?: "off" | "check" | "required";
   /** `catch` (default): services send mail to roll's catcher, listed on the preview, never delivered; `deliver`: the project's own mail settings. */
   mail?: "catch" | "deliver";
+  /** Branch the data as of a point in time where the product keeps history: `-24h`, `-30m`, `-7d`, or an RFC 3339 time (30 days back at most). */
+  data_at?: string | null;
   /** A feedback button on its pages for people who came in through roll (link access). */
   feedback: boolean;
   /** Variables for a family of branches: a branch glob → `{name: value}`, over `env`. */

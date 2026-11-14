@@ -49,6 +49,17 @@ pub trait Brancher: Send + Sync {
     /// Make `branch` the parent's current state again. Its ref may be new.
     async fn reset(&self, parent: &str, branch: &str, kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched>;
 
+    /// [`Brancher::branch`] from the parent as it was at `at` (unix seconds), where the product
+    /// keeps history: `None` from one that doesn't (the caller branches as of now and says so).
+    async fn branch_at(&self, _parent: &str, _name: &str, _mode: Mode, _at: i64) -> anyhow::Result<Option<Branched>> {
+        Ok(None)
+    }
+
+    /// [`Brancher::reset`] to the parent as it was at `at`, the same way.
+    async fn reset_at(&self, _parent: &str, _branch: &str, _kept: Option<&str>, _name: &str, _mode: Mode, _at: i64) -> anyhow::Result<Option<Branched>> {
+        Ok(None)
+    }
+
     /// Delete `branch`, which must be the child of `parent` named `name` (anything else is
     /// refused). Ok when it's already gone. Never touches `parent`.
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()>;

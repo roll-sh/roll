@@ -57,6 +57,11 @@ pub struct Settings {
     /// project's own mail settings reach previews.
     #[serde(default)]
     pub mail: MailRule,
+    /// Branch the data as of a point in time (Neon's time-travel branches), where the product
+    /// keeps history: `-24h` (`-30m`, `-7d`) before each branching or reset, or an RFC 3339 time;
+    /// at most 30 days back. Products without history branch as of now and say so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_at: Option<String>,
     /// A feedback button on the pages of people who came in through roll (link access): it pins a
     /// note to an element and posts it on the change, from roll.
     pub feedback: bool,
@@ -175,6 +180,28 @@ pub struct GithubRule {
     pub widths: Vec<u32>,
 }
 
+/// The unix second `data_at` means at `now` (unix seconds): `-24h`/`-30m`/`-7d` back from now, or
+/// an RFC 3339 time; `None` for anything else or more than 30 days back.
+pub fn data_at_secs(rule: &str, now: i64) -> Option<i64> {
+    const MAX: i64 = 30 * 86_400;
+    let rule = rule.trim();
+    let at = match rule.strip_prefix('-') {
+        Some(rel) => {
+            let (n, unit) = rel.split_at(rel.len().checked_sub(1)?);
+            let n: i64 = n.parse().ok().filter(|n| *n > 0)?;
+            let per = match unit {
+                "m" => 60,
+                "h" => 3_600,
+                "d" => 86_400,
+                _ => return None,
+            };
+            now - n.checked_mul(per)?
+        }
+        None => humantime::parse_rfc3339_weak(rule).ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64,
+    };
+    (at <= now && now - at <= MAX).then_some(at)
+}
+
 /// A width's page entry (`@768`): the first page at that width.
 pub fn width_entry(e: &str) -> Option<u32> {
     e.strip_prefix('@').filter(|n| !n.starts_with('0')).and_then(|n| n.parse::<u32>().ok()).filter(|w| (320..=2560).contains(w))
@@ -251,6 +278,7 @@ impl Default for Settings {
             access: Access::Link,
             visual_review: VisualReviewRule::Off,
             mail: MailRule::Catch,
+            data_at: None,
             feedback: true,
             warm: true,
             seed: None,
@@ -409,6 +437,12 @@ impl Settings {
         if self.github.hide.len() > MAX_HIDE || !self.github.hide.iter().all(|s| selector_ok(s)) {
             return bad(format!("github.hide: at most {MAX_HIDE} CSS selectors of up to 200 characters (no braces, semicolons or comments)"));
         }
+        if let Some(at) = &self.data_at {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+            if data_at_secs(at, now).is_none() {
+                return bad(format!("data_at: {at:?} isn't -<n>m, -<n>h, -<n>d or an RFC 3339 time within 30 days"));
+            }
+        }
         let w = &self.github.widths;
         if w.len() > 3 || w.iter().any(|x| width_entry(&format!("@{x}")).is_none()) || (1..w.len()).any(|i| w[..i].contains(&w[i])) {
             return bad("github.widths: up to 3 different widths, 320 to 2560 pixels".into());
@@ -468,6 +502,13 @@ mod tests {
 
     #[test]
     fn patches_merge_and_production_needs_a_yes() {
+        // A point in time for the data: a while back (at most 30 days), or a time.
+        assert_eq!(data_at_secs("-24h", 1_000_000), Some(1_000_000 - 86_400));
+        assert_eq!(data_at_secs("1970-01-12T00:00:00Z", 1_000_000), Some(950_400));
+        for bad in ["-31d", "-0h", "24h", "-5w", "yesterday"] {
+            assert_eq!(data_at_secs(bad, 10_000_000), None, "{bad}");
+        }
+        assert!(Settings::default().patched(&json!({ "data_at": "soon" })).is_err());
         // Widths: up to three different ones a tablet or a wide screen has, kept as `@<width>`.
         assert!(Settings::default().patched(&json!({ "github": { "widths": [768, 1920] } })).is_ok());
         for bad in [json!([768, 768]), json!([100]), json!([400, 500, 600, 700])] {

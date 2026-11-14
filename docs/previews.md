@@ -440,6 +440,16 @@ preview wrote a document with a price). With several such resources, each one's 
     reads `[masked]` and its `_terms_enum` finds nothing, the parent reads `parent`; roll
     search's `expunging_a_branch_rewrites_the_segments_it_shares` pins the sequence).
   - Other products: a `seed` anonymises the rows instead.
+- **Data as of a point in time** (Neon's time-travel branches): `data_at` (`-24h`, `-30m`, `-7d`
+  or an RFC 3339 time, 30 days back at most) makes each branching and reset start from the
+  parent as it was then, where the product keeps history: Postgres (pg-control's point in time;
+  a reset branches again from there, since an in-place reset can't go back) and NoSQL (`at`, in
+  place). Structure-only branches need no history and ignore it; other products branch as of
+  now and the preview's activity says so (`Brancher::branch_at`/`reset_at`;
+  `engine.rs::data_at_branches_from_history_where_there_is_some`). Not checked live: a
+  Postgres branch as of a time seconds old stayed in recovery past two minutes even once the
+  parent's history reached past it (pg-control's `RECOVERY_TIMEOUT` is 30 minutes), so the
+  live script leaves it out until pg-control's recovery is looked at.
 - **Previews never email real people.** A preview's data is production's people, so its mail is
   caught (`mail: "catch"`, the default; review apps' MailHog): rolld runs a small SMTP catcher
   (`ROLL_PREVIEWS_SMTP`, `0.0.0.0:2525`; `roll_previews::mail`) that accepts mail only from a
@@ -1098,6 +1108,7 @@ Ranked by what a person notices first. Done so far:
 - feedback resolved from the page (its Resolve opens roll, where it's resolved for the page);
 - the first page's words against main's (`base_change.text`, lines gained and lost);
 - broken links on the first page (its own origin's, `HEAD` only, against main's);
+- data as of a point in time (`data_at`, where the product keeps history: Postgres, NoSQL);
 - a phone-width screenshot with its own visual change;
 - every change compared with the default branch, whose preview roll keeps itself (`github.baseline`);
 - the comment's page checks folded under one line of counts;
@@ -1183,18 +1194,14 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Data as of a point in time** (Neon's time-travel branches): `data_at` (a time, or `-24h`)
-   makes a preview's branches start from the parent as it was then, where the product keeps
-   history (Postgres's, NoSQL's `at`), to reproduce a bug with yesterday's data; products that
-   can't say so in its activity.
-2. **SEO basics on the first page** (Lighthouse's SEO audit): a title, a meta description, a
+1. **SEO basics on the first page** (Lighthouse's SEO audit): a title, a meta description, a
    viewport, a canonical link, one `h1`, no `noindex` meant for production, said with the
    accessibility checks and against main's.
-3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-4. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
+3. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
    a preview reaches real people, but its code can still call any API (a payment provider's
    sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
    (today), `"roll"` (only roll's own products and the preview's branches) or a list of hosts;
@@ -1204,19 +1211,19 @@ Ranked by what a person notices first. Done so far:
    host whose firewall roll mustn't touch) or an internal network with a forwarding sidecar for
    every product port (an image of its own, and roll code's runner changed); on the cloud fleet
    it's security groups, with the cloud thread.
-5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-6. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-7. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-8. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+7. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1229,6 +1236,11 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
+8. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+   Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
+   minutes even with the parent's history reporting `end` past it, where pg-control's own test
+   (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
+   old; the live script will check it once this is understood.
 9. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the

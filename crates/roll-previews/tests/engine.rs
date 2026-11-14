@@ -824,3 +824,19 @@ async fn a_preview_s_mail_is_caught_never_sent() {
     let (_, vars) = e.engine.env(&p.id, "web").await.unwrap();
     assert!(vars.iter().any(|(k, v)| k == "SENDGRID_API_KEY" && v == "SG.real"));
 }
+
+/// `data_at` branches the data as the parent was then, where the product keeps history; one that
+/// doesn't branches as of now and says so.
+#[tokio::test]
+async fn data_at_branches_from_history_where_there_is_some() {
+    let e = env(json!({ "enabled": true, "data_at": "-24h" }));
+    e.code.open(change("chg_t", 8));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_t").unwrap().unwrap();
+    let now = e.engine.store.now_ms().unwrap() / 1000;
+    let at = e.pg.at.lock().clone();
+    assert!(at.len() == 1 && (now - 86_400 - at[0]).abs() < 60, "Postgres as of a day ago: {at:?}");
+    let said: Vec<String> = e.engine.store.activity(&p.id).unwrap().into_iter().map(|a| a.message).collect();
+    assert!(said.iter().any(|m| m.contains("keeps no history: branched as of now")), "{said:?}");
+}
+
