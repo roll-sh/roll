@@ -10116,6 +10116,138 @@ from `perf record` of c1; round 1's figures from agent 220's table):
   5. Memory (lead 5 of the brief) not started: the engine 1,675 MB against PostgreSQL's 1,651
      and pgrust's 1,871 at 2 GB caches.
 
+### Batch aggregation, round 3 (agent 234; BENCH.md "Batch aggregation, round 3")
+
+The bulk script's `count(*), sum(c)` (c float8) went the row path: `AggPlan::compile` gives up
+on the whole scan as soon as one aggregate has no batch kernel, and float aggregates
+(`Partial::Floats`), `sum(int2 / int4)` (`Partial::SumInt`) and min / max (`Partial::Best`) had
+none. Base `count_after` profile: `partial_row` 29%, `LazyBuf::read` 12%, `skip_value` /
+`decode_value` 9%, `FloatStats::push` 7% (the executor's checked serial sum). Three commits:
+
+- **Float aggregates and integer sums in the batch path** (`vector::AggArg::Float`,
+  `Partials::batch_run` / `run_sums` / `run_commit`). A float4 / float8 column argument of avg,
+  variance or stddev, or of sum over float8 (sum(float4), `SumF4`, has no partial state; the
+  first commit's message says float4 too), is decoded as the batch's `F64` column and its
+  live, non-NULL values are appended to the group's `Floats` in row order (keyless: one
+  `extend`; grouped: by each row's group). The executor still sums each part's values in the serial order, so the results
+  are the row path's bit for bit. `sum(int2 / int4)` (`SumInt`, which raises at the row whose
+  running sum leaves an int8) is taken when the lane's bound times the batch's rows is under
+  2^62 and, per group, the state's magnitude plus the bound times the group's rows stays inside
+  an int8, so no running sum can overflow (values and words groups); else the batch goes the row
+  way, which raises where it did. `batch_row` takes a float column too (its bits through `vals`).
+- **A float part merged in one pass** (`FloatStats::push_all`): `FloatAgg::merge` sums a part's
+  values in a plain loop (with Sxx for avg / variance / stddev: `push`'s arithmetic, step for
+  step) and keeps the result when Sx (and Sxx) end finite: an infinite or NaN sum stays so, so a
+  finite end means no step overflowed. Otherwise nothing is kept and the checked `push` runs
+  value by value, raising at the same value as before.
+- **min / max, and count(*) alone** (`AggArg::Best`, `best_rows`; `Pre::decode_none`). min / max
+  of an int2, int4, int8, date, float4 or float8 column (no bpchar or tid: those keep the old
+  value on a tie): each group's best row of the batch by the row path's rule (`float_cmp` for
+  floats; a later row equal to the best replaces it, as the X_larger / X_smaller transitions keep
+  the new value, so 0 and -0 tell), then one `Best::add` of that row's value, which applies the
+  rule against the state. A plan that reads no column and has no filter (count(*), constants) no
+  longer walks every row's header (`decode_none`). Both are functions of their own
+  (`#[inline(never)]`, chosen by `partial_chunk`): written inside `Pre::decode` and `run_sums`
+  (builds n003 / n004) they cost q01 +5.2 / +0.8% and q06 +5.8 / +0.5% user instructions, every
+  scan's decode loop compiled differently.
+
+Results: `~/.cache/a234/bench/dump.sql` (sums, averages, variances, min / max of float and integer
+columns, keyless and by a text key, filtered; 763 lines) gives the same bytes on base and on
+every build of the round, on the bulk table after its UPDATE / DELETE / VACUUM. Those float sums
+are not PostgreSQL's on this table, before or after this round: past the heap model's limit the
+engine reads in key order, PostgreSQL's serial scan in heap order (the UPDATE's new versions at
+the end): `sum(c)` 54035714.28571466 against 54035714.285715684. Tables the heap model covers read
+in PostgreSQL's order and don't reach the batch path (`Source::Rows`).
+
+Measured (BENCH.md has the tables; lane C, the bulk table at 750,000 rows after the script's
+DELETE; G user instructions of the server's cgroup):
+
+- Plain dist, base against the three commits, 5 alternating pairs: `count(*), sum(c)` 1.346 ->
+  0.495 (-63.2% in every pair); the whole script with its background steps 61.62 -> 60.55 (-1.2 to
+  -2.7% a pair); every other step of the script within +-0.5% but DELETE and its compaction (+-5
+  to 17% both ways, as in round 14). Extra steps on the same table: avg(c) -60.1%, `GROUP BY b`
+  (1,000 text keys, count, sum(c)) -37.0%, count(b) +0.2%. Without the two indexes (single runs):
+  count(*) 0.350 -> 0.251, sum(a) 0.665 -> 0.446, min(a), max(a) 1.403 -> 0.443.
+- PGO builds (`tools/dist-pgo.sh` of each commit, same checkout), 3 pairs: `count(*), sum(c)`
+  1.012 -> 0.482 (-52.4%), the script 52.06 -> 51.26 (-0.9 to -2.7%); COPY in +0.4%, VACUUM +0.7%,
+  ANALYZE +0.9% (the profile's shifts), avg(c) -46.9%, `GROUP BY b` -24.9%.
+- Same day, same lane and settings: PostgreSQL 18.6 the script 52.33, `count(*), sum(c)` 0.489;
+  pgrust 44.61 and 0.168. Roll (plain dist) 60.55 = 1.16x PostgreSQL, 1.36x pgrust (base 1.18x,
+  1.38x); PGO 51.26 = 0.98x, 1.15x. `count(*), sum(c)`: 1.01x PostgreSQL, 2.9x pgrust (base 2.75x,
+  8.0x).
+- TPC-H q01 / q06 (3 alternating pairs, 5 runs a pass): plain dist user instructions +0.02 /
+  +0.03%; PGO -2.0 / -0.15%. Cycles are worse: plain dist q01 +4 to +6% (base 5.85-5.98 G, the
+  round's builds 6.07-6.38 G at 0.3-0.8 foreign cores, n002 as much as n005), q06 noisier (base
+  itself 4.63-5.01 G); PGO q06 +7 to +11%, q01 mixed. Same instructions, so placement: a cycles
+  profile of q06 has `Pre::decode` (its source unchanged) at +36% cycles, the other functions
+  +5-12% (that pass's load), and its hottest instructions moved from the start of a 64-byte line
+  (`...5c0`, `...5d4`) to its middle and across it (`...8f7` to `...924`). The host is a Xeon
+  W-2295 (Cascade Lake: the JCC erratum, a jump crossing or ending on a 32-byte boundary is not
+  cached in the decoded-uop cache). Built with LLVM's padding for it
+  (`-Cllvm-args=-x86-branches-within-32B-boundaries`, both commits, plain dist), the round's q01
+  / q06 cycles are base's: +1.9 / -3.5 / +0.8% and +1.8 / -1.3 / +2.6% in 3 pairs (instructions
+  +0.9 / +0.1%: the padding differs). The padding also makes base itself cheaper in cycles (q01
+  5.38-5.73 G against 5.85-5.98, q06 4.22-4.57 against 4.63-4.71) for +3.8 / +4.5% instructions.
+- Point reads (lane A, pgbench select-only prepared at 8 clients, scale 10, 5 alternating pairs):
+  43,990 -> 43,968 user instructions a transaction (-0.05%; pairs -0.24 to +0.04%).
+- Foreign load on lane C was 1.8-3.9 cores in every bulk run (other sessions' unpinned builds),
+  so no bulk pair is under 1.0; the server cgroup's instruction counts don't see it (each build's
+  `count(*), sum(c)` within 0.1% from run to run). The TPC-H passes ran at 0.3-1.2.
+
+Measured, not changed:
+- With the script's indexes the engine plans `count(*)` and `sum(a)` as a Parallel Index Only Scan
+  of `bulk_a` (2.0 G) where PostgreSQL runs a Parallel Seq Scan (0.28 G): the engine costs the
+  whole index at 15,878 against PostgreSQL's 20,490 (`Index Only Scan using bulk_a`, the min /
+  max InitPlans' paths), its btree model smaller than PostgreSQL's index after the UPDATE, DELETE
+  and VACUUM. A plan difference (EXPLAIN differs): for the btree size model's owners.
+- `GROUP BY a, b` (750,000 groups) stays serial in both (HashAggregate; the engine models its
+  spill, `may_spill`), 2.38 G against PostgreSQL's 1.35 and pgrust's 1.15.
+- `GROUP BY b` after the round (1.45 G against PostgreSQL's 1.36, pgrust's 0.59): a parallel
+  scan's chunks (`CHUNKS_PER_WORKER`, 64 a worker) each send their own part with every group
+  (1,000 a part: each group's key values, states and float vector made, then freed on the
+  executor's thread: 12% of its samples in the allocator, 5% in the executor's merge), and a
+  text key past 8 bytes is hashed as bytes per row (`batch_key`, `bidx`: 12%). Order-dependent states (floats, min / max) can't
+  share a part across chunks unless each group's values keep their chunk's place.
+- count(*)'s floor after the round (0.251 G, 335 instructions a row; pgrust 0.055): the store's
+  read path is about 60% of it (0.15 G: in base's profile `Block::read` 16%, `fill_batch_with`
+  15%, `RowBatch::push_in` 14% of 0.35 G; every entry's key rebuilt and copied into the batch); with columns, `Pre::decode` walks every value up
+  to the last one read (about 240 instructions a row for the 4th column: the format's tags).
+
+Dropped: n003 / n004 (the same changes written inside the hot functions; numbers above;
+`~/.cache/a234/patches/n003.patch`, `n004.patch`).
+
+Next (largest first):
+1. Code placement of the scan loops: `-Cllvm-args=-x86-branches-within-32B-boundaries` in the
+   dist and PGO builds (the build's owners: every workload measured, cycles first, as it adds
+   3-5% instructions of padding); measured here on q01 / q06 only: 2-8% fewer cycles, and the
+   placement swings gone (without it a change anywhere in the executor moves q01 / q06 cycles
+   5-10% with the same instructions).
+2. The store's read path for scans (keys copied per entry, the block entry decode).
+3. `GROUP BY` parts: one part per worker across its chunks for order-dependent states (each
+   group's float values tagged with their chunk), and a key cache for text keys.
+4. The btree size model after bulk UPDATE / DELETE / VACUUM (the plan difference above).
+
+Commits as pushed (rebased onto origin's `c6845b8fa`, no conflict): `3715e3cc7`, `a3e6c1df2`,
+`8d29a561b` (measured and trained as `067603ccb`, `d2cf6e02b`, `df19df4ee` on `2947ce5a4`; on the
+rebased head release lib tests 223 passed, parallel_scan 13, golden 3).
+
+Verification: release build, release lib `storage::cols` tests, `parallel_scan` (13 passed;
+`vector_batches_match_rows` now also draws float aggregates over a float8 column with NULLs and
+signed zeros, integer sums and min / max of int2 / int4 / date / float8 columns), release Clippy
+with no warning in a changed file. The verification train on `df19df4ee` (the three commits on
+origin's `2947ce5a4`, `TRAIN_NO_CHECKOUT=1`): release crate tests pass; Clippy 20 warnings, none
+in the changed code; crash_random seeds 1-30 x 4; the power stage (power_cut 4 passed, seeds 1-30
+x 4 with `CRASH_POWER=1`, with and without `CRASH_ASYNC=1`); debug crate tests pass; isolation
+1647 / 1648 permutations (intra-grant-inplace, as before); pg_dump_tap 14,609 passed, 0 failed.
+The regression suite gave 51,075 / 51,150 with 73 newly differing units in copy, copyencoding,
+misc, psql, subscription and largeobject, every one the reference's: its server-side COPY TO /
+lo_export failed with "Permission denied" because the reference container (`a234-rref`) ran as
+uid 1000 and the harness makes its results directory inside the container for the image's
+postgres user. Those six files after test_setup against a reference started as the image's own
+user (`a234-rref2`): 1,881 / 1,881 units, newly differing 0, i.e. 51,148 / 51,150 as the baseline.
+Run regress references as the image's user, not `--user 1000:1000`. No planner change: the
+difftest guard was not run.
+
 ## Point reads, round 5 (agent 230)
 
 BENCH.md "Point reads, round 5" has the measurements (lane A, two cores, plain dist: prepared point
@@ -11176,7 +11308,8 @@ Not done, for the next round (BENCH.md has the profiles):
 - count(*) (2.7x PostgreSQL, 7.8x pgrust): the batch aggregation path (agent 226's) takes no
   float8 sum: `sum(c)` is collected row by row (`Partial::Floats`) and summed in row order on
   the executor's thread; a float8 lane that keeps each chunk's values in row order for that sum
-  would let count(*) and sum(float8) take the batch path.
+  would let count(*) and sum(float8) take the batch path. (Done by agent 234: "Batch
+  aggregation, round 3", 1.346 -> 0.495 G.)
 
 Commits: `d23bfde2d` (compaction's L1 inputs), `7c8da4c1b` (the policy), `3647b3556` (one-run
 index builds). No format change: the files and the manifest are written as before
