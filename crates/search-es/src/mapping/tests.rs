@@ -19,10 +19,9 @@ fn ctx_for(settings: Option<&Value>) -> MappingCtx {
     MappingCtx::from_settings(&s)
 }
 
-/// Types roll search rejects on purpose.
-fn skipped(case: &Value) -> bool {
-    let s = case.to_json();
-    s.contains("semantic_text")
+/// Types roll search rejects on purpose (none now).
+fn skipped(_case: &Value) -> bool {
+    false
 }
 
 fn check_error(label: &str, got: EsError, expected: &Value) {

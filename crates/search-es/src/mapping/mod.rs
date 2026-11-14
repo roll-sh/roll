@@ -2636,6 +2636,13 @@ impl Mapping {
         if total > ctx.total_fields_limit {
             return Err(EsError::illegal_argument(format!("Limit of total fields [{}] has been exceeded", ctx.total_fields_limit)));
         }
+        // `SemanticFieldMapper`: its chunks are nested documents, which can't nest further.
+        for (path, m, scope) in &fields {
+            if matches!(m, Mapper::Field(f) if f.ty == "semantic_text") && scope.is_some() {
+                let msg = format!("semantic_text field [{path}] cannot be nested");
+                return Err(EsError::mapper_parsing(format!("Failed to parse mapping: {msg}")).caused_by(EsError::illegal_argument(msg)));
+            }
+        }
         // `ParentJoinFieldMapper.doValidate`.
         if !ctx.opensearch() {
             let joins: Vec<&str> = fields.iter().filter(|(_, m, _)| matches!(m, Mapper::Field(f) if f.ty == "join")).map(|(p, _, _)| p.as_str()).collect();

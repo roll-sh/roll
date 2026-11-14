@@ -675,6 +675,33 @@ fn set_once(cur: &Value, new: &Value, _: &mut Vec<String>) -> bool {
     cur.is_null() || cur == new
 }
 
+/// `semantic_text` (`SemanticTextFieldMapper`): the endpoint that embeds the field's text, the
+/// one that embeds queries, the model settings the first embedded document records (task type,
+/// and for dense models dimensions, similarity and element type), chunking and the embeddings'
+/// index options. The embeddings live in hidden nested chunks (`crate::xpack::inference::semantic`).
+pub static SEMANTIC_TEXT: &[ParamDef] = &[
+    p("inference_id", Str, Dv::Str(crate::xpack::inference::semantic::DEFAULT_INFERENCE_ID), Updatable).ser(Ser::Always),
+    p("search_inference_id", Str, Dv::Null, Updatable).nullable().ser(Ser::NonNull),
+    p("model_settings", Json, Dv::Null, Merge::Check { check: model_settings_merge, show: crate::mapping::params::conflict_string }).nullable().ser(Ser::NonNull),
+    p("chunking_settings", Json, Dv::Null, Updatable).nullable().ser(Ser::NonNull),
+    p("index_options", Json, Dv::Null, Updatable).nullable().ser(Ser::NonNull),
+    META,
+];
+
+/// `SemanticFieldMapper.canMergeModelSettings`: settings, once recorded, change only to equal
+/// ones.
+fn model_settings_merge(cur: &Value, new: &Value, conflicts: &mut Vec<String>) -> bool {
+    if cur.is_null() || new.is_null() || crate::xpack::inference::semantic::ModelSettings::parse(cur).ok() == crate::xpack::inference::semantic::ModelSettings::parse(new).ok() {
+        return true;
+    }
+    conflicts.push("Cannot update parameter [model_settings] from [] to []".into());
+    false
+}
+
+fn validate_semantic_text(f: &FieldMapper, _ctx: &MappingCtx) -> Result<(), EsError> {
+    crate::xpack::inference::semantic::validate_mapper(f)
+}
+
 pub static WILDCARD: &[ParamDef] = &[IGNORE_ABOVE, p("null_value", Str, Dv::Null, Fixed).nullable(), META];
 
 pub static JOIN: &[ParamDef] = &[
@@ -833,6 +860,7 @@ pub static TYPES: &[TypeDef] = &[
     TypeDef { multi_fields: false, ..def!("rank_features", RANK_FEATURES, Family::Other) },
     def!("scaled_float", SCALED_FLOAT, Family::Numeric).with_validate(validate_number),
     TypeDef { multi_fields: false, ..def!("search_as_you_type", SEARCH_AS_YOU_TYPE, Family::Text) },
+    TypeDef { multi_fields: false, in_multi_field: false, validate: Some(validate_semantic_text), ..def!("semantic_text", SEMANTIC_TEXT, Family::Other) },
     def!("shape", SHAPE, Family::Geo),
     def!("short", SHORT, Family::Numeric).with_validate(validate_number),
     TypeDef { multi_fields: false, in_multi_field: false, ..def!("sparse_vector", SPARSE_VECTOR, Family::Vector) },
@@ -997,7 +1025,6 @@ pub fn lookup(name: &str) -> Option<&'static TypeDef> {
 /// Types Elasticsearch knows but roll search refuses, with the reason.
 pub fn unsupported(name: &str) -> Option<&'static str> {
     match name {
-        "semantic_text" => Some("semantic_text fields need an inference service, which roll search doesn't provide"),
         "rank_vectors" => Some("rank_vectors fields are not supported by roll search"),
         _ => None,
     }
