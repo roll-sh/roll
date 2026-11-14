@@ -1661,6 +1661,14 @@ identities outliving their re-keyer (#57), readers missed through imports and pr
 kind of credential shown to read-only callers and references not judged (#60), a stalled renewal
 (#56) and a refused strict read keeping its leases (#55): all fixed.
 
+A twelfth independent review (2026-11-14, of the eleventh review's fixes) found no high-severity
+issue; it found a login racing a key replacement could still get a token (#57: the login's write
+checks the keys it verified), Jenkins' file log unmasked (#54: documented, `ROLL_MASK=1`, since a
+file can't be told from a dump), late logins and late 401s overwriting fresh tokens (#56), reach
+looking one step away and at unshared importers (#61), a write's warning naming a credential's
+kind without reveal (#60), and `.env` corner cases and a repository choosing the environment (#58):
+all fixed.
+
 Then (2026-11-14, latest): `roll run` masks values in what the command prints when it isn't a
 terminal (#54), as 1Password's `op run` and GitHub Actions do; pulling into Kubernetes with External
 Secrets Operator (#55: its webhook provider, checked against ESO 2.15 on k3s) and
@@ -1767,9 +1775,8 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A twelfth independent review** of the eleventh review's fixes (#54–#61) (running), and its
-   fixes. #58's "Move to roll" on a multi-line key was checked live in code-server: the whole key
-   moved, byte for byte, and no line of it was left in the file.
+1. **A thirteenth independent review**, narrow: the twelfth review's fixes (#54, #56, #57, #58,
+   #60, #61) only.
 2. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
    #49 and #54 meet, `watch` keeps both (answered digests, streams and signals).
 3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
