@@ -628,7 +628,20 @@ impl Apps {
                 None => InstanceState::None,
             }
         };
-        Ok(EnvironmentSummary { name: e.name.clone(), state, url: public.then(|| self.url(&e.slug)), active, latest })
+        let mut attention = Vec::new();
+        if self.lives.lock().get(&env_key(&e.service, &e.name)).is_some_and(|l| l.crash_loop().is_some()) {
+            attention.push("crash_loop");
+        }
+        if self.capped(&e.service) {
+            attention.push("capped");
+        }
+        if e.maintenance.is_some() {
+            attention.push("maintenance");
+        }
+        if latest.as_ref().is_some_and(|l| l.status == DeployStatus::Failed) {
+            attention.push("deploy_failed");
+        }
+        Ok(EnvironmentSummary { name: e.name.clone(), state, url: public.then(|| self.url(&e.slug)), active, latest, attention })
     }
 
     pub async fn patch_service(self: &Arc<Self>, id: &str, body: Value) -> Result<Service> {

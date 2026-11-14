@@ -246,6 +246,7 @@ type EnvironmentSummary = {
   url: string | null;
   active: { id: string; revision: string | null; created_at: number } | null;
   latest: { id: string; status: DeployStatus } | null;
+  attention?: ("crash_loop" | "capped" | "maintenance" | "deploy_failed")[]; // what wants its owner's eye (absent: nothing)
 };
 
 type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";

@@ -28,6 +28,9 @@ describe("a service on the canvas", () => {
     // A deploy on its way is busy whatever the instances do; once it ends the card says how.
     expect(view("stopped", latest("building"))).toMatchObject({ state: "starting", stateLabel: "Building…", note: undefined });
     expect(view("running", { ...latest("failed"), active: { id: "dep_live", revision: null, created_at: 1 } })).toMatchObject({ state: "online", meta: "Failed" });
+    // What wants an eye: crashing reads failed between restarts, a capped project paused.
+    expect(view("running", { attention: ["crash_loop"] })).toMatchObject({ state: "failed", stateLabel: "Crashing" });
+    expect(view("stopped", { attention: ["capped"] })).toMatchObject({ state: "idle", stateLabel: "Paused (spend limit)" });
     // A first deploy that failed: nothing serves, and the card says so in red.
     expect(view("none", latest("failed"))).toMatchObject({ state: "failed", stateLabel: "Deploy failed" });
     expect(view("running").href).toBe("/dashboard/apps/svc_a");

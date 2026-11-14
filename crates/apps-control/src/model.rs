@@ -828,6 +828,10 @@ pub struct EnvironmentSummary {
     pub url: Option<String>,
     pub active: Option<DeployRef>,
     pub latest: Option<LatestRef>,
+    /// What wants its owner's eye, for a list or a canvas card (Render's, Railway's): a crash loop,
+    /// the project capped by its spend limit, maintenance, its latest deploy failed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attention: Vec<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

@@ -1147,6 +1147,9 @@ async fn a_project_over_its_spend_limit_is_paused_until_the_limit_is_raised() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(stopped, "a capped project's instances stop: {:?}", w.fake.instances(&id));
+    // Its summary says so, for a list or a canvas card.
+    let (_, s) = call(&w.api, "GET", &format!("/v1/apps/services/{id}"), None).await;
+    assert!(s["environments"][0]["attention"].as_array().is_some_and(|a| a.contains(&json!("capped"))), "{s}");
     assert_eq!(visit(&w, &host, "/").await.0, StatusCode::PAYMENT_REQUIRED);
     assert_eq!(call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), Some(json!({}))).await.0, StatusCode::CONFLICT);
     // Raised: it answers again.

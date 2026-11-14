@@ -102,6 +102,8 @@ export interface EnvironmentSummary {
   url: string | null;
   active: { id: string; revision: string | null; created_at: number } | null;
   latest: { id: string; status: DeployStatus } | null;
+  /** What wants its owner's eye: a crash loop, the project capped by its spend limit, maintenance, its latest deploy failed. */
+  attention?: ("crash_loop" | "capped" | "maintenance" | "deploy_failed")[];
 }
 
 export interface Service {
