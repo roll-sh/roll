@@ -43,6 +43,11 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
                 <span className="truncate font-mono text-[11.5px]">{r.parent}</span>
                 <span>→</span>
                 <span className="truncate font-mono text-[11.5px] text-muted">{r.ref ?? "branching…"}</span>
+                {r.data === "real" && (
+                  <span className="shrink-0 text-soft" title="Its branch holds the parent's data as it is: the preview's code reads it unmasked">
+                    unmasked
+                  </span>
+                )}
               </li>
             );
           })}

@@ -35,6 +35,21 @@ export interface PreviewResource {
   error: string | null;
   /** Bytes the branch owns (not its parent's). */
   bytes: number;
+  /** What of the parent's data the preview's code gets: `real` is production data as it is. */
+  data: "none" | "masked" | "real";
+}
+
+/**
+ * What to tell someone about a resource whose previews would get its data as it is (the
+ * server's `data: "real"`, from the settings), with the way out; `null` when they wouldn't.
+ */
+export function unmaskedNote(kind: string, mode: "branch" | "schema" | "skip", masks: number): string | null {
+  // Queues and tasks never copy messages; a repo or a service holds no data to branch.
+  if (mode !== "branch" || ["queue", "tasks", "repo", "service"].includes(kind)) return null;
+  if (kind === "postgres" || kind === "nosql" || kind === "search")
+    return masks > 0 ? null : "Previews get its data as it is: mask what holds people's data, or use Schema only.";
+  if (kind === "stream") return "Previews get its messages as they are (they can't be masked): use Schema only, or skip it.";
+  return "Previews get its data as it is (it can't be masked): a seed can replace it with made-up data, or skip it.";
 }
 
 export interface PreviewCost {

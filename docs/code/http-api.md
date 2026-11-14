@@ -144,7 +144,7 @@ Check   = {name, status: "queued" | "running" | "success" | "failure" | "cancell
 Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | null,
            postgres: {project_id, branch_id} | null, redis: {db_id} | null, error: string | null, created_at,
            environment?: {id /* pv_… */, slug, state /* roll previews' Preview.state */,
-                          services: [{name, url, state}], resources: [{kind, parent, ref: string | null}],
+                          services: [{name, url, state}], resources: [{kind, parent, ref: string | null, data?: "none" | "masked" | "real" /* what of the parent's data it gets; real: as it is */}],
                           sleeping_usd_month, active_usd_hour, dashboard_url: string | null,
                           github: {comment, status, deployment},
                           head?: string /* the changeset it's for: statuses are about it (after pushes that touched only ignored paths its services run an earlier one) */,

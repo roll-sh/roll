@@ -1353,8 +1353,7 @@ impl Store {
     /// The visual review of a change's preview (`github.visual_review`), once its pages were
     /// compared with the baseline's: each page that differs, who accepted it at this head, and
     /// the change accepted once every one of them is.
-    fn visual_review(&self, r: &Row, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck], shot: Option<String>) -> Result<Option<crate::VisualReview>> {
-        let rule = self.settings(&r.project_id)?.visual_review;
+    fn visual_review(&self, r: &Row, rule: crate::settings::VisualReviewRule, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck], shot: Option<String>) -> Result<Option<crate::VisualReview>> {
         if r.change_id.is_none() || rule == crate::settings::VisualReviewRule::Off {
             return Ok(None);
         }
@@ -1709,6 +1708,7 @@ impl Store {
     }
 
     pub fn view(&self, r: Row) -> Result<Preview> {
+        let settings = self.settings(&r.project_id)?;
         let resources = self.resources(&r.id)?;
         let services = self.services_with_time(&r.id)?;
         let cost = self.cost_of(&r, &resources, &services)?;
@@ -1746,7 +1746,7 @@ impl Store {
             a11y_added: page_a11y.as_ref().zip(b.a11y.as_ref()).map(|(ours, main)| ours.added_since(main)),
             errors_added: page_health.as_ref().zip(b.health.as_ref()).map(|(ours, main)| ours.added_since(main)),
         });
-        let visual_review = self.visual_review(&r, base_change.as_ref(), &pages, f.head)?;
+        let visual_review = self.visual_review(&r, settings.visual_review, base_change.as_ref(), &pages, f.head)?;
         let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
         let screenshot_link = screenshot_at.map(|at| self.link_at(&r.id, at, None)).transpose()?;
         let diff_link = match screenshot_at.filter(|_| base_differs) {
@@ -1785,7 +1785,10 @@ impl Store {
                 .collect(),
             resources: resources
                 .into_iter()
-                .map(|x| Resource { kind: x.kind, parent: x.parent, r#ref: x.r#ref, mode: x.mode, state: x.state, error: x.error, bytes: x.bytes })
+                .map(|x| {
+                    let masks = settings.masking.get(&format!("{}:{}", x.kind.as_str(), x.parent)).map_or(0, |m| m.len());
+                    Resource { data: crate::Data::of(x.kind, x.mode, masks), kind: x.kind, parent: x.parent, r#ref: x.r#ref, mode: x.mode, state: x.state, error: x.error, bytes: x.bytes }
+                })
                 .collect(),
             cost: cost.rounded(),
             schema_changes,

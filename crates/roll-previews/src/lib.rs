@@ -545,6 +545,33 @@ pub struct Resource {
     pub error: Option<String>,
     /// Bytes the branch owns (not its parent's).
     pub bytes: i64,
+    /// What of the parent's data the preview's code gets.
+    pub data: Data,
+}
+
+/// What of a parent's data a branch hands the preview's code: said wherever the branch is, so
+/// production data never reaches a preview unnoticed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Data {
+    /// None of its rows, objects or messages: structure only (`schema`), or a product whose
+    /// branches never copy them (queues, tasks).
+    None,
+    /// Its data, with the project's masks applied (Postgres, NoSQL, search).
+    Masked,
+    /// Its data as it is.
+    Real,
+}
+
+impl Data {
+    /// A branch of a `kind` resource made in `mode`, with `masks` masked columns or fields.
+    pub fn of(kind: Kind, mode: Mode, masks: usize) -> Data {
+        match (kind, mode) {
+            (Kind::Queue | Kind::Tasks, _) | (_, Mode::Schema) => Data::None,
+            (Kind::Postgres | Kind::Nosql | Kind::Search, _) if masks > 0 => Data::Masked,
+            _ => Data::Real,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -621,6 +648,21 @@ pub fn label_part(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Production data reaches a preview only as it's masked, or as it is, and that's said.
+    #[test]
+    fn a_branch_says_what_production_data_it_hands_over() {
+        assert_eq!(Data::of(Kind::Postgres, Mode::Branch, 0), Data::Real);
+        assert_eq!(Data::of(Kind::Postgres, Mode::Branch, 2), Data::Masked);
+        assert_eq!(Data::of(Kind::Postgres, Mode::Schema, 0), Data::None);
+        // No masks for them: a mask rule there changes nothing.
+        assert_eq!(Data::of(Kind::Redis, Mode::Branch, 1), Data::Real);
+        assert_eq!(Data::of(Kind::Stream, Mode::Branch, 0), Data::Real);
+        assert_eq!(Data::of(Kind::Stream, Mode::Schema, 0), Data::None);
+        // Never copied.
+        assert_eq!(Data::of(Kind::Queue, Mode::Branch, 0), Data::None);
+        assert_eq!(Data::of(Kind::Tasks, Mode::Branch, 0), Data::None);
+    }
 
     /// What the browser writes reads back; numbers past reason, or anything else, don't.
     #[test]

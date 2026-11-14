@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { parseSse, previewsApi } from "./previews-api";
+import { parseSse, previewsApi, unmaskedNote } from "./previews-api";
 import { ROLL_API } from "./roll-api";
 
 /** A fetch that answers from a table (`METHOD /path?query`) and records what it was asked. */
@@ -85,5 +85,15 @@ describe("following logs", () => {
     // A \r\n split between two chunks is one line end, not an event's end.
     const c = parseSse("", "event: service\r");
     expect(parseSse(c.rest, "\ndata: web\r\n\r\n").events).toEqual([{ event: "service", data: "web" }]);
+  });
+});
+
+describe("unmaskedNote", () => {
+  it("says when previews would get production data as it is, and the way out", () => {
+    expect(unmaskedNote("postgres", "branch", 0)).toMatch(/as it is: mask/);
+    expect(unmaskedNote("postgres", "branch", 2)).toBeNull();
+    expect(unmaskedNote("redis", "branch", 0)).toMatch(/can't be masked.*seed/);
+    expect(unmaskedNote("stream", "branch", 0)).toMatch(/Schema only/);
+    for (const [kind, mode] of [["stream", "schema"], ["bucket", "skip"], ["queue", "branch"], ["repo", "branch"]] as const) expect(unmaskedNote(kind, mode, 0)).toBeNull();
   });
 });

@@ -743,7 +743,7 @@ mod preview_tests {
             slug: "pr7-shop".into(),
             state: "ready".into(),
             services: vec![PreviewServiceLink { name: "web".into(), url: "https://web-pr7-shop.preview.roll.site".into(), state: "sleeping".into() }],
-            resources: vec![PreviewResourceLink { kind: "postgres".into(), parent: "prj_a".into(), r#ref: Some("br_b".into()) }],
+            resources: vec![PreviewResourceLink { kind: "postgres".into(), parent: "prj_a".into(), r#ref: Some("br_b".into()), data: None }],
             sleeping_usd_month: 0.0123,
             active_usd_hour: 0.0143,
             dashboard_url: Some("https://roll.sh/dashboard/projects/prj_x/previews".into()),

@@ -106,7 +106,16 @@ impl CodeSource {
                     .iter()
                     .map(|x| PreviewServiceLink { name: x.name.clone(), url: x.url.clone(), state: x.state.as_str().to_string() })
                     .collect(),
-                resources: p.resources.iter().map(|x| PreviewResourceLink { kind: x.kind.as_str().to_string(), parent: x.parent.clone(), r#ref: x.r#ref.clone() }).collect(),
+                resources: p.resources.iter().map(|x| PreviewResourceLink {
+                        kind: x.kind.as_str().to_string(),
+                        parent: x.parent.clone(),
+                        r#ref: x.r#ref.clone(),
+                        data: Some(match x.data {
+                            crate::Data::None => "none",
+                            crate::Data::Masked => "masked",
+                            crate::Data::Real => "real",
+                        }.into()),
+                    }).collect(),
                 // As precise as the comment shows: a usage reading that moves a cost by a hair
                 // doesn't make a new event for every webhook and the pull request.
                 sleeping_usd_month: (p.cost.sleeping_usd_month * 100.0).round() / 100.0,

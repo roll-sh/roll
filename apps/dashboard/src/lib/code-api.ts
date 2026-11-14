@@ -335,7 +335,8 @@ export interface PreviewEnvironment {
   slug: string;
   state: "queued" | "awaiting_approval" | "creating" | "ready" | "sleeping" | "updating" | "failed" | "deleting";
   services: { name: string; url: string; state: string }[];
-  resources: { kind: string; parent: string; ref: string | null }[];
+  /** `data`: what of the parent's data the preview gets (`real`: as it is, unmasked). */
+  resources: { kind: string; parent: string; ref: string | null; data?: "none" | "masked" | "real" }[];
   sleeping_usd_month: number;
   active_usd_hour: number;
   /** The preview on the dashboard (its project's Previews tab). */

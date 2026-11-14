@@ -1,6 +1,6 @@
 import { AlertTriangle, Plus, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { isProduction, previewsApi, type PreviewBypass, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
+import { isProduction, previewsApi, unmaskedNote, type PreviewBypass, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
 import type { PlacedResource } from "@/lib/workspace-api";
 import { KIND_LABEL, resourceKey } from "@/lib/workspace-resources";
 import { Dialog } from "../agents/ui/dialog";
@@ -169,6 +169,7 @@ function Form({
               const masks = Object.entries(s.masking?.[id] ?? {})
                 .map(([col, f]) => `${col} = ${f}`)
                 .join("\n");
+              const unmasked = unmaskedNote(r.kind, rule ?? (s.data === "branch" ? "branch" : schema ? "schema" : "skip"), Object.keys(s.masking?.[id] ?? {}).length);
               return (
                 <div key={id} className="border-t border-line first:border-t-0">
                   <div className="flex items-center gap-2 px-2.5 py-1.5">
@@ -193,6 +194,7 @@ function Form({
                       <option value="skip">Skip</option>
                     </select>
                   </div>
+                  {unmasked && <p className="px-2.5 pb-1.5 text-[11px] text-soft">{unmasked}</p>}
                   {(r.kind === "nosql" || r.kind === "postgres" || r.kind === "search") && (
                     <div className="px-2.5 pb-2">
                       <textarea

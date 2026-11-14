@@ -51,7 +51,7 @@ const preview: Preview = {
   url: "https://web-pr482-shop.preview.roll.site",
   share_url: null,
   services: [{ name: "web", repo: "acme/web", url: "https://web-pr482-shop.preview.roll.site", share_url: null, revision: "a1b2", deployed: "a1b2", state: "running", error: null }],
-  resources: [{ kind: "postgres", parent: "pgp_main", ref: "br_pv1", mode: "branch", state: "ready", error: null, bytes: 1 << 20 }],
+  resources: [{ kind: "postgres", parent: "pgp_main", ref: "br_pv1", mode: "branch", state: "ready", error: null, bytes: 1 << 20, data: "real" }],
   cost: { sleeping_usd_month: 0.02, active_usd_hour: 0.01, month_to_date_usd: 0.4, bytes: 1 << 20 },
   last_reset_at: null,
   last_active_at: T,

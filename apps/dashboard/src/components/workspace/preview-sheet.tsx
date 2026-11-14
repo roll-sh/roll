@@ -194,6 +194,12 @@ export function PreviewSheet({
                         <div className="mt-0.5 font-mono text-[10.5px] text-subtle">
                           {KIND_NAME[r.kind]} · {r.mode === "schema" ? "schema only" : "branch"} · {formatBytes(r.bytes)}
                           {masked?.get(id) ? ` · masked (${masked.get(id)})` : ""}
+                          {r.data === "real" && (
+                            <span className="text-soft" title="Its branch holds the parent's data as it is: the preview's code reads it unmasked">
+                              {" "}
+                              · production data, unmasked
+                            </span>
+                          )}
                         </div>
                         {r.error && <p className="mt-0.5 text-[11px] break-words text-danger">{r.error}</p>}
                       </div>

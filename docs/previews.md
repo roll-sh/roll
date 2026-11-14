@@ -434,6 +434,12 @@ preview wrote a document with a price). With several such resources, each one's 
     reads `[masked]` and its `_terms_enum` finds nothing, the parent reads `parent`; roll
     search's `expunging_a_branch_rewrites_the_segments_it_shares` pins the sequence).
   - Other products: a `seed` anonymises the rows instead.
+  - Each branch says what it hands the preview's code (`resources[].data`): `none` (structure
+    only, or queues and tasks, which never copy messages), `masked` (Postgres, NoSQL or search
+    with masks set) or `real` (the parent's data as it is). The sheet and the change page mark a
+    `real` branch "production data, unmasked", and the settings say on each such resource how
+    not to (live: bucket, Redis and stream `real`, the masked three `masked`, queue and tasks
+    `none`).
 - **Queues branch without what moves messages in.** Shovels and federation upstreams (and the
   `federation-upstream*` keys of policies) aren't copied, so a branch can't pull production
   messages or carry the production broker's credentials.
@@ -1005,6 +1011,9 @@ Ranked by what a person notices first. Done so far:
   services' included (`admin:/users`);
 - a visual review per push (`visual_review`: the `roll/visual` status, Accept in roll, and
   `required` keeping the change from landing in roll);
+- what each data branch hands the preview's code (`resources[].data`: `none`, `masked` or `real`),
+  said on the sheet and the change page ("production data, unmasked") and, with the way out,
+  in the settings (masks, Schema only, a seed, Skip);
 - a visual review per page (Chromatic's per-snapshot review): each changed page accepted on its
   own, the change once all are, and a push asking again only about the pages it changed (live:
   "changed, 1 of 2", then accepted);
@@ -1072,37 +1081,30 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Say where a preview holds production data unmasked**: Redis, bucket and stream branches
-   share the parent's data as it is (there's no mask for them), and so do Postgres, NoSQL and
-   search branches with no masks set, yet the settings say nothing. Each such resource in
-   branch mode should say so where it's set (and the sheet, next to "masked (n)"), with the way
-   out: Schema only (streams), a seed that anonymises (Redis, buckets), or Skip. Neon and
-   PlanetScale make anonymised branches the obvious path; previews should at least never hand
-   real data over silently.
-2. **Core Web Vitals per push** (Vercel Speed Insights, Lighthouse): the largest contentful
+1. **Core Web Vitals per push** (Vercel Speed Insights, Lighthouse): the largest contentful
    paint and layout shift measured in the screenshot's session, compared with main's at the
    merge base ("LCP 1.8 s, 400 ms slower than main"), and in the speed budget (`github.budget`
    gains `lcp_ms`, `cls`).
-3. **A visual threshold per project** (Chromatic's `diffThreshold`, Percy's sensitivity): a page
+2. **A visual threshold per project** (Chromatic's `diffThreshold`, Percy's sensitivity): a page
    counts as changed only past a share of its pixels (`github.visual_threshold`, default 0), for
    a page whose clock or rotating banner `hide` can't name.
-4. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-6. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-7. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-8. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+7. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1115,7 +1117,7 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-9. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

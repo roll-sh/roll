@@ -473,6 +473,9 @@ pub struct PreviewResourceLink {
     pub kind: String,
     pub parent: String,
     pub r#ref: Option<String>,
+    /// What of the parent's data the preview gets: `none`, `masked` or `real` (as it is).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
 }
 
 /// Why a change can't land (or be queued) right now.

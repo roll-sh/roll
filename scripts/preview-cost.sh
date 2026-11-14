@@ -171,6 +171,10 @@ PG_PARENT_KB=$(du -sk "$HOME_DIR/data/$(api GET "/v1/projects/$PG" | jq_ "[b['id
 PG_BRANCH_KB=$( [ -n "$PG_BRANCH" ] && du -sk "$HOME_DIR/data/$PG_BRANCH" | cut -f1 || echo 0)
 BRANCH_OBJECTS=$(api GET "/v1/storage/buckets/$BRANCH_BUCKET" | jq_ "d['bytes']")
 BRANCH_SEES=$($S3 ls --recursive "s3://$BRANCH_BUCKET/" | wc -l)
+# What each branch hands the preview's code: masked where masks are set, none where nothing is
+# copied, and production data as it is everywhere else, which the preview says.
+DATA=$(echo "$P" | jq_ "' '.join(sorted('%s=%s' % (r['kind'], r['data']) for r in d['resources']))")
+[ "$DATA" = "bucket=real nosql=masked postgres=masked queue=none redis=real search=masked stream=real tasks=none" ] || { echo "the preview should say what data each branch hands over: $DATA"; exit 1; }
 # The preview's NoSQL branch reads masked; the parent's policy is untouched.
 BRANCH_NOSQL=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='nosql'][0]")
 MASKED=$(api GET "/v1/nosql/databases/$BRANCH_NOSQL" | jq_ "d['masking'].get('app.users.email')")
@@ -562,6 +566,7 @@ cat <<EOF
 | NoSQL branch's mask on app.users.email / masks on the parent | $MASKED / $PARENT_MASKED |
 | NoSQL: app.users.email in the branch / a filter on the real address there | $NOSQL_READ / $NOSQL_FILTER |
 | NoSQL: a mask on app.users_by_email's key, set | $KEY_MASK |
+| What each branch hands the preview's code | $DATA |
 | Postgres users.email in the branch / in the parent | $PG_MASKED / $PG_PARENT |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |
