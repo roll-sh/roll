@@ -616,7 +616,11 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
 ### Runtime resolve for services (roll apps)
 
 roll apps (docs/apps/) deploys a service into an environment and injects that environment's
-secrets when the service starts. It uses one call:
+secrets when the service starts. rolld's `ForApps` (`crates/rolld/src/secrets.rs`) is apps'
+`SecretSource`: the service's own project's environment of the same name, resolved as
+`app:<svc>`, only where the project stands for the service (`Workspace::trusts`). A project or
+environment roll secrets doesn't have is no variables (a service needn't use secrets); an
+unresolved reference or a dynamic credential fails the deploy, saying which. It uses one call:
 
 - **In process**: `Secrets::values(project, env, path, true, Some("app:<service>"), &caller)`
   returns `Values`: a map of `Value`s (redacted in `Debug`, zeroized on drop), `problems` (fail a

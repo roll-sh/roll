@@ -1,24 +1,25 @@
-import { ClipboardPaste, Copy, Eye, EyeOff, Link2, Plus, Rocket, Trash2, Undo2 } from "lucide-react";
+import { ClipboardPaste, Copy, Eye, EyeOff, FileText, Link2, Lock, LockOpen, Plus, Rocket, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { appsApi, parseEnv, VARIABLE_NAME, type Environment, type Link, type LinkKind, type VariableSource, type Variables } from "@/lib/apps-api";
+import { appsApi, describePending, parseEnv, toEnv, VARIABLE_NAME, type Environment, type Link, type LinkKind, type VariableSource, type Variables } from "@/lib/apps-api";
 import { KIND_LABEL, resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { btn, input, panel, primary } from "../ui";
 import { message, SureButton, type Runner } from "./shared";
 
-const SOURCE_LABEL: Record<VariableSource, string> = { service: "service", secret: "secret", link: "link", roll: "roll" };
+const SOURCE_LABEL: Record<VariableSource, string> = { service: "service", secret: "secret", link: "link", roll: "roll", reference: "reference" };
 const SOURCE_TONE: Record<VariableSource, string> = {
   service: "border-line-2 text-muted",
   secret: "border-line-2 text-fg",
   link: "border-accent/40 text-accent",
   roll: "border-line text-subtle",
+  reference: "border-line-2 text-muted",
 };
 
 /** Workspace kinds a service can link to, by their link kind. */
 /** What a service can link to today: rolld wires Postgres and Redis (buckets, streams and NoSQL come as roll secrets links, docs/apps/README.md "Next"). */
-export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis" };
+export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", service: "service" };
 
-type Edit = { name: string; value: string };
+type Edit = { name: string; value: string; seal?: boolean };
 
 /**
  * The environment's variables (masked; Reveal asks for the values), edited in place and saved in
@@ -45,14 +46,30 @@ export function VariablesTab({
   const [error, setError] = useState<string | null>(null);
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [removed, setRemoved] = useState<Set<string>>(new Set());
+  // Existing variables to seal at Save: for good, so staged until then.
+  const [sealing, setSealing] = useState<Set<string>>(new Set());
   const [added, setAdded] = useState<Edit[]>([]);
   const [pasting, setPasting] = useState(false);
   const [pasted, setPasted] = useState("");
+  // What the next deploy would change, named (read again whenever the environment changes).
+  const [pending, setPending] = useState<string | null>(null);
+  useEffect(() => {
+    if (!env.needs_deploy) return setPending(null);
+    let live = true;
+    appsApi.pending(service, env.name).then((p) => live && setPending(describePending(p)), () => live && setPending(null));
+    return () => {
+      live = false;
+    };
+  }, [service, env.name, env.needs_deploy, env.active?.id, vars]);
   const parsed = useMemo(() => parseEnv(pasted), [pasted]);
+  // Railway's raw editor: the environment's own variables as one `.env` text, saved as the
+  // difference (a line gone is unset). Sealed ones aren't in it and stay.
+  const [raw, setRaw] = useState<{ base: Record<string, string>; text: string } | null>(null);
+  const rawParsed = useMemo(() => (raw ? parseEnv(raw.text) : null), [raw]);
 
   /** Stage `set` for review: an existing service variable becomes an edit, a new name a row. */
   const stage = (set: Record<string, string>) => {
-    const have = new Set((vars?.vars ?? []).filter((v) => v.source === "service").map((v) => v.name));
+    const have = new Set((vars?.vars ?? []).filter((v) => v.source === "service" || v.source === "reference").map((v) => v.name));
     setEdits((e) => ({ ...e, ...Object.fromEntries(Object.entries(set).filter(([k]) => have.has(k))) }));
     setAdded((a) => [...a.filter((x) => !(x.name in set)), ...Object.entries(set).filter(([k]) => !have.has(k)).map(([name, value]) => ({ name, value }))]);
   };
@@ -74,9 +91,35 @@ export function VariablesTab({
     setValues(null);
     setEdits({});
     setRemoved(new Set());
+    setSealing(new Set());
     setAdded([]);
     void load();
   }, [load]);
+
+  const editRaw = async () => {
+    if (raw) return setRaw(null);
+    // The list as it is now (another person may have changed it), then the values.
+    const fresh = await runner.run("reveal", () => appsApi.variables(service, env.name));
+    if (!fresh) return;
+    setVars(fresh);
+    const own = fresh.vars.filter((v) => (v.source === "service" || v.source === "reference") && !v.sealed);
+    const v = own.some((x) => !x.reference) ? await runner.run("reveal", () => appsApi.reveal(service, env.name)) : {};
+    if (!v) return;
+    // Only what both answers have: one sealed or removed in between isn't in the text.
+    const base = Object.fromEntries(own.filter((x) => x.reference !== undefined || Object.hasOwn(v, x.name)).map((x) => [x.name, x.reference ?? v[x.name]]));
+    setRaw({ base, text: toEnv(base) });
+  };
+  const saveRaw = async () => {
+    if (!raw || !rawParsed || rawParsed.errors.length) return;
+    const set = Object.fromEntries(Object.entries(rawParsed.vars).filter(([k, v]) => !Object.hasOwn(raw.base, k) || raw.base[k] !== v));
+    const unset = Object.keys(raw.base).filter((k) => !Object.hasOwn(rawParsed.vars, k));
+    const out = await runner.run("variables", () => appsApi.setVariables(service, env.name, { set, unset }));
+    if (out) {
+      setVars(out);
+      setRaw(null);
+      setValues(null);
+    }
+  };
 
   const reveal = async () => {
     if (values) return setValues(null);
@@ -85,25 +128,40 @@ export function VariablesTab({
   };
 
   const badNew = added.filter((a) => a.name && !VARIABLE_NAME.test(a.name)).length > 0;
-  const dirty = Object.keys(edits).length > 0 || removed.size > 0 || added.some((a) => a.name);
+  const toSeal = [...[...sealing].filter((n) => !removed.has(n)), ...added.filter((a) => a.name && a.seal).map((a) => a.name)];
+  const dirty = Object.keys(edits).length > 0 || removed.size > 0 || added.some((a) => a.name) || sealing.size > 0;
+  const discard = () => {
+    setEdits({});
+    setRemoved(new Set());
+    setSealing(new Set());
+    setAdded([]);
+  };
   const save = async () => {
     const set: Record<string, string> = { ...edits };
     for (const a of added) if (a.name) set[a.name] = a.value;
-    const out = await runner.run("variables", () => appsApi.setVariables(service, env.name, { set, unset: [...removed] }));
+    const out = await runner.run("variables", () => appsApi.setVariables(service, env.name, { set, unset: [...removed], seal: toSeal }));
     if (out) {
       setVars(out);
-      setEdits({});
-      setRemoved(new Set());
-      setAdded([]);
+      discard();
       setValues(null);
     }
   };
+  const toggle = (set: (f: (s: Set<string>) => Set<string>) => void, name: string) =>
+    set((r) => {
+      const n = new Set(r);
+      if (n.has(name)) n.delete(name);
+      else n.add(name);
+      return n;
+    });
 
   return (
     <div className="space-y-6">
       {env.needs_deploy && (
         <div className="rise flex flex-wrap items-center gap-3 rounded-xl border border-accent/40 bg-accent/[0.06] px-4 py-3">
-          <p className="min-w-0 flex-1 text-[13px]">Variables or settings changed since the live deployment. Redeploy to apply them: the same image, no build.</p>
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px]">Variables or settings changed since the live deployment. Redeploy to apply them: the same image, no build.</p>
+            {pending && <p className="mt-1 font-mono text-[11.5px] text-muted">{pending}</p>}
+          </div>
           <button className={primary} onClick={onRedeploy} disabled={runner.busy !== null || !env.active}>
             <Rocket className="size-3.5" /> Redeploy
           </button>
@@ -135,6 +193,9 @@ export function VariablesTab({
             )}
             <button className={btn} onClick={() => setPasting((p) => !p)} aria-pressed={pasting}>
               <ClipboardPaste className="size-3.5" /> Paste .env
+            </button>
+            <button className={btn} onClick={editRaw} aria-pressed={!!raw} disabled={runner.busy !== null || !vars || dirty} title="Edit the environment's own variables as one .env text">
+              <FileText className="size-3.5" /> {raw ? "Back to the list" : "Edit as .env"}
             </button>
             <button className={btn} onClick={reveal} disabled={runner.busy !== null || !vars?.vars.length}>
               {values ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
@@ -176,21 +237,54 @@ export function VariablesTab({
         )}
         {error && <p className="px-5 py-4 text-[13px] text-danger">{error}</p>}
         {!vars && !error && <p className="px-5 py-4 text-[13px] text-subtle"><span className="shimmer">Loading…</span></p>}
-        {vars && (
+        {vars && raw && rawParsed && (
+          <div className="rise space-y-2 px-5 py-4">
+            <textarea
+              value={raw.text}
+              onChange={(e) => setRaw({ ...raw, text: e.target.value })}
+              rows={Math.min(24, Math.max(6, raw.text.split("\n").length + 1))}
+              spellCheck={false}
+              className={`${input} w-full font-mono text-[12px]`}
+              aria-label="The environment's variables as .env text"
+            />
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <span className={`text-[12px] ${rawParsed.errors.length ? "text-danger" : "text-subtle"}`}>
+                {rawParsed.errors.length
+                  ? `Lines ${rawParsed.errors.join(", ")} aren't KEY=value.`
+                  : `A line removed is unset. Links, secrets and roll's own aren't here${vars.vars.some((v) => v.sealed) ? "; sealed ones aren't either, and stay" : ""}.`}
+              </span>
+              <div className="flex gap-2">
+                <button className={btn} onClick={() => setRaw(null)}>
+                  Cancel
+                </button>
+                <button className={primary} disabled={runner.busy !== null || rawParsed.errors.length > 0 || toEnv(rawParsed.vars) === toEnv(raw.base)} onClick={saveRaw}>
+                  {runner.busy === "variables" ? <span className="shimmer">Saving…</span> : "Save"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {vars && !raw && (
           <ul className="divide-y divide-line">
             {vars.vars.length === 0 && added.length === 0 && <li className="px-5 py-4 text-[13px] text-muted">No variables yet. roll sets PORT and ROLL_* on every deploy.</li>}
             {vars.vars.map((v) => {
-              const editable = v.source === "service";
+              // A reference is its own variable: edited as its template, never as what it resolves to.
+              const editable = v.source === "service" || v.source === "reference";
               const gone = removed.has(v.name);
               const editing = v.name in edits;
               return (
                 <li key={v.name} className={`flex flex-wrap items-center gap-3 px-5 py-2.5 ${gone ? "opacity-50" : ""}`}>
                   <span className={`w-56 max-w-full truncate font-mono text-[12px] ${gone ? "line-through" : ""}`}>{v.name}</span>
                   <span className={`rounded border px-1.5 font-mono text-[10.5px] ${SOURCE_TONE[v.source]}`}>{SOURCE_LABEL[v.source]}</span>
+                  {v.sealed && (
+                    <span className="inline-flex items-center gap-1 text-[11px] text-subtle" title="Sealed: the app runs with it, nothing shows it again">
+                      <Lock className="size-3" strokeWidth={1.5} /> sealed
+                    </span>
+                  )}
                   {editing ? (
                     <input
                       autoFocus
-                      placeholder="new value"
+                      placeholder={v.sealed ? "new value (stays sealed)" : "new value"}
                       value={edits[v.name]}
                       onChange={(e) => setEdits((x) => ({ ...x, [v.name]: e.target.value }))}
                       className={`${input} min-w-0 flex-1 font-mono text-[12px]`}
@@ -199,22 +293,28 @@ export function VariablesTab({
                   ) : (
                     <button
                       disabled={!editable || gone}
-                      onClick={() => setEdits((x) => ({ ...x, [v.name]: values?.[v.name] ?? "" }))}
+                      onClick={() => setEdits((x) => ({ ...x, [v.name]: v.sealed ? "" : (v.reference ?? values?.[v.name] ?? "") }))}
                       className="min-w-0 flex-1 truncate text-left font-mono text-[12px] text-muted enabled:hover:text-fg"
                       title={editable ? "Edit" : `Set by ${v.source === "link" ? "a link" : v.source === "secret" ? "the project's secrets" : "roll"}`}
                     >
-                      {values?.[v.name] ?? v.masked}
+                      {v.sealed ? v.masked : (v.reference ?? values?.[v.name] ?? v.masked)}
+                    </button>
+                  )}
+                  {editable && !v.sealed && !gone && (
+                    <button
+                      onClick={() => toggle(setSealing, v.name)}
+                      className={`p-1 hover:text-fg ${sealing.has(v.name) ? "text-accent" : "text-subtle"}`}
+                      aria-pressed={sealing.has(v.name)}
+                      aria-label={`Seal ${v.name}`}
+                      title={sealing.has(v.name) ? "Sealed at Save: click to keep it readable" : "Seal: the app runs with it, nothing shows it again"}
+                    >
+                      {sealing.has(v.name) ? <Lock className="size-3.5" /> : <LockOpen className="size-3.5" />}
                     </button>
                   )}
                   {editable && (
                     <button
                       onClick={() => {
-                        setRemoved((r) => {
-                          const n = new Set(r);
-                          if (n.has(v.name)) n.delete(v.name);
-                          else n.add(v.name);
-                          return n;
-                        });
+                        toggle(setRemoved, v.name);
                         setEdits(({ [v.name]: _, ...rest }) => rest);
                       }}
                       className="p-1 text-subtle hover:text-fg"
@@ -244,6 +344,15 @@ export function VariablesTab({
                   className={`${input} min-w-0 flex-1 font-mono text-[12px]`}
                   spellCheck={false}
                 />
+                <button
+                  onClick={() => setAdded((l) => l.map((x, j) => (j === i ? { ...x, seal: !x.seal } : x)))}
+                  className={`p-1 hover:text-fg ${a.seal ? "text-accent" : "text-subtle"}`}
+                  aria-pressed={!!a.seal}
+                  aria-label="Seal"
+                  title={a.seal ? "Sealed at Save" : "Seal: the app runs with it, nothing shows it again"}
+                >
+                  {a.seal ? <Lock className="size-3.5" /> : <LockOpen className="size-3.5" />}
+                </button>
                 <button onClick={() => setAdded((l) => l.filter((_, j) => j !== i))} className="p-1 text-subtle hover:text-fg" aria-label="Drop">
                   <Trash2 className="size-3.5" />
                 </button>
@@ -253,14 +362,8 @@ export function VariablesTab({
         )}
         {dirty && (
           <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-3">
-            <button
-              className={btn}
-              onClick={() => {
-                setEdits({});
-                setRemoved(new Set());
-                setAdded([]);
-              }}
-            >
+            {toSeal.length > 0 && <span className="mr-auto text-[12px] text-subtle">Sealing {toSeal.join(", ")} is for good: nothing shows {toSeal.length === 1 ? "it" : "them"} again.</span>}
+            <button className={btn} onClick={discard}>
               Discard
             </button>
             <button className={primary} disabled={runner.busy !== null || badNew} onClick={save}>
@@ -286,14 +389,14 @@ function Links({ service, project, runner, onChange }: { service: string; projec
     void load();
   }, [load]);
 
-  // The project's databases and storage, by `kind:ref`.
+  // The project's databases and its other services, by `kind:ref`.
   const candidates = useMemo(() => {
     const p = ws.projects.find((x) => x.id === project);
     return (p?.resources ?? [])
-      .filter((r) => LINKABLE[r.kind])
+      .filter((r) => LINKABLE[r.kind] && !(r.kind === "service" && r.ref === service))
       .map((r) => ws.inventory.get(resourceKey(r)))
       .filter((v): v is ResourceView => !!v && v.state !== "missing");
-  }, [ws.projects, ws.inventory, project]);
+  }, [ws.projects, ws.inventory, project, service]);
   const linked = new Set((links ?? []).map((l) => `${l.kind}:${l.ref}`));
   const nameOf = (l: Link) => ws.inventory.get(`${l.kind}:${l.ref}`)?.name ?? l.ref;
 
@@ -314,7 +417,7 @@ function Links({ service, project, runner, onChange }: { service: string; projec
     <section className={panel}>
       <div className="flex min-h-14 items-center justify-between gap-3 border-b border-line px-5 py-3">
         <h2 className="text-[15px] font-medium">Links</h2>
-        <span className="text-[12px] text-subtle">A link adds the resource's connection variables.</span>
+        <span className="text-[12px] text-subtle">A link adds a database's connection variables, or another service's URLs.</span>
       </div>
       <ul className="divide-y divide-line">
         {links?.length === 0 && <li className="px-5 py-4 text-[13px] text-muted">Nothing linked.</li>}
@@ -345,7 +448,7 @@ function Links({ service, project, runner, onChange }: { service: string; projec
       </ul>
       <div className="flex flex-wrap items-center gap-2 border-t border-line px-5 py-3">
         <select value={pick} onChange={(e) => setPick(e.target.value)} className={`${input} min-w-0 flex-1`} aria-label="Resource to link">
-          <option value="">{candidates.length ? "Link a resource in this project…" : "No databases or storage in this project yet"}</option>
+          <option value="">{candidates.length ? "Link a resource in this project…" : "Nothing else in this project to link yet"}</option>
           {candidates.map((c) => (
             <option key={resourceKey(c)} value={resourceKey(c)} disabled={linked.has(resourceKey(c))}>
               {KIND_LABEL[c.kind]} · {c.name}

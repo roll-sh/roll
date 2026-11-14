@@ -52,6 +52,14 @@ struct World {
 
 /// roll apps on this host's Docker, or None when the Docker tests aren't asked for.
 async fn docker_world() -> Option<World> {
+    docker_world_netns(None).await
+}
+
+async fn docker_world_netns(netns: Option<bool>) -> Option<World> {
+    docker_world_with(netns, |_| {}).await
+}
+
+async fn docker_world_with(netns: Option<bool>, setup: impl FnOnce(&mut AppsConfig)) -> Option<World> {
     if std::env::var("ROLL_APPS_DOCKER").ok().as_deref() != Some("1") || !apps_control::runtime::docker::available().await {
         eprintln!("skipped: set ROLL_APPS_DOCKER=1 with Docker running");
         return None;
@@ -64,8 +72,16 @@ async fn docker_world() -> Option<World> {
     let cluster = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::solo()), roll_cluster::ClusterConfig::new("n1", "http://127.0.0.1:1", b"0123456789abcdef".to_vec())).unwrap();
     let mut cfg = AppsConfig::new(dir.path().to_path_buf());
     cfg.live.probe_every = Duration::from_millis(5);
+    // A TCP service's port: one free here.
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    cfg.tcp_ports = Some((free, free));
+    cfg.tcp_host = "127.0.0.1".into();
+    setup(&mut cfg);
     let deps = Deps {
-        runtime: Arc::new(Docker::new(dir.path().join("scratch"))),
+        runtime: Arc::new(match netns {
+            Some(on) => Docker::new(dir.path().join("scratch")).with_netns(on),
+            None => Docker::new(dir.path().join("scratch")),
+        }),
         builder: Arc::new(DockerBuilder::new(2)),
         sources: None,
         secrets: Arc::new(NoSecrets),
@@ -325,3 +341,256 @@ async fn a_volume_restores_from_its_tar_and_a_broken_one_changes_nothing() {
     assert_eq!(sh("ls -A /data && cat /data/a/f"), ".hidden\na\none\n");
     rt.remove_volume(&vol).await;
 }
+
+/// A cold start with the instance's network in a sandbox made with it (the wake starts only the
+/// app, in the sandbox's network namespace) against the instance holding its own: alternating
+/// pairs on the same image, everything removed after.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cold_start_skips_network_setup_with_a_sandbox() {
+    let (Some(on), Some(off)) = (docker_world_netns(Some(true)).await, docker_world_netns(Some(false)).await) else { return };
+    let (a, ah) = deploy_container(&on, "sandboxed").await;
+    let (b, bh) = deploy_container(&off, "own").await;
+    let cold = |w: &World, id: String, host: String| {
+        let (apps, public) = (w.apps.clone(), w.public.clone());
+        async move {
+            apps.live(&id, "production").sleep().await;
+            let (st, t) = get(&public, &host).await;
+            assert_eq!(st, StatusCode::OK);
+            t
+        }
+    };
+    let (mut with, mut without, mut faster) = (Vec::new(), Vec::new(), 0);
+    for i in 0..5 {
+        // Alternating which goes first.
+        let (x, y) = if i % 2 == 0 {
+            let x = cold(&on, a.clone(), ah.clone()).await;
+            (x, cold(&off, b.clone(), bh.clone()).await)
+        } else {
+            let y = cold(&off, b.clone(), bh.clone()).await;
+            (cold(&on, a.clone(), ah.clone()).await, y)
+        };
+        faster += usize::from(x < y);
+        with.push(x);
+        without.push(y);
+    }
+    let sandboxes = apps_control::runtime::docker::docker(&["ps", "-q", "--filter", &format!("label=sh.roll.apps={a}"), "--filter", "label=sh.roll.apps.role=network"]).await.unwrap();
+    assert!(!sandboxes.is_empty(), "the sandboxed instance has its network sandbox");
+    eprintln!(
+        "MEASURED cold start, network in a sandbox vs its own: median {} ms vs {} ms (pairs {:?} vs {:?}; sandbox faster in {faster} of 5)",
+        median(with.clone()).as_millis(),
+        median(without.clone()).as_millis(),
+        with.iter().map(|d| d.as_millis()).collect::<Vec<_>>(),
+        without.iter().map(|d| d.as_millis()).collect::<Vec<_>>(),
+    );
+    for (w, id) in [(&on, &a), (&off, &b)] {
+        assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+        let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
+    }
+    let left = apps_control::runtime::docker::docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={a}")]).await.unwrap();
+    assert!(left.is_empty(), "the instance and its sandbox are gone: {left}");
+    on.apps.shutdown().await;
+    off.apps.shutdown().await;
+}
+
+/// A small busybox site run as a container (a start command keeps it from being served as files): its id and host.
+async fn deploy_container(w: &World, name: &str) -> (String, String) {
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "upload"}, "build": {"start": "httpd -f -p $PORT -h /site"}, "run": {"memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let tree = tempfile::tempdir().unwrap();
+    std::fs::write(tree.path().join("index.html"), "<h1>cold</h1>").unwrap();
+    let mut bundle = Vec::new();
+    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+    let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), None, "application/gzip", Some(bundle)).await;
+    let dep = d["id"].as_str().unwrap().to_string();
+    for _ in 0..1200 {
+        let (_, x) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}"), None, "application/json", None).await;
+        if x["status"] == "active" {
+            break;
+        }
+        assert!(!["failed", "canceled"].contains(&x["status"].as_str().unwrap_or("")), "{x}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
+    (id, env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string())
+}
+
+/// Another service of the project reaches a sleeping one by name: stopped, the waker in its
+/// sandbox takes the call and hands it to the app once it's up; frozen, it's thawed. A public
+/// request still wakes it afterwards (the waker lets go of the port first).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_private_caller_wakes_a_sleeping_service() {
+    use apps_control::runtime::docker::docker;
+    let Some(w) = docker_world_netns(Some(true)).await else { return };
+    let (id, host) = deploy_container(&w, "inner").await;
+    let (_, svc) = call(&w.api, "GET", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    let port = svc["run"]["port"].as_u64().unwrap_or(8080);
+    let net = apps_control::network_name(&w.project, "production");
+    // A caller on the project's network, as another service is.
+    let caller = format!("roll-apps-test-caller-{}", &id[4..]);
+    docker(&["run", "-d", "--name", &caller, "--network", &net, "busybox:1.37", "sleep", "600"]).await.unwrap();
+    let url = format!("http://inner:{port}/");
+    let fetch = || async {
+        let t = Instant::now();
+        let body = docker(&["exec", &caller, "wget", "-q", "-O-", "-T", "30", &url]).await;
+        (body, t.elapsed())
+    };
+    let live = w.apps.live(&id, "production");
+    let state = || async { call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await.1["state"].as_str().unwrap_or("").to_string() };
+    // Awake: the baseline (an exec and a request).
+    assert_eq!(get(&w.public, &host).await.0, StatusCode::OK);
+    let (body, awake) = fetch().await;
+    assert!(body.as_deref().is_ok_and(|b| b.contains("<h1>cold</h1>")), "{body:?}");
+    // Stopped.
+    live.sleep().await;
+    assert_eq!(state().await, "stopped");
+    let wakers = docker(&["ps", "-q", "--filter", &format!("label=sh.roll.apps={id}"), "--filter", "label=sh.roll.apps.role=wake"]).await.unwrap();
+    assert!(!wakers.is_empty(), "asleep, the waker listens");
+    let (body, stopped) = fetch().await;
+    assert!(body.as_deref().is_ok_and(|b| b.contains("<h1>cold</h1>")), "the first caller gets the app: {body:?}");
+    assert_eq!(state().await, "running");
+    // Frozen.
+    live.backdate(Duration::from_secs(31));
+    live.tick().await;
+    assert_eq!(state().await, "suspended");
+    let (body, frozen) = fetch().await;
+    assert!(body.is_ok(), "{body:?}");
+    let mut now = String::new();
+    for _ in 0..100 {
+        now = state().await;
+        if now == "running" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(now, "running", "{}", call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await.1);
+    // Asleep again, a public request starts it: the waker gives up the port in time.
+    live.sleep().await;
+    let (st, public) = get(&w.public, &host).await;
+    if st != StatusCode::OK {
+        let (_, l) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs?tail=40"), None, "application/json", None).await;
+        for x in l.as_array().into_iter().flatten() {
+            eprintln!("LOG {} {}", x["stream"], x["text"]);
+        }
+        let _ = docker(&["rm", "-f", &caller]).await;
+    }
+    assert_eq!(st, StatusCode::OK);
+    eprintln!(
+        "MEASURED a private caller (docker exec + wget) at a service that's awake {} ms, stopped {} ms, frozen {} ms; a public cold start with the waker armed {} ms",
+        awake.as_millis(),
+        stopped.as_millis(),
+        frozen.as_millis(),
+        public.as_millis()
+    );
+    let _ = docker(&["rm", "-f", &caller]).await;
+    // From inside its network, as roll previews' screenshots reach it: asleep, woken, held.
+    live.sleep().await;
+    let r = w.apps.reachable(&id, "production").await.unwrap().expect("a container to join");
+    let inside = docker(&["run", "--rm", "--network", &format!("container:{}", r.container), "--cap-drop", "ALL", "--read-only", "busybox:1.37", "wget", "-q", "-O-", &format!("http://127.0.0.1:{}/", r.port)]).await;
+    assert!(inside.as_deref().is_ok_and(|b| b.contains("<h1>cold</h1>")), "{inside:?}");
+    drop(r);
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    let _ = docker(&["network", "rm", &net]).await;
+    let left = docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={id}")]).await.unwrap();
+    assert!(left.is_empty(), "the instance, its sandbox and its waker are gone: {left}");
+    w.apps.shutdown().await;
+}
+
+/// A TCP service and a tunnel on real Docker: a busybox echo server, asleep each time, answers
+/// a raw connection to its own port and a tunnel's bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tcp_service_and_a_tunnel_reach_a_sleeping_port() {
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let Some(w) = docker_world().await else { return };
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "echo", "source": {"kind": "image", "image": "busybox:1.37"}, "run": {"port": 9000, "tcp": true, "start": "nc -lk -p 9000 -e cat", "memory_mb": 256, "cpu": 0.25} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    // The loop gives its environment a port and listens there.
+    tokio::spawn(w.apps.clone().serve_tcp_ports("127.0.0.1".parse().unwrap()));
+    for _ in 0..1200 {
+        let (_, e) = call(&w.api, "GET", &base, None, "application/json", None).await;
+        if e["active"].is_object() && e["tcp"].is_string() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (_, e) = call(&w.api, "GET", &base, None, "application/json", None).await;
+    let addr = e["tcp"].as_str().unwrap_or_else(|| panic!("{e}")).to_string();
+    let live = w.apps.live(&id, "production");
+    // Its own port, from asleep.
+    live.sleep().await;
+    let mut conn = None;
+    for _ in 0..100 {
+        if let Ok(c) = tokio::net::TcpStream::connect(addr.as_str()).await {
+            conn = Some(c);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    let mut conn = conn.expect("its port listens");
+    let began = Instant::now();
+    conn.write_all(b"over tcp\n").await.unwrap();
+    let mut buf = [0u8; 9];
+    tokio::time::timeout(Duration::from_secs(30), conn.read_exact(&mut buf)).await.expect("an echo").unwrap();
+    assert_eq!(&buf, b"over tcp\n");
+    let tcp_cold = began.elapsed();
+    drop(conn);
+    // A tunnel, from asleep.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    live.sleep().await;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = l.local_addr().unwrap();
+    tokio::spawn(axum::serve(l, w.api.clone()).into_future());
+    let began = Instant::now();
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{at}{base}/tunnel")).await.unwrap();
+    ws.send(Message::Binary(b"tunnelled\n".to_vec().into())).await.unwrap();
+    let mut got = Vec::new();
+    while got.len() < 10 {
+        match tokio::time::timeout(Duration::from_secs(30), ws.next()).await.expect("an echo") {
+            Some(Ok(Message::Binary(b))) => got.extend_from_slice(&b),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(&got, b"tunnelled\n");
+    eprintln!("MEASURED a TCP service from asleep: {} ms to its echo; a tunnel from asleep: {} ms", tcp_cold.as_millis(), began.elapsed().as_millis());
+    let _ = ws.close(None).await;
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
+    w.apps.shutdown().await;
+}
+
+/// `run.cpu_target` on real cgroups: an instance kept busy (a loop beside its server) is over
+/// its target, and a second one starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_busy_instance_brings_another_on_its_cpu() {
+    let Some(w) = docker_world_with(None, |c| c.live.cpu_window = Duration::from_secs(3)).await else { return };
+    let run = json!({"port": 8080, "min_instances": 1, "max_instances": 2, "cpu": 0.25, "memory_mb": 256, "cpu_target": 50, "start": "while :; do :; done & mkdir -p /w && echo busy > /w/index.html && httpd -f -p 8080 -h /w"});
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "busy", "source": {"kind": "image", "image": "busybox:1.37"}, "run": run })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let running = || async {
+        let (_, e) = call(&w.api, "GET", &base, None, "application/json", None).await;
+        e["instances"].as_array().map_or(0, |a| a.iter().filter(|i| i["state"] == "running").count())
+    };
+    let began = Instant::now();
+    let mut two = false;
+    while began.elapsed() < Duration::from_secs(90) {
+        if running().await >= 2 {
+            two = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let (_, log) = call(&w.api, "GET", &format!("{base}/logs?tail=50"), None, "application/json", None).await;
+    let said = log.as_array().into_iter().flatten().find_map(|l| l["text"].as_str().filter(|t| t.starts_with("scaled out: CPU")).map(str::to_string));
+    assert!(two, "a second instance for its CPU: {log}");
+    eprintln!("MEASURED CPU scaling on cgroups: a second instance {} s after the service was made ({})", began.elapsed().as_secs(), said.unwrap_or_default());
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
+    w.apps.shutdown().await;
+}
+

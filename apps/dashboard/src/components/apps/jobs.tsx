@@ -1,6 +1,6 @@
 import { Play, Square, TerminalSquare } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { appsApi, followLog, runStatus, type CronRun, type Job, type LogLine } from "@/lib/apps-api";
+import { appsApi, followChanges, followLog, runStatus, type CronRun, type Job, type LogLine } from "@/lib/apps-api";
 import { btn, EmptyPanel, input, Panel, primary } from "../ui";
 import { usePageVisible } from "./live";
 import { clock, LogView, message, type Runner } from "./shared";
@@ -52,9 +52,14 @@ export function JobsTab({ service, env, runner, cron = false }: { service: strin
   const visible = usePageVisible();
   useEffect(() => {
     if (!running || !visible) return;
-    const t = setInterval(() => void load(), 1500);
-    return () => clearInterval(t);
-  }, [running, load, visible]);
+    // A job's end is a tick on the service's change stream; a slow poll is the safety net.
+    const stop = followChanges(service, { onChange: () => void load() });
+    const t = setInterval(() => void load(), 15000);
+    return () => {
+      stop();
+      clearInterval(t);
+    };
+  }, [running, load, visible, service]);
 
   useEffect(() => {
     if (!selected) return;
@@ -145,7 +150,10 @@ export function JobsTab({ service, env, runner, cron = false }: { service: strin
                       onClick={() => setSelected(j.id)}
                       className={`w-full px-5 py-3 text-left transition-colors duration-150 hover:bg-panel-2 ${j.id === selected ? "bg-panel-2" : ""}`}
                     >
-                      <span className="block truncate font-mono text-[12px]">{j.command}</span>
+                      <span className="block truncate font-mono text-[12px]">
+                        {j.command}
+                        {(j.tasks ?? 1) > 1 && <span className="text-muted"> × {j.tasks}</span>}
+                      </span>
                       <span className="mt-1 flex items-center justify-between gap-2">
                         <JobBadge job={j} />
                         <span className="font-mono text-[11px] text-subtle">{clock(j.started_at, true)}</span>
