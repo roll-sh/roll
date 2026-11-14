@@ -275,12 +275,15 @@ every deployment is immutable with instant rollback.
   failure (a connection closed before it answered) is a 502 that says so without the error, which
   goes to the environment's log.
 - **A request that finds its instance gone** (killed or out of memory, before roll noticed:
-  nothing listens on its port, or a kept-alive connection to it broke and the runtime says it
-  isn't running) goes, if it's a GET, HEAD or OPTIONS with no body (by its headers and the body
+  nothing listens on its port, or a kept-alive connection to it broke and the instance is gone:
+  the runtime says it isn't running, or, since a runtime learns of a kill a moment late, the
+  instance doesn't answer when asked; one that answers closed the connection itself, a 502) goes, if it's a GET, HEAD or OPTIONS with no body (by its headers and the body
   itself: a safe request, which RFC 9110 lets be repeated, as browsers do when a reused connection
   closes), once more to a fresh instance (Fly's proxy retries the same way), the instance counted as
-  crashed and the environment's log saying so; a request with a body gets the "Restarting" 503,
-  never sent twice.
+  crashed and the environment's log saying so (and why, when no fresh one starts); a request
+  with a body gets the "Restarting" 503, never sent twice
+  (`api.rs::a_get_to_a_vanished_instance_goes_to_a_fresh_one`, with `Fake::vanish`: a kill roll
+  isn't told of). The fake runtime's kill ends kept-alive connections too, as the kernel's does.
 
 - **The waking proxy** (Knative's activator, Fly's proxy) runs on the service's owner node. A
   request for a service with no running instance is held (up to `wake_timeout`, 60 s, then a
@@ -707,7 +710,8 @@ The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`,
   Only a web service's or a worker's, of the deployment its label or tag names (a cron run's or
   a job's container is `…-run<n>`, never kept); a frozen one is kept asleep with nothing asked of
   it, a TCP service is checked by its port accepting, an HTTP one by an answer; new names start
-  past every one seen. Anything else of the service's (older deployments, jobs, one that doesn't
+  past every one seen, and never one this process made (a request that loads the environment
+  mid-deploy once removed the deploy's own instance being health-checked). Anything else of the service's (older deployments, jobs, one that doesn't
   answer) is removed, and so is all of it if the environment can't be loaded (tried three times,
   a second apart at most). On a runtime the nodes share (Fargate), a node giving a service up (a
   handoff, or fenced) lets its instances go untouched (`EnvLive::let_go`; `Runtime::release`
@@ -1566,47 +1570,42 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **Two timing flakes in `tests/api.rs` under load** (seen at load 45, about one full run in
-   four): `a_get_to_a_vanished_instance_goes_to_a_fresh_one` answering 503 where the retry should
-   reach a fresh instance, and `maintenance_answers_roll_page_and_wakes_nothing` getting 502
-   ("killed mid-request") where 504 is expected. Find the race each one hits (the failing
-   assertion now prints the environment's log), not a longer wait.
-2. **Work in flight on a node that gave a service up**: a scale-in's stop, a crashed extra's
+1. **Work in flight on a node that gave a service up**: a scale-in's stop, a crashed extra's
    removal or a drain spawned before `EnvLive::let_go` still runs afterwards, and on a shared
    runtime can stop a task the next owner just adopted. Such work checks it still holds the
    service (the environment's `closed`) before it touches an instance.
-3. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+2. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-4. **Region**: the region shown on the overview and each environment, defaulting to the project's
+3. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-5. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+4. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-6. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+5. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-7. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+6. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-8. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+7. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-9. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-10. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+8. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+9. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-11. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+10. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-12. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+11. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-13. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+12. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-14. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+13. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
