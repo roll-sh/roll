@@ -77,6 +77,7 @@ fn page_retrying(status: StatusCode, title: &str, text: &str, retry: u32) -> Res
          <main>{HORIZON}<h1>{title}</h1><p>{text}</p></main>"
     );
     let mut r = (status, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response();
+    r.extensions_mut().insert(RollPage::Error);
     if status == StatusCode::SERVICE_UNAVAILABLE
         && let Ok(v) = HeaderValue::from_str(&retry.to_string())
     {
@@ -89,7 +90,37 @@ fn page_retrying(status: StatusCode, title: &str, text: &str, retry: u32) -> Res
 /// half minute.
 fn maintenance_page(message: &str) -> Response {
     let text = if message.is_empty() { "This service is down for maintenance. It'll be back soon.".to_string() } else { escape(message) };
-    page_retrying(StatusCode::SERVICE_UNAVAILABLE, "Down for maintenance", &text, 30)
+    let mut r = page_retrying(StatusCode::SERVICE_UNAVAILABLE, "Down for maintenance", &text, 30);
+    r.extensions_mut().insert(RollPage::Maintenance);
+    r
+}
+
+/// Which of roll's pages a response is (never an app's own answer), so an environment's own
+/// page can take its place ([`their_page`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RollPage {
+    Error,
+    Maintenance,
+}
+
+/// One of roll's 5xx pages, as the environment's own HTML when it has one (Heroku's error and
+/// maintenance pages): the same status and `Retry-After`, never cached.
+async fn their_page(apps: &Arc<Apps>, service: &str, env: &str, r: Response) -> Response {
+    let Some(kind) = r.extensions().get::<RollPage>().copied() else { return r };
+    if !r.status().is_server_error() {
+        return r;
+    }
+    let Ok(gate) = apps.gate(&apps.live(service, env)).await else { return r };
+    let html = match kind {
+        RollPage::Error => gate.pages.error.clone(),
+        RollPage::Maintenance => gate.pages.maintenance.clone(),
+    };
+    let Some(html) = html else { return r };
+    let (mut parts, _) = r.into_parts();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    parts.headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Response::from_parts(parts, Body::from(html))
 }
 
 fn escape(s: &str) -> String {
@@ -195,14 +226,18 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
 struct SiteRequest {
     method: axum::http::Method,
     path: String,
+    query: Option<String>,
     if_none_match: Option<String>,
+    accept_encoding: Option<String>,
+    range: Option<String>,
+    if_range: Option<String>,
     request_id: Option<String>,
 }
 
 impl SiteRequest {
     fn of(req: &Request) -> SiteRequest {
         let h = |n: &str| req.headers().get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
-        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), if_none_match: h("if-none-match"), request_id: h("x-request-id") }
+        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), query: req.uri().query().map(str::to_string), if_none_match: h("if-none-match"), accept_encoding: h("accept-encoding"), range: h("range"), if_range: h("if-range"), request_id: h("x-request-id") }
     }
 }
 
@@ -230,21 +265,135 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
         }
     };
     let path = percent_encoding::percent_decode_str(&req.path).decode_utf8_lossy().into_owned();
-    let Some((name, status)) = crate::sites::resolve(&site, &path, tpl.spa) else {
+    // Its own rules first (`_redirects`): a redirect, or another of its files.
+    let not_found = || page(StatusCode::NOT_FOUND, "Not found", "There's no page at this address.");
+    if crate::site_rules::is_rules_file(&path) {
         done(404, 0);
-        return page(StatusCode::NOT_FOUND, "Not found", "There's no page at this address.");
+        return not_found();
+    }
+    let own = crate::sites::exists(&site, &path);
+    // A rule that hides a path (a 404 rule) or sends it elsewhere decides it; a rewrite or no
+    // rule at all leaves a missing fingerprinted file to the site's earlier deployments.
+    let mut skew_ok = !own;
+    let resolved = match site.rules.redirect(&path, req.query.as_deref(), own) {
+        Some(crate::site_rules::Outcome::Redirect(status, to)) => {
+            done(status, 0);
+            let mut r = Response::new(Body::empty());
+            *r.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::MOVED_PERMANENTLY);
+            if let Ok(v) = HeaderValue::from_str(&to) {
+                r.headers_mut().insert(header::LOCATION, v);
+            }
+            return r;
+        }
+        Some(crate::site_rules::Outcome::Serve(status, to)) => {
+            skew_ok &= status == 200;
+            crate::sites::resolve(&site, &to, false).filter(|(_, s)| *s == 200).map(|(n, _)| (n, status))
+        }
+        None => crate::sites::resolve(&site, &path, tpl.spa),
     };
-    let (offset, len) = site.files[name];
-    let etag = format!("\"{}-{offset}\"", &key[..key.len().min(16)]);
-    if status == 200 && req.if_none_match.as_deref().is_some_and(|v| v.split(',').any(|t| t.trim() == etag)) {
+    // A fingerprinted file the live site doesn't have may be an earlier deployment's, asked for by
+    // a page loaded before the deploy (a lazy-loaded chunk): served from there (skew protection),
+    // even where a single-page app's rewrite would answer its index.
+    let resolved = resolved.map(|(n, s)| (n.to_string(), s));
+    let earlier = match skew_ok {
+        true => apps.earlier_site_file(service, env, &key, &path).await,
+        false => None,
+    };
+    let skewed = earlier.is_some();
+    let (site, key, name, status) = match (earlier, resolved) {
+        (Some((s, k, n)), _) => (s, k, n, 200),
+        (None, Some((n, s))) => (site, key, n, s),
+        (None, None) => {
+            done(404, 0);
+            return not_found();
+        }
+    };
+    let name = name.as_str();
+    // The site's own `_headers` for the path, on a 304 as on the answer (a cache takes a 304's).
+    let site_headers = site.rules.headers(&path);
+    let ctype = crate::sites::content_type(name);
+    // Compressed as Render's and Vercel's static sites are: the build's own `.br` or `.gz` of the
+    // file, else gzipped here (once: a site never changes), for text-like files the client takes
+    // it for. Each encoding has its ETag.
+    let compress = crate::sites::compressible(ctype);
+    let size = site.files[name].1;
+    let pre = |ext: &str| site.files.get(&format!("{name}.{ext}")).copied();
+    let (qbr, qgz) = (accept_q(req.accept_encoding.as_deref(), "br"), accept_q(req.accept_encoding.as_deref(), "gzip"));
+    // Gzipped here: what this file would be, if the node gets to it (never for a HEAD's sake).
+    let on_the_fly = compress && qgz > 0.0 && pre("gz").is_none() && (crate::sites::GZIP_MIN..=crate::sites::GZIP_MAX).contains(&size);
+    let encoding = match () {
+        _ if !compress => None,
+        _ if pre("br").is_some() && qbr > 0.0 && qbr >= qgz => Some("br"),
+        _ if pre("gz").is_some() && qgz > 0.0 => Some("gzip"),
+        _ if pre("br").is_some() && qbr > 0.0 => Some("br"),
+        _ if on_the_fly && (!head || site.gzipped(name).is_some()) => Some("gzip"),
+        _ => None,
+    };
+    let etag_of = |encoding: Option<&str>| {
+        format!("\"{}-{}{}\"", &key[..key.len().min(16)], site.files[name].0, match encoding {
+            Some("br") => "-br",
+            Some(_) => "-gz",
+            None => "",
+        })
+    };
+    let cache = match () {
+        _ if ctype.starts_with("text/html") => "no-cache",
+        // The URL asked for names its bytes (never a rewrite's stable name, nor an earlier
+        // deployment's file, which a rule could hide tomorrow).
+        _ if status == 200 && !skewed && name == path.trim_matches('/') && crate::sites::fingerprinted(name) => "public, max-age=31536000, immutable",
+        _ => "public, max-age=300",
+    };
+    let etag = etag_of(encoding);
+    // Weak comparison (a CDN that compresses weakens the tag: `W/"…"`), and `*`.
+    let matches = |v: &str| v.split(',').map(|t| t.trim()).any(|t| t == "*" || t.strip_prefix("W/").unwrap_or(t) == etag);
+    if status == 200 && req.if_none_match.as_deref().is_some_and(matches) {
         done(304, 0);
         let mut r = StatusCode::NOT_MODIFIED.into_response();
-        r.headers_mut().insert(header::ETAG, HeaderValue::from_str(&etag).expect("ascii"));
+        let h = r.headers_mut();
+        h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("ascii"));
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+        if compress {
+            h.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+        }
+        own_headers(h, &site_headers, compress);
         return r;
     }
-    let ctype = crate::sites::content_type(name);
+    // The bytes: the build's own compressed file, ours, or the file (when ours can't be had now).
+    let gz = match encoding {
+        Some("gzip") if pre("gz").is_none() => site.gzip(name).await,
+        _ => None,
+    };
+    let encoding = if encoding == Some("gzip") && pre("gz").is_none() && gz.is_none() { None } else { encoding };
+    let etag = etag_of(encoding);
+    let file = match encoding {
+        Some("br") => pre("br").expect("chosen"),
+        Some(_) if gz.is_none() => pre("gz").expect("chosen"),
+        _ => site.files[name],
+    };
+    let (mut offset, mut len) = match &gz {
+        Some(b) => (file.0, b.len() as u64),
+        None => file,
+    };
+    // One byte range of the file as it is (a video's seek, a download resumed); several, or one
+    // that doesn't parse, get the whole file, as RFC 9110 allows. `If-Range` keeps it to this
+    // version of the file.
+    let ranged = status == 200 && encoding.is_none() && req.if_range.as_deref().is_none_or(|v| v.trim() == etag);
+    let mut range = None;
+    if ranged && let Some(r) = req.range.as_deref().and_then(|r| byte_range(r, len)) {
+        let Ok((start, end)) = r else {
+            done(416, 0);
+            let mut r = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+            r.headers_mut().insert(header::CONTENT_RANGE, HeaderValue::from_str(&format!("bytes */{len}")).expect("ascii"));
+            return r;
+        };
+        range = Some(format!("bytes {start}-{end}/{len}"));
+        (offset, len) = (offset + start, end - start + 1);
+    }
+    let status = if range.is_some() { 206 } else { status };
     let body = if head {
         Body::empty()
+    } else if let Some(b) = gz {
+        Body::from(b)
     } else {
         // The file's bytes, read from the tar as they're sent.
         let tar = site.tar.clone();
@@ -279,26 +428,113 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
     let h = r.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(ctype));
     h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    if let Some(e) = encoding {
+        h.insert(header::CONTENT_ENCODING, HeaderValue::from_static(e));
+    }
+    if compress {
+        h.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    }
+    if ranged {
+        h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    }
+    if let Some(cr) = range {
+        h.insert(header::CONTENT_RANGE, HeaderValue::from_str(&cr).expect("ascii"));
+    }
     h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("ascii"));
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static(if ctype.starts_with("text/html") { "no-cache" } else { "public, max-age=300" }));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     h.insert(HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff"));
+    own_headers(h, &site_headers, compress);
     r
+}
+
+/// A site's own `_headers` over roll's (each checked when the file was read): the first a block
+/// sets replaces roll's, more of one name add to it. Its own `Vary` never drops what the encoding
+/// varies on (a cache would hand gzip to a client that can't read it).
+fn own_headers(h: &mut axum::http::HeaderMap, headers: &[(String, String)], compress: bool) {
+    let mut set = std::collections::HashSet::new();
+    for (n, v) in headers {
+        if let (Ok(n), Ok(v)) = (HeaderName::from_bytes(n.as_bytes()), HeaderValue::from_str(v)) {
+            if set.insert(n.clone()) {
+                h.insert(n, v);
+            } else {
+                h.append(n, v);
+            }
+        }
+    }
+    let varies = h.get_all(header::VARY).iter().any(|v| v.to_str().is_ok_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("accept-encoding") || t.trim() == "*")));
+    if compress && !varies {
+        h.append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    }
+}
+
+/// How much `accept` (an `Accept-Encoding`) wants `coding`: its own q, else `*`'s, else none
+/// (RFC 9110: `*` stands only for codings it doesn't name).
+fn accept_q(accept: Option<&str>, coding: &str) -> f32 {
+    let mut star = 0.0;
+    for part in accept.unwrap_or("").split(',') {
+        let mut it = part.split(';');
+        let name = it.next().unwrap_or("").trim();
+        let q = it.find_map(|a| a.trim().split_once('=').filter(|(k, _)| k.trim().eq_ignore_ascii_case("q")).map(|(_, v)| v.trim().parse::<f32>().unwrap_or(0.0))).unwrap_or(1.0);
+        if name.eq_ignore_ascii_case(coding) {
+            return q;
+        }
+        if name == "*" {
+            star = q;
+        }
+    }
+    star
+}
+
+/// `Range: bytes=…` against a file of `len` bytes: the first and last byte, or `Err` when it
+/// can't be met (a 416). None: not one range this answers (the whole file instead).
+fn byte_range(h: &str, len: u64) -> Option<std::result::Result<(u64, u64), ()>> {
+    let spec = h.trim().strip_prefix("bytes=")?.trim();
+    if spec.contains(',') {
+        return None;
+    }
+    let (a, b) = spec.split_once('-')?;
+    let (a, b) = (a.trim(), b.trim());
+    let num = |s: &str| (!s.is_empty() && s.bytes().all(|c| c.is_ascii_digit())).then(|| s.parse::<u64>().ok()).flatten();
+    Some(match (a.is_empty(), b.is_empty()) {
+        // The last `b` bytes.
+        (true, false) => match num(b)? {
+            n if n == 0 || len == 0 => Err(()),
+            n => Ok((len.saturating_sub(n), len - 1)),
+        },
+        (false, _) => {
+            let start = num(a)?;
+            let end = if b.is_empty() { u64::MAX } else { num(b)? };
+            if end < start {
+                return None;
+            }
+            if start >= len { Err(()) } else { Ok((start, end.min(len - 1))) }
+        }
+        (true, true) => return None,
+    })
 }
 
 /// A visitor's gradual-rollout bucket (docs/apps/README.md, "Gradual rollouts").
 const BUCKET: &str = "roll_bucket";
 
+/// A visitor's instance, for a service with affinity ([`crate::live::affinity_key`]).
+const AFFINITY: &str = "roll_instance";
+
 /// The visitor's rollout bucket from its cookie (0–99), taken out of the cookies the app sees.
 fn take_bucket(req: &mut Request) -> Option<u8> {
-    let mut bucket = None;
+    take_cookie(req, BUCKET).and_then(|n| n.parse::<u8>().ok()).filter(|n| *n < 100)
+}
+
+/// One of roll's cookies, taken out of the cookies the app sees.
+fn take_cookie(req: &mut Request, name: &str) -> Option<String> {
+    let mut found = None;
     let mut kept = Vec::new();
     let mut ours = false;
     for v in req.headers().get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()) {
         for c in v.split(';').map(str::trim).filter(|c| !c.is_empty()) {
-            match c.strip_prefix(&format!("{BUCKET}=")) {
+            match c.strip_prefix(&format!("{name}=")) {
                 Some(n) => {
                     ours = true;
-                    bucket = n.parse::<u8>().ok().filter(|n| *n < 100);
+                    found = Some(n.to_string());
                 }
                 None => kept.push(c.to_string()),
             }
@@ -312,7 +548,7 @@ fn take_bucket(req: &mut Request) -> Option<u8> {
             req.headers_mut().insert(header::COOKIE, v);
         }
     }
-    bucket
+    found
 }
 
 /// The 401 of a private environment. A preview's (`pv-…`) links into the dashboard, which signs
@@ -368,11 +604,40 @@ fn strip_roll_headers(h: &mut axum::http::HeaderMap) {
 
 /// The waking proxy on the owner: an instance (woken if need be), the request forwarded, the
 /// answer metered.
-async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, mut req: Request) -> Response {
+async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, req: Request) -> Response {
+    let r = proxy_inner(apps.clone(), service, env, deployment, req).await;
+    their_page(&apps, service, env, r).await
+}
+
+async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, mut req: Request) -> Response {
     let began = Instant::now();
     // Came in through roll: the private environment's access cookie (checked just below).
     let cookie = format!("roll_access_{env}=");
     let via_link = env.starts_with("pv-") && req.headers().get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).any(|v| v.split(';').any(|c| c.trim().starts_with(&cookie)));
+    // Its allow list first (deployment URLs too: they're public), before anything wakes.
+    let gate = match apps.gate(&apps.live(service, env)).await {
+        Ok(g) => g,
+        Err(_) => return page(StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "This environment's settings couldn't be read. Try again in a few seconds."),
+    };
+    let client = roll_cluster::client_addr(&req);
+    if !gate.admits(client.as_deref()) {
+        return page(StatusCode::FORBIDDEN, "Not from here", "This service only answers visitors from the networks its owner allowed.");
+    }
+    // Its firewall rules (a 403 that says nothing of them).
+    let ua = req.headers().get(header::USER_AGENT).map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned()).unwrap_or_default();
+    if !gate.firewall.is_empty() && !gate.firewall_allows(req.method().as_str(), &crate::model::normal_path(req.uri().path()), &ua) {
+        return page(StatusCode::FORBIDDEN, "Not allowed", "This service doesn't answer this request.");
+    }
+    // Its rate limit per client, before anything wakes.
+    if let Some(limit) = &gate.rate
+        && let Err(wait) = apps.live(service, env).take_token(crate::live::client_ip(client.as_deref()), limit)
+    {
+        let mut r = page(StatusCode::TOO_MANY_REQUESTS, "Slow down", "Too many requests from your address. Try again in a moment.");
+        if let Ok(v) = HeaderValue::from_str(&(wait.as_secs_f64().ceil() as u64).max(1).to_string()) {
+            r.headers_mut().insert(header::RETRY_AFTER, v);
+        }
+        return r;
+    }
     // A private environment answers only visitors with its token, before anything wakes.
     if let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
         return turned_away;
@@ -405,13 +670,14 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
     // In maintenance: roll's page, nothing woken. A deployment's own URL still answers (a fix
     // can be tried before maintenance ends).
     if deployment.is_none()
-        && let Some(m) = apps.maintenance(&live).await
+        && let Some(m) = &gate.maintenance
     {
-        return maintenance_page(&m);
+        return maintenance_page(m);
     }
     // A gradual rollout keeps each visitor on one deployment: their bucket, from the cookie it
     // gave them (never passed to the app), or a new one while a canary runs.
     let mut bucket = take_bucket(&mut req);
+    let affine = take_cookie(&mut req, AFFINITY);
     let fresh = deployment.is_none() && bucket.is_none() && live.canary().is_some();
     if fresh {
         let mut b = [0u8; 1];
@@ -437,7 +703,7 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
                 }
                 return r;
             }
-            Ok(Some(t)) => live.acquire_tpl(t).await,
+            Ok(Some(t)) => live.acquire_preferring(t, affine.as_deref()).await,
             Ok(None) => Err(WakeError::NoDeployment),
             Err(e) => Err(e),
         },
@@ -502,7 +768,21 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
     }
     let request_id = h.get("x-request-id").and_then(|v| v.to_str().ok()).unwrap_or("").chars().take(64).collect::<String>();
     let (instance, cold, waited_ms) = (lease.inst.name.clone(), lease.cold, lease.waited.as_millis() as u64);
-    let sent = if h2 { apps.client_h2.request(req).await } else { apps.client.request(req).await };
+    let send = async { if h2 { apps.client_h2.request(req).await } else { apps.client.request(req).await } };
+    // Its timeout runs to the answer's head: an upgrade, or a stream that has begun, is the
+    // app's to keep.
+    let sent = match lease.timeout.filter(|_| !upgrade) {
+        Some(t) => match tokio::time::timeout(t, send).await {
+            Ok(r) => r,
+            Err(_) => {
+                live.answered(&lease.inst, 504);
+                live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 504, 0);
+                access.write(504, began, 0, &instance, &request_id, cold, waited_ms);
+                return page(StatusCode::GATEWAY_TIMEOUT, "Timed out", &format!("The service didn't answer within its {} s.", t.as_secs()));
+            }
+        },
+        None => send.await,
+    };
     let mut resp = match sent {
         Ok(r) => r,
         Err(e) if e.is_connect() => {
@@ -560,6 +840,16 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
         return resp.map(Body::new);
     }
     strip_hop_by_hop(resp.headers_mut(), false);
+    // Affinity: the visitor's cookie names the instance that answered.
+    if lease.affinity {
+        let key = crate::live::affinity_key(&lease.inst.name);
+        if affine.as_deref() != Some(key.as_str()) {
+            let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
+            if let Ok(c) = HeaderValue::from_str(&format!("{AFFINITY}={key}; Path=/; HttpOnly; SameSite=Lax{secure}")) {
+                resp.headers_mut().append(header::SET_COOKIE, c);
+            }
+        }
+    }
     if let (true, Some(b)) = (fresh, bucket) {
         let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
         if let Ok(c) = HeaderValue::from_str(&format!("{BUCKET}={b}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax{secure}")) {
@@ -632,6 +922,33 @@ impl Access {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_encoding_is_taken_by_its_own_q_and_star_only_for_the_rest() {
+        use super::accept_q as q;
+        assert_eq!((q(Some("gzip, br"), "br"), q(Some("gzip, br"), "gzip")), (1.0, 1.0));
+        assert_eq!(q(Some("gzip;q=0, *"), "gzip"), 0.0, "named and refused: * doesn't bring it back");
+        assert_eq!(q(Some("gzip;q=0, *"), "br"), 1.0);
+        assert_eq!(q(Some("gzip;Q=0"), "gzip"), 0.0);
+        assert_eq!(q(Some("gzip;q=1, br;q=0.1"), "br"), 0.1);
+        assert_eq!((q(None, "gzip"), q(Some("identity"), "gzip")), (0.0, 0.0));
+    }
+
+    #[test]
+    fn one_byte_range_is_met_and_the_rest_is_the_whole_file() {
+        use super::byte_range as r;
+        assert_eq!(r("bytes=0-99", 1000), Some(Ok((0, 99))));
+        assert_eq!(r("bytes=900-", 1000), Some(Ok((900, 999))));
+        assert_eq!(r("bytes=990-5000", 1000), Some(Ok((990, 999))));
+        assert_eq!(r("bytes=-100", 1000), Some(Ok((900, 999))));
+        assert_eq!(r("bytes=-5000", 1000), Some(Ok((0, 999))));
+        assert_eq!(r("bytes=1000-", 1000), Some(Err(())));
+        assert_eq!(r("bytes=-0", 1000), Some(Err(())));
+        assert_eq!(r("bytes=0-", 0), Some(Err(())));
+        for whole in ["bytes=0-1,5-6", "bytes=5-1", "items=0-1", "bytes=-", "bytes=a-b", "bytes=+1-2", "bytes=99999999999999999999-"] {
+            assert_eq!(r(whole, 1000), None, "{whole}");
+        }
+    }
+
     #[test]
     fn the_pages_mark_is_the_brands_export() {
         let brand = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/brand/assets/horizon-dark.svg");

@@ -321,6 +321,7 @@ impl Build {
             start: self.start.clone(),
             spa: self.spa,
             build_env: Vec::new(),
+            process: None,
         }
     }
 }
@@ -356,6 +357,9 @@ pub struct Run {
     pub pre_deploy: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schedule: Option<String>,
+    /// The zone a cron schedule's fields are in (IANA, `Europe/Budapest`); UTC when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_s: Option<u32>,
     pub min_instances: u32,
@@ -392,6 +396,55 @@ pub struct Run {
     /// unset, 30.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drain_s: Option<u32>,
+    /// A web service also scales on CPU (Render's target CPU): while its awake instances
+    /// average over this percent of their CPU for a minute another starts (up to
+    /// `max_instances`), and fewer stay once they'd be under it. 10–100; unset, requests only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_target: Option<u32>,
+    /// A worker that stops (Railway's restart policy): started again `always`, only when it
+    /// failed (`on_failure`, up to `restart_tries` in a row), or `never`. A deploy or a restart
+    /// starts fresh ones whatever it says.
+    #[serde(skip_serializing_if = "Restart::is_always")]
+    pub restart: Restart,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_tries: Option<u32>,
+    /// A visitor keeps going to the same instance while it's up and has room (Cloud Run's
+    /// session affinity: a cookie), for apps that keep sessions in memory.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub affinity: bool,
+    /// Its port speaks TCP, not HTTP (Railway's TCP proxy: a game server, MQTT, a database of
+    /// its own): each environment answers on a port of its own from the node's TCP range,
+    /// woken and spliced per connection; its HTTP names don't serve it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub tcp: bool,
+    /// A deployment that falls into a crash loop within ten minutes of going live is replaced
+    /// by the one before it (its image, no build): a gradual rollout's error rollback for an
+    /// at-once deploy. Never a rollback's own: no two in a row.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rollback_on_crash: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Restart {
+    #[default]
+    Always,
+    OnFailure,
+    Never,
+}
+
+impl Restart {
+    fn is_always(&self) -> bool {
+        *self == Restart::Always
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Restart::Always => "always",
+            Restart::OnFailure => "on_failure",
+            Restart::Never => "never",
+        }
+    }
 }
 
 fn yes() -> bool {
@@ -452,8 +505,9 @@ impl Rollout {
     pub const MIN_REQUESTS: u64 = 20;
 }
 
-/// Metric alerts (Railway's monitors): each 0 is off. Judged every minute over the last five.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// Metric and log alerts (Railway's monitors): each 0 (or none) is off. Judged every minute
+/// over the last five.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Alerts {
     /// Memory at or above this share of the limit, per instance, every minute of the five.
@@ -462,11 +516,16 @@ pub struct Alerts {
     pub error_pct: u8,
     /// p95 latency at or above this in three of the five minutes.
     pub p95_ms: u32,
+    /// Text its output (stdout and stderr, any case) holds at least `log_count` times in the
+    /// five minutes: `alert.log` (the pattern and the count, never a line).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_match: Option<String>,
+    pub log_count: u32,
 }
 
 impl Default for Alerts {
     fn default() -> Self {
-        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0 }
+        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, log_match: None, log_count: 10 }
     }
 }
 
@@ -478,6 +537,7 @@ impl Default for Run {
             start: None,
             pre_deploy: None,
             schedule: None,
+            timezone: None,
             timeout_s: None,
             min_instances: 0,
             max_instances: 3,
@@ -495,6 +555,12 @@ impl Default for Run {
             scale: None,
             public: true,
             drain_s: None,
+            cpu_target: None,
+            restart: Restart::Always,
+            restart_tries: None,
+            affinity: false,
+            tcp: false,
+            rollback_on_crash: false,
         }
     }
 }
@@ -505,6 +571,9 @@ impl Run {
     pub fn normalized(mut self) -> Result<Run> {
         if self.alerts.memory_pct > 100 || self.alerts.error_pct > 100 {
             return Err(Error::BadRequest("alerts.memory_pct and alerts.error_pct are 0–100 (0 is off)".into()));
+        }
+        if self.alerts.log_match.as_ref().is_some_and(|m| m.trim().is_empty() || m.len() > 200) || !(1..=10_000).contains(&self.alerts.log_count) {
+            return Err(Error::BadRequest("alerts.log_match is 1–200 characters, alerts.log_count 1–10000".into()));
         }
         let bad = |m: &str| Err(Error::BadRequest(format!("run.{m}")));
         let r = &self.rollout;
@@ -551,6 +620,36 @@ impl Run {
         if self.drain_s.is_some_and(|d| !(1..=300).contains(&d)) {
             return bad("drain_s is 1–300");
         }
+        if self.affinity && self.kind != RunType::Web {
+            return bad("affinity is for a web service");
+        }
+        if self.tcp {
+            if self.kind != RunType::Web {
+                return bad("tcp is for a service with a port (type web)");
+            }
+            if self.health_path.is_some() || self.h2c || self.affinity || !self.rollout.steps.is_empty() {
+                return bad("a TCP service has no HTTP: no health_path, h2c, affinity or gradual rollout (its health is its port accepting)");
+            }
+        }
+        if self.restart != Restart::Always && self.kind != RunType::Worker {
+            return bad("restart is for a worker (a web service starts on its requests, a cron run once)");
+        }
+        if let Some(t) = self.restart_tries {
+            if self.restart != Restart::OnFailure {
+                return bad("restart_tries goes with restart = on_failure");
+            }
+            if !(1..=100).contains(&t) {
+                return bad("restart_tries is 1–100");
+            }
+        }
+        if let Some(t) = self.cpu_target {
+            if !(10..=100).contains(&t) {
+                return bad("cpu_target is 10–100 (percent of an instance's CPU)");
+            }
+            if self.kind != RunType::Web {
+                return bad("cpu_target is for a web service (a worker follows its work with scale)");
+            }
+        }
         if self.port == Some(0) {
             return bad("port is 1–65535");
         }
@@ -585,7 +684,7 @@ impl Run {
         match self.kind {
             RunType::Cron => {
                 let Some(s) = &self.schedule else { return bad("schedule is required for a cron service") };
-                crate::cron::Schedule::parse(s)?;
+                crate::cron::Schedule::parse(s, self.timezone.as_deref())?;
                 if self.timeout_s.is_some_and(|t| !(1..=86_400).contains(&t)) {
                     return bad("timeout_s is 1–86400");
                 }
@@ -593,11 +692,17 @@ impl Run {
             }
             RunType::Worker => {
                 self.schedule = None;
+                self.timezone = None;
                 self.min_instances = self.min_instances.max(1);
                 self.max_instances = self.max_instances.max(self.min_instances);
             }
             RunType::Web => {
                 self.schedule = None;
+                self.timezone = None;
+                // A request's time to its answer (Cloud Run's request timeout, at most an hour).
+                if self.timeout_s.is_some_and(|t| !(1..=3600).contains(&t)) {
+                    return bad("timeout_s is 1–3600 for a web service (the time a request has to its answer)");
+                }
             }
         }
         Ok(self)
@@ -706,6 +811,8 @@ pub struct Environment {
     pub instances: Vec<Instance>,
     pub domains: Vec<Domain>,
     pub port: Option<u16>,
+    /// A TCP service's address (`host:port`), once it has its port.
+    pub tcp: Option<String>,
     pub needs_deploy: bool,
     /// Visitors need the environment's access token (`PUT … {access: {token}}`).
     pub private: bool,
@@ -728,6 +835,15 @@ pub struct Environment {
     /// In maintenance (Render's maintenance mode): its public names answer a 503 page with the
     /// message, and nothing wakes. Null: serving.
     pub maintenance: Option<Maintenance>,
+    /// Its own pages for what roll would otherwise answer (Heroku's error and maintenance pages).
+    #[serde(skip_serializing_if = "Pages::is_empty")]
+    pub pages: Pages,
+    /// Only these addresses get in through its public names (empty: anyone).
+    pub allow_ips: Vec<IpRule>,
+    /// Each client's requests a minute through its public names (null: no limit).
+    pub rate_limit: Option<RateLimit>,
+    /// Its firewall rules, in order ([]: none).
+    pub firewall: Vec<FirewallRule>,
     /// A worker that follows its work: the backlog it last read (null before the first read)
     /// and the instances that wants.
     pub scaling: Option<Scaling>,
@@ -736,6 +852,136 @@ pub struct Environment {
     /// The push waiting for its checks, if one is.
     pub waiting_for_ci: Option<String>,
     pub created_at: i64,
+}
+
+/// An address range let into a public service (Render's IP allow list).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IpRule {
+    /// A network (`203.0.113.0/24`, `2001:db8::/32`), kept in its canonical form.
+    pub cidr: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// One firewall rule (Vercel's firewall rules): what it matches, and whether it lets in or
+/// keeps out. Every field given must match; the first rule that does decides.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirewallRule {
+    pub action: FirewallAction,
+    /// A path, or a prefix ending in `*` (`/admin/*`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Methods (`GET`, `POST`…); empty: any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<String>,
+    /// Text the `User-Agent` contains (case aside).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FirewallAction {
+    Allow,
+    Deny,
+}
+
+/// The most rules an environment has.
+pub const MAX_FIREWALL_RULES: usize = 50;
+
+/// A request's path as an app is likely to read it, for matching rules: percent-decoded, `//`
+/// one `/`, and `.`/`..` resolved (so `/%61dmin` and `/x/../admin` are `/admin`).
+pub fn normal_path(raw: &str) -> String {
+    let decoded = percent_encoding::percent_decode_str(raw).decode_utf8_lossy();
+    let mut out: Vec<&str> = Vec::new();
+    // A segment's `;params` (servlet containers read `/admin;x` as `/admin`) don't count.
+    for seg in decoded.split('/').map(|s| s.split(';').next().unwrap_or("")) {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    let mut p = format!("/{}", out.join("/"));
+    if decoded.ends_with('/') && p.len() > 1 {
+        p.push('/');
+    }
+    p
+}
+
+impl FirewallRule {
+    /// Checked as given, and kept in the form it's matched in (methods upper case, the user
+    /// agent lower case).
+    pub fn check(mut self) -> Result<FirewallRule> {
+        let bad = |m: &str| Err(Error::BadRequest(format!("firewall: {m}")));
+        if let Some(p) = &self.path
+            && (!p.starts_with('/') || p.len() > 512 || p.strip_suffix('*').unwrap_or(p).contains('*'))
+        {
+            return bad("a path starts with / (at most 512 characters, `*` only at its end)");
+        }
+        if self.methods.len() > 9 || self.methods.iter().any(|m| m.is_empty() || m.len() > 16 || !m.bytes().all(|b| b.is_ascii_alphabetic())) {
+            return bad("methods are HTTP methods (GET, POST…)");
+        }
+        self.methods = self.methods.iter().map(|m| m.to_ascii_uppercase()).collect();
+        if let Some(ua) = &self.user_agent {
+            if ua.trim().is_empty() || ua.len() > 200 {
+                return bad("user_agent is 1–200 characters");
+            }
+            self.user_agent = Some(ua.trim().to_ascii_lowercase());
+        }
+        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() {
+            return bad("a rule matches on a path, methods or a user agent");
+        }
+        Ok(self)
+    }
+
+    /// `path` as [`normal_path`] gives it. Paths compare in any case and without a trailing
+    /// slash (`/admin/*` takes `/admin` too); HEAD is a GET.
+    pub fn matches(&self, method: &str, path: &str, user_agent: &str) -> bool {
+        let trim = |p: &str| if p.len() > 1 { p.trim_end_matches('/').to_ascii_lowercase() } else { p.to_ascii_lowercase() };
+        let path = trim(path);
+        let path_ok = self.path.as_deref().is_none_or(|p| match p.strip_suffix('*') {
+            Some(prefix) => {
+                let prefix = prefix.to_ascii_lowercase();
+                path.starts_with(&prefix) || path == trim(&prefix)
+            }
+            None => path == trim(p),
+        });
+        let method = if method.eq_ignore_ascii_case("HEAD") { "GET" } else { method };
+        let method_ok = self.methods.is_empty() || self.methods.iter().any(|m| m.eq_ignore_ascii_case(method));
+        let ua_ok = self.user_agent.as_deref().is_none_or(|u| user_agent.to_ascii_lowercase().contains(u));
+        path_ok && method_ok && ua_ok
+    }
+}
+
+/// Requests a minute each client may make through an environment's public names, with a burst
+/// over that rate (a token bucket): Vercel's firewall rate limits.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimit {
+    pub per_minute: u32,
+    /// How many may come at once (default: a minute's worth).
+    #[serde(default)]
+    pub burst: Option<u32>,
+}
+
+impl RateLimit {
+    pub fn check(&self) -> Result<()> {
+        if !(1..=100_000).contains(&self.per_minute) {
+            return Err(Error::BadRequest("rate_limit.per_minute is 1–100000".into()));
+        }
+        if self.burst.is_some_and(|b| !(1..=100_000).contains(&b)) {
+            return Err(Error::BadRequest("rate_limit.burst is 1–100000".into()));
+        }
+        Ok(())
+    }
+
+    pub fn burst(&self) -> u32 {
+        self.burst.unwrap_or(self.per_minute)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1020,6 +1266,32 @@ pub fn check_hostname(h: &str, reserved: &[&str]) -> Result<String> {
     Ok(h)
 }
 
+/// One allow-list entry as given: a network or bare address (a string, or `{cidr,
+/// description?}`), kept canonical (`10.1.2.3/8` is `10.0.0.0/8`).
+pub fn ip_rule(v: &serde_json::Value) -> Result<IpRule> {
+    let (cidr, description) = match v {
+        serde_json::Value::String(c) => (c.as_str(), None),
+        serde_json::Value::Object(o) => {
+            if let Some(k) = o.keys().find(|k| !["cidr", "description"].contains(&k.as_str())) {
+                return Err(Error::BadRequest(format!("allow_ips: {k} isn't a field")));
+            }
+            let d = match o.get("description") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(d)) if d.chars().count() <= 200 => Some(d.trim().to_string()).filter(|d| !d.is_empty()),
+                Some(_) => return Err(Error::BadRequest("allow_ips: a description is at most 200 characters".into())),
+            };
+            (o.get("cidr").and_then(serde_json::Value::as_str).unwrap_or(""), d)
+        }
+        _ => return Err(Error::BadRequest("allow_ips holds networks".into())),
+    };
+    let c = cidr.trim();
+    let net = c
+        .parse::<ipnet::IpNet>()
+        .or_else(|_| c.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
+        .map_err(|_| Error::BadRequest(format!("allow_ips: {c:?} isn't a network (a.b.c.d/n, an IPv6 /n, or an address)")))?;
+    Ok(IpRule { cidr: net.trunc().to_string(), description })
+}
+
 /// Where a custom domain's TXT challenge goes: `_roll-challenge.<host>`, a wildcard's on the
 /// name under it (DNS providers rarely take a `*` mid-name; a TXT name holds several values).
 pub fn challenge_name(host: &str) -> String {
@@ -1086,7 +1358,37 @@ pub struct VarView {
     pub name: String,
     pub masked: String,
     pub source: &'static str,
+    /// A reference variable's template (`${{ api.KEY }}`): names, never a value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// Set and run with, never shown again: not by `…/variables/values`, nor its length here.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sealed: bool,
 }
+
+/// An environment's own HTML for roll's pages (Heroku's `ERROR_PAGE_URL` and
+/// `MAINTENANCE_PAGE_URL`, stored rather than fetched): `error` for the 502, 503 and 504 a
+/// visitor gets while the app can't answer or wake, `maintenance` while it's in maintenance.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Pages {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<String>,
+}
+
+/// The most a page may weigh.
+pub const PAGE_MAX: usize = 64 << 10;
+
+impl Pages {
+    pub fn is_empty(&self) -> bool {
+        self.error.is_none() && self.maintenance.is_none()
+    }
+}
+
+/// What a sealed value shows, whatever it is.
+pub const SEALED_MASK: &str = "••••••••";
 
 /// A value as the masked list shows it: dots, between 4 and 12 of them, so its length barely
 /// shows either.
@@ -1135,6 +1437,8 @@ pub struct Job {
     pub id: String,
     pub deployment: String,
     pub command: String,
+    /// Containers it runs, each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT` (Cloud Run Jobs').
+    pub tasks: u32,
     pub status: RunStatus,
     pub exit_code: Option<i32>,
     pub started_at: i64,

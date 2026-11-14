@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deployChange, parseEnv, stepDurations, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
+import { deployChange, describePending, formatFirewall, parseEnv, parseFirewall, stepDurations, toEnv, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
 import { service } from "./workspace-resources";
 
 const svc = (env: Partial<EnvironmentSummary>, id = "svc_a"): Service => ({
@@ -58,6 +58,14 @@ describe("pasted .env text", () => {
     expect(vars).toEqual({ DATABASE_URL: "postgres://x?a=b", NAME: 'a "b"\nc', RAW: "$HOME" });
     expect(errors).toEqual([6, 7]);
   });
+
+  it("writes variables as text that reads back exactly (the raw editor)", () => {
+    const vars = { URL: "postgres://u:p@h:5432/db?ssl=true", SPACED: " a b ", QUOTE: `it's "x"`, PEM: "-----BEGIN-----\nabc\\n\t\r\n-----END-----", EMPTY: "", HASH: "a #b", DOLLAR: "$HOME" };
+    expect(parseEnv(toEnv(vars))).toEqual({ vars, errors: [] });
+    expect(toEnv({ A: "plain", B: "two words" })).toBe("A=plain\nB='two words'\n");
+    const odd = parseEnv("__proto__=x\ntoString=y\n").vars;
+    expect([Object.keys(odd), odd.__proto__, Object.hasOwn(odd, "constructor")]).toEqual([["__proto__", "toString"], "x", false]);
+  });
 });
 
 describe("a deployment's steps", () => {
@@ -72,3 +80,25 @@ describe("a deployment's steps", () => {
     expect(stepDurations({ created_at: 0, steps: [{ step: "build", at: 10 }] }, 110).at(-1)).toEqual({ label: "Build", ms: 100 });
   });
 });
+
+describe("firewall rules as typed", () => {
+  it("read one a line and come back the same", () => {
+    const text = "allow /admin/health\ndeny /admin/*\ndeny method=DELETE,PUT\n# a note\ndeny ua=Bad Bot/2";
+    const rules = parseFirewall(text);
+    expect(rules).toEqual([
+      { action: "allow", path: "/admin/health" },
+      { action: "deny", path: "/admin/*" },
+      { action: "deny", methods: ["DELETE", "PUT"] },
+      { action: "deny", user_agent: "Bad Bot/2" },
+    ]);
+    expect(formatFirewall(rules)).toBe(text.replace("# a note\n", ""));
+  });
+});
+
+describe("pending changes", () => {
+  it("name what the next deploy does", () => {
+    expect(describePending({ variables: { added: ["ADDED"], removed: ["GONE"], changed: ["MODE"] }, run: ["memory_mb"] })).toBe("MODE changed, ADDED added, GONE removed, memory mb set");
+    expect(describePending({ variables: null, run: [] })).toBeNull();
+  });
+});
+

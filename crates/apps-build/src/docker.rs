@@ -49,6 +49,7 @@ pub(crate) fn plan(tree: &dyn Tree, o: &Overrides) -> Result<Plan, Error> {
         notes,
         spa: false,
         uses: Vec::new(),
+        release: None,
     })
 }
 

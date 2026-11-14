@@ -12,7 +12,7 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
 use code_sql::{Db, OptionalExtension, params};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS services (
@@ -153,6 +153,9 @@ CREATE TABLE IF NOT EXISTS apps_sites (
     size INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS deploy_no_traffic (
+    deployment TEXT PRIMARY KEY
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS deploy_no_cache (
     deployment TEXT PRIMARY KEY
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS deploy_steps (
@@ -332,9 +335,25 @@ pub struct EnvRow {
     /// In maintenance: its public names answer roll's page with this message (empty: the
     /// default one) and nothing wakes.
     pub maintenance: Option<String>,
+    /// Its own error and maintenance pages.
+    pub pages: crate::model::Pages,
+    /// Only these networks get in through its public names (empty: anyone).
+    pub allow_ips: Vec<crate::model::IpRule>,
+    pub rate_limit: Option<crate::model::RateLimit>,
+    /// A TCP service's port here (`run.tcp`), from the node's TCP range.
+    pub tcp_port: Option<u16>,
+    pub firewall: Vec<crate::model::FirewallRule>,
 }
 
 /// A link: its kind, resource, variables' prefix, and the credentials it made for itself.
+/// An environment's own variables as a deployment went live with them, and which were sealed.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Snapshot {
+    pub vars: BTreeMap<String, String>,
+    #[serde(default)]
+    pub sealed: BTreeSet<String>,
+}
+
 pub type LinkRow = (LinkKind, String, String, Option<crate::integrations::Minted>);
 
 #[derive(Clone, Debug, PartialEq)]
@@ -365,6 +384,9 @@ pub struct NewDeployment {
     /// Stops when it's healthy, never switched to: neither supersedes a queued deploy nor is
     /// superseded by one.
     pub no_traffic: bool,
+    /// Builds from scratch: no cached layer, base images pulled again, a new namespace for the
+    /// service's cache mounts ([`Store::build_cache`]).
+    pub no_cache: bool,
 }
 
 /// One minute of one environment's metrics.
@@ -420,7 +442,7 @@ pub struct Store {
 }
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages";
 const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor";
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> code_sql::Result<T> {
@@ -475,6 +497,11 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         tag_seen: r.get(12)?,
         feedback: r.get::<_, i64>(13)? != 0,
         maintenance: r.get(14)?,
+        allow_ips: r.get::<_, Option<String>>(15)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+        rate_limit: r.get::<_, Option<String>>(16)?.and_then(|j| serde_json::from_str(&j).ok()),
+        tcp_port: r.get::<_, Option<i64>>(17)?.map(|p| p as u16),
+        firewall: r.get::<_, Option<String>>(18)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+        pages: r.get::<_, Option<String>>(19)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
     })
 }
 
@@ -546,9 +573,17 @@ impl Store {
         db.add_column("environments", "hook_hash", "TEXT")?;
         db.add_column("environments", "follow_tag", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "tag_seen", "TEXT")?;
+        db.add_column("variables", "write_only", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("services", "build_cache", "TEXT")?;
+        db.add_column("environments", "pages", "TEXT")?;
         db.add_column("environments", "feedback", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("links", "minted", "TEXT")?;
         db.add_column("environments", "maintenance", "TEXT")?;
+        db.add_column("environments", "allow_ips", "TEXT")?;
+        db.add_column("environments", "rate_limit", "TEXT")?;
+        db.add_column("jobs", "tasks", "INTEGER NOT NULL DEFAULT 1")?;
+        db.add_column("environments", "tcp_port", "INTEGER")?;
+        db.add_column("environments", "firewall", "TEXT")?;
         db.add_column("domains", "redirect_to", "TEXT")?;
         Ok(Store { db, sealer })
     }
@@ -637,6 +672,27 @@ impl Store {
         Ok(self.db.query(&format!("SELECT {ENV_COLS} FROM environments WHERE service = ? ORDER BY created_at, name"), [service], env_row)?)
     }
 
+    /// An environment's TCP port: the one it has, else the next free in `range` after the last
+    /// one given (a cursor that goes round, so a port just freed isn't handed to the next
+    /// environment, another tenant's, while old clients still dial it). None: all taken.
+    pub fn assign_tcp_port(&self, service: &str, env: &str, range: (u16, u16)) -> Result<Option<u16>> {
+        self.db.write(|c| {
+            let had: Option<i64> = c.query_row("SELECT tcp_port FROM environments WHERE service = ? AND name = ?", [service, env], |r| r.get(0)).optional()?.flatten();
+            if let Some(p) = had {
+                return Ok(Some(p as u16));
+            }
+            let used: std::collections::HashSet<i64> = c.query("SELECT tcp_port FROM environments WHERE tcp_port IS NOT NULL", (), |r| r.get(0))?.into_iter().collect();
+            let last: Option<i64> = c.query_row("SELECT value FROM state WHERE key = 'apps.tcp.last'", (), |r| r.get::<_, String>(0)).optional()?.and_then(|v| v.parse().ok());
+            let (lo, hi) = (range.0 as i64, range.1 as i64);
+            let start = last.filter(|l| (lo..=hi).contains(l)).map_or(lo, |l| l + 1);
+            let span = hi - lo + 1;
+            let Some(p) = (0..span).map(|i| lo + (start - lo + i).rem_euclid(span)).find(|p| !used.contains(p)) else { return Ok(None) };
+            c.execute("UPDATE environments SET tcp_port = ? WHERE service = ? AND name = ?", params![p, service, env])?;
+            c.execute("INSERT INTO state (key, value) VALUES ('apps.tcp.last', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", [p.to_string()])?;
+            Ok(Some(p as u16))
+        })
+    }
+
     pub fn all_environments(&self) -> Result<Vec<EnvRow>> {
         Ok(self.db.query(&format!("SELECT {ENV_COLS} FROM environments ORDER BY created_at"), (), env_row)?)
     }
@@ -689,7 +745,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -1008,6 +1064,9 @@ impl Store {
             if d.no_traffic {
                 c.execute("INSERT INTO deploy_no_traffic (deployment) VALUES (?)", [&id])?;
             }
+            if d.no_cache {
+                c.execute("INSERT INTO deploy_no_cache (deployment) VALUES (?)", [&id])?;
+            }
             Ok(c.query_row(&format!("SELECT {DEPLOY_COLS} FROM deployments WHERE id = ?"), [&id], deploy_row)?)
         })
     }
@@ -1089,6 +1148,39 @@ impl Store {
         Ok(self.db.query_row("SELECT size FROM apps_sites WHERE key = ?", [key], |r| r.get::<_, i64>(0)).optional()?.map(|n| n as u64))
     }
 
+    /// Whether a newer push than `own` (made at `after`, unix ms) waits in the environment's
+    /// queue: by landing when both came from one (a push's CI can pass after a later push's),
+    /// else by when it was made. A try-out with no traffic doesn't count.
+    pub fn newer_push_queued(&self, service: &str, env: &str, own: &str, after: i64) -> Result<bool> {
+        let landing = |k: Option<&str>| k.and_then(|k| k.strip_prefix("landing:")).and_then(|n| n.parse::<i64>().ok());
+        let own_key: Option<String> = self.db.query_row("SELECT key FROM deploy_keys WHERE deployment = ?", [own], |r| r.get(0)).optional()?;
+        let queued: Vec<(i64, Option<String>)> = self.db.query(
+            "SELECT d.created_at, k.key FROM deployments d LEFT JOIN deploy_keys k ON k.deployment = d.id WHERE d.service = ? AND d.env = ? AND d.status = 'queued' AND d.cause = 'push' AND d.id NOT IN (SELECT deployment FROM deploy_no_traffic)",
+            params![service, env],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(queued.iter().any(|(at, key)| match (landing(own_key.as_deref()), landing(key.as_deref())) {
+            (Some(mine), Some(theirs)) => theirs > mine,
+            _ => *at > after,
+        }))
+    }
+
+    pub fn no_cache(&self, id: &str) -> Result<bool> {
+        Ok(self.db.query_row("SELECT 1 FROM deploy_no_cache WHERE deployment = ?", [id], |_| Ok(())).optional()?.is_some())
+    }
+
+    /// The namespace of the service's BuildKit cache mounts (`apps_build::isolate_caches`): a
+    /// secret, made on its first build; `fresh` makes a new one (an empty cache from then on).
+    pub fn build_cache(&self, service: &str, fresh: bool) -> Result<String> {
+        let new = crate::model::random(16);
+        self.db.write(|c| {
+            let sql = if fresh { "UPDATE services SET build_cache = ? WHERE id = ?" } else { "UPDATE services SET build_cache = ? WHERE id = ? AND build_cache IS NULL" };
+            c.execute(sql, [&new, service])?;
+            c.query_row("SELECT build_cache FROM services WHERE id = ?", [service], |r| r.get::<_, Option<String>>(0))
+        })?
+        .ok_or_else(|| Error::NotFound(format!("no service {service}")))
+    }
+
     pub fn no_traffic(&self, id: &str) -> Result<bool> {
         Ok(self.db.query_row("SELECT 1 FROM deploy_no_traffic WHERE deployment = ?", [id], |_| Ok(())).optional()?.is_some())
     }
@@ -1133,15 +1225,21 @@ impl Store {
         format!("{service}/{env}/{name}")
     }
 
-    /// `env`'s own variables as `deployment` went live with them, sealed under it (what a
-    /// rollback to it restores; stored by [`Store::switch_active`]).
-    pub fn seal_snapshot(&self, deployment: &str, vars: &BTreeMap<String, String>) -> String {
-        self.sealer.seal(&format!("snapshot:{deployment}"), &serde_json::to_string(vars).expect("JSON"))
+    /// `env`'s own variables as `deployment` went live with them, and which were sealed, sealed
+    /// under it (what a rollback to it restores; stored by [`Store::switch_active`]).
+    pub fn seal_snapshot(&self, deployment: &str, service: &str, env: &str) -> Result<String> {
+        let snap = Snapshot { vars: self.variables(service, env)?, sealed: self.sealed_variables(service, env)? };
+        Ok(self.sealer.seal(&format!("snapshot:{deployment}"), &serde_json::to_string(&snap).expect("JSON")))
     }
 
-    pub fn snapshot(&self, deployment: &str) -> Result<Option<BTreeMap<String, String>>> {
+    pub fn snapshot(&self, deployment: &str) -> Result<Option<Snapshot>> {
         let row: Option<String> = self.db.query_row("SELECT sealed FROM deploy_vars WHERE deployment = ?", [deployment], |r| r.get(0)).optional()?;
-        row.map(|s| Ok(serde_json::from_str(&self.sealer.open(&format!("snapshot:{deployment}"), &s)?).unwrap_or_default())).transpose()
+        row.map(|s| {
+            let json = self.sealer.open(&format!("snapshot:{deployment}"), &s)?;
+            // Before sealed variables, a snapshot was the map alone.
+            Ok(serde_json::from_str(&json).or_else(|_| serde_json::from_str(&json).map(|vars| Snapshot { vars, sealed: Default::default() })).unwrap_or_default())
+        })
+        .transpose()
     }
 
     pub fn variables(&self, service: &str, env: &str) -> Result<BTreeMap<String, String>> {
@@ -1150,15 +1248,27 @@ impl Store {
         rows.into_iter().map(|(n, s)| Ok((n.clone(), self.sealer.open(&Self::aad(service, env, &n), &s)?))).collect()
     }
 
-    pub fn change_variables(&self, service: &str, env: &str, set: &BTreeMap<String, String>, unset: &[String]) -> Result<()> {
+    /// The names of `env`'s sealed variables: set and run with, never shown again.
+    pub fn sealed_variables(&self, service: &str, env: &str) -> Result<BTreeSet<String>> {
+        Ok(self.db.query("SELECT name FROM variables WHERE service = ? AND env = ? AND write_only = 1", [service, env], |r| r.get(0))?.into_iter().collect())
+    }
+
+    /// Set, then unset, then seal (`seal`: names set here or kept). A sealed variable a new
+    /// value replaces stays sealed: nothing unseals one.
+    pub fn change_variables(&self, service: &str, env: &str, set: &BTreeMap<String, String>, unset: &[String], seal: &BTreeSet<String>) -> Result<()> {
         let sealed: Vec<(String, String)> = set.iter().map(|(k, v)| (k.clone(), self.sealer.seal(&Self::aad(service, env, k), v))).collect();
         self.db.write(|c| {
             for n in unset {
                 c.execute("DELETE FROM variables WHERE service = ? AND env = ? AND name = ?", [service, env, n])?;
             }
             for (n, s) in &sealed {
-                c.execute("DELETE FROM variables WHERE service = ? AND env = ? AND name = ?", [service, env, n])?;
-                c.execute("INSERT INTO variables (service, env, name, sealed) VALUES (?, ?, ?, ?)", [service, env, n, s])?;
+                c.execute(
+                    "INSERT INTO variables (service, env, name, sealed) VALUES (?, ?, ?, ?) ON CONFLICT (service, env, name) DO UPDATE SET sealed = excluded.sealed",
+                    [service, env, n, s],
+                )?;
+            }
+            for n in seal {
+                c.execute("UPDATE variables SET write_only = 1 WHERE service = ? AND env = ? AND name = ?", [service, env, n])?;
             }
             Ok(())
         })
@@ -1182,12 +1292,17 @@ impl Store {
             .collect()
     }
 
-    pub fn put_link(&self, service: &str, kind: LinkKind, r#ref: &str, prefix: &str, minted: Option<&crate::integrations::Minted>) -> Result<()> {
+    /// Make or update a link. A credential the link already has stays (two requests making it
+    /// at once both minted one; the first stored wins): whether `minted` is the one it keeps.
+    pub fn put_link(&self, service: &str, kind: LinkKind, r#ref: &str, prefix: &str, minted: Option<&crate::integrations::Minted>) -> Result<bool> {
         let sealed = minted.map(|m| self.sealer.seal(&format!("link:{service}:{}:{ref}", kind.as_str()), &serde_json::to_string(m).expect("JSON")));
         self.db.write(|c| {
-            c.execute("DELETE FROM links WHERE service = ? AND kind = ? AND ref = ?", [service, kind.as_str(), r#ref])?;
-            c.execute("INSERT INTO links (service, kind, ref, prefix, minted) VALUES (?, ?, ?, ?, ?)", params![service, kind.as_str(), r#ref, prefix, sealed])?;
-            Ok(())
+            c.execute(
+                "INSERT INTO links (service, kind, ref, prefix, minted) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service, kind, ref) DO UPDATE SET prefix = excluded.prefix, minted = COALESCE(links.minted, excluded.minted)",
+                params![service, kind.as_str(), r#ref, prefix, sealed],
+            )?;
+            let kept: Option<String> = c.query_row("SELECT minted FROM links WHERE service = ? AND kind = ? AND ref = ?", [service, kind.as_str(), r#ref], |r| r.get(0))?;
+            Ok(sealed.is_none() || kept == sealed)
         })
     }
 
@@ -1409,14 +1524,14 @@ impl Store {
 
     // ── jobs ──
 
-    pub fn add_job(&self, service: &str, env: &str, deployment: &str, command: &str) -> Result<Job> {
+    pub fn add_job(&self, service: &str, env: &str, deployment: &str, command: &str, tasks: u32) -> Result<Job> {
         let id = new_id("job");
         let now = self.now()?;
         self.db.execute(
-            "INSERT INTO jobs (id, service, env, deployment, command, status, exit_code, started_at, finished_at) VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, NULL)",
-            params![id, service, env, deployment, command, now],
+            "INSERT INTO jobs (id, service, env, deployment, command, status, exit_code, started_at, finished_at, tasks) VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, NULL, ?)",
+            params![id, service, env, deployment, command, now, tasks as i64],
         )?;
-        Ok(Job { id, deployment: deployment.into(), command: command.into(), status: RunStatus::Running, exit_code: None, started_at: now, finished_at: None })
+        Ok(Job { id, deployment: deployment.into(), command: command.into(), tasks, status: RunStatus::Running, exit_code: None, started_at: now, finished_at: None })
     }
 
     pub fn finish_job(&self, id: &str, status: RunStatus, exit_code: Option<i32>) -> Result<()> {
@@ -1536,6 +1651,41 @@ impl Store {
         // Turned on or off, it starts again from what the tag points at then.
         self.db.execute("UPDATE environments SET follow_tag = ?, tag_seen = NULL WHERE service = ? AND name = ?", params![on as i64, service, env])?;
         Ok(())
+    }
+
+    pub fn set_firewall(&self, service: &str, env: &str, rules: &[crate::model::FirewallRule]) -> Result<()> {
+        let j = (!rules.is_empty()).then(|| serde_json::to_string(rules).expect("JSON"));
+        self.db.execute("UPDATE environments SET firewall = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_rate_limit(&self, service: &str, env: &str, limit: Option<&crate::model::RateLimit>) -> Result<()> {
+        let j = limit.map(|l| serde_json::to_string(l).expect("JSON"));
+        self.db.execute("UPDATE environments SET rate_limit = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_allow_ips(&self, service: &str, env: &str, rules: &[crate::model::IpRule]) -> Result<()> {
+        let j = (!rules.is_empty()).then(|| serde_json::to_string(rules).expect("JSON"));
+        self.db.execute("UPDATE environments SET allow_ips = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
+    /// Change the environment's pages in one write (`set`: a page's HTML, or None for roll's).
+    pub fn patch_pages(&self, service: &str, env: &str, set: &[(String, Option<String>)]) -> Result<()> {
+        self.db.write(|c| {
+            let j: Option<String> = c.query_row("SELECT pages FROM environments WHERE service = ? AND name = ?", [service, env], |r| r.get(0))?;
+            let mut pages: crate::model::Pages = j.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
+            for (k, v) in set {
+                match k.as_str() {
+                    "error" => pages.error = v.clone(),
+                    _ => pages.maintenance = v.clone(),
+                }
+            }
+            let j = (!pages.is_empty()).then(|| serde_json::to_string(&pages).expect("JSON"));
+            c.execute("UPDATE environments SET pages = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+            Ok(())
+        })
     }
 
     pub fn set_maintenance(&self, service: &str, env: &str, message: Option<&str>) -> Result<()> {
@@ -1727,7 +1877,7 @@ fn target_row(r: &code_sql::Row<'_>) -> code_sql::Result<NotifyTarget> {
     Ok(NotifyTarget { id: r.get(0)?, project: r.get(1)?, kind: r.get(2)?, host: r.get(3)?, events: serde_json::from_str(&events).unwrap_or_default(), created_at: r.get(5)? })
 }
 
-const JOB_COLS: &str = "id, deployment, command, status, exit_code, started_at, finished_at";
+const JOB_COLS: &str = "id, deployment, command, status, exit_code, started_at, finished_at, tasks";
 
 fn job_row(r: &code_sql::Row<'_>) -> code_sql::Result<Job> {
     Ok(Job {
@@ -1738,6 +1888,7 @@ fn job_row(r: &code_sql::Row<'_>) -> code_sql::Result<Job> {
         exit_code: r.get::<_, Option<i64>>(4)?.map(|c| c as i32),
         started_at: r.get(5)?,
         finished_at: r.get(6)?,
+        tasks: r.get::<_, i64>(7)? as u32,
     })
 }
 

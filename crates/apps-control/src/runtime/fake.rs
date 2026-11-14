@@ -56,16 +56,21 @@ pub struct Fake {
     pub counts: Counts,
     /// Who the last pull logged in as (a private registry).
     pub pulled_as: Mutex<Option<String>>,
+    /// Each build's `no_cache` and its Dockerfile, in order.
+    pub built: Mutex<Vec<(bool, String)>>,
     /// Instances that answer 500 from now on (a running app that broke: [`Fake::sicken`]).
     sick: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Instances the kernel killed for their memory ([`Fake::oom`]).
     oom: Mutex<std::collections::HashSet<String>>,
+    /// Instances busy at this share of their CPU ([`Fake::set_busy`]), from when it was set.
+    busy: Mutex<HashMap<String, (f64, std::time::Instant)>>,
     /// Volumes' contents (what a backup reads and a restore writes).
     volumes: Mutex<HashMap<String, Vec<u8>>>,
     /// What a tag points at in its registry ([`Fake::move_tag`]); zeros when unset.
     tags: Mutex<HashMap<String, String>>,
-    /// Who's at an instance's port without rolld ([`Fake::set_callers`]).
-    callers: Mutex<HashMap<String, super::Callers>>,
+    /// Connections each instance's network accepted, and how many are open from other services
+    /// ([`Fake::connect`], [`Fake::set_private`]).
+    accepted: Mutex<HashMap<String, (u64, u32)>>,
 }
 
 impl Fake {
@@ -73,9 +78,20 @@ impl Fake {
         Arc::new(Fake::default())
     }
 
-    /// The project's other services at `name`'s port (what Docker reads from its sandbox).
-    pub fn set_callers(&self, name: &str, c: super::Callers) {
-        self.callers.lock().insert(name.to_string(), c);
+    /// `name` uses `share` of its CPU from now on (its usage's CPU time grows at that rate).
+    pub fn set_busy(&self, name: &str, share: f64) {
+        self.busy.lock().insert(name.to_string(), (share, std::time::Instant::now()));
+    }
+
+    /// Another service connects to `name`'s port while it sleeps (what Docker counts in its
+    /// sandbox).
+    pub fn connect(&self, name: &str) {
+        self.accepted.lock().entry(name.to_string()).or_default().0 += 1;
+    }
+
+    /// `n` connections from other services are open to `name` now.
+    pub fn set_private(&self, name: &str, n: u32) {
+        self.accepted.lock().entry(name.to_string()).or_default().1 = n;
     }
 
     pub fn state(&self, name: &str) -> Option<FakeState> {
@@ -117,6 +133,14 @@ impl Fake {
     pub fn oom(&self, name: &str) {
         self.oom.lock().insert(name.to_string());
         self.crash(name);
+    }
+
+    /// The process ends by itself with `code` (0: done with its work).
+    pub fn exit(&self, name: &str, code: i32) {
+        self.crash(name);
+        if let Some(i) = self.instances.lock().get_mut(name) {
+            i.exited.send_replace(Some(code));
+        }
     }
 
     /// The process dies on its own (killed, out of memory): its port stops answering.
@@ -200,8 +224,12 @@ impl Runtime for Fake {
         "fake"
     }
 
-    async fn callers(&self, name: &str) -> Option<super::Callers> {
-        self.callers.lock().get(name).copied()
+    async fn take_callers(&self, name: &str) -> bool {
+        self.accepted.lock().get_mut(name).is_some_and(|a| std::mem::take(&mut a.0) > 0)
+    }
+
+    async fn private_peers(&self, name: &str) -> Option<u32> {
+        Some(self.accepted.lock().get(name).map_or(0, |a| a.1))
     }
 
     fn can_suspend(&self) -> bool {
@@ -229,6 +257,9 @@ impl Runtime for Fake {
 
     async fn start(&self, name: &str, log: LogSink) -> anyhow::Result<Option<SocketAddr>> {
         self.counts.starts.fetch_add(1, Ordering::SeqCst);
+        if let Some(a) = self.accepted.lock().get_mut(name) {
+            a.0 = 0;
+        }
         let spec = {
             let m = self.instances.lock();
             let i = m.get(name).ok_or_else(|| anyhow::anyhow!("no instance {name}"))?;
@@ -237,7 +268,11 @@ impl Runtime for Fake {
         // A job: `FAKE_EXIT`, or a command `exit <code>` (a pre-deploy command, a cron run).
         let exit = spec.command.as_deref().and_then(|c| c.strip_prefix("exit ")).and_then(|c| c.trim().parse::<i32>().ok());
         if let Some(code) = exit.or_else(|| var(&spec, "FAKE_EXIT").and_then(|c| c.parse::<i32>().ok())) {
-            log.line("job ran");
+            // A job's task says which it is.
+            log.line(match var(&spec, "ROLL_TASK_INDEX") {
+                Some(i) => format!("job ran as task {i} of {}", var(&spec, "ROLL_TASK_COUNT").unwrap_or("?")),
+                None => "job ran".to_string(),
+            });
             let mut m = self.instances.lock();
             let i = m.get_mut(name).expect("exists");
             i.state = FakeState::Stopped;
@@ -270,6 +305,9 @@ impl Runtime for Fake {
         if let Some(i) = self.instances.lock().get_mut(name) {
             i.state = FakeState::Paused;
         }
+        if let Some(a) = self.accepted.lock().get_mut(name) {
+            a.0 = 0;
+        }
         Ok(())
     }
 
@@ -283,6 +321,9 @@ impl Runtime for Fake {
 
     async fn stop(&self, name: &str, _grace: Duration) -> anyhow::Result<()> {
         self.counts.stops.fetch_add(1, Ordering::SeqCst);
+        if let Some(a) = self.accepted.lock().get_mut(name) {
+            a.0 = 0;
+        }
         if let Some(i) = self.instances.lock().get_mut(name) {
             if let Some(s) = i.server.take() {
                 s.abort();
@@ -317,9 +358,24 @@ impl Runtime for Fake {
     }
 
     /// A static site: an index, a script, and a symlink that must never be served.
-    async fn export_files(&self, _image: &str, _dir: &str) -> anyhow::Result<super::VolumeStream> {
+    async fn export_files(&self, image: &str, _dir: &str) -> anyhow::Result<super::VolumeStream> {
         let mut b = tar::Builder::new(Vec::new());
-        for (name, body) in [("./index.html", &b"<!doctype html><title>fake site</title>"[..]), ("./assets/app.js", b"start()"), ("./404.html", b"<h1>not here</h1>")] {
+        let big = "console.log('roll');\n".repeat(200);
+        // A fingerprinted chunk of this build's own, as Vite names them.
+        let h = image.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, c| (h ^ c as u64).wrapping_mul(0x0100_0000_01b3));
+        let chunk = format!("./assets/chunk-{:08x}z9.js", h as u32);
+        let files: [(&str, &[u8]); 9] = [
+            (chunk.as_str(), b"chunk()"),
+            ("./assets/big.js", big.as_bytes()),
+            ("./assets/pre.css", b"body{color:#000}"),
+            ("./assets/pre.css.br", b"BROTLI-BYTES"),
+            ("./index.html", b"<!doctype html><title>fake site</title>"),
+            ("./assets/app.js", b"start()"),
+            ("./404.html", b"<h1>not here</h1>"),
+            ("./_redirects", b"/old /assets/app.js 308\n/app/* /index.html 200\n"),
+            ("./_headers", b"/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n"),
+        ];
+        for (name, body) in files {
             let mut h = tar::Header::new_gnu();
             h.set_size(body.len() as u64);
             h.set_mode(0o644);
@@ -360,7 +416,11 @@ impl Runtime for Fake {
 
     async fn usage(&self, name: &str) -> Option<Usage> {
         match self.state(name)? {
-            FakeState::Running => Some(Usage { cpu_ns: 1_000_000, memory_bytes: 64 << 20 }),
+            FakeState::Running => {
+                let cpu = self.instances.lock().get(name).map_or(0.0, |i| i.spec.cpu);
+                let grown = self.busy.lock().get(name).map_or(0.0, |(share, since)| share * cpu * since.elapsed().as_secs_f64() * 1e9);
+                Some(Usage { cpu_ns: 1_000_000 + grown as u64, memory_bytes: 64 << 20 })
+            }
             _ => None,
         }
     }
@@ -411,20 +471,28 @@ impl Builder for Fake {
         "fake"
     }
 
-    async fn build(&self, job: &BuildJob, log: &LogSink, _cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String> {
+    async fn build(&self, job: &BuildJob, log: &LogSink, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String> {
         self.counts.builds.fetch_add(1, Ordering::SeqCst);
         log.line(format!("#1 building {}", job.tag));
         if let Some(ms) = std::fs::read_to_string(job.context.join("SLOW_BUILD")).ok().and_then(|t| t.trim().parse().ok()) {
-            tokio::time::sleep(Duration::from_millis(ms)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(ms)) => {}
+                _ = cancel.cancelled() => anyhow::bail!("canceled"),
+            }
         }
         if job.context.join("FAIL_BUILD").exists() {
             log.line("#2 ERROR: the build failed on purpose");
             anyhow::bail!("the build failed");
         }
-        anyhow::ensure!(job.context.join(&job.dockerfile).exists(), "no Dockerfile in the context");
+        let dockerfile = std::fs::read_to_string(job.context.join(&job.dockerfile)).map_err(|_| anyhow::anyhow!("no Dockerfile in the context"))?;
+        self.built.lock().push((job.no_cache, dockerfile));
         log.line("#2 DONE");
         Ok(job.tag.clone())
     }
 
     async fn remove_image(&self, _image: &str) {}
+
+    fn shares_caches(&self) -> bool {
+        true
+    }
 }

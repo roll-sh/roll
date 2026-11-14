@@ -36,6 +36,10 @@ pub struct Up {
     /// What the deployment is (shown in the dashboard).
     #[arg(long, short = 'm')]
     pub message: Option<String>,
+    /// Build from scratch: no cached layer, base images pulled again, and the service's
+    /// dependency caches empty from here on.
+    #[arg(long)]
+    pub no_cache: bool,
     /// Every service and database the directory's roll.toml declares (`[apps.<name>]`,
     /// `[databases.<name>]`): made where missing, linked, and deployed. The plan is printed
     /// first.
@@ -60,6 +64,10 @@ pub struct Deploy {
     /// (`<id>--<host>`), and `roll apps rollback <id>` puts it live.
     #[arg(long)]
     pub no_traffic: bool,
+    /// Build from scratch: no cached layer, base images pulled again, and the service's
+    /// dependency caches empty from here on (for a build a stale cache keeps breaking).
+    #[arg(long)]
+    pub no_cache: bool,
     #[arg(long, short = 'd')]
     pub detach: bool,
 }
@@ -165,9 +173,12 @@ pub enum AppsCmd {
         /// The port the app listens on.
         #[arg(long)]
         port: Option<u16>,
-        /// A cron service's schedule (five fields, UTC).
+        /// A cron service's schedule (five fields, in `--timezone`, else UTC).
         #[arg(long)]
         schedule: Option<String>,
+        /// The zone a cron schedule's fields are in (IANA: `Europe/Budapest`); `UTC` for UTC.
+        #[arg(long)]
+        timezone: Option<String>,
     },
     /// Change run settings: `roll apps set --min 1 --max 5 --cpu 1 --memory 1024`.
     Set {
@@ -192,6 +203,9 @@ pub enum AppsCmd {
         health: Option<String>,
         #[arg(long)]
         schedule: Option<String>,
+        /// The zone a cron schedule's fields are in (IANA: `Europe/Budapest`).
+        #[arg(long)]
+        timezone: Option<String>,
         /// `web`, `worker` or `cron`.
         #[arg(long = "type", value_name = "TYPE")]
         kind: Option<String>,
@@ -237,6 +251,26 @@ pub enum AppsCmd {
         /// `0` goes back to 30.
         #[arg(long, value_name = "SECONDS")]
         drain: Option<u32>,
+        /// A web service also scales on CPU: another instance while they average over this
+        /// percent for a minute (10–100); `0` turns it off.
+        #[arg(long, value_name = "PERCENT")]
+        cpu_target: Option<u32>,
+        /// A worker that stops: `always` started again, `on_failure`, or `never`.
+        #[arg(long, value_parser = ["always", "on_failure", "never"])]
+        restart: Option<String>,
+        /// With `--restart on_failure`: failures in a row before it's left stopped (default 10).
+        #[arg(long)]
+        restart_tries: Option<u32>,
+        /// A web service keeps each visitor on one instance while it's up (`true`), or not.
+        #[arg(long)]
+        affinity: Option<bool>,
+        /// Its port speaks TCP, not HTTP (`true`): a port of its own per environment.
+        #[arg(long)]
+        tcp: Option<bool>,
+        /// A deployment that crash-loops within ten minutes of going live is replaced by the one
+        /// before it (`true`), or stays (`false`).
+        #[arg(long)]
+        rollback_on_crash: Option<bool>,
     },
     /// Delete a service: its environments, instances, deployments and images (asks first;
     /// `--yes` doesn't).
@@ -250,6 +284,16 @@ pub enum AppsCmd {
     Deploys {
         #[command(flatten)]
         target: Target,
+    },
+    /// Reach the service's port from this machine, a private one too (Fly's `fly proxy`):
+    /// connections to `127.0.0.1:<local port>` go to it through roll, a tunnel each, waking it
+    /// and keeping it up while they're open. Ctrl-C ends it.
+    Proxy {
+        #[command(flatten)]
+        target: Target,
+        /// The port here (default: the service's own).
+        #[arg(long)]
+        local_port: Option<u16>,
     },
     /// A shell in a running instance (a web service asleep is woken and kept up while it's
     /// open); leave with `exit` or Ctrl-D.
@@ -269,6 +313,10 @@ pub enum AppsCmd {
         /// The job's limit, in seconds (default 3600).
         #[arg(long)]
         timeout: Option<u64>,
+        /// Run it in this many containers, each with `ROLL_TASK_INDEX` (0…) and
+        /// `ROLL_TASK_COUNT`; done when all are (1–100, ten at a time).
+        #[arg(long)]
+        tasks: Option<u32>,
         #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
@@ -307,7 +355,12 @@ pub enum AppsCmd {
         /// Names to remove.
         #[arg(long, short = 'u')]
         unset: Vec<String>,
-        /// Print the values.
+        /// Seal these (set here or already set): the app runs with them, and nothing shows them
+        /// again, `--reveal` included. A sealed variable can be replaced or removed, never
+        /// unsealed.
+        #[arg(long, value_name = "NAME")]
+        seal: Vec<String>,
+        /// Print the values (never a sealed one's).
         #[arg(long)]
         reveal: bool,
         /// Set every `KEY=value` line of a `.env` file (`export`, comments and quotes as in a
@@ -483,6 +536,37 @@ pub enum AppsCmd {
         /// End maintenance.
         #[arg(long)]
         serve: bool,
+        /// Only this network gets in through its public URLs (`a.b.c.d/n`, an IPv6 `/n`, an
+        /// address). Repeatable; the list replaces the one it has.
+        #[arg(long = "allow-ip", value_name = "CIDR", conflicts_with = "allow_any")]
+        allow_ip: Vec<String>,
+        /// Anyone gets in again.
+        #[arg(long)]
+        allow_any: bool,
+        /// Each client's requests a minute through its public URLs, `N` or `N:BURST`.
+        #[arg(long, value_name = "N[:BURST]", conflicts_with = "no_rate_limit")]
+        rate_limit: Option<String>,
+        /// No limit per client.
+        #[arg(long)]
+        no_rate_limit: bool,
+        /// A firewall rule, in order (the first match decides): `deny /admin/*`,
+        /// `deny method=DELETE,PUT`, `allow /admin/health`, `deny ua=BadBot`. Repeatable; the
+        /// rules replace the ones it has.
+        #[arg(long = "firewall", value_name = "RULE", conflicts_with = "no_firewall")]
+        firewall: Vec<String>,
+        /// No firewall rules.
+        #[arg(long)]
+        no_firewall: bool,
+        /// Its own page (an HTML file, at most 64 KiB) for the 502, 503 and 504 visitors get
+        /// while the app can't answer or wake (Heroku's error page).
+        #[arg(long, value_name = "HTML_FILE")]
+        error_page: Option<PathBuf>,
+        /// Its own page for while it's in maintenance.
+        #[arg(long, value_name = "HTML_FILE")]
+        maintenance_page: Option<PathBuf>,
+        /// Back to roll's pages.
+        #[arg(long, conflicts_with_all = ["error_page", "maintenance_page"])]
+        roll_pages: bool,
     },
     /// Tear an environment down (asks first; `--yes` doesn't).
     EnvDelete {
@@ -622,6 +706,72 @@ fn secret_env_file(name: &str) -> bool {
         Some(rest) => rest.starts_with('.') && ![".example", ".sample", ".template"].contains(&rest),
         None => false,
     }
+}
+
+/// `…/tunnel` for each connection to `127.0.0.1:local`: its bytes copied both ways.
+async fn proxy(api: &Api, env: &str, what: &str, port: u16, local: u16) -> anyhow::Result<()> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let l = tokio::net::TcpListener::bind(("127.0.0.1", local)).await.map_err(|e| anyhow::anyhow!("127.0.0.1:{local} is taken ({e}): pick another with --local-port"))?;
+    let base = api.base.strip_prefix("http").map(|rest| format!("ws{rest}")).unwrap_or_else(|| api.base.clone());
+    let url = format!("{base}{env}/tunnel");
+    let mut headers: Vec<(String, String)> = api.headers.clone();
+    if let Some(k) = &api.key {
+        headers.push(("authorization".into(), format!("Bearer {k}")));
+    }
+    eprintln!("127.0.0.1:{local} → {what}:{port} (Ctrl-C ends it)");
+    loop {
+        let (conn, _) = tokio::select! {
+            a = l.accept() => a?,
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+        };
+        let mut req = url.as_str().into_client_request()?;
+        for (k, v) in &headers {
+            req.headers_mut().insert(reqwest::header::HeaderName::from_bytes(k.as_bytes())?, v.parse()?);
+        }
+        tokio::spawn(async move {
+            if let Err(e) = carry(req, conn).await {
+                eprintln!("a connection ended: {e:#}");
+            }
+        });
+    }
+}
+
+/// One local connection over one tunnel, until either side closes.
+async fn carry(req: tokio_tungstenite::tungstenite::handshake::client::Request, conn: tokio::net::TcpStream) -> anyhow::Result<()> {
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+    let (ws, _) = tokio_tungstenite::connect_async(req).await.map_err(|e| match e {
+        WsError::Http(r) => anyhow::anyhow!("{}: {}", r.status(), String::from_utf8_lossy(r.body().as_deref().unwrap_or_default())),
+        e => anyhow::anyhow!("{e}"),
+    })?;
+    let (mut tx, mut rx) = ws.split();
+    let (mut rd, mut wr) = conn.into_split();
+    let mut buf = vec![0u8; 64 << 10];
+    // An empty message ends a direction (a half-close); the tunnel ends when both have.
+    let (mut from_local, mut from_service) = (true, true);
+    while from_local || from_service {
+        tokio::select! {
+            n = rd.read(&mut buf), if from_local => match n? {
+                0 => {
+                    tx.send(Message::Binary(Vec::new().into())).await?;
+                    from_local = false;
+                }
+                n => tx.send(Message::Binary(buf[..n].to_vec().into())).await?,
+            },
+            m = rx.next(), if from_service => match m {
+                Some(Ok(Message::Binary(b))) if b.is_empty() => {
+                    wr.shutdown().await?;
+                    from_service = false;
+                }
+                Some(Ok(Message::Binary(b))) => wr.write_all(&b).await?,
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                Some(Ok(_)) => {}
+            },
+        }
+    }
+    let _ = tx.send(Message::Close(None)).await;
+    Ok(())
 }
 
 /// A shell over `…/shell`: the terminal raw, keystrokes and the screen copied both ways, the
@@ -815,12 +965,59 @@ fn parse_env(text: &str) -> (Vec<(String, String)>, Vec<usize>) {
         let v = v.trim();
         let v = match (v.chars().next(), v.len() >= 2) {
             (Some('\''), true) if v.ends_with('\'') => v[1..v.len() - 1].to_string(),
-            (Some('"'), true) if v.ends_with('"') => v[1..v.len() - 1].replace("\\n", "\n").replace("\\\"", "\""),
+            (Some('"'), true) if v.ends_with('"') => unescape(&v[1..v.len() - 1]),
             _ => v.to_string(),
         };
         vars.push((k.to_string(), v));
     }
     (vars, bad)
+}
+
+/// A double-quoted `.env` value's escapes (`\n`, `\r`, `\t`, `\"`, `\\`), as Compose's env files and
+/// the dashboard read them.
+fn unescape(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    let mut it = v.chars();
+    while let Some(c) = it.next() {
+        match (c, it.clone().next()) {
+            ('\\', Some(n @ ('n' | 'r' | 't' | '"' | '\\'))) => {
+                it.next();
+                out.push(match n {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    other => other,
+                });
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// One `KEY=value` line that [`parse_env`] reads back as it is: plain when safe, else quoted.
+fn env_line(k: &str, v: &str) -> String {
+    let safe = v.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-./:@,+=%?&~".contains(&b));
+    if safe {
+        format!("{k}={v}")
+    } else if !v.contains(['\'', '\n', '\r']) {
+        format!("{k}='{v}'")
+    } else {
+        let mut q = String::with_capacity(v.len() + 2);
+        for c in v.chars() {
+            match c {
+                '\n' => q.push_str("\\n"),
+                '\r' => q.push_str("\\r"),
+                '\t' => q.push_str("\\t"),
+                '"' | '\\' => {
+                    q.push('\\');
+                    q.push(c);
+                }
+                c => q.push(c),
+            }
+        }
+        format!("{k}=\"{q}\"")
+    }
 }
 
 /// Print a log's lines (SSE `data:` JSON) until the stream ends.
@@ -941,6 +1138,9 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
     let mut req = api.http.post(format!("{}{}/deploys", api.base, env_path(&svc, &u.target.env))).header("content-type", "application/gzip").body(bundle);
     if let Some(k) = &api.key {
         req = req.bearer_auth(k);
+    }
+    if u.no_cache {
+        req = req.header("x-roll-no-cache", "1");
     }
     // The message: the one given, else the checkout's last commit (said to have local changes
     // when the tree isn't clean), percent-encoded since a subject needn't be ASCII.
@@ -1369,6 +1569,9 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                 if let Some(k) = &api.key {
                     req = req.bearer_auth(k);
                 }
+                if u.no_cache {
+                    req = req.header("x-roll-no-cache", "1");
+                }
                 if let Some(m) = &u.message {
                     req = req.header("x-roll-message", urlencoding::encode(m).into_owned());
                 }
@@ -1401,7 +1604,7 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
 
 pub async fn deploy(api: &Api, json_out: bool, d: Deploy) -> anyhow::Result<()> {
     let svc = service(api, &d.target).await?;
-    let body = json!({ "revision": d.revision, "image": d.image, "no_traffic": d.no_traffic.then_some(true) });
+    let body = json!({ "revision": d.revision, "image": d.image, "no_traffic": d.no_traffic.then_some(true), "no_cache": d.no_cache.then_some(true) });
     let dep = api.post(&format!("{}/deploys", env_path(&svc, &d.target.env)), body).await?;
     if json_out || d.detach {
         println!("{}", serde_json::to_string_pretty(&dep)?);
@@ -1583,7 +1786,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             svc
         }
-        AppsCmd::Create { name, project, repo, root, image, kind, port, schedule } => {
+        AppsCmd::Create { name, project, repo, root, image, kind, port, schedule, timezone } => {
             let source = match (repo, image) {
                 (Some(r), None) => json!({ "kind": "repo", "repo": r, "root": root }),
                 (None, Some(i)) => json!({ "kind": "image", "image": i }),
@@ -1597,6 +1800,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             if let Some(p) = port {
                 run.insert("port".into(), p.into());
             }
+            if let Some(tz) = timezone {
+                run.insert("timezone".into(), tz.into());
+            }
             if let Some(sch) = schedule {
                 run.insert("schedule".into(), sch.into());
             }
@@ -1608,7 +1814,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale, public, drain } => {
+        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale, public, drain, cpu_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() {
@@ -1664,6 +1870,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("pre_deploy", pre_deploy.map(Value::from)),
                 ("health_path", health.map(Value::from)),
                 ("schedule", schedule.map(Value::from)),
+                ("timezone", timezone.map(Value::from)),
                 ("type", kind.map(Value::from)),
                 ("concurrency", concurrency.map(Value::from)),
                 ("suspend_after_s", suspend_after.map(Value::from)),
@@ -1674,6 +1881,12 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("h2c", h2c.map(Value::from)),
                 ("public", public.map(Value::from)),
                 ("drain_s", drain.map(|d| if d == 0 { Value::Null } else { Value::from(d) })),
+                ("cpu_target", cpu_target.map(|t| if t == 0 { Value::Null } else { Value::from(t) })),
+                ("restart", restart.map(Value::from)),
+                ("restart_tries", restart_tries.map(Value::from)),
+                ("affinity", affinity.map(Value::from)),
+                ("tcp", tcp.map(Value::from)),
+                ("rollback_on_crash", rollback_on_crash.map(Value::from)),
                 ("scale", match scale.as_deref() {
                     None => None,
                     Some("none") => Some(Value::Null),
@@ -1723,10 +1936,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let svc = service(api, &target).await?;
             return ssh(api, &env_path(&svc, &target.env), instance.as_deref()).await;
         }
-        AppsCmd::Run { target, timeout, command } => {
+        AppsCmd::Proxy { target, local_port } => {
+            let svc = service(api, &target).await?;
+            let port = svc["run"]["port"].as_u64().unwrap_or(8080) as u16;
+            return proxy(api, &env_path(&svc, &target.env), &format!("{}/{}", s(&svc["name"]), target.env), port, local_port.unwrap_or(port)).await;
+        }
+        AppsCmd::Run { target, timeout, tasks, command } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/jobs", env_path(&svc, &target.env));
-            let job = api.post(&base, json!({ "command": shell_join(&command), "timeout_s": timeout })).await?;
+            let job = api.post(&base, json!({ "command": shell_join(&command), "timeout_s": timeout, "tasks": tasks })).await?;
             if !json_out {
                 let id = s(&job["id"]);
                 follow(api, &format!("{base}/{}/logs?follow=1", enc(&id))).await?;
@@ -1771,7 +1989,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Vars { target, set, unset, reveal, from_file } => {
+        AppsCmd::Vars { target, set, unset, seal, reveal, from_file } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/variables", env_path(&svc, &target.env));
             let mut m = serde_json::Map::new();
@@ -1783,12 +2001,12 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 m.extend(vars.into_iter().map(|(k, v)| (k, Value::String(v))));
             }
-            if !set.is_empty() || !unset.is_empty() || !m.is_empty() {
+            if !set.is_empty() || !unset.is_empty() || !m.is_empty() || !seal.is_empty() {
                 for kv in set {
                     let (k, v) = kv.split_once('=').ok_or_else(|| anyhow::anyhow!("{kv}: set variables as KEY=value"))?;
                     m.insert(k.to_string(), v.into());
                 }
-                api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset }))).await?;
+                api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset, "seal": seal }))).await?;
                 if !json_out {
                     eprintln!("saved; `roll apps redeploy` puts them live (a new deploy or push does too)");
                 }
@@ -1796,12 +2014,14 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let v = if reveal { api.get(&format!("{base}/values")).await? } else { api.get(&base).await? };
             if !json_out {
                 if reveal {
+                    // As a `.env` that `--from-file` (and the dashboard) reads back exactly.
                     for (k, val) in v.as_object().into_iter().flatten() {
-                        println!("{k}={}", s(val));
+                        println!("{}", env_line(k, &s(val)));
                     }
                 } else {
                     for x in v["vars"].as_array().into_iter().flatten() {
-                        println!("{:<32} {:<10} {}", s(&x["name"]), s(&x["source"]), s(&x["masked"]));
+                        let sealed = if x["sealed"] == true { "  sealed" } else { "" };
+                        println!("{:<32} {:<10} {}{sealed}", s(&x["name"]), s(&x["source"]), s(&x["masked"]));
                     }
                 }
                 return Ok(());
@@ -2068,7 +2288,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, private, open, maintenance, serve } => {
+        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, private, open, maintenance, serve, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, error_page, maintenance_page, roll_pages } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -2090,6 +2310,39 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("maintenance".into(), json!({ "message": Some(note).filter(|n| !n.is_empty()) }));
             } else if serve {
                 body.insert("maintenance".into(), json!(false));
+            }
+            if !allow_ip.is_empty() {
+                body.insert("allow_ips".into(), json!(allow_ip));
+            } else if allow_any {
+                body.insert("allow_ips".into(), Value::Null);
+            }
+            if let Some(r) = rate_limit {
+                let (n, burst) = r.split_once(':').map_or((r.as_str(), None), |(n, b)| (n, Some(b)));
+                let n: u32 = n.parse().map_err(|_| anyhow::anyhow!("--rate-limit is N or N:BURST"))?;
+                let mut l = json!({ "per_minute": n });
+                if let Some(b) = burst {
+                    l["burst"] = json!(b.parse::<u32>().map_err(|_| anyhow::anyhow!("--rate-limit is N or N:BURST"))?);
+                }
+                body.insert("rate_limit".into(), l);
+            } else if no_rate_limit {
+                body.insert("rate_limit".into(), Value::Null);
+            }
+            if !firewall.is_empty() {
+                body.insert("firewall".into(), Value::Array(firewall.iter().map(|r| firewall_rule(r)).collect::<anyhow::Result<_>>()?));
+            } else if no_firewall {
+                body.insert("firewall".into(), Value::Null);
+            }
+            let mut pages = serde_json::Map::new();
+            for (k, f) in [("error", &error_page), ("maintenance", &maintenance_page)] {
+                if let Some(f) = f {
+                    pages.insert(k.into(), json!(std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?));
+                }
+            }
+            if roll_pages {
+                pages.extend([("error".into(), Value::Null), ("maintenance".into(), Value::Null)]);
+            }
+            if !pages.is_empty() {
+                body.insert("pages".into(), Value::Object(pages));
             }
             // A new access token, made here: only its link shows it, once.
             let token = private.then(new_token);
@@ -2142,6 +2395,28 @@ pub(crate) fn new_token() -> String {
     b.iter().map(|x| ALPHABET[(x & 31) as usize] as char).collect()
 }
 
+/// A firewall rule as typed: `<allow|deny> [/path] [method=A,B] [ua=the rest of the line]`.
+fn firewall_rule(line: &str) -> anyhow::Result<Value> {
+    let mut words = line.split_whitespace();
+    let action = words.next().filter(|a| *a == "allow" || *a == "deny").ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow or deny: {line:?}"))?;
+    let mut rule = json!({ "action": action });
+    let rest: Vec<&str> = words.collect();
+    for (i, w) in rest.iter().enumerate() {
+        if let Some(ua) = w.strip_prefix("ua=") {
+            rule["user_agent"] = json!(std::iter::once(ua).chain(rest[i + 1..].iter().copied()).collect::<Vec<_>>().join(" "));
+            break;
+        } else if let Some(m) = w.strip_prefix("method=") {
+            rule["methods"] = json!(m.split(',').filter(|m| !m.is_empty()).collect::<Vec<_>>());
+        } else if w.starts_with('/') {
+            rule["path"] = json!(w);
+        } else {
+            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, or ua=…");
+        }
+    }
+    Ok(rule)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2190,6 +2465,12 @@ mod tests {
         let (vars, bad) = parse_env("# db\nexport DATABASE_URL=postgres://x\nNAME='a b'\nMULTI=\"one\\ntwo\"\n\n1BAD=x\nnope\n");
         assert_eq!(vars, [("DATABASE_URL".into(), "postgres://x".into()), ("NAME".into(), "a b".into()), ("MULTI".into(), "one\ntwo".into())]);
         assert_eq!(bad, [6, 7]);
+        // What `--reveal` prints reads back exactly.
+        let tricky = [("URL", "postgres://u:p@h/db?x=1"), ("SPACED", " a b "), ("QUOTE", "it's \"x\""), ("PEM", "-----BEGIN-----\nab\\nc\t\r\n-----END-----"), ("EMPTY", ""), ("HASH", "a #b")];
+        let text: String = tricky.iter().map(|(k, v)| env_line(k, v) + "\n").collect();
+        let (back, bad) = parse_env(&text);
+        assert!(bad.is_empty(), "{text}");
+        assert_eq!(back, tricky.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>(), "{text}");
     }
 
     #[test]

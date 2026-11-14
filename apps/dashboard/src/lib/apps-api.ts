@@ -50,6 +50,8 @@ export interface Run {
   /** Once per deploy before the switch (a migration); a non-zero exit fails the deploy. */
   pre_deploy?: string;
   schedule?: string;
+  /** The zone a cron schedule's fields are in (IANA); UTC when unset. */
+  timezone?: string;
   timeout_s?: number;
   min_instances: number;
   max_instances: number;
@@ -60,11 +62,14 @@ export interface Run {
   health_timeout_s: number;
   /** A replaced instance's time to finish: its requests, then SIGTERM, SIGKILL when it's up (1–300; unset 30). */
   drain_s?: number;
+  /** A web service also scales on CPU: another instance while they average over this percent for a minute (10–100). */
+  cpu_target?: number;
   suspend_after_s: number;
   sleep_after_s: number;
   volume?: { mount: string; size_gb: number };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
-  alerts?: { memory_pct: number; error_pct: number; p95_ms: number };
+  /** log_match: text its output holds log_count times in five minutes (alert.log). */
+  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; log_match?: string; log_count?: number };
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
   rollout?: { steps: number[]; step_s: number; error_pct: number };
@@ -72,6 +77,15 @@ export interface Run {
   h2c?: boolean;
   /** false: no public URL, only the project's private network (absent: public). */
   public?: boolean;
+  /** A worker that stops: started again always (default), on failure (up to restart_tries in a row), or never. */
+  restart?: "always" | "on_failure" | "never";
+  restart_tries?: number;
+  /** A web service keeps each visitor on one instance (a cookie) while it's up. */
+  affinity?: boolean;
+  /** Its port speaks TCP, not HTTP: each environment answers on a port of its own. */
+  tcp?: boolean;
+  /** A deployment that crash-loops within ten minutes of going live is replaced by the one before it. */
+  rollback_on_crash?: boolean;
   /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */
   scale?: { stream: string; group: string; per_instance?: number };
 }
@@ -121,11 +135,12 @@ export interface NewService {
 
 /**
  * `.env` text as variables: `KEY=value` lines (`export` allowed, `#` comments and blank lines
- * skipped, a value in single quotes as is, in double quotes with `\n` for a line break). Lines it
- * can't read are named in `errors` (1-based).
+ * skipped, a value in single quotes as is, in double quotes with `\n`, `\r`, `\t`, `\"` and `\\`
+ * as Compose's env files read them). Lines it can't read are named in `errors` (1-based).
  */
 export function parseEnv(text: string): { vars: Record<string, string>; errors: number[] } {
-  const vars: Record<string, string> = {};
+  // No prototype: `__proto__` and `toString` are names like any other.
+  const vars: Record<string, string> = Object.create(null);
   const errors: number[] = [];
   text.split(/\r?\n/).forEach((raw, i) => {
     const line = raw.trim().replace(/^export\s+/, "");
@@ -140,11 +155,23 @@ export function parseEnv(text: string): { vars: Record<string, string>; errors: 
     const q = value[0];
     if ((q === '"' || q === "'") && value.length >= 2 && value.endsWith(q)) {
       value = value.slice(1, -1);
-      if (q === '"') value = value.replace(/\\n/g, "\n").replace(/\\"/g, '"');
+      if (q === '"') value = value.replace(/\\([nrt"\\])/g, (_, c: string) => ({ n: "\n", r: "\r", t: "\t" })[c] ?? c);
     }
     vars[key] = value;
   });
   return { vars, errors };
+}
+
+/** Variables as `.env` text that {@link parseEnv} reads back as they are: plain when safe, else quoted. */
+export function toEnv(vars: Record<string, string>): string {
+  const quote = (v: string) => {
+    if (/^[A-Za-z0-9_\-./:@,+=%?&~]*$/.test(v)) return v;
+    if (!/['\r\n]/.test(v)) return `'${v}'`;
+    return `"${v.replace(/[\\"\n\r\t]/g, (c) => ({ "\n": "\\n", "\r": "\\r", "\t": "\\t" })[c] ?? `\\${c}`)}"`;
+  };
+  return Object.entries(vars)
+    .map(([k, v]) => `${k}=${quote(v)}\n`)
+    .join("");
 }
 
 /** A field set to `null` goes back to its default (apps-control's `merge`). */
@@ -155,6 +182,80 @@ export interface ServicePatch {
   source?: Source;
   build?: Reset<Build>;
   run?: Reset<Run>;
+}
+
+export interface IpRule {
+  /** Canonical: `203.0.113.7/32`, `10.0.0.0/8`, `2001:db8::/32`. */
+  cidr: string;
+  description?: string;
+}
+
+/** What the next deploy changes (names only; null variables: no snapshot to compare). */
+export interface Pending {
+  variables: { added: string[]; removed: string[]; changed: string[] } | null;
+  run: string[];
+}
+
+/** The changes as a line ("MODE changed, ADDED added, memory_mb"), or null when there are none to name. */
+export function describePending(p: Pending): string | null {
+  const parts = [
+    ...(p.variables?.changed ?? []).map((n) => `${n} changed`),
+    ...(p.variables?.added ?? []).map((n) => `${n} added`),
+    ...(p.variables?.removed ?? []).map((n) => `${n} removed`),
+    ...p.run.map((f) => `${f.replaceAll("_", " ")} set`),
+  ];
+  return parts.length ? parts.join(", ") : null;
+}
+
+export interface FirewallRule {
+  action: "allow" | "deny";
+  /** A path, or a prefix ending in `*`. */
+  path?: string;
+  methods?: string[];
+  /** Text the User-Agent contains. */
+  user_agent?: string;
+}
+
+/** Firewall rules as typed, one a line: `deny /admin/*`, `deny method=DELETE,PUT`, `allow /admin/health`, `deny ua=BadBot` (`ua=` last: the rest of the line). */
+export function parseFirewall(text: string): FirewallRule[] {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#"))
+    .map((l) => {
+      const [action, ...rest] = l.split(/\s+/);
+      const rule: FirewallRule = { action: action === "allow" ? "allow" : "deny" };
+      for (let i = 0; i < rest.length; i++) {
+        const t = rest[i];
+        if (t.startsWith("ua=")) {
+          rule.user_agent = [t.slice(3), ...rest.slice(i + 1)].join(" ");
+          break;
+        }
+        if (t.startsWith("method=")) rule.methods = t.slice(7).split(",").filter(Boolean);
+        else if (t.startsWith("/")) rule.path = t;
+      }
+      return rule;
+    });
+}
+
+/** The rules as one line each, as `parseFirewall` reads them. */
+export function formatFirewall(rules: FirewallRule[]): string {
+  return rules
+    .map((r) => [r.action, r.path, r.methods?.length ? `method=${r.methods.join(",")}` : undefined, r.user_agent ? `ua=${r.user_agent}` : undefined].filter(Boolean).join(" "))
+    .join("\n");
+}
+
+/** An allow list as typed, one network per line with an optional description after it. */
+export function parseAllowList(text: string): IpRule[] {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const [cidr, ...rest] = l.split(/\s+/);
+      const description = rest.join(" ").replace(/^#\s*/, "");
+      return description ? { cidr, description } : { cidr };
+    });
 }
 
 export interface EnvironmentPut {
@@ -169,6 +270,14 @@ export interface EnvironmentPut {
   follow_tag?: boolean;
   /** Maintenance: its public names answer roll's page with the message; false ends it. */
   maintenance?: boolean | { message?: string | null };
+  /** Its own HTML (at most 64 KiB) instead of roll's pages; null goes back to roll's, an absent field stays. */
+  pages?: { error?: string | null; maintenance?: string | null };
+  /** Only these networks get in through its public names; null or [] lets anyone in. */
+  allow_ips?: (string | IpRule)[] | null;
+  /** Each client's requests a minute through its public names, with a burst; null: no limit. */
+  rate_limit?: { per_minute: number; burst?: number } | null;
+  /** Its firewall rules, in order (the first match decides); null or [] for none. */
+  firewall?: FirewallRule[] | null;
   /** Its own size and scale over the service's; a null field goes back to the service's. */
   run?: Partial<Record<EnvRunField, number | null>>;
 }
@@ -211,6 +320,8 @@ export interface Environment extends EnvironmentSummary {
   instances: Instance[];
   domains: Domain[];
   port: number | null;
+  /** A TCP service's address (`host:port`), once it has its port. */
+  tcp?: string | null;
   needs_deploy: boolean;
   /** Its hostnames answer only visitors with its access token (a preview). */
   private: boolean;
@@ -234,6 +345,14 @@ export interface Environment extends EnvironmentSummary {
   waiting_for_ci?: string | null;
   /** In maintenance: what visitors read (null: roll's words). Null: serving. */
   maintenance?: { message: string | null } | null;
+  /** Its own pages (Heroku's): `error` for the 502/503/504 while the app can't answer or wake, `maintenance` while in maintenance. Absent: roll's. */
+  pages?: { error?: string; maintenance?: string };
+  /** Only these networks get in through its public names (empty: anyone). */
+  allow_ips?: IpRule[];
+  /** Each client's requests a minute through its public names (null: no limit). */
+  rate_limit?: { per_minute: number; burst?: number | null } | null;
+  /** Its firewall rules, in order. */
+  firewall?: FirewallRule[];
   created_at: number;
 }
 
@@ -241,6 +360,8 @@ export interface NewDeploy {
   revision?: string;
   image?: string;
   message?: string;
+  /** Build from scratch: no cached layer, base images pulled again, the cache mounts empty from then on. */
+  no_cache?: boolean;
 }
 
 export type DeployTrigger = "push" | "manual" | "rollback" | "upload" | "api" | "settings" | "promote";
@@ -295,10 +416,15 @@ export interface Link {
   vars: string[];
 }
 
-export type VariableSource = "service" | "secret" | "link" | "roll";
+/** `reference`: one of its own with `${{ … }}` in it, filled in at the deploy. */
+export type VariableSource = "service" | "secret" | "link" | "roll" | "reference";
 
 export interface Variables {
-  vars: { name: string; masked: string; source: VariableSource }[];
+  /**
+   * reference: a reference variable's template (names, never a value). sealed: run with, never
+   * shown again (not by `reveal` either); a reference that reads a sealed value is sealed too.
+   */
+  vars: { name: string; masked: string; source: VariableSource; reference?: string; sealed?: boolean }[];
 }
 
 export interface LogLine {
@@ -343,7 +469,7 @@ export interface NotifyTarget {
   secret?: string;
 }
 
-export type NotifyEvent = "deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "cron.failed" | "job.failed";
+export type NotifyEvent = "deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed";
 
 /** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
 export interface AppEvent {
@@ -409,6 +535,8 @@ export interface Job {
   id: string;
   deployment: string;
   command: string;
+  /** Containers it ran, each with ROLL_TASK_INDEX and ROLL_TASK_COUNT. */
+  tasks?: number;
   status: RunStatus;
   exit_code: number | null;
   started_at: number;
@@ -492,9 +620,12 @@ export const appsApi = {
   wake: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/wake`),
 
   variables: (id: string, e: string) => call<Variables>("GET", `${env(id, e)}/variables`),
+  /** What the next deploy changes: its own variables by name, and run settings. */
+  pending: (id: string, e: string) => call<Pending>("GET", `${env(id, e)}/pending`),
   /** The values in the clear (the `reveal` action). */
   reveal: (id: string, e: string) => call<Record<string, string>>("GET", `${env(id, e)}/variables/values`),
-  setVariables: (id: string, e: string, change: { set?: Record<string, string>; unset?: string[] }) =>
+  /** `seal`: names set here or already set, sealed for good (a new value keeps them sealed). */
+  setVariables: (id: string, e: string, change: { set?: Record<string, string>; unset?: string[]; seal?: string[] }) =>
     call<Variables>("PATCH", `${env(id, e)}/variables`, change),
 
   logs: (id: string, e: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${env(id, e)}/logs${qs({ tail: q.tail, since: q.since })}`),
@@ -513,7 +644,7 @@ export const appsApi = {
   runs: (id: string, e: string) => call<CronRun[]>("GET", `${env(id, e)}/runs`),
   runNow: (id: string, e: string) => call<CronRun>("POST", `${env(id, e)}/runs`),
   jobs: (id: string, e: string) => call<Job[]>("GET", `${env(id, e)}/jobs`),
-  startJob: (id: string, e: string, body: { command: string; timeout_s?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
+  startJob: (id: string, e: string, body: { command: string; timeout_s?: number; tasks?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
   job: (id: string, e: string, j: string) => call<Job>("GET", `${env(id, e)}/jobs/${encodeURIComponent(j)}`),
   cancelJob: (id: string, e: string, j: string) => call<Job>("POST", `${env(id, e)}/jobs/${encodeURIComponent(j)}/cancel`),
 

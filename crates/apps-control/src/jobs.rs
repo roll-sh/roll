@@ -5,6 +5,7 @@
 //! port and no volume: the service's own instance may be using the volume.
 
 use crate::logs::Stream;
+use futures::StreamExt;
 use crate::model::{Job, RunStatus};
 use crate::{Apps, Error, Result};
 use serde_json::Value;
@@ -18,11 +19,16 @@ const MAX_TIMEOUT_S: u64 = 24 * 3600;
 /// Jobs running at once in an environment, and on a node.
 const MAX_PER_ENV: usize = 5;
 const MAX_PER_NODE: usize = 50;
+/// Job containers a node runs at once (a job's tasks each take one).
+pub const MAX_CONTAINERS: usize = 50;
+/// A job's tasks at most, and how many of them run at once.
+const MAX_TASKS: u64 = 100;
+const PARALLEL: usize = 10;
 
 impl Apps {
     pub async fn start_job(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Job> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["command", "timeout_s"].contains(&k.as_str())) {
+        if let Some(k) = o.keys().find(|k| !["command", "timeout_s", "tasks"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
         let command = o.get("command").and_then(Value::as_str).map(str::trim).unwrap_or("");
@@ -32,6 +38,10 @@ impl Apps {
         let timeout = match o.get("timeout_s") {
             None | Some(Value::Null) => DEFAULT_TIMEOUT_S,
             Some(v) => v.as_u64().filter(|t| (1..=MAX_TIMEOUT_S).contains(t)).ok_or_else(|| Error::BadRequest(format!("timeout_s is 1–{MAX_TIMEOUT_S}")))?,
+        };
+        let tasks = match o.get("tasks") {
+            None | Some(Value::Null) => 1,
+            Some(v) => v.as_u64().filter(|t| (1..=MAX_TASKS).contains(t)).ok_or_else(|| Error::BadRequest(format!("tasks is 1–{MAX_TASKS}")))? as u32,
         };
         if self.capped(service) {
             return Err(Error::Conflict("this project reached its spending limit for the month".into()));
@@ -50,7 +60,7 @@ impl Apps {
             running.insert(hold.clone(), key.clone());
         }
         let (sid, e, dep, cmd) = (service.to_string(), env.to_string(), tpl.deployment.clone(), command.to_string());
-        let made = self.db(move |s| s.add_job(&sid, &e, &dep, &cmd)).await;
+        let made = self.db(move |s| s.add_job(&sid, &e, &dep, &cmd, tasks)).await;
         let job = {
             let mut running = self.running_jobs.lock();
             running.remove(&hold);
@@ -65,17 +75,36 @@ impl Apps {
         let (this, id, cmd) = (self.clone(), job.id.clone(), command.to_string());
         let (sid, e, dep) = (service.to_string(), env.to_string(), tpl.deployment.clone());
         tokio::spawn(async move {
-            let ran = live.run_to_exit(Some(&cmd), Duration::from_secs(timeout), Some(log.clone()), cancel, |_| {}).await;
-            let (status, code) = match ran {
-                Ok(e) if e.canceled => (RunStatus::Canceled, None),
-                Ok(e) if e.timed_out => (RunStatus::TimedOut, None),
-                Ok(e) if e.code == Some(0) => (RunStatus::Succeeded, Some(0)),
-                Ok(e) => (RunStatus::Failed, e.code),
-                Err(err) => {
-                    log.stream(Stream::System).line(format!("the job didn't start: {err:#}"));
-                    (RunStatus::Failed, None)
-                }
-            };
+            // Its tasks, at most PARALLEL at once, each told which it is.
+            let outcomes: Vec<(RunStatus, Option<i32>)> = futures::stream::iter(0..tasks)
+                .map(|n| {
+                    let (live, cmd, log, cancel, slots) = (live.clone(), cmd.clone(), log.clone(), cancel.clone(), this.job_slots.clone());
+                    async move {
+                        let Ok(_slot) = slots.acquire_owned().await else { return (RunStatus::Failed, None) };
+                        let vars = [("ROLL_TASK_INDEX".to_string(), n.to_string()), ("ROLL_TASK_COUNT".to_string(), tasks.to_string())];
+                        let ran = live.run_to_exit(Some(&cmd), &vars, Duration::from_secs(timeout), Some(log.clone()), cancel, |_| {}).await;
+                        let outcome = match ran {
+                            Ok(e) if e.canceled => (RunStatus::Canceled, None),
+                            Ok(e) if e.timed_out => (RunStatus::TimedOut, None),
+                            Ok(e) if e.code == Some(0) => (RunStatus::Succeeded, Some(0)),
+                            Ok(e) => (RunStatus::Failed, e.code),
+                            Err(err) => {
+                                log.stream(Stream::System).line(format!("the job didn't start: {err:#}"));
+                                (RunStatus::Failed, None)
+                            }
+                        };
+                        if tasks > 1 {
+                            log.stream(Stream::System).line(format!("task {n}: {}", outcome.0.as_str()));
+                        }
+                        outcome
+                    }
+                })
+                .buffer_unordered(PARALLEL)
+                .collect()
+                .await;
+            // The job: canceled, else timed out, else the first failure, else done.
+            let first = |s: RunStatus| outcomes.iter().find(|(st, _)| *st == s).copied();
+            let (status, code) = first(RunStatus::Canceled).or_else(|| first(RunStatus::TimedOut)).or_else(|| first(RunStatus::Failed)).unwrap_or((RunStatus::Succeeded, Some(0)));
             log.stream(Stream::System).line(format!("{} ({})", status.as_str(), code.map_or("no exit code".into(), |c| format!("exit {c}"))));
             this.cancels.lock().remove(&id);
             this.running_jobs.lock().remove(&id);

@@ -53,7 +53,7 @@ impl Apps {
         self.refuse_capped(service)?;
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["revision", "image", "message", "no_traffic"].contains(&k.as_str()) {
+            if !["revision", "image", "message", "no_traffic", "no_cache"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -71,6 +71,12 @@ impl Apps {
             None | Some(Value::Null) => false,
             Some(Value::Bool(b)) => *b,
             Some(_) => return Err(Error::BadRequest("no_traffic is a boolean".into())),
+        };
+        // Render's "Clear build cache & deploy": for a build a stale cached layer keeps breaking.
+        let no_cache = match o.get("no_cache") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err(Error::BadRequest("no_cache is a boolean".into())),
         };
         if let Some(k) = key {
             if k.is_empty() || k.len() > 200 || !k.bytes().all(|b| b.is_ascii_graphic()) {
@@ -146,7 +152,10 @@ impl Apps {
                 }
             }
         }
-        let d = NewDeployment { trigger, revision, message, image, plan: None, rollback_of: None, run: svc.for_env(&row)?.run, upload: upload_key, status: DeployStatus::Queued, actor: by.actor, no_traffic };
+        let d = NewDeployment { trigger, revision, message, image, plan: None, rollback_of: None, run: svc.for_env(&row)?.run, upload: upload_key, status: DeployStatus::Queued, actor: by.actor, no_traffic, no_cache };
+        if no_cache && d.image.is_some() {
+            return Err(Error::BadRequest("no_cache is for a deploy that builds; an image is pulled as it is".into()));
+        }
         let (sid, e, k) = (service.to_string(), env.to_string(), key.map(str::to_string));
         let ours = d.upload.clone().filter(|_| key.is_some());
         if no_traffic && (svc.run.kind != RunType::Web || svc.run.volume.is_some()) {
@@ -203,6 +212,7 @@ impl Apps {
             status: DeployStatus::Queued,
             actor,
             no_traffic: false,
+            no_cache: false,
         };
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
@@ -246,6 +256,7 @@ impl Apps {
             status: DeployStatus::Queued,
             actor,
             no_traffic: false,
+            no_cache: false,
         };
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
@@ -267,11 +278,12 @@ impl Apps {
         if !keep_variables && let Some(then) = self.db(move |s| s.snapshot(&did)).await? {
             let (sid, e) = (service.to_string(), env.to_string());
             let now = self.db(move |s| s.variables(&sid, &e)).await?;
-            let set: std::collections::BTreeMap<String, String> = then.iter().filter(|(k, v)| now.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), v.clone())).collect();
-            let unset: Vec<String> = now.keys().filter(|k| !then.contains_key(*k)).cloned().collect();
+            let set: std::collections::BTreeMap<String, String> = then.vars.iter().filter(|(k, v)| now.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), v.clone())).collect();
+            let unset: Vec<String> = now.keys().filter(|k| !then.vars.contains_key(*k)).cloned().collect();
             if !set.is_empty() || !unset.is_empty() {
-                let (sid, e, s2, u2) = (service.to_string(), env.to_string(), set.clone(), unset.clone());
-                self.db(move |s| s.change_variables(&sid, &e, &s2, &u2)).await?;
+                // Sealed as they were then (and what's sealed since stays so).
+                let (sid, e, s2, u2, sealed) = (service.to_string(), env.to_string(), set.clone(), unset.clone(), then.sealed);
+                self.db(move |s| s.change_variables(&sid, &e, &s2, &u2, &sealed)).await?;
                 self.settings_changed();
                 self.audit("variables.restored", service, env, actor.clone(), json!({ "from": old.id, "set": set.keys().collect::<Vec<_>>(), "unset": unset })).await;
             }
@@ -288,6 +300,7 @@ impl Apps {
             status: DeployStatus::Queued,
             actor,
             no_traffic: false,
+            no_cache: false,
         };
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
@@ -442,6 +455,41 @@ impl Apps {
         }
     }
 
+    /// While a push's build runs, a newer push queued for the environment (on any node: the queue
+    /// is the store) stops it: superseded, its build minutes saved, the newer one next. A deploy
+    /// that's rolling out finishes. Stops watching when dropped.
+    fn supersede_on_newer_push(self: &Arc<Self>, d: &Deployment, cancel: CancellationToken) -> Option<tokio_util::sync::DropGuard> {
+        if d.trigger != Trigger::Push {
+            return None;
+        }
+        let (this, d, done) = (self.clone(), d.clone(), CancellationToken::new());
+        let guard = done.clone().drop_guard();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(this.cfg.supersede_every) => {}
+                    _ = done.cancelled() => return,
+                }
+                let (sid, e, own, after) = (d.service.clone(), d.environment.clone(), d.id.clone(), d.created_at);
+                match this.db(move |s| s.newer_push_queued(&sid, &e, &own, after)).await {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(err) => {
+                        warn!(deployment = %d.id, error = %err, "apps: looking for a newer push failed");
+                        continue;
+                    }
+                }
+                let id = d.id.clone();
+                if this.db(move |s| s.set_status(&id, &[DeployStatus::Building], DeployStatus::Superseded, Some("a newer push replaced it"))).await.unwrap_or(false) {
+                    this.deploy_log(&d.id).stream(Stream::System).line("stopped: a newer push replaced it");
+                    cancel.cancel();
+                }
+                return;
+            }
+        });
+        Some(guard)
+    }
+
     async fn run_inner(self: &Arc<Self>, d: &Deployment, log: &LogSink, cancel: CancellationToken) -> anyhow::Result<()> {
         // Queued before its project reached its spend limit: it doesn't build or start now.
         anyhow::ensure!(!self.capped(&d.service), "the project reached its spending limit for the month");
@@ -487,14 +535,19 @@ impl Apps {
                 if !self.db(move |s| s.set_status(&id, &[DeployStatus::Queued], DeployStatus::Building, None)).await? {
                     anyhow::bail!("the deployment was canceled");
                 }
+                let _watch = self.supersede_on_newer_push(d, cancel.clone());
                 self.build(&svc, d, log, cancel.clone()).await?
             }
         };
         if cancel.is_cancelled() {
             anyhow::bail!("canceled");
         }
+        // Canceled or superseded while it built (the status is the truth, whoever changed it).
         let id = d.id.clone();
-        self.db(move |s| s.set_status(&id, &[DeployStatus::Building, DeployStatus::Deploying], DeployStatus::Deploying, None)).await?;
+        if !self.db(move |s| s.set_status(&id, &[DeployStatus::Building, DeployStatus::Deploying], DeployStatus::Deploying, None)).await? {
+            cancel.cancel();
+            anyhow::bail!("canceled");
+        }
         let mut dep = d.clone();
         dep.image = Some(image);
         dep.run = run;
@@ -530,7 +583,7 @@ impl Apps {
         // The environment's own variables as this deployment reads them: what a rollback to it
         // restores, kept with its switch to live.
         let (sid, e, did) = (svc.id.clone(), env.name.clone(), d.id.clone());
-        let snapshot = self.db(move |s| Ok(s.seal_snapshot(&did, &s.variables(&sid, &e)?))).await?;
+        let snapshot = self.db(move |s| s.seal_snapshot(&did, &sid, &e)).await?;
         let vars_hash = {
             let r = self.resolve_vars(&svc, &env, &dep.id).await?;
             fingerprint(&r.vars_for_hash(), &svc)
@@ -808,6 +861,7 @@ impl Apps {
         }
         // A root directory inside a JS workspace builds from the repo's root (the lockfile and the
         // workspace's packages are there), unless it brings its own Dockerfile.
+        let mut from_root = false;
         if let Some(r) = &root
             && build_cfg.builder == Builder::Auto
             && std::fs::symlink_metadata(context.join("Dockerfile")).is_err()
@@ -822,6 +876,8 @@ impl Apps {
                     build_cfg.start = ws.start;
                 }
                 context = tree.clone();
+                // The repo root's Procfile is the repo's, not this package's.
+                from_root = true;
             }
         }
         // The variables the build's steps see: the environment's, as its instances will.
@@ -844,10 +900,28 @@ impl Apps {
         };
         let mut overrides = build_cfg.overrides();
         overrides.build_env = build_env.iter().map(|(k, _)| k.clone()).collect();
+        // A Procfile's command for what this service runs (a cron's command is its own).
+        overrides.process = match run.kind {
+            _ if from_root => None,
+            RunType::Web => Some("web".into()),
+            RunType::Worker => Some("worker".into()),
+            RunType::Cron => None,
+        };
         let ctx = context.clone();
         let plan = tokio::task::spawn_blocking(move || apps_build::plan(&apps_build::DirTree::new(ctx), &overrides)).await?.map_err(|e| anyhow::anyhow!("{e}"))?;
         for n in &plan.notes {
             log.line(format!("plan: {n}"));
+        }
+        // The service's own cache mounts (`isolate_caches`); a deploy without the cache starts
+        // them empty, and every build after it uses the new ones.
+        let (sid, did) = (svc.id.clone(), d.id.clone());
+        let (no_cache, cache_ns) = self.db(move |s| {
+            let fresh = s.no_cache(&did)?;
+            Ok((fresh, s.build_cache(&sid, fresh)?))
+        })
+        .await?;
+        if no_cache {
+            log.line("building without the cache: no cached layers, base images pulled again, the cache mounts empty");
         }
         let dockerfile = if plan.provider == apps_build::Provider::Dockerfile {
             let df = build_cfg.dockerfile.clone().unwrap_or_else(|| "Dockerfile".into());
@@ -869,6 +943,31 @@ impl Apps {
         if run.port.is_none() {
             run.port = Some(plan.port);
         }
+        // Heroku's release phase: the Procfile's `release:`, when the service has no pre-deploy.
+        if run.pre_deploy.is_none() {
+            run.pre_deploy = plan.release.clone();
+        }
+        // On a builder shared by services, the build reads a copy with its cache mounts
+        // namespaced, outside the tree (so no `COPY . .` puts it in the image), next to the
+        // Dockerfile's own `.dockerignore` if it has one; the namespace never reaches the log.
+        let (dockerfile, log, layers) = if self.deps.builder.shares_caches() {
+            let at = context.join(&dockerfile);
+            let isolated = apps_build::isolate_caches(&tokio::fs::read(&at).await?, &cache_ns);
+            let copy = dir.join("Dockerfile.isolated");
+            tokio::fs::write(&copy, isolated).await?;
+            let own_ignore = at.with_file_name(format!("{}.dockerignore", at.file_name().and_then(|n| n.to_str()).unwrap_or("Dockerfile")));
+            if std::fs::symlink_metadata(&own_ignore).is_ok_and(|m| m.is_file()) {
+                tokio::fs::copy(&own_ignore, dir.join("Dockerfile.isolated.dockerignore")).await?;
+            }
+            let layers = {
+                use sha2::{Digest, Sha256};
+                Sha256::digest(format!("layers:{cache_ns}")).iter().take(16).map(|b| format!("{b:02x}")).collect::<String>()
+            };
+            (copy.to_string_lossy().into_owned(), log.redacting(&cache_ns), Some(layers))
+        } else {
+            (dockerfile, log.clone(), None)
+        };
+        let log = &log;
         let plan_json = serde_json::to_value(&plan)?;
         let job = BuildJob {
             service: svc.id.clone(),
@@ -882,6 +981,8 @@ impl Apps {
             own_dockerfile: plan.provider == apps_build::Provider::Dockerfile,
             env: build_env,
             env_hash,
+            no_cache,
+            layers,
         };
         log.line(format!("building with {}", self.deps.builder.name()));
         let image = self.deps.builder.build(&job, log, cancel).await?;
@@ -899,7 +1000,11 @@ impl Apps {
         }
         let mut probe = svc.clone();
         probe.run.port = run.port;
-        let mut vars = self.resolve_vars(&probe, env, &dep.id).await?.vars;
+        let resolved = self.resolve_vars(&probe, env, &dep.id).await?;
+        if !resolved.unresolved.is_empty() {
+            self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(format!("references that name nothing, left empty: {}", resolved.unresolved.join(", ")));
+        }
+        let mut vars = resolved.vars;
         if run.kind != RunType::Web {
             vars.retain(|(k, _)| k != "PORT");
         }
@@ -1085,6 +1190,32 @@ impl Apps {
         }
     }
 
+    /// `run.rollback_on_crash`: the live deployment, crash-looping within ten minutes of going
+    /// live and not itself a rollback, is replaced by the one before it.
+    async fn rollback_on_crash(self: &Arc<Self>, l: &crate::live::EnvLive) {
+        let Some(tpl) = l.template().filter(|t| t.run.rollback_on_crash) else { return };
+        let id = tpl.deployment.clone();
+        let Ok(d) = self.db(move |s| s.deployment(&id)).await else { return };
+        let Some(live_at) = d.finished_at.filter(|t| code_sql::now_ms() - t <= 10 * 60_000) else { return };
+        // Its own crashes since it went live, not another deploy's failed checks or older ones.
+        if d.rollback_of.is_some() || l.crashes_of(&d.id, live_at) < 3 {
+            return;
+        }
+        // A deploy on its way (a fix, say) decides instead.
+        let (sid, en) = (l.service.clone(), l.env.clone());
+        if self.db(move |s| s.pending_deployments(&sid)).await.map_or(true, |p| p.iter().any(|x| x.environment == en)) {
+            return;
+        }
+        l.log.stream(Stream::System).line(format!("{} is crash-looping within ten minutes of going live: rolling back to the deployment before it", d.id));
+        let (this, sid, e) = (self.clone(), l.service.clone(), l.env.clone());
+        tokio::spawn(async move {
+            // The image only: today's variables stay (a credential rotated since isn't undone).
+            if let Err(err) = this.rollback_previous(&sid, &e, Some("crash loop".into()), true).await {
+                this.logs.sink(format!("env:{sid}/{e}"), Stream::System).line(format!("couldn't roll back: {err}"));
+            }
+        });
+    }
+
     /// An environment that went into a crash loop gets one event for it (until it leaves it).
     async fn note_crash_loop(self: &Arc<Self>, l: &crate::live::EnvLive) {
         let key = format!("{}/{}", l.service, l.env);
@@ -1094,6 +1225,7 @@ impl Apps {
                     let (sid, e, dep) = (l.service.clone(), l.env.clone(), l.template().map(|t| t.deployment.clone()));
                     let data = serde_json::json!({ "crashes": c.crashes, "last_error": c.last_error });
                     let _ = self.db(move |s| s.add_event("crash_loop", &sid, &e, dep.as_deref(), &data)).await;
+                    self.rollback_on_crash(l).await;
                 }
             }
             None => {
@@ -1106,7 +1238,7 @@ impl Apps {
     /// alert is an event once, when it starts; it can start again once it has cleared.
     pub async fn judge_alerts(self: &Arc<Self>, l: &crate::live::EnvLive) {
         let Some(tpl) = l.template() else { return };
-        let (a, limit_mb) = (tpl.run.alerts, tpl.run.memory_mb);
+        let (a, limit_mb) = (tpl.run.alerts.clone(), tpl.run.memory_mb);
         let now = code_sql::now_ms() / 60_000;
         let (sid, e) = (l.service.clone(), l.env.clone());
         let Ok(rows) = self.db(move |s| s.minutes(&sid, &e, now - 5)).await else { return };
@@ -1130,7 +1262,17 @@ impl Apps {
                 firing.push(("alert.latency", serde_json::json!({ "value": value, "threshold": a.p95_ms })));
             }
         }
-        for kind in ["alert.memory", "alert.errors", "alert.latency"] {
+        // Its output saying something often enough (system lines are roll's, and the alert's
+        // own line names the pattern: only stdout and stderr count).
+        if let Some(pat) = a.log_match.as_deref() {
+            let key = format!("env:{}/{}", l.service, l.env);
+            let since = code_sql::now_ms() - 5 * 60_000;
+            let count = self.logs.count_recent(&key, pat, since) as u32;
+            if count >= a.log_count {
+                firing.push(("alert.log", serde_json::json!({ "pattern": pat, "count": count, "threshold": a.log_count })));
+            }
+        }
+        for kind in ["alert.memory", "alert.errors", "alert.latency", "alert.log"] {
             let key = format!("{}/{}/{kind}", l.service, l.env);
             match firing.iter().find(|(k, _)| *k == kind) {
                 Some((_, data)) => {
@@ -1148,8 +1290,8 @@ impl Apps {
     }
 
     /// Private callers at owned web services, five times a second for sleeping instances (a
-    /// frozen one's wake is milliseconds) and once a second for running ones' activity: two
-    /// small reads of `/proc` per instance.
+    /// frozen one's wake is milliseconds; one cheap read of `/proc/<pid>/net/snmp` each), and
+    /// once a second for running ones near their sleep (a dear read, at most every 5 s each).
     async fn private_callers(self: Arc<Self>) {
         let mut every = tokio::time::interval(Duration::from_millis(200));
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1470,7 +1612,7 @@ impl Apps {
     pub async fn cron_pass(self: &Arc<Self>, now: i64) {
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
         for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {
-            let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s).ok()) else { continue };
+            let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s, svc.run.timezone.as_deref()).ok()) else { continue };
             let sid = svc.id.clone();
             let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
             for e in envs.into_iter().filter(|e| e.active.is_some()) {
