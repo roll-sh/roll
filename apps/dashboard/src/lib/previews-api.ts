@@ -84,7 +84,17 @@ export interface Preview {
   /** The project's other pages (`github.pages`) at the latest screenshot. */
   pages?: PageCheck[];
   /** Its visual review (`github.visual_review`): whether how its pages look against the baseline was accepted at this head. */
-  visual_review?: { state: "unchanged" | "changed" | "accepted"; branch: string; percent: number; by: string | null; at: number | null; required: boolean; head: string } | null;
+  visual_review?: {
+    state: "unchanged" | "changed" | "accepted";
+    branch: string;
+    percent: number;
+    by: string | null;
+    at: number | null;
+    required: boolean;
+    head: string;
+    /** Each page that differs (`path` `""`: the first page) and who accepted it at this head: the change is accepted once every one is. */
+    pages: { path: string; percent: number; by: string | null; at: number | null }[];
+  } | null;
   /** It also has a phone-width screenshot. */
   phone_screenshot?: boolean;
   /** How fast its first page loaded at this head (timed with the screenshot), and at the one before. */
@@ -269,8 +279,9 @@ export const previewsApi = {
   /** Keep it past its TTL for `hours` (at most 720); 0 lets its rules decide again. */
   keep: (id: string, hours: number) => call<Preview>("POST", `${one(id)}/keep`, { hours }),
   /** Accept how a change's pages look at its latest screenshot (the `roll/visual` status). */
-  /** `head`: the screenshot's that was looked at (`visual_review.head`): refused (409) once a newer one came in. */
-  acceptVisual: (id: string, head?: string) => call<Preview>("POST", `${one(id)}/visual/accept`, head ? { head } : {}),
+  /** `head`: the screenshot's that was looked at (`visual_review.head`): refused (409) once a newer one came in. `path`: that page only (`""` the first), else every page. */
+  acceptVisual: (id: string, head?: string, path?: string) =>
+    call<Preview>("POST", `${one(id)}/visual/accept`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}) }),
   /** Its share links (never their tokens). */
   shares: (id: string) => call<PreviewShare[]>("GET", `${one(id)}/shares`),
   /** A link for someone outside the team, open for `hours`; `url` is in this answer only. */

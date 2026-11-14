@@ -431,8 +431,9 @@ fn review_line(v: &crate::model::PreviewVisualReview, dashboard: Option<&str>) -
     let link = dashboard.filter(|u| (u.starts_with("https://") || u.starts_with("http://")) && !u.contains([')', ' ', '\n'])).map(|u| format!(" [Review it in roll]({u})")).unwrap_or_default();
     match v.state.as_str() {
         "changed" => Some(format!(
-            "**Visual review:** its pages differ from `{branch}` by {:.1}%{}.{link}\n\n",
+            "**Visual review:** its pages differ from `{branch}` by {:.1}%{}{}.{link}\n\n",
             v.percent.max(0.1),
+            v.partly().map(|(done, all)| format!(" ({done} of {all} accepted)")).unwrap_or_default(),
             if v.required { ", and it can't land until someone accepts them" } else { "" }
         )),
         "accepted" => Some(format!("Visual review: accepted by {by}.\n\n")),
@@ -481,7 +482,10 @@ fn visual_status(v: &crate::model::PreviewVisualReview) -> (&'static str, String
     let by: String = v.by.as_deref().unwrap_or("someone").chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).take(40).collect();
     match v.state.as_str() {
         "accepted" => ("success", format!("Accepted by {by}: differs from {branch} by {:.1}%", v.percent.max(0.1))),
-        "changed" => ("pending", format!("Differs from {branch} by {:.1}%: accept it in roll", v.percent.max(0.1))),
+        "changed" => match v.partly() {
+            Some((done, all)) => ("pending", format!("Differs from {branch} by {:.1}%: {done} of {all} pages accepted, accept the rest in roll", v.percent.max(0.1))),
+            None => ("pending", format!("Differs from {branch} by {:.1}%: accept it in roll", v.percent.max(0.1))),
+        },
         _ => ("success", format!("Looks the same as {branch}")),
     }
 }
@@ -801,8 +805,11 @@ mod preview_tests {
         );
         let page = |path: &str, percent, base_percent, errors| crate::model::PreviewPageCheck { path: path.into(), errors, percent, base_percent };
         e.pages = vec![page("/pricing", Some(40.0), Some(2.0), 1), page("/about", Some(0.0), None, 0)];
-        let review = |state: &str, by: Option<&str>| crate::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.04, by: by.map(Into::into), required: false, head: None };
+        let review = |state: &str, by: Option<&str>| crate::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.04, by: by.map(Into::into), required: false, head: None, pages: Vec::new() };
         assert_eq!(visual_status(&review("changed", None)), ("pending", "Differs from main by 8.0%: accept it in roll".into()));
+        let mut partly = review("changed", None);
+        partly.pages = [("", Some("ada")), ("/pricing", None)].map(|(path, by)| crate::model::PreviewPageReview { path: path.into(), percent: 8.0, by: by.map(Into::into) }).to_vec();
+        assert_eq!(visual_status(&partly), ("pending", "Differs from main by 8.0%: 1 of 2 pages accepted, accept the rest in roll".into()));
         assert_eq!(visual_status(&review("accepted", Some("ada"))), ("success", "Accepted by ada: differs from main by 8.0%".into()));
         assert_eq!(visual_status(&review("unchanged", None)).0, "success");
         assert_eq!(

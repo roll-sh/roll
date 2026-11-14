@@ -688,7 +688,7 @@ and admins see every project.
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each) | `{vars}`: the preview's own variables; its services redeploy with them |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
-| `POST /v1/previews/{id}/visual/accept` | `{head?}` (the screenshot's looked at, `visual_review.head`) | `Preview`: how a change's pages look at its latest screenshot is accepted (`visual_review`, `roll/visual`); 409 with no screenshot yet, 400 for a branch's preview, 403 from the change's author or from a token when the review is required, 409 when `head` isn't the latest screenshot's (a newer one came in) |
+| `POST /v1/previews/{id}/visual/accept` | `{head?, path?}` (the screenshot's looked at, `visual_review.head`; `path`: that page only, `""` the first, else every page) | `Preview`: how a change's pages look at its latest screenshot is accepted (`visual_review`, `roll/visual`); 404 for a page it has no screenshot of; 409 with no screenshot yet, 400 for a branch's preview, 403 from the change's author or from a token when the review is required, 409 when `head` isn't the latest screenshot's (a newer one came in) |
 | `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}` |
 | `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come. `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s (2,000 lines wide after the first read) and only new lines are sent, with a line saying so when some were missed. Runs on the preview's holder; the stream ends when the client goes |
 | `GET /v1/previews/{id}/activity` | | `Activity[]`, newest first |
@@ -859,10 +859,14 @@ type Settings = {
     screenshot's head, the one the person looked at (`head`): a newer screenshot coming in
     meanwhile makes it a 409, and GitHub's button counts only on the check run of the push the
     review is about. The comment says it too ("**Visual review:** its pages differ from `main` by
-    8.0%. Review it in roll", then "accepted by ada"). The next push is reviewed again, unless
-    every page (desktop, phone, the
-    other pages) looks exactly as at the accepted head, when the acceptance carries over (as
-    Chromatic carries accepted baselines forward). GitHub's branch protection can require
+    8.0%. Review it in roll", then "accepted by ada"). Pages are accepted one at a time too, as
+    Chromatic reviews each snapshot (`visual_review.pages`: each page that differs and who
+    accepted it; the sheet's Accept per page, `roll preview accept --page /pricing` or `--first`,
+    `path` in the body); the change is accepted once every changed page is ("1 of 2 pages
+    accepted, accept the rest in roll" meanwhile), and GitHub's button accepts them all. On the
+    next push each accepted page that looks exactly as it did (the first page at both widths,
+    each other page) keeps its acceptance, as Chromatic carries accepted baselines forward, so
+    only the pages the push changed are asked about again. GitHub's branch protection can require
     `roll/visual`; with `required` roll's own landing does too (a `visual` blocker in
     `Code::blockers`, from the project's rule, never the change's). A review is someone else's:
     the change's author can't accept it (403 in roll, ignored from GitHub, and an older such
@@ -1001,6 +1005,9 @@ Ranked by what a person notices first. Done so far:
   services' included (`admin:/users`);
 - a visual review per push (`visual_review`: the `roll/visual` status, Accept in roll, and
   `required` keeping the change from landing in roll);
+- a visual review per page (Chromatic's per-snapshot review): each changed page accepted on its
+  own, the change once all are, and a push asking again only about the pages it changed (live:
+  "changed, 1 of 2", then accepted);
 - comparisons with main at the change's merge base (the baseline's last 10 heads kept);
 - stable screenshots: animations stopped and `github.hide` selectors blanked before each capture;
 - where a page changed, as a diff image (`?diff=base|previous`, the sheet's Diff);
@@ -1065,28 +1072,23 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Accept per page** (Chromatic accepts per snapshot): a visual review accepts the whole
-   change, so a push that moves `/pricing` on purpose and `/` by accident is accepted whole.
-   Each page's comparison gets its own state on the sheet and in the `roll/visual` check run's
-   summary; `required` waits on every changed page; carrying an acceptance over a pixel-identical
-   push stays per page.
-2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+1. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+3. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-5. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+4. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+5. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1099,7 +1101,7 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+6. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

@@ -140,11 +140,13 @@ CREATE TABLE IF NOT EXISTS base_history (
     at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, head)
 );
-CREATE TABLE IF NOT EXISTS visual_accepts (
-    preview_id TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS visual_page_accepts (
+    preview_id TEXT NOT NULL,
+    path TEXT NOT NULL,
     head TEXT NOT NULL,
     by TEXT NOT NULL,
-    at INTEGER NOT NULL
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, path)
 );
 CREATE TABLE IF NOT EXISTS budget_alerts (
     project_id TEXT NOT NULL,
@@ -707,7 +709,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_accepts", "base_history", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "base_history", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1293,71 +1295,94 @@ impl Store {
     }
 
     /// `by` accepted how the preview's pages look at the latest screenshot's head (`None`: no
-    /// screenshot to accept).
+    /// screenshot to accept): `page` only (`""` the first page, else another page's path), or
+    /// every page taken there.
     /// `seen`: the head whose screenshots were looked at; refused (`Conflict`) when a newer one
     /// came in meanwhile, so nobody accepts pages they didn't see.
-    pub fn accept_visual(&self, id: &str, by: &str, seen: Option<&str>) -> Result<Option<String>> {
+    pub fn accept_visual(&self, id: &str, by: &str, seen: Option<&str>, page: Option<&str>) -> Result<Option<String>> {
         let now = self.now_ms()?;
         // Read and written in one transaction: a screenshot landing in between can't be accepted.
         self.db.write(|c| {
             let head: Option<String> = c.query_row("SELECT head FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional()?;
-            let Some(head) = head else { return Ok(None) };
+            let Some(head) = head.filter(|h| !h.is_empty()) else { return Ok(None) };
             if seen.is_some_and(|s| s != head) {
                 return Err(Error::Conflict(format!("a newer screenshot came in (at {}): look at it first", head.chars().take(12).collect::<String>())));
             }
-            c.execute(
-                "INSERT INTO visual_accepts (preview_id, head, by, at) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, by = excluded.by, at = excluded.at",
-                params![id, head, by, now],
-            )?;
+            let others: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
+            let pages: Vec<String> = match page {
+                None => std::iter::once(String::new()).chain(others).collect(),
+                Some(p) if p.is_empty() || others.iter().any(|o| o == p) => vec![p.to_string()],
+                Some(p) => return Err(Error::NotFound(format!("the preview has no screenshot of {p:?}"))),
+            };
+            for path in pages {
+                c.execute(
+                    "INSERT INTO visual_page_accepts (preview_id, path, head, by, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, by = excluded.by, at = excluded.at",
+                    params![id, path, head, by, now],
+                )?;
+            }
             Ok::<_, Error>(Some(head))
         })
     }
 
-    /// After a screenshot: an acceptance of the head just before moves to this one when every page
-    /// looks exactly as it did there (Chromatic carries accepted baselines forward), so a push that
-    /// changes nothing visible isn't reviewed again. `true` when it moved.
+    /// After a screenshot: each page accepted at the head just before is accepted at this one when
+    /// it looks exactly as it did there (Chromatic carries accepted baselines forward), so a push
+    /// that changes nothing visible isn't reviewed again, and one that changes a page asks only
+    /// about that page. `true` when an acceptance moved.
     pub fn carry_acceptance(&self, id: &str) -> Result<bool> {
         self.db.write(|c| {
-            let accepted: Option<String> = c.query_row("SELECT head FROM visual_accepts WHERE preview_id = ?", [id], |r| r.get(0)).optional()?;
             // (head, the head before, desktop change, phone change)
             type Shot = (String, Option<String>, Option<i64>, Option<i64>);
             let shot: Option<Shot> =
                 c.query_row("SELECT head, prev_head, change_bp, phone_change_bp FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
-            let (Some(accepted), Some((head, Some(prev), Some(0), phone))) = (accepted, shot) else { return Ok(false) };
-            if accepted != prev || head == accepted || phone.is_some_and(|p| p != 0) {
-                return Ok(false);
+            let Some((head, Some(prev), desktop, phone)) = shot else { return Ok(false) };
+            // Each page's (path, the head before, change): the first page's at both widths.
+            let mut same: Vec<String> = Vec::new();
+            if desktop == Some(0) && phone.is_none_or(|p| p == 0) {
+                same.push(String::new());
             }
-            // Every other page was taken at both heads and is unchanged too.
-            let pages: Vec<(Option<String>, Option<i64>)> = c.query("SELECT prev_head, change_bp FROM page_shots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            if pages.iter().any(|(h, bp)| h.as_deref() != Some(prev.as_str()) || *bp != Some(0)) {
-                return Ok(false);
+            let pages: Vec<(String, Option<String>, Option<i64>)> = c.query("SELECT path, prev_head, change_bp FROM page_shots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            same.extend(pages.into_iter().filter(|(_, h, bp)| h.as_deref() == Some(prev.as_str()) && *bp == Some(0)).map(|(p, _, _)| p));
+            let mut moved = false;
+            for path in same {
+                moved |= c.execute("UPDATE visual_page_accepts SET head = ? WHERE preview_id = ? AND path = ? AND head = ?", [head.as_str(), id, path.as_str(), prev.as_str()])? > 0;
             }
-            c.execute("UPDATE visual_accepts SET head = ? WHERE preview_id = ?", [head.as_str(), id])?;
-            Ok::<_, Error>(true)
+            Ok::<_, Error>(moved)
         })
     }
 
     /// The visual review of a change's preview (`github.visual_review`), once its pages were
-    /// compared with the baseline's: the most any of them differs, and who accepted that head.
+    /// compared with the baseline's: each page that differs, who accepted it at this head, and
+    /// the change accepted once every one of them is.
     fn visual_review(&self, r: &Row, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck], shot: Option<String>) -> Result<Option<crate::VisualReview>> {
         let rule = self.settings(&r.project_id)?.visual_review;
         if r.change_id.is_none() || rule == crate::settings::VisualReviewRule::Off {
             return Ok(None);
         }
         let Some(base) = base else { return Ok(None) };
-        let percent = [Some(base.percent), base.phone_percent].into_iter().chain(pages.iter().map(|p| p.base_percent)).flatten().fold(0.0_f64, f64::max);
-        let accepted: Option<(String, String, i64)> = self.db.read(|c| c.query_row("SELECT head, by, at FROM visual_accepts WHERE preview_id = ?", [&r.id], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?))).optional())?;
-        let accepted = accepted.filter(|(h, _, _)| shot.as_deref() == Some(h.as_str()));
-        let state = match (&accepted, percent > 0.0) {
-            (_, false) => crate::VisualState::Unchanged,
-            (Some(_), true) => crate::VisualState::Accepted,
-            (None, true) => crate::VisualState::Changed,
+        let accepts: Vec<(String, String, String, i64)> = self.db.read(|c| c.query("SELECT path, head, by, at FROM visual_page_accepts WHERE preview_id = ?", [&r.id], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?, x.get(3)?))))?;
+        let accepted = |path: &str| accepts.iter().find(|(p, h, _, _)| p == path && shot.as_deref() == Some(h.as_str())).map(|(_, _, by, at)| (by.clone(), *at));
+        let first = base.percent.max(base.phone_percent.unwrap_or(0.0));
+        let changed: Vec<(String, f64)> =
+            std::iter::once((String::new(), first)).chain(pages.iter().filter_map(|p| Some((p.path.clone(), p.base_percent?)))).filter(|(_, pct)| *pct > 0.0).collect();
+        let reviews: Vec<crate::PageReview> = changed
+            .iter()
+            .map(|(path, percent)| {
+                let a = accepted(path);
+                crate::PageReview { path: path.clone(), percent: *percent, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at) }
+            })
+            .collect();
+        let percent = changed.iter().map(|(_, p)| *p).fold(0.0_f64, f64::max);
+        let state = if reviews.is_empty() {
+            crate::VisualState::Unchanged
+        } else if reviews.iter().all(|p| p.by.is_some()) {
+            crate::VisualState::Accepted
+        } else {
+            crate::VisualState::Changed
         };
-        let (by, at) = match accepted.filter(|_| state == crate::VisualState::Accepted) {
-            Some((_, by, at)) => (Some(by), Some(at)),
-            None => (None, None),
-        };
-        Ok(Some(crate::VisualReview { state, branch: base.branch.clone(), percent, by, at, required: rule == crate::settings::VisualReviewRule::Required, head: shot.unwrap_or_default() }))
+        // Who accepted it: whoever accepted its last page.
+        let last = reviews.iter().filter(|_| state == crate::VisualState::Accepted).max_by_key(|p| p.at);
+        let (by, at) = (last.and_then(|p| p.by.clone()), last.and_then(|p| p.at));
+        Ok(Some(crate::VisualReview { state, branch: base.branch.clone(), percent, by, at, required: rule == crate::settings::VisualReviewRule::Required, head: shot.unwrap_or_default(), pages: reviews }))
     }
 
     /// Another page's screenshot (`previous`: the one before it).

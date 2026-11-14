@@ -500,6 +500,14 @@ case "$BLOCKED" in *visual*) ;; *) echo "a required visual review should keep th
 # Accepting what wasn't seen (an older screenshot's head) is refused; what was, accepted.
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$PV/visual/accept" -H 'content-type: application/json' -d '{"head":"cs_not_this_one"}')" = 409 ] || { echo "accepting an older screenshot should be refused"; exit 1; }
 SEEN=$(api GET "/v1/previews/$PV" | jq_ "d['visual_review']['head']")
+# One page at a time (the first page and web:/ both differ from main's): one accepted, the change
+# still waits for the other.
+CHANGED_PAGES=$(api GET "/v1/previews/$PV" | jq_ "len(d['visual_review']['pages'])")
+[ "$CHANGED_PAGES" -ge 2 ] || { echo "two pages should differ from main's to review them one at a time: $CHANGED_PAGES"; exit 1; }
+ONE=$(api GET "/v1/previews/$PV" | jq_ "d['visual_review']['pages'][0]['path']")
+PARTLY=$(api POST "/v1/previews/$PV/visual/accept" "$(python3 -c 'import json,sys; print(json.dumps({"head": sys.argv[1], "path": sys.argv[2]}))' "$SEEN" "$ONE")" | jq_ "'%s, %d of %d' % (d['visual_review']['state'], sum(1 for x in d['visual_review']['pages'] if x['by']), len(d['visual_review']['pages']))")
+case "$PARTLY" in "changed, 1 of "*) ;; *) echo "accepting one page should leave the others waiting: $PARTLY"; exit 1;; esac
+case "$(api GET "/v1/code/changes/$CHG" | jq_ "[b['kind'] for b in d.get('blockers', [])]")" in *visual*) ;; *) echo "a partly accepted required review should still block landing"; exit 1;; esac
 REVIEW=$(api POST "/v1/previews/$PV/visual/accept" "{\"head\":\"$SEEN\"}" | jq_ "'%s by %s' % (d['visual_review']['state'], d['visual_review']['by'])")
 [ "$REVIEW" = "accepted by operator" ] || { echo "accepting should settle the review: $REVIEW"; exit 1; }
 case "$(api GET "/v1/code/changes/$CHG" | jq_ "[b['kind'] for b in d.get('blockers', [])]")" in *visual*) echo "an accepted review shouldn't block landing"; exit 1;; esac
@@ -575,7 +583,7 @@ cat <<EOF
 | The phone-width screenshot | $PHONE |
 | The change's page against main's preview | $BASE (main loads in $MAIN_LOAD ms) |
 | Another page (\`github.pages\`) | $PAGES |
-| Visual review (required): the change's page against main's, then accepted | changed (blockers $BLOCKED), then $REVIEW |
+| Visual review (required): the change's page against main's, one page accepted, then all | changed (blockers $BLOCKED), then $PARTLY, then $REVIEW |
 | Accessibility of the test page (it has no lang and no title) | $A11Y; new against main: $A11Y_NEW |
 | The first page's speed, timed with its screenshot | $SPEED |
 | The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |

@@ -444,6 +444,20 @@ pub struct VisualReview {
     pub required: bool,
     /// The head whose screenshots it's about: what an acceptance names (`seen`).
     pub head: String,
+    /// Each page that differs from the baseline's, and who accepted it at this head (Chromatic
+    /// reviews per snapshot): the change is accepted once every one of them is.
+    pub pages: Vec<PageReview>,
+}
+
+/// One page of a visual review.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PageReview {
+    /// `""`: the first page (at both widths); else another page's (`github.pages`).
+    pub path: String,
+    /// How much it differs from the baseline's.
+    pub percent: f64,
+    pub by: Option<String>,
+    pub at: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

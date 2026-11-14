@@ -243,13 +243,35 @@ export function PreviewSheet({
                       type="button"
                       disabled={busy !== null || gone}
                       onClick={() => run("accept", () => previewsApi.acceptVisual(p.id, p.visual_review?.head))}
-                      className="ml-auto h-6 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
+                      className="ml-auto h-6 shrink-0 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
                     >
-                      {busy === "accept" ? "Accepting…" : "Accept"}
+                      {busy === "accept" ? "Accepting…" : p.visual_review.pages.length > 1 ? "Accept all" : "Accept"}
                     </button>
                   </>
                 )}
               </div>
+            )}
+            {p.visual_review && p.visual_review.state === "changed" && p.visual_review.pages.length > 1 && (
+              <ul className="mt-1 space-y-0.5 text-[11.5px]" aria-label="Pages to review">
+                {p.visual_review.pages.map((pg) => (
+                  <li key={pg.path} className="flex min-w-0 items-center gap-2">
+                    <span className="truncate font-mono text-[11px] text-muted">{pg.path || "/"}</span>
+                    <span className="shrink-0 font-mono text-[11px] tabular-nums text-subtle">{Math.max(pg.percent, 0.1).toFixed(1)}%</span>
+                    {pg.by ? (
+                      <span className="ml-auto shrink-0 text-subtle">accepted by {pg.by}</span>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={busy !== null || gone}
+                        onClick={() => run(`accept:${pg.path}`, () => previewsApi.acceptVisual(p.id, p.visual_review?.head, pg.path))}
+                        className="ml-auto h-6 shrink-0 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
+                      >
+                        {busy === `accept:${pg.path}` ? "Accepting…" : "Accept"}
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
             )}
             {p.page_health && (p.page_health.errors > 0 || p.page_health.failed > 0) && (
               <div className="mt-1.5 space-y-0.5 text-[11.5px] text-danger">

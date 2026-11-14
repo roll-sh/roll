@@ -71,8 +71,15 @@ pub enum Preview {
         release: bool,
     },
     /// Accept how a change's pages look at its latest screenshot (the `roll/visual` status,
-    /// `github.visual_review`); each new push is reviewed again.
-    Accept { preview: String },
+    /// `github.visual_review`): every page, --page one of `github.pages`, or --first the first
+    /// page only. A push asks again about the pages it changes.
+    Accept {
+        preview: String,
+        #[arg(long, conflicts_with = "first")]
+        page: Option<String>,
+        #[arg(long)]
+        first: bool,
+    },
     /// Save its screenshot (a PNG) to --out: the first page, --page another of `github.pages`,
     /// --phone at a phone's width, --base the default branch's it was compared with, --previous
     /// the one before, or --diff base|previous where it differs from those.
@@ -420,7 +427,14 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             std::fs::write(&out, &png).map_err(|e| anyhow::anyhow!("writing {}: {e}", out.display()))?;
             json!({ "saved": out.display().to_string(), "bytes": png.len() })
         }
-        Preview::Accept { preview } => api.post(&format!("/v1/previews/{preview}/visual/accept"), json!({})).await?,
+        Preview::Accept { preview, page, first } => {
+            let body = match (page, first) {
+                (Some(p), _) => json!({ "path": p }),
+                (None, true) => json!({ "path": "" }),
+                (None, false) => json!({}),
+            };
+            api.post(&format!("/v1/previews/{preview}/visual/accept"), body).await?
+        }
         Preview::Keep { preview, hours, release } => api.post(&format!("/v1/previews/{preview}/keep"), json!({ "hours": if release { 0 } else { hours } })).await?,
         Preview::Share { preview, hours, list, revoke } => {
             let path = format!("/v1/previews/{preview}/shares");

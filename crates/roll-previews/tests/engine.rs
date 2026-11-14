@@ -212,30 +212,45 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     // A push whose page looks different waits for someone.
     let chg = e.engine.store.row_by_change("chg_1").unwrap().unwrap();
     let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
-    let shoot = |head: &str| {
-        e.engine.store.set_screenshot(&chg.id, head, &png(255), None, None).unwrap();
+    // The first page and /pricing, against main's (Chromatic reviews each snapshot).
+    let pricing = |v: u8| vec![roll_previews::ports::PageShot { path: "/pricing".into(), png: png(v), errors: 0 }];
+    e.engine.store.set_page_shots(&base.id, "cs_main", &pricing(0), &["/pricing".into()]).unwrap();
+    let shoot = |head: &str, first: u8, page: u8| {
+        e.engine.store.set_screenshot(&chg.id, head, &png(first), None, None).unwrap();
+        e.engine.store.set_page_shots(&chg.id, head, &pricing(page), &["/pricing".into()]).unwrap();
         e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
     };
-    shoot("cs_1b");
+    let waiting = || review().map(|v| v.pages.iter().filter(|p| p.by.is_none()).map(|p| p.path.clone()).collect::<Vec<_>>());
+    shoot("cs_1b", 255, 255);
     assert_eq!(review().map(|v| (v.state, v.percent)), Some((VisualState::Changed, 100.0)));
-    assert!(e.engine.accept_visual(&base.id, "ada", true, None).await.is_err(), "only a change's");
+    assert_eq!(waiting(), Some(vec!["".to_string(), "/pricing".to_string()]));
+    assert!(e.engine.accept_visual(&base.id, "ada", true, None, None).await.is_err(), "only a change's");
     // Not by its own author.
-    let err = e.engine.accept_visual(&chg.id, "carol", true, Some("cs_1b")).await.unwrap_err();
+    let err = e.engine.accept_visual(&chg.id, "carol", true, Some("cs_1b"), None).await.unwrap_err();
     assert!(err.to_string().contains("own author"), "{err}");
     // What was seen: an older screenshot's head is refused, this one's accepted.
-    let err = e.engine.accept_visual(&chg.id, "ada", true, Some("cs_1a")).await.unwrap_err();
+    let err = e.engine.accept_visual(&chg.id, "ada", true, Some("cs_1a"), None).await.unwrap_err();
     assert!(err.to_string().contains("a newer screenshot came in"), "{err}");
-    let p = e.engine.accept_visual(&chg.id, "ada", true, Some("cs_1b")).await.unwrap();
+    // One page at a time: the change waits until every changed page is accepted.
+    let p = e.engine.accept_visual(&chg.id, "ada", true, Some("cs_1b"), Some("/pricing")).await.unwrap();
+    assert_eq!(p.visual_review.map(|v| v.state), Some(VisualState::Changed));
+    assert_eq!(waiting(), Some(vec!["".to_string()]));
+    assert!(e.engine.accept_visual(&chg.id, "ada", true, Some("cs_1b"), Some("/nowhere")).await.is_err(), "a page it has no screenshot of");
+    let p = e.engine.accept_visual(&chg.id, "ada", true, Some("cs_1b"), Some("")).await.unwrap();
     assert_eq!(p.visual_review.map(|v| (v.state, v.by)), Some((VisualState::Accepted, Some("ada".into()))));
     assert_eq!(e.code.last_report("chg_1").visual_review.map(|v| v.state), Some(VisualState::Accepted), "the change is told at once");
-    // A push that changes nothing visible keeps it; the next one that does is reviewed again.
-    shoot("cs_1c");
+    // A push that changes nothing visible keeps it.
+    shoot("cs_1c", 255, 255);
     assert!(e.engine.store.carry_acceptance(&chg.id).unwrap());
     assert_eq!(review().map(|v| v.state), Some(VisualState::Accepted), "pixel-identical to what was accepted");
-    e.engine.store.set_screenshot(&chg.id, "cs_1d", &png(128), None, None).unwrap();
-    e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
-    assert!(!e.engine.store.carry_acceptance(&chg.id).unwrap());
+    // One that changes /pricing only asks about /pricing again; the first page stays accepted.
+    shoot("cs_1d", 255, 128);
+    assert!(e.engine.store.carry_acceptance(&chg.id).unwrap());
     assert_eq!(review().map(|v| v.state), Some(VisualState::Changed));
+    assert_eq!(waiting(), Some(vec!["/pricing".to_string()]));
+    // Accept with no page: every page there.
+    e.engine.accept_visual(&chg.id, "ada", true, Some("cs_1d"), None).await.unwrap();
+    assert_eq!(review().map(|v| v.state), Some(VisualState::Accepted));
 }
 
 #[tokio::test]

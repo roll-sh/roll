@@ -352,6 +352,25 @@ pub struct PreviewVisualReview {
     /// The head whose screenshots it's about (what an acceptance names).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
+    /// Each page that differs, and who accepted it at this head.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<PreviewPageReview>,
+}
+
+/// One page of a visual review (`path` `""`: the first page).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewPageReview {
+    pub path: String,
+    pub percent: f64,
+    pub by: Option<String>,
+}
+
+impl PreviewVisualReview {
+    /// `(accepted, changed)` pages, when some but not all are accepted.
+    pub fn partly(&self) -> Option<(usize, usize)> {
+        let done = self.pages.iter().filter(|p| p.by.is_some()).count();
+        (done > 0 && done < self.pages.len()).then_some((done, self.pages.len()))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
