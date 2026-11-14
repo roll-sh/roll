@@ -253,8 +253,9 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     assert_eq!(d.call(&secrets, Method::GET, &at("development", "secrets"), None).await.0, StatusCode::OK);
     assert_eq!(d.call(&secrets, Method::GET, &at("production", "secrets"), None).await.0, StatusCode::FORBIDDEN);
     assert_eq!(d.call(&secrets, Method::GET, &at("development", "values"), None).await.0, StatusCode::FORBIDDEN);
-    // Health spans every environment: refused until secrets filters it by the token's grant.
-    assert_eq!(d.call(&secrets, Method::GET, &format!("/v1/secrets/projects/{}/health", project.id), None).await.0, StatusCode::FORBIDDEN);
+    // Health spans every environment and filters itself by the token's grant (roll-secrets' tests
+    // check that it hears only of development): the gate lets it in.
+    assert_eq!(d.call(&secrets, Method::GET, &format!("/v1/secrets/projects/{}/health", project.id), None).await.0, StatusCode::OK);
 
     // Rotated: the old secret is dead at once, the new one has the same rules.
     let (s, rotated) = d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{grant}/rotate"), None).await;

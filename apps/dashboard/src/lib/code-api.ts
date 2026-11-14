@@ -278,8 +278,13 @@ export interface Blocker {
     | "unresolved_threads"
     | "review_pending"
     | "review_required"
+    | "secret_leak"
+    | "secret_missing"
     | (string & {});
   message: string;
+  /** `secret_leak`, `secret_missing`: the roll secrets key, and the environments it's about. */
+  key?: string;
+  environments?: string[];
 }
 
 export type EntryState = "waiting" | "testing" | "bisecting" | "landing" | "ejected" | "landed";
@@ -381,6 +386,8 @@ export interface Change {
   queue?: QueueInfo | null;
   /** Why it can't be queued or land right now; empty when it can. */
   blockers?: Blocker[];
+  /** What it should know but needn't block on (`secret_missing`); absent when there's nothing. */
+  notices?: Blocker[];
   /** Where its review stands under the repo's rules. */
   review?: ReviewSummary;
   checks: Check[];
@@ -864,6 +871,23 @@ export interface Blame {
   /** Binary files and files over 1 MiB: no ranges. */
   binary: boolean;
   ranges: BlameRange[];
+}
+
+// ── leaked secrets ──
+
+/** Where roll secrets' values sit in the default branch's head (`GET …/leaks`): never the values. */
+export interface LeakScan {
+  head: string | null;
+  files: number;
+  /** `folder` is the secret's folder in its environment; `path` the file's. */
+  found: { key: string; environment: string; folder: string; path: string; line: number }[];
+  /** Files not read, and why. */
+  skipped: string[];
+  /** The scan stopped at its limit. */
+  truncated: boolean;
+  /** Commits read with `history`, and the ones that added a value (newest first). */
+  commits: number;
+  history: { key: string; environment: string; folder: string; changeset: string; path: string }[];
 }
 
 // ── webhooks and commit statuses ──
@@ -1385,6 +1409,7 @@ export function createCodeApi(
     release: (id: string, agent?: string) => call<WorkItem>("POST", `${wk(id)}/release`, { agent }),
     complete: (id: string, agent?: string) => call<WorkItem>("POST", `${wk(id)}/complete`, { agent }),
 
+    scanLeaks: (repo: string, history = 0) => call<LeakScan>("GET", `${rp(repo)}/leaks${history ? `?history=${history}` : ""}`),
     webhooks: (repo: string) => call<Webhook[]>("GET", `${rp(repo)}/webhooks`),
     createWebhook: (repo: string, input: WebhookInput & { url: string }) =>
       call<{ webhook: Webhook; ping: string; secret?: string }>("POST", `${rp(repo)}/webhooks`, input),

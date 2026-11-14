@@ -97,6 +97,7 @@ export const RESERVED_NAMES = [
   "observability",
   "previews",
   "agents",
+  "share",
   "shares",
   // roll itself.
   "roll",

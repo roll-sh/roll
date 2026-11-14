@@ -4,7 +4,8 @@
 //! - [`AppConfig`]: the App's id, private key, webhook secret and slug.
 //! - [`auth`]: RS256 App JWTs and cached installation tokens.
 //! - [`webhook`]: `X-Hub-Signature-256` verification and typed events.
-//! - [`client::GitHub`]: the REST calls code-control needs, with rate-limit backoff.
+//! - [`client::GitHub`]: the REST calls code-control needs, with rate-limit backoff, and the
+//!   Actions secrets roll secrets' syncs write ([`seal_secret`]).
 //! - [`mapping`]: GitHub issues, PRs and pushes as plain drafts for code-control to translate.
 //! - [`mirror::Mirror`]: when to push landed heads to GitHub, so thousands of landings become
 //!   one fast-forward push.
@@ -18,7 +19,7 @@ pub mod model;
 pub mod webhook;
 
 pub use auth::{AppAuth, InstallationToken};
-pub use client::{BranchProtection, ClientOptions, GitCredentials, GitHub, ListPage, RateLimit, impatiently};
+pub use client::{ActionsKey, BranchProtection, ClientOptions, GitCredentials, GitHub, ListPage, RateLimit, impatiently, seal_secret};
 pub use config::AppConfig;
 pub use mapping::{ChangeDraft, DraftState, PrState, PushCommit, PushDraft, WorkItemDraft};
 pub use mirror::{

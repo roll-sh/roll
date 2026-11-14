@@ -139,12 +139,13 @@ impl Code {
         self.settings_cache.lock().get(repo_id).map(|(_, s)| s.clone()).unwrap_or_default()
     }
 
-    /// Why `c` can't land right now: its state and checks ([`base_blockers`](Self::base_blockers))
-    /// and its reviews (from the review config and facts last read; [`mergeable`](Self::mergeable)
-    /// reads them first).
+    /// Why `c` can't land right now: its state and checks ([`base_blockers`](Self::base_blockers)),
+    /// its reviews and the secrets it adds (from the review config and facts last read;
+    /// [`mergeable`](Self::mergeable) reads them first).
     pub fn blockers(&self, r: &RepoRow, c: &Change, settings: &Settings) -> Vec<Blocker> {
         let mut out = Self::base_blockers(r, c, settings);
         out.extend(self.review_blockers(r, c));
+        out.extend(self.leak_blockers(r, c));
         out
     }
 
@@ -186,6 +187,7 @@ impl Code {
     pub async fn mergeable(&self, r: &RepoRow, c: &Change) -> Result<(), Vec<Blocker>> {
         let settings = self.settings(r).await;
         self.prepare_review(r, c).await;
+        self.prepare_leaks(r, c).await;
         let blockers = self.blockers(r, c, &settings);
         if blockers.is_empty() { Ok(()) } else { Err(blockers) }
     }
