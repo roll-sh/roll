@@ -731,3 +731,73 @@ async fn a_dockerfiles_stage_is_built_by_its_target() {
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
 }
 
+/// What the proxy itself costs on warm traffic: the same instance through roll's public route
+/// and at its own port, one request at a time (median, p99) and 50 at once (requests a second).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn the_proxys_own_cost_is_measured() {
+    let Some(w) = docker_world().await else { return };
+    let (id, host) = deploy_container(&w, "costed").await;
+    assert_eq!(get(&w.public, &host).await.0, StatusCode::OK);
+    let short = id.trim_start_matches("svc_");
+    let names = apps_control::runtime::docker::docker(&["ps", "--filter", &format!("label=sh.roll.apps={id}"), "--format", "{{.Names}}"]).await.unwrap();
+    let sandbox = names.lines().find(|n| n.starts_with(&format!("roll-apps-{short}-production-")) && n.ends_with("-net")).unwrap_or_else(|| panic!("{names}")).to_string();
+    let port = apps_control::runtime::docker::docker(&["inspect", "-f", "{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}}{{end}}{{end}}", &sandbox]).await.unwrap();
+    let direct_url: axum::http::Uri = format!("http://127.0.0.1:{}/", port.trim()).parse().unwrap();
+    let client: hyper_util::client::legacy::Client<_, Body> = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http();
+    let direct = |c: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, Body>, u: axum::http::Uri| async move {
+        let t = Instant::now();
+        let r = c.request(Request::get(u).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let _ = r.into_body().collect().await;
+        t.elapsed()
+    };
+    let (mut via, mut own) = (Vec::new(), Vec::new());
+    for _ in 0..50 {
+        get(&w.public, &host).await;
+        direct(client.clone(), direct_url.clone()).await;
+    }
+    for _ in 0..500 {
+        via.push(get(&w.public, &host).await.1);
+        own.push(direct(client.clone(), direct_url.clone()).await);
+    }
+    let pct = |mut v: Vec<Duration>, p: f64| {
+        v.sort();
+        v[((v.len() as f64 - 1.0) * p) as usize]
+    };
+    let rps = |via_roll: bool| {
+        let (public, host, client, url) = (w.public.clone(), host.clone(), client.clone(), direct_url.clone());
+        async move {
+            let t = Instant::now();
+            let tasks: Vec<_> = (0..50)
+                .map(|_| {
+                    let (public, host, client, url) = (public.clone(), host.clone(), client.clone(), url.clone());
+                    tokio::spawn(async move {
+                        for _ in 0..40 {
+                            if via_roll {
+                                assert_eq!(get(&public, &host).await.0, StatusCode::OK);
+                            } else {
+                                direct(client.clone(), url.clone()).await;
+                            }
+                        }
+                    })
+                })
+                .collect();
+            for t in tasks {
+                t.await.unwrap();
+            }
+            2000.0 / t.elapsed().as_secs_f64()
+        }
+    };
+    let (rps_via, rps_own) = (rps(true).await, rps(false).await);
+    eprintln!(
+        "MEASURED the proxy on warm traffic: median {} µs through roll vs {} µs at the instance's own port (p99 {} vs {} µs); 50 at once: {:.0} vs {:.0} requests a second",
+        pct(via.clone(), 0.5).as_micros(),
+        pct(own.clone(), 0.5).as_micros(),
+        pct(via, 0.99).as_micros(),
+        pct(own, 0.99).as_micros(),
+        rps_via,
+        rps_own
+    );
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+}
+

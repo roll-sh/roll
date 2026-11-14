@@ -54,7 +54,10 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How long a host's answer is kept on a node that didn't change it ([`Apps::env_for_host`]).
+const HOST_TTL: Duration = Duration::from_secs(1);
 use store::{EnvRow, ServiceRow, Store};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -190,6 +193,10 @@ pub struct Apps {
     running_jobs: Mutex<HashMap<String, String>>,
     /// Cron runs this process runs now (a takeover's cleanup spares them).
     pub(crate) running_runs: Mutex<HashMap<String, String>>,
+    /// What each public host named lately ([`Apps::env_for_host`]): when, at which
+    /// `hosts_gen`, and the answer.
+    hosts: Mutex<HashMap<String, HostAnswer>>,
+    hosts_gen: std::sync::atomic::AtomicU64,
     /// Job containers this node runs at once, whatever jobs they belong to ([`jobs`]).
     job_slots: Arc<tokio::sync::Semaphore>,
     /// Services whose project reached its spend limit this month (`spend`), as last read.
@@ -291,6 +298,8 @@ type NeedsDeploy = (std::time::Instant, u64, String, Option<String>, bool);
 
 /// A service id looked up by name, as of when (none: no such web service).
 type NameLookup = (std::time::Instant, Option<String>);
+/// A host's kept answer: when, at which generation, and the service, environment and deployment.
+type HostAnswer = (Instant, u64, Option<(String, String, Option<String>)>);
 
 /// Another service's values a reference may read, and which of them are sealed.
 type ServiceValues = (HashMap<String, String>, BTreeSet<String>);
@@ -319,6 +328,8 @@ impl Apps {
             cancels: Mutex::new(HashMap::new()),
             running_jobs: Mutex::new(HashMap::new()),
             running_runs: Mutex::default(),
+            hosts: Mutex::default(),
+            hosts_gen: Default::default(),
             job_slots: Arc::new(tokio::sync::Semaphore::new(jobs::MAX_CONTAINERS)),
             capped: Mutex::new(Default::default()),
             capped_refresh: tokio::sync::Mutex::new(()),
@@ -707,6 +718,8 @@ impl Apps {
         let domains = self.db(move |s| s.custom_domains_of(&sid, None)).await?;
         let sid = id.to_string();
         self.db(move |s| s.delete_service(&sid)).await?;
+        // Its hostnames name nothing now.
+        self.hosts_changed();
         // Its environments' networks, where no other service of the project has that environment.
         for e in &envs {
             self.drop_network_if_unused(&project, &e.name, id).await;
@@ -810,6 +823,8 @@ impl Apps {
 
     /// `service` changed: whoever follows it reads it again.
     pub fn changed(&self, service: &str) {
+        // What a host names may have changed with it (made private, a domain, an environment).
+        self.hosts_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _ = self.changes.send(service.to_string());
     }
 
@@ -833,8 +848,14 @@ impl Apps {
     }
 
     /// Something a deployment's fingerprint reads changed: every cached `needs_deploy` is stale.
+    /// Forget every host's kept answer ([`Apps::env_for_host`]).
+    pub(crate) fn hosts_changed(&self) {
+        self.hosts_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn settings_changed(&self) {
         self.settings_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.hosts_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     async fn environment_view(self: &Arc<Self>, r: EnvRow) -> Result<Environment> {
@@ -1761,6 +1782,8 @@ impl Apps {
     }
 
     pub async fn add_domain(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Domain> {
+        // What a hostname names is about to change: no host answer kept from before.
+        self.hosts_changed();
         let host = body.get("hostname").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("hostname is required".into()))?;
         let mut reserved: Vec<&str> = self.cfg.reserved.iter().map(String::as_str).collect();
         reserved.push(&self.cfg.domain);
@@ -1813,6 +1836,8 @@ impl Apps {
     /// Check a custom domain's DNS now (a CNAME to its target, or the TXT challenge), and where
     /// its certificate is.
     pub async fn verify_domain(self: &Arc<Self>, service: &str, env: &str, host: &str) -> Result<Domain> {
+        // What a hostname names is about to change: no host answer kept from before.
+        self.hosts_changed();
         let h = host.to_ascii_lowercase();
         let (sid, e) = (service.to_string(), env.to_string());
         let row = self.db(move |s| s.environment(&sid, &e)).await?;
@@ -1857,6 +1882,8 @@ impl Apps {
     }
 
     pub async fn delete_domain(self: &Arc<Self>, service: &str, env: &str, host: &str) -> Result<()> {
+        // What a hostname names is about to change: no host answer kept from before.
+        self.hosts_changed();
         let (sid, e, h) = (service.to_string(), env.to_string(), host.to_ascii_lowercase());
         self.db(move |s| s.delete_domain(&sid, &e, &h)).await?;
         self.release_domains(&[host.to_ascii_lowercase()]).await;
@@ -1876,6 +1903,8 @@ impl Apps {
     /// Remove the custom domains still unverified `older_than` after they were added: the
     /// hostname is free for its real owner. Returns them.
     pub async fn expire_domain_claims(self: &Arc<Self>, older_than: Duration) -> Result<Vec<String>> {
+        // What a hostname names is about to change: no host answer kept from before.
+        self.hosts_changed();
         let age = older_than.as_millis() as i64;
         // The database's clock, which stamped them.
         let expired = self.db(move |s| s.expire_domain_claims(s.now()? - age)).await?;
@@ -1891,6 +1920,8 @@ impl Apps {
     /// environment's hostnames (its own, or another custom domain that doesn't redirect), or
     /// (`null`) serve them again.
     pub async fn set_domain_redirect(self: &Arc<Self>, service: &str, env: &str, host: &str, body: Value) -> Result<Domain> {
+        // What a hostname names is about to change: no host answer kept from before.
+        self.hosts_changed();
         let o = body.as_object().cloned().unwrap_or_default();
         if let Some(k) = o.keys().find(|k| k.as_str() != "redirect_to") {
             return Err(Error::BadRequest(format!("unknown field {k}")));
@@ -1967,6 +1998,26 @@ impl Apps {
     /// The service and environment a hostname is, and the deployment when it's one's own
     /// (`<deployment>--<slug>`: the id without `dep_`).
     pub async fn env_for_host(self: &Arc<Self>, host: &str) -> Option<(String, String, Option<String>)> {
+        // Every request asks: kept a second (another node's change shows within it), and
+        // forgotten at once on any change here. It was two queries a request, about 150 µs of the
+        // proxy's 260 (`docker.rs::the_proxys_own_cost_is_measured`, release).
+        let generation = self.hosts_gen.load(std::sync::atomic::Ordering::SeqCst);
+        if let Some((at, g, v)) = self.hosts.lock().get(host).cloned()
+            && g == generation
+            && at.elapsed() < HOST_TTL
+        {
+            return v;
+        }
+        let v = self.env_for_host_now(host).await;
+        let mut cache = self.hosts.lock();
+        if cache.len() >= 10_000 {
+            cache.clear();
+        }
+        cache.insert(host.to_string(), (Instant::now(), generation, v.clone()));
+        v
+    }
+
+    async fn env_for_host_now(self: &Arc<Self>, host: &str) -> Option<(String, String, Option<String>)> {
         let found = self.host_target(host).await?;
         // A private service has no public names: the same 404 as an address nobody has, read
         // from its settings now (making it private takes effect at once, not with a deploy).

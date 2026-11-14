@@ -1349,6 +1349,16 @@ Spend counts the services a project has now (a deleted service's month drops out
 
 ## Measured
 
+- **The proxy's own cost on warm traffic** (`docker.rs::the_proxys_own_cost_is_measured`, a
+  release build, real Docker, the same busybox instance through roll's public route and at its
+  own published port, 500 requests one at a time after 50 to warm up, three runs each, ai-server
+  at load 22 to 30): it added 250, 265 and 261 µs at the median (mean 259). Two store queries a
+  request (the host's environment, then whether its service is still public) were most of it:
+  with a host's answer kept a second (forgotten at once on any change on that node: its
+  settings, environments, domains), it adds 133, 90 and 102 µs (mean 108), 58% less. Requests a
+  second at 50 at once are the app's (busybox httpd, about 550 either way). On another node a
+  change (made private, a domain gone) shows within that second; the node that made it sees it
+  at once.
 - A web instance's network lives in a sandbox made with it (`Docker` with `netns`, the default;
   `ROLL_APPS_NETNS=0` turns it off): busybox asleep, holding the network namespace, its aliases
   on the project network and its published port, with no capabilities, 16 MiB, half a vCPU, 8
@@ -1656,9 +1666,9 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (a product review of what one engineer can close here now, bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **The proxy's own cost, measured**: its added latency and requests a second on warm traffic
-   against the app reached directly (`pnpm test:apps --docker` prints it beside the cold starts),
-   and what's found worth cutting, cut only on a measured win.
+1. **The proxy's remaining 100 µs**: after the host cache, profile what's left on a warm request
+   (the access line's JSON, the meter's lock, the gate and live lookups done twice, the upstream
+   hop) and cut what a measurement says is worth it.
 2. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
