@@ -411,19 +411,24 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **The twelfth review** of what's new since the eleventh: what an agent sees on the token page,
-   the audit CSV, open registration's bounds, completions named in the audit log (in progress).
-2. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+1. **Registration that a flood can't fill** (the twelfth review): a dynamic client's `client_id` is a
+   MAC'd blob of its name and redirect URIs, and nothing is stored until a person consents; an
+   unconsented id is refused after a day. No cap or eviction to fill, as a metadata document's
+   client already is (in progress).
+2. **The prefix check per method** (the twelfth review): rolld logs each route's methods, and a
+   method a route's own rows don't name (decided by a prefix row) is listed as `METHOD route` in
+   `prefix-reviewed.txt` or given a row.
+3. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
    lands after #20, #25 and #30): kept merged both ways; secrets' tenth-review fixes are in #30
    (an admin's token reaches operator projects, project-wide metadata needs a rule over the whole
    project). The canvas check costs nothing measurable (`gate_latency`, release, pinned, A/B
    twice: a token's one-resource request 83–115 µs p50 with it, 105–116 µs without).
-3. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+4. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions.
-4. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
+5. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Done lately: a person's canvas no longer widens a project rule (`Workspace::trusts`, built on
@@ -438,13 +443,18 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); `secrets_list_ssh_cas` (secrets
-#45); open client registration bounded (20 a minute a network; a flood never pushes out a client a
-person is connecting); `secrets_list_cas` (secrets #44); the prefix check skips public routes (no
-grant classifies what anyone may call); `secrets_list_cloud_accounts` (secrets #43); the audit log
-as CSV (the audit page, `roll mcp audit --format csv`; formula-safe cells); what an agent sees, on
-the token page (`GET /v1/access/tokens/{id}/tools`: the tools and prompts a token is offered and
-what the list costs an agent's context); completions named as such in the audit log
+revoked as leaked, about to expire; only their own, never a secret); the twelfth review's contained
+findings (CSV cells all quoted with formulas defused after in-cell separators too; a completion
+never waits on or uses an open approval; registration's rate map swept once a minute and bounded;
+the token-page list read from the caller's address and off the async threads; stored grants honour
+the idle policy; client names as consent shows them, no invisible characters); a person's own
+token's page tested to show only their reach (#25); `secrets_list_ssh_cas` (secrets #45); open
+client registration bounded (20 a minute a network; a flood never pushes out a client a person is
+connecting); `secrets_list_cas` (secrets #44); the prefix check skips public routes (no grant
+classifies what anyone may call); `secrets_list_cloud_accounts` (secrets #43); the audit log as CSV
+(the audit page, `roll mcp audit --format csv`; formula-safe cells); what an agent sees, on the
+token page (`GET /v1/access/tokens/{id}/tools`: the tools and prompts a token is offered and what
+the list costs an agent's context); completions named as such in the audit log
 (`completion/complete:<tool>`); a connection's tool names worked out once per request; every open
 sibling's head passes the route check with #25 (apps-next's rollback to the last deploy,
 previews-next's share revoke, search's index refresh and settings reviewed: 178 in all);
