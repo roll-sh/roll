@@ -546,6 +546,11 @@ async fn protected_environments_take_change_requests_that_another_principal_appr
     assert_eq!((s, r["state"].as_str()), (StatusCode::OK, Some("approved")));
     api.ok(Method::POST, &format!("/environments/staging/requests/{id}/apply"), None).await;
     assert_eq!(api.values("staging", "/payments/eu").await["values"]["STRIPE"], "sk_1");
+    // Nor by deleting the folder, or one above it.
+    for folder in ["/payments", "/payments/eu"] {
+        let (s, e) = api.call(Method::DELETE, &format!("/environments/staging/folders?path={folder}"), None).await;
+        assert!(s == StatusCode::CONFLICT && e["code"] == "approval_required", "{folder}: {e}");
+    }
 }
 
 #[tokio::test]

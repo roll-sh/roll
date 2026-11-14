@@ -345,7 +345,9 @@ impl Secrets {
     }
 
     pub fn review_request(&self, project: &str, slug: &str, id: &str, v: Verdict, caller: &Caller) -> Result<Request> {
-        caller.need(Action::Admin, &Scope::env(project, slug))?;
+        // Admin where the request changes things (checked per folder below): a folder's own admin
+        // reviews its folder's requests.
+        caller.need(Action::Read, &Scope::env(project, slug))?;
         if !["approve", "reject"].contains(&v.verdict.as_str()) {
             return Err(Error::BadRequest("verdict is approve or reject".into()));
         }
@@ -360,6 +362,10 @@ impl Secrets {
             }
             if r.by == caller.principal {
                 return Err(Error::Forbidden("the author of a request can't review it (an admin can apply it with bypass)".into()));
+            }
+            let changed: Vec<ItemDiff> = from_json(&r.items);
+            for i in &changed {
+                caller.need(Action::Admin, &Scope::at(project, slug, &i.path))?;
             }
             let gates = request_gates(c, &env, &r)?;
             if !crate::folder_policy::may_review(&gates, &caller.principal) {
@@ -426,6 +432,11 @@ impl Secrets {
             if current.state != r.state {
                 return Err(Error::Conflict("conflict", format!("{id} is {} now", current.state)));
             }
+            // The gates as they are in this transaction: a policy added since the read counts.
+            let met = crate::folder_policy::satisfied(&request_gates(c, &env, &current)?, &from_json::<Vec<Review>>(&current.reviews), &current.by);
+            if !met && !bypass {
+                return Err(Error::Conflict("approval_required", format!("{id} doesn't have the approvals what it changes needs")));
+            }
             for i in &prepared.items {
                 let newer: i64 = c.query_row(
                     "SELECT COUNT(*) FROM versions WHERE env_id = ? AND path = ? AND key = ? AND owner = ? AND seq > ?",
@@ -439,7 +450,7 @@ impl Secrets {
             let (change, diffs) = crate::write::apply(c, &dek, &env, &prepared.items, "request", &message, caller, now)?;
             let seq = (!diffs.is_empty()).then_some(change.seq);
             c.execute("UPDATE requests SET state = 'applied', applied_seq = ? WHERE id = ? AND state = ?", params![seq, id, r.state])?;
-            if bypass && r.state != "approved" {
+            if bypass && !met {
                 audit::record(c, project, caller, "approval.bypass", Some(slug), Some(&r.path), &[], &format!("applied {id} without approval"), now)?;
             }
             Ok(())

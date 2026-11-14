@@ -772,8 +772,14 @@ impl Secrets {
         self.check_items(project, to, &items, caller)?;
         let message = p.message.unwrap_or_else(|| format!("promoted {} from {from}", plural(items.len(), "key")));
         names::message(&message)?;
-        // Into a protected environment, a promotion is a change request with the values in it.
-        if self.db.read(|c| envs::by_slug(c, project, to))?.protected {
+        // Into a protected environment, or a folder with a change policy, a promotion is a change
+        // request with the values in it.
+        let guarded = self.db.read(|c| {
+            let env = envs::by_slug(c, project, to)?;
+            let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
+            Ok::<_, Error>(env.protected || !crate::folder_policy::covering(c, &env.id, &paths)?.is_empty())
+        })?;
+        if guarded {
             if items.is_empty() {
                 return Ok(Applied { change: None, items: vec![], warnings: vec![], request: None });
             }

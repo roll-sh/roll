@@ -479,6 +479,7 @@ impl Secrets {
                 c.execute("DELETE FROM folders WHERE env_id = ?", [e])?;
                 c.execute("DELETE FROM imports WHERE env_id = ? OR from_env_id = ?", [e, e])?;
                 c.execute("DELETE FROM exports WHERE env_id = ?", [e])?;
+                c.execute("DELETE FROM folder_policies WHERE env_id = ?", [e])?;
             }
             // What other projects shared with this one goes with it.
             c.execute("DELETE FROM exports WHERE to_project = ?", [project])?;

@@ -679,6 +679,10 @@ impl Secrets {
             if env.protected {
                 return Err(Error::Conflict("approval_required", format!("{slug} is protected: deleting a folder needs a change request")));
             }
+            // A folder with a change policy, or one holding one, goes only through change requests.
+            if let Some(p) = crate::folder_policy::all(c, &env.id)?.into_iter().find(|p| names::under(&p.path, &path) || names::under(&path, &p.path)) {
+                return Err(Error::Conflict("approval_required", format!("changes to {} in {slug} need approval: delete its keys through a change request", p.path)));
+            }
             let under = |p: &str| names::under(p, &path);
             let rows = c.query("SELECT path, key, owner FROM secrets WHERE env_id = ?", [&env.id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
             let items: Vec<Item> =
@@ -732,9 +736,13 @@ impl Secrets {
         }
         self.project(project)?;
         let now = self.db.now_ms()?;
-        // On a protected environment, imports change what it resolves to without a change: an
-        // admin's decision, like its policy.
-        if self.db.read(|c| by_slug(c, project, slug))?.protected {
+        // On a protected environment, or in a folder with a change policy, imports change what it
+        // resolves to without a change: an admin's decision, like its policy.
+        let guarded = self.db.read(|c| {
+            let env = by_slug(c, project, slug)?;
+            Ok::<_, Error>(env.protected || !crate::folder_policy::covering(c, &env.id, &[path.as_str()])?.is_empty())
+        })?;
+        if guarded {
             caller.need(Action::Admin, &Scope::at(project, slug, &path))?;
         }
         self.db.write(|c| {
@@ -782,7 +790,7 @@ pub(crate) fn ensure_folders(c: &Conn<'_>, env_id: &str, path: &str, now: i64) -
 }
 
 fn drop_env(c: &Conn<'_>, env: &EnvRow) -> Result<()> {
-    for t in ["secrets", "versions", "requests", "leases", "folders", "imports", "exports"] {
+    for t in ["secrets", "versions", "requests", "leases", "folders", "imports", "exports", "folder_policies"] {
         c.execute(&format!("DELETE FROM {t} WHERE env_id = ?"), [&env.id])?;
     }
     c.execute("DELETE FROM imports WHERE from_env_id = ?", [&env.id])?;

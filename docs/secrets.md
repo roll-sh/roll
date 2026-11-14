@@ -1307,8 +1307,14 @@ takes writes as before. A request's **gates** are the environment's policy (when
 and every folder policy covering a key it changes; each needs its own approvals from its own
 approvers (`gates: [{path?, approvals, approvers?, approved}]` on the request), a reviewer must be
 an approver of at least one of them, and applying checks the gates as they are then (a policy added
-after the approvals still has to be met). Only who may change what is per folder: reading
-(untrusted readers, exposure in health) stays the environment's.
+after the approvals still has to be met). Every way to change a covered key goes through a request:
+writes, deletes (deleting a covered folder, or one holding one, is refused), a promotion (it opens
+a request), and setting a covered folder's imports needs `admin`, as on a protected environment. A
+reviewer needs `admin` on each folder the request changes (a folder's own admin reviews its
+folder's requests); applying checks the gates in the applying transaction, and a bypass of gates
+that aren't met is audited. Backups carry folder policies, and a restore sets them last. Only who
+may change what is per folder: reading (untrusted readers, exposure in health) stays the
+environment's.
 
 ### Audit log
 
