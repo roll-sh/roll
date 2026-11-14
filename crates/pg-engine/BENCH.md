@@ -285,6 +285,61 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Storage format v2, round 1 (2026-11-14, agent 231)
+
+HANDOFF "Storage format v2: design" has the study behind it and "Storage format v2, round 1"
+what changed: block format 2, a store file's blocks in the block cache's form. **base** is
+`248f9f8fa` (origin's head at the round's start); **s001** format 2 at zstd level -1 (measured,
+not kept: the accounts table's rows take 28% more bytes); **s002** format 2 at zstd level 1,
+`620376440`; **s003** s002 with a block's entries copied into an allocation of their own size on
+load, `9fb5eab1b` (the pushed change). Plain dist builds (fat LTO, line tables) of one checkout,
+equal-length paths (`~/.cache/a231/bin/<4 chars>`). Lane C (servers 14,15,32,33; clients
+16,17,34,35) for bulk and TPC-H, lane A (6,7,24,25; 8,9,26,27) for point reads and short
+transactions, lane B (10,11,28,29; 12,13,30,31) for range reads, each run under its lane's lock,
+waiting up to an hour for quiet CPUs outside it; a bulk run with a step over 1.0 foreign core was
+run again. The host was at load 20-37 throughout (other sessions' builds and benchmarks).
+
+### Bulk (1M rows, settled, bg_ steps counted; user instructions G, s002 against base, 5 rounds)
+
+| step | base | s002 | % per round | median |
+|---|---|---|---|---|
+| COPY in | 10.227 | 10.171 | -0.5 x5 | -0.5 |
+| CREATE INDEX | 6.174 | 6.081 | -1.4 / -1.5 / -1.5 / -1.6 / -1.5 | -1.5 |
+| CREATE UNIQUE INDEX | 4.379 | 4.322 | -1.2 / -1.8 / -1.3 / -1.4 / -1.3 | -1.3 |
+| COPY out | 3.113 | 3.113 | 0 x5 | 0.0 |
+| INSERT … SELECT | 7.042 | 6.968 | -1.2 / -0.5 / -1.1 / -1.1 / -0.8 | -1.1 |
+| UPDATE half | 13.390 | 13.411 | -0.1 / +0.2 / +0.0 / +0.3 / +0.3 | +0.2 |
+| DELETE a quarter | 6.366 | 6.192 | -6.8 / -3.2 / -1.7 / -2.4 / -3.8 | -3.2 |
+| bg after it (compaction) | 6.800 | 6.360 | +5.9 / -9.9 / -5.4 / -10.1 / -6.7 | -6.7 |
+| **VACUUM** (reads the compaction's outputs) | 2.051 | 1.833 | -10.6 x5 | **-10.6** |
+| ANALYZE, count(*), TRUNCATE, DROP | 1.88 | 1.88 | 0 | 0.0 |
+| **all steps** | 61.366 | 60.237 | -0.9 / -2.2 / -1.6 / -2.1 / -1.9 | **-1.9** |
+| MB written | 201.1 | 181.6 | -6.0 / -9.9 / +0.1 / -4.1 / -9.7 | **-6.0** |
+
+Rows equal in every run (count and sums of every column of both tables). Peak (cgroup) base
+304-362 MB (median 309), s002 296-359 (304); VmHWM 252-254 both. Data dir at the end: base 25,
+25, 5, 25, 5 MB; s002 22, 5, 22, 22, 22. s001 (level -1, rounds 1-3): the compaction -11.7 / +3.5 /
+-19.2%, VACUUM -15.8%, MB written -9%.
+
+### TPC-H SF1 (each arm on a data directory it loaded itself; 3 alternating rounds; user instructions %)
+
+| cache | 22-query instructions, s002 against base | cycles | wall, sum of medians | per query | peak (VmHWM) |
+|---|---|---|---|---|---|
+| 2 GB | +0.44 / +0.01 / +0.17% | +1.9 / +5.4 / -3.1% | 13.26 -> 13.52 s | within +-1% at the median but q13 (+3.6 / +0.1 / +1.7) | base 1,693-1,697 MB, s002 1,706-1,719 (s003: below) |
+| 256 MB | **-14.63 / -14.44 / -14.38%** | -16.9 / -14.0 / -11.5% | 53.74 -> 48.38 s | every query lower every round: q07 -26, q08 -25, q09 -18, q04/q05 -18, q22 -17, q03 -15, q21 -13, q11 -12..-15, q20 -11, q01 -4, q13 -2 | base 593-639, s002 626-637 |
+
+All 22 result hashes equal PostgreSQL's in every pass of every build. Data directory after the
+load and a clean close: base 638 MB (73 files of format 1), s002 561 MB (73 of format 2).
+
+### Point reads, short transactions, range reads (5 alternating pairs; medians, s002 against base)
+
+| cell | instr/op | cycles/op | CPU/op | ops/s |
+|---|---|---|---|---|
+| point select, 8 clients | -1.1% (pairs -2.0..-0.2) | -2.3% | -2.6% | +3.3% |
+| point select, 1 client | -0.3% | -0.7% | +1.9% | -3.9% |
+| point select, 32 clients | -0.2% | +4.9% (pairs -4.5..+15.7; two disturbed) | 0.0% | -0.8% |
+| range read (100 rows), 8 clients | -0.3% | -1.3% | +1.1% | -3.4% |
+
 ## Analytic path, round 2 (2026-11-13, agent 226)
 
 HANDOFF "Analytic path, round 2" has what changed and the phase study. **b1** is `66fb5dc38`
