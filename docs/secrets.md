@@ -1586,6 +1586,13 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
+A seventh independent review (2026-11-14, of RabbitMQ, the OpenSearch names and the sixth
+review's fixes) found no high-severity issue; it found a RabbitMQ template copied in part (an
+exchange left open), `render --watch` rendering twice, throttled OCSP answers marked cacheable,
+repeated flavor lookups, and the short public-suffix list: fixed, or documented for the last.
+Moving in from Vault trees and AWS Secrets Manager is #52 (checked against Vault 1.20 and
+LocalStack).
+
 Then RabbitMQ outside roll (#39, merged up into #41 and #42; checked live against RabbitMQ 4) and
 OpenSearch clusters' fields named as their clients read them (#51).
 
@@ -1664,15 +1671,11 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A seventh independent review** (running) of RabbitMQ outside roll, the OpenSearch link names
-   and the sixth review's fixes, and its fixes.
-2. **Moving in from Vault and AWS Secrets Manager** (a pull request on #20), as Infisical's and
-   Doppler's importers: `roll secrets import --from vault` walks a KV v2 mount (folders become
-   folders, each secret's fields keys) and `--from aws` reads Secrets Manager by prefix, through
-   the existing audited import route; nothing of theirs is stored, and the source's token stays in
-   the shell.
-3. **Change policies per folder**, as Infisical's approval policies on secret paths: a protected
+1. **Change policies per folder**, as Infisical's approval policies on secret paths: a protected
    folder (`/payments`) inside an unprotected environment, with its own approvals and approvers.
+2. **An eighth independent review** of moving in (#52) and the seventh review's fixes.
+3. **When #50 and #51 meet** (whichever lands second): `open_request_items` keeps both the canvas
+   check before the provider (#51) and check-and-set (#50); a test covering both.
 4. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
 5. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
@@ -1712,6 +1715,8 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#52, moving in from Vault trees and AWS Secrets Manager** (after #20): `import --from vault
+  --recursive` into folders, `--from aws` through the user's aws CLI.
 - **#51, search links on OpenSearch clusters** (after #20): an internal user (`user`,
   `password`) where the cluster has no API keys; the wrong field for a flavor is refused when linked.
 - **#50, check-and-set writes** (after #20): `if_version` on a set or delete, refused as `stale`
