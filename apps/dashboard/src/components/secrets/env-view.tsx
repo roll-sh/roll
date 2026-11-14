@@ -11,6 +11,7 @@ import { FolderCrumbs } from "./folders";
 import { useSlashFocus } from "./grid";
 import { HistoryDrawer, type Drawer } from "./history";
 import { ImportDialog } from "./import-dialog";
+import { EsoDialog } from "./eso-dialog";
 import { ImportsPanel } from "./imports";
 import { RefInput, useRefSource, useRefWarnings, type RefSource } from "./ref-input";
 import { ShareDialog, type ShareSource } from "./share-dialog";
@@ -39,6 +40,7 @@ export function EnvView({ env }: { env: Environment }) {
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [pulling, setPulling] = useState(false);
   const [linking, setLinking] = useState(false);
   const [drawer, setDrawer] = useState<Drawer | null>(null);
   const [sharing, setSharing] = useState<ShareSource | null>(null);
@@ -165,12 +167,13 @@ export function EnvView({ env }: { env: Environment }) {
               <MenuTrigger className={button} aria-label="Export">
                 <Download className="size-3.5" /> Export
               </MenuTrigger>
-              <MenuPopup align="end" className="w-48">
+              <MenuPopup align="end" className="w-56">
                 {(["dotenv", "json", "shell", "yaml", "docker", "kubernetes"] as const).map((f) => (
                   <MenuItem key={f} onClick={() => exportAs(f)}>
                     {{ dotenv: ".env", json: "json", shell: "shell", yaml: "yaml", docker: "Docker env file", kubernetes: "Kubernetes Secret" }[f]} <span className="ml-auto text-[10.5px] text-subtle">audited</span>
                   </MenuItem>
                 ))}
+                <MenuItem onClick={() => setPulling(true)}>External Secrets Operator…</MenuItem>
               </MenuPopup>
             </Menu>
             <button className={button} onClick={() => setDrawer({ kind: "changes" })} title="History (h)">
@@ -360,6 +363,7 @@ export function EnvView({ env }: { env: Environment }) {
       </div>
 
       <HistoryDrawer env={env} drawer={drawer} onClose={() => setDrawer(null)} onDrawer={setDrawer} onChanged={refresh} />
+      <EsoDialog open={pulling} onClose={() => setPulling(false)} env={env} path={path} />
       <ImportDialog open={importing} onClose={() => setImporting(false)} env={env} path={path} current={secrets} onImported={(text, w) => (setNote({ text, warnings: w }), refresh(), open.reload())} />
       <ShareDialog source={sharing} onClose={() => setSharing(null)} onShared={() => {}} />
       <LinkDialog open={linking} onClose={() => setLinking(false)} env={env} path={path} taken={keys} onWrite={write} />

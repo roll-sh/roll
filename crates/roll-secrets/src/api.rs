@@ -448,12 +448,30 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
     // As it was after a change, or at a time: what was stored then.
     let num = |k: &str| q.get(k).map(|v| v.parse::<i64>().map_err(|_| Error::BadRequest(format!("{k} is a number")))).transpose();
     let (seq, at) = (num("seq")?, num("at")?);
+    // A reader that mustn't take a partial answer (External Secrets Operator writes what it gets):
+    // any problem fails the read, so it keeps what it had.
+    let strict = flag(&q, "strict", false);
     let (v, as_of) = if seq.is_some() || at.is_some() {
         let (n, v) = blocking(s, move |s| s.values_at(&project, &env, &path_of(&q), seq, at, &c)).await?;
         (v, Some(n))
     } else {
-        (blocking(s, move |s| s.values(&project, &env, &path_of(&q), resolve, None, &c)).await?, None)
+        let dynamic = flag(&q, "dynamic", true);
+        let read = blocking(s, move |s| {
+            let v = s.values_for(&project, &env, &path_of(&q), resolve, None, dynamic, &c)?;
+            if strict && !v.problems.is_empty() {
+                // Nothing is answered, so nothing this read issued may outlive it.
+                for lease in &v.leases {
+                    s.revoke_leases_where("id = ?", lease);
+                }
+            }
+            Ok::<_, Error>(v)
+        });
+        (read.await?, None)
     };
+    if strict && !v.problems.is_empty() {
+        let keys: Vec<&str> = v.problems.iter().map(|p| p.key.as_str()).collect();
+        return Err(Error::Conflict("unresolved", format!("{} didn't resolve: {} (strict: nothing is answered)", keys.len(), keys.join(", "))));
+    }
     let r = match format {
         None if as_of.is_some() => {
             let mut j = serde_json::to_value(&v).expect("JSON");
