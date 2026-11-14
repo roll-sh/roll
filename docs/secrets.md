@@ -1606,8 +1606,9 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **Sensitive keys in roll apps** (#46 with #31): apps shows a sensitive key's name, never its
-   value, once its `SecretVar` carries the flag (asked of the apps thread).
+1. **Sensitive keys in roll apps** (once #46 and #31 land): `ForApps` sets `SecretVar.sensitive`
+   from `Values.sensitive`; apps (#26) already seals such variables (in a container's env, masked in
+   every answer). One line once both are on #20.
 2. **AWS through roll's issuer** (once #38 and #43 land): `AssumeRoleWithWebIdentity` with roll's
    own token, so roll needs no AWS keys of its own and the trust policy pins `sub` as GCP's and
    Azure's do.
@@ -1640,6 +1641,8 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#47, encryption keys** (after #20): encryption as a service, as Vault's Transit: named,
+  versioned keys that never leave roll; encrypt, decrypt (audited), rewrap, data keys.
 - **#46, sensitive keys** (after #20): a key tagged `sensitive` reaches only roll's runtimes, syncs
   and workload identities, never a person or a token; the tag is for good.
 - **#45, SSH certificates** (after #44): a project's SSH CA signs short-lived user certificates
