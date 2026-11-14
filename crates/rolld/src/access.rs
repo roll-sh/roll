@@ -88,6 +88,8 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
         locked: auth.enforcing(),
         audit_days: std::env::var("ROLL_ACCESS_AUDIT_DAYS").ok().and_then(|d| d.parse().ok()).filter(|d| *d > 0).unwrap_or(90),
         trust_forwarded_for: crate::auth::edge(),
+        // The edge's own addresses (the load balancer's subnets): X-Forwarded-For only from them.
+        trusted_proxies: std::env::var("ROLL_TRUSTED_PROXIES").ok().map(|v| v.split(',').filter_map(|c| c.trim().parse().ok()).collect()).unwrap_or_default(),
         metadata_allow_private: std::env::var("ROLL_ACCESS_METADATA_ALLOW_PRIVATE").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes")),
         ..Default::default()
     };
