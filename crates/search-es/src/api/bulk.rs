@@ -242,6 +242,9 @@ pub async fn bulk(ctx: &Ctx<'_>) -> EsResult<Reply> {
         .map(|(it, &a)| if a { Some(crate::meta::names::time_based_id()) } else { it.args.id.clone() })
         .collect();
     let denied = authorize_items(ctx, &items, &ids);
+    let mut items = items;
+    let mut embed_failed = embed_ahead(ctx, &mut items, &denied).await;
+    let items = items;
     let mut ahead = super::bulk_ahead::Ahead::new(ctx.cluster, &items, &ids);
     // Index items with a document prepared ahead are applied with the other items of their
     // shard, the shards in parallel (Elasticsearch's shard-level bulk requests); every other
@@ -252,6 +255,11 @@ pub async fn bulk(ctx: &Ctx<'_>) -> EsResult<Reply> {
         if let Some(e) = denied.get(i).cloned().flatten() {
             let name = it.index.clone().unwrap_or_default();
             slots[i] = Some(Slot::Done(Err(Box::new((e, crate::meta::resolve::resolve_date_math(&name, ctx.now_ms).unwrap_or(name), ids[i].clone(), None)))));
+            continue;
+        }
+        if let Some(e) = embed_failed[i].take() {
+            let name = write::resolve_existing(&ctx.state(), it.index.as_deref().unwrap_or_default()).map_or_else(|| it.index.clone().unwrap_or_default(), |x| x.name.clone());
+            slots[i] = Some(Slot::Done(Err(Box::new((e, name, ids[i].clone(), None)))));
             continue;
         }
         if !ahead.has(i) {
@@ -355,6 +363,45 @@ pub async fn bulk(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     resp.insert("items".into(), crate::json::raw::from_buffer(out_items));
     Reply::ok(Value::Obj(resp))
+}
+
+/// Embeds the `semantic_text` values of the request's index and create items in batches, one
+/// call per endpoint per batch for all of them (Elasticsearch's `ShardBulkInferenceActionFilter`):
+/// their `_inference_fields` are added to their source. Items whose target runs an ingest
+/// pipeline are embedded after it, one by one (`write::prepare_checked`). An item whose
+/// endpoint failed fails with the endpoint's error (its slot in the answer).
+async fn embed_ahead(ctx: &Ctx<'_>, items: &mut [Item], denied: &[Option<EsError>]) -> Vec<Option<EsError>> {
+    let mut failed: Vec<Option<EsError>> = items.iter().map(|_| None).collect();
+    let st = ctx.state();
+    let mut picked: Vec<(usize, std::sync::Arc<crate::meta::IndexMeta>, Map)> = Vec::new();
+    for (i, it) in items.iter().enumerate() {
+        if denied.get(i).is_some_and(Option::is_some) || !matches!(it.action, Action::Index | Action::Create) {
+            continue;
+        }
+        let Some(idx) = it.index.as_deref().and_then(|e| write::resolve_existing(&st, e)) else { continue };
+        if crate::xpack::inference::semantic::fields(&idx.mapping).is_empty() {
+            continue;
+        }
+        let request = it.args.pipeline.as_deref();
+        if request.is_some_and(|p| p != "_none") || !super::bulk_ahead::plain_index(&st, &idx, request == Some("_none")) {
+            continue;
+        }
+        let Ok(Some(Value::Obj(doc))) = crate::json::parse(&it.data) else { continue };
+        picked.push((i, idx, doc));
+    }
+    if picked.is_empty() {
+        return failed;
+    }
+    let docs: Vec<(&crate::mapping::Mapping, &Map)> = picked.iter().map(|(_, idx, d)| (&*idx.mapping, d)).collect();
+    let results = crate::xpack::inference::semantic::infer_documents(ctx.cluster, &docs).await;
+    for ((i, _, doc), r) in picked.iter().zip(results) {
+        match r {
+            Ok(entries) if !entries.is_empty() => items[*i].data = crate::xpack::inference::semantic::with_inference(&items[*i].data, doc, &entries).0,
+            Ok(_) => {}
+            Err(e) => failed[*i] = Some(e),
+        }
+    }
+    failed
 }
 
 /// The security checks of every item (`security::authorize_writes`): the error of each denied

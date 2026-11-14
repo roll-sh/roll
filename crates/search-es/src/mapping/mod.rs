@@ -243,6 +243,10 @@ pub struct FieldMapper {
     date_format: std::sync::OnceLock<Result<Arc<crate::time::DateFormatter>, String>>,
     /// The full path documents reach this field by, shared by every value parsed into it.
     pub(crate) full_name: std::sync::OnceLock<Arc<str>>,
+    /// `semantic_text` only: the hidden mappers of its chunks (`inference.chunks`, nested, with
+    /// their `embeddings`), built from its model settings on first use and reset whenever a
+    /// parameter changes (`crate::xpack::inference::semantic::hidden_mapper`).
+    hidden: std::sync::OnceLock<Option<Arc<ObjectMapper>>>,
 }
 
 impl PartialEq for FieldMapper {
@@ -273,6 +277,7 @@ impl FieldMapper {
             props: BTreeMap::new(),
             boost: None,
             date_format: std::sync::OnceLock::new(),
+            hidden: std::sync::OnceLock::new(),
             full_name: std::sync::OnceLock::new(),
         }
     }
@@ -319,10 +324,19 @@ impl FieldMapper {
         self.def.param_index(name).and_then(|i| self.values[i].as_ref())
     }
 
+    /// A `semantic_text` field's hidden chunk mappers (`None` until it has model settings).
+    pub fn semantic_hidden(&self) -> Option<&ObjectMapper> {
+        if self.ty != "semantic_text" {
+            return None;
+        }
+        self.hidden.get_or_init(|| crate::xpack::inference::semantic::hidden_mapper(self).map(Arc::new)).as_deref()
+    }
+
     pub fn set(&mut self, name: &str, v: Value) {
         if let Some(i) = self.def.param_index(name) {
             self.values[i] = Some(v);
             self.date_format = std::sync::OnceLock::new();
+            self.hidden = std::sync::OnceLock::new();
         }
     }
 
@@ -596,6 +610,7 @@ impl FieldMapper {
             return Err(EsError::illegal_argument(format!("mapper [{full_path}] cannot be changed from type [{}] to [{}]", self.ty, incoming.ty)));
         }
         let mut out = self.clone();
+        out.hidden = std::sync::OnceLock::new();
         let mut conflicts = Vec::new();
         for (i, pd) in self.def.params.iter().enumerate() {
             let cur = self.effective(pd.name, ctx);
@@ -3038,6 +3053,11 @@ pub(crate) fn lookup_in<'a>(o: &'a ObjectMapper, path: &str) -> Option<MapperRef
                 }
                 if tail == "template_id" && f.templated() {
                     return Some(MapperRef::Field(template_id_mapper()));
+                }
+                if let Some(h) = f.semantic_hidden()
+                    && let Some(r) = crate::stack::maybe_grow(|| lookup_in(h, tail))
+                {
+                    return Some(r);
                 }
             }
             _ => {}

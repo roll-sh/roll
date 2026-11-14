@@ -165,6 +165,14 @@ impl SourceView<'_> {
     pub fn apply_parsed(&self, v: Value, fs: &FetchSource, parsed: bool) -> Value {
         use crate::engine::synthetic;
         let mut v = v;
+        // `semantic_text` embeddings (`_inference_fields`) are vectors too: shown only with
+        // `exclude_vectors: false` or when the includes name them.
+        if let Value::Obj(m) = &mut v
+            && fs.exclude_vectors != Some(false)
+            && !fs.includes.iter().any(|i| i.starts_with("_inference_fields"))
+        {
+            m.retain(|k, _| !crate::xpack::inference::semantic::is_inference_key(k));
+        }
         // A forced synthetic `_source` of a stored-source index is built whole from the
         // document. A search shows its vectors; `get` leaves them out as from a synthetic
         // source (all of them unless the request filters it).

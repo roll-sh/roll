@@ -48,6 +48,8 @@ sha1.workspace = true
 sha2.workspace = true
 hkdf.workspace = true
 tokio.workspace = true
+# Word and sentence boundaries of inference chunking (`xpack::inference::chunking`).
+unicode-segmentation.workspace = true
 zxcvbn.workspace = true
 
 [build-dependencies]

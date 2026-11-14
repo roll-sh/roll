@@ -195,3 +195,233 @@ mod tests {
         assert_eq!(parse(obj! { "max_chunk_size" => 5 }).unwrap_err().reason(), "Can't generate Chunker without ChunkingStrategy provided");
     }
 }
+
+/// A chunk of a text: offsets in UTF-16 code units, as Java's `String` counts them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// A text's word boundaries (ICU's word `BreakIterator` as Unicode word segmentation): each
+/// boundary (a byte offset) and whether the segment ending there is a word (a letter or digit
+/// in it, ICU's rule status other than `WORD_NONE`).
+fn word_bounds(text: &str, from: usize) -> Vec<(usize, bool)> {
+    use unicode_segmentation::UnicodeSegmentation;
+    text[from..].split_word_bound_indices().map(|(i, w)| (from + i + w.len(), w.chars().any(char::is_alphanumeric))).collect()
+}
+
+fn count_words(text: &str, start: usize, end: usize) -> usize {
+    word_bounds(&text[..end], start).iter().filter(|(_, w)| *w).count()
+}
+
+/// `WordBoundaryChunker.chunkPositions` (byte offsets and word counts).
+fn word_chunks(text: &str, size: usize, overlap: usize) -> Vec<(usize, usize, usize)> {
+    let mut out = Vec::new();
+    let step = size.saturating_sub(overlap);
+    let (mut in_chunk, mut next_start, mut start, mut since_mark) = (0usize, 0usize, 0usize, 0usize);
+    for (boundary, word) in word_bounds(text, 0) {
+        if !word {
+            continue;
+        }
+        in_chunk += 1;
+        since_mark += 1;
+        if in_chunk >= size {
+            out.push((start, boundary, in_chunk));
+            in_chunk = overlap;
+            if overlap == 0 {
+                next_start = boundary;
+            }
+            start = next_start;
+        }
+        if since_mark == step {
+            next_start = boundary;
+            since_mark = 0;
+        }
+    }
+    if in_chunk > overlap || out.is_empty() {
+        out.push((start, text.len(), in_chunk));
+    }
+    out
+}
+
+/// `SentenceBoundaryChunker.skipWords`: the offset after `n` words from the start of the word
+/// at `start`.
+fn skip_words(text: &str, start: usize, n: usize) -> usize {
+    if n == 0 {
+        return start;
+    }
+    let mut count = 0;
+    for (b, word) in word_bounds(text, start) {
+        if word {
+            count += 1;
+            if count == n {
+                return b;
+            }
+        }
+    }
+    text.len()
+}
+
+/// `SentenceBoundaryChunker.chunk` (byte offsets).
+fn sentence_chunks(text: &str, max: usize, preceding: bool) -> Vec<(usize, usize)> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut chunks = Vec::new();
+    let (mut chunk_start, mut chunk_end, mut sentence_start, mut chunk_words) = (0usize, 0usize, 0usize, 0usize);
+    let (mut prev_words, mut prev_start) = (0usize, 0usize);
+    let max_overlap = (max / 2).min(20);
+    let long_overlap = 20.min(max.saturating_sub(1) / 2);
+    for (i, s) in text.split_sentence_bound_indices() {
+        let sentence_end = i + s.len();
+        let words = count_words(text, sentence_start, sentence_end);
+        if chunk_words + words > max {
+            let mut next = words;
+            if chunk_words > 0 {
+                chunks.push((chunk_start, chunk_end));
+                if preceding {
+                    if prev_words + words > max {
+                        let skip = prev_words.saturating_sub(max_overlap);
+                        chunk_start = skip_words(text, prev_start, skip);
+                        chunk_words = (prev_words - skip) + words;
+                    } else {
+                        chunk_words = prev_words + words;
+                        chunk_start = prev_start;
+                    }
+                    next = chunk_words;
+                } else {
+                    chunk_start = chunk_end;
+                    chunk_words = words;
+                }
+            }
+            if next > max {
+                let splits = word_chunks(&text[chunk_start..sentence_end], max, long_overlap);
+                for s in &splits[..splits.len() - 1] {
+                    chunks.push((chunk_start + s.0, chunk_start + s.1));
+                }
+                let last = splits[splits.len() - 1];
+                chunk_start += last.0;
+                chunk_words = last.2;
+            }
+        } else {
+            chunk_words += words;
+        }
+        if preceding {
+            prev_start = sentence_start;
+            prev_words = words;
+        }
+        sentence_start = sentence_end;
+        chunk_end = sentence_end;
+    }
+    if chunk_words > 0 {
+        chunks.push((chunk_start, text.len()));
+    }
+    if chunks.is_empty() {
+        chunks.push((0, text.len()));
+    }
+    chunks
+}
+
+/// `RecursiveChunker`: split on the first separator that brings every piece within the word
+/// limit (pieces merged back up to it), recursing with the next separators into pieces that are
+/// still too long, and on sentences once none is left. Separators are regular expressions;
+/// lookarounds, which the regex engine lacks, are dropped (`(?<!\n)\n(?!\n)` splits on every
+/// `\n`).
+fn recursive_chunks(text: &str, start: usize, end: usize, max: usize, separators: &[String], out: &mut Vec<(usize, usize)>) {
+    if count_words(text, start, end) <= max {
+        out.push((start, end));
+        return;
+    }
+    let Some((sep, rest)) = separators.split_first() else {
+        for (s, e) in sentence_chunks(&text[start..end], max, false) {
+            out.push((start + s, start + e));
+        }
+        return;
+    };
+    let pattern = regex::Regex::new(r"\(\?<?[!=][^)]*\)").map(|re| re.replace_all(sep, "").into_owned()).unwrap_or_else(|_| sep.clone());
+    let Ok(re) = regex::RegexBuilder::new(&pattern).multi_line(true).size_limit(1 << 20).build() else {
+        return recursive_chunks(text, start, end, max, rest, out);
+    };
+    // Pieces start at each separator match.
+    let mut cuts = vec![start];
+    for m in re.find_iter(&text[start..end]) {
+        if m.start() > 0 {
+            cuts.push(start + m.start());
+        }
+    }
+    cuts.push(end);
+    cuts.dedup();
+    if cuts.len() <= 2 {
+        return recursive_chunks(text, start, end, max, rest, out);
+    }
+    let (mut cur_start, mut cur_words) = (cuts[0], 0usize);
+    for w in cuts.windows(2) {
+        let (s, e) = (w[0], w[1]);
+        let words = count_words(text, s, e);
+        if words > max {
+            if cur_words > 0 {
+                out.push((cur_start, s));
+            }
+            recursive_chunks(text, s, e, max, rest, out);
+            cur_start = e;
+            cur_words = 0;
+        } else if cur_words + words > max {
+            out.push((cur_start, s));
+            cur_start = s;
+            cur_words = words;
+        } else {
+            cur_words += words;
+        }
+    }
+    if cur_start < end && (cur_words > 0 || out.is_empty()) {
+        out.push((cur_start, end));
+    }
+}
+
+/// UTF-16 length of `text[..byte]`.
+fn utf16_at(text: &str, byte: usize) -> usize {
+    text[..byte].encode_utf16().count()
+}
+
+impl Chunking {
+    /// The chunks of `text` (`Chunker.chunk`), as UTF-16 offsets.
+    pub fn chunk(&self, text: &str) -> Vec<Span> {
+        let bytes: Vec<(usize, usize)> = match self {
+            Chunking::None => vec![(0, text.len())],
+            Chunking::Word { max_chunk_size, overlap } => word_chunks(text, (*max_chunk_size).max(1) as usize, *overlap as usize).into_iter().map(|(s, e, _)| (s, e)).collect(),
+            Chunking::Sentence { max_chunk_size, sentence_overlap } => sentence_chunks(text, (*max_chunk_size).max(1) as usize, *sentence_overlap > 0),
+            Chunking::Recursive { max_chunk_size, separators } => {
+                let mut out = Vec::new();
+                recursive_chunks(text, 0, text.len(), (*max_chunk_size).max(1) as usize, separators, &mut out);
+                out
+            }
+        };
+        bytes.into_iter().map(|(s, e)| Span { start: utf16_at(text, s), end: utf16_at(text, e) }).collect()
+    }
+}
+
+/// The text of a chunk (`String.substring` over UTF-16 offsets).
+pub fn substring(text: &str, span: Span) -> String {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    String::from_utf16_lossy(&units[span.start.min(units.len())..span.end.min(units.len())])
+}
+
+#[cfg(test)]
+mod chunker_tests {
+    use super::*;
+
+    #[test]
+    fn word_and_sentence_chunks() {
+        let text = "one two three four five six seven";
+        let w = Chunking::Word { max_chunk_size: 3, overlap: 1 }.chunk(text);
+        let parts: Vec<String> = w.iter().map(|s| substring(text, *s)).collect();
+        // A window starts at the boundary after the word before it, as Elasticsearch's does.
+        assert_eq!(parts, vec!["one two three", " three four five", " five six seven"]);
+        let text = "These are not the droids. He's free to go. Move along.";
+        let s = Chunking::Sentence { max_chunk_size: 20, sentence_overlap: 0 }.chunk(text);
+        assert_eq!(s, vec![Span { start: 0, end: text.len() }]);
+        let s = Chunking::Sentence { max_chunk_size: 5, sentence_overlap: 0 }.chunk(text);
+        let parts: Vec<String> = s.iter().map(|x| substring(text, *x)).collect();
+        assert_eq!(parts, vec!["These are not the droids. ", "He's free to go. ", "Move along."]);
+        assert_eq!(Chunking::None.chunk("é😀"), vec![Span { start: 0, end: 3 }]);
+    }
+}

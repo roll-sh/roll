@@ -60,6 +60,9 @@ pub struct ParsedDocument {
     pub doc_count: Option<i64>,
     /// The mapping update the document's dynamic fields need (to merge and publish).
     pub dynamic_update: Option<Mapping>,
+    /// `semantic_text` fields whose first embeddings record their model settings (path,
+    /// settings): a mapping update to publish before indexing.
+    pub model_settings: Vec<(String, Value)>,
 }
 
 /// Whether `s` is longer than a keyword's `ignore_above` limit, measured as Java's
@@ -89,7 +92,16 @@ pub fn parse_document(mapping: &Mapping, ctx: &MappingCtx, doc: &Value, source: 
     // The field the dynamic pass refused (`strict_allow_templates` admits the fields its
     // templates map, so only that one fails).
     let mut strict_field = None;
-    let (effective, update, strict_pending) = match crate::mapping::dynamic::dynamic_update(mapping, doc_map, ctx) {
+    // Inference results (`_inference_fields`) are metadata, never mapped dynamically.
+    let has_inference = doc_map.keys().any(|k| crate::xpack::inference::semantic::is_inference_key(k));
+    let without_inference: Value;
+    let dyn_doc = if has_inference {
+        without_inference = Value::Obj(doc_map.iter().filter(|(k, _)| !crate::xpack::inference::semantic::is_inference_key(k)).map(|(k, v)| (k.clone(), v.clone())).collect());
+        without_inference.as_object().unwrap_or(doc_map)
+    } else {
+        doc_map
+    };
+    let (effective, update, strict_pending) = match crate::mapping::dynamic::dynamic_update(mapping, dyn_doc, ctx) {
         Ok(Some(u)) => {
             let merged = mapping.merge(&u, ctx, MergeReason::MappingUpdate)?;
             (std::borrow::Cow::Owned(merged), Some(u), false)
@@ -137,6 +149,10 @@ pub fn parse_document(mapping: &Mapping, ctx: &MappingCtx, doc: &Value, source: 
     let mut out = p.out;
     out.ignored = p.ignored.into_iter().collect();
     out.dynamic_update = update;
+    if has_inference {
+        let desc = p.desc.clone();
+        out.model_settings = crate::xpack::inference::semantic::index_inference(&effective, doc_map, source, &desc, &mut out)?;
+    }
     Ok(out)
 }
 
@@ -297,6 +313,13 @@ impl<'m, 'p> Walker<'m, 'p> {
                     let name = self.p.current_name().unwrap_or("").to_string();
                     self.check_name(&name)?;
                     let value_token = self.p.next_token().unwrap_or(Token::Null);
+                    if root && crate::xpack::inference::semantic::is_inference_key(&name) {
+                        // Read from the parsed document once the walk is done.
+                        if matches!(value_token, Token::StartObject | Token::StartArray) {
+                            self.p.skip_children();
+                        }
+                        continue;
+                    }
                     if root && crate::mapping::METADATA_FIELDS.contains(&name.as_str()) {
                         self.metadata_field(&name)?;
                         continue;

@@ -612,6 +612,10 @@ impl FieldTable {
                         let mpath = format!("{path}.{mk}");
                         self.add_field(mf, &mpath, nested, Some(&path), ctx, numbers, sims)?;
                     }
+                    // A `semantic_text` field's embeddings are in hidden nested chunks.
+                    if let Some(h) = f.semantic_hidden() {
+                        crate::stack::maybe_grow(|| self.walk(h, &path, nested, ctx, numbers, sims))?;
+                    }
                     // Mapped sub-fields of a `flattened` field are fields of their own
                     // (`<path>.<key>`).
                     if f.ty == "flattened" {

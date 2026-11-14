@@ -707,6 +707,13 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
         }
         "geo_shape" | "shape" => vec![FieldValue::Shape(crate::query::geo::parse_geometry(w.p).map_err(ValueError::typed)?)],
         "integer_range" | "long_range" | "float_range" | "double_range" | "date_range" | "ip_range" => vec![parse_range(w, f, full, ctx)?],
+        // The text is in `_source`; its embeddings come from `_inference_fields`.
+        "semantic_text" => {
+            if token == Token::StartObject {
+                return Err(EsError::illegal_argument(format!("[semantic_text] field [{full}] does not support object values")).into());
+            }
+            Vec::new()
+        }
         "dense_vector" => parse_dense_vector(w, f, full, ctx)?,
         "knn_vector" => parse_knn_vector(w, f, full, ctx)?,
         "rank_feature" => {
@@ -785,11 +792,6 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
                 return Err(EsError::java(400, "illegal_argument_exception", format!("Encountered unexpected token [{}].", t.name())).into());
             }
         },
-        "semantic_text" => {
-            // Kept in _source; indexing these types comes with their engines.
-            w.p.skip_children();
-            Vec::new()
-        }
         _ => {
             w.p.skip_children();
             Vec::new()

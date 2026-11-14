@@ -691,7 +691,12 @@ pub static SEMANTIC_TEXT: &[ParamDef] = &[
 /// `SemanticFieldMapper.canMergeModelSettings`: settings, once recorded, change only to equal
 /// ones.
 fn model_settings_merge(cur: &Value, new: &Value, conflicts: &mut Vec<String>) -> bool {
-    if cur.is_null() || new.is_null() || crate::xpack::inference::semantic::ModelSettings::parse(cur).ok() == crate::xpack::inference::semantic::ModelSettings::parse(new).ok() {
+    use crate::xpack::inference::semantic::ModelSettings;
+    let same = match (ModelSettings::parse(cur), ModelSettings::parse(new)) {
+        (Ok(a), Ok(b)) => a.compatible(&b),
+        _ => cur == new,
+    };
+    if cur.is_null() || new.is_null() || same {
         return true;
     }
     conflicts.push("Cannot update parameter [model_settings] from [] to []".into());
