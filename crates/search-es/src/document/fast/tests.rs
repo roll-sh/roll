@@ -27,6 +27,7 @@ fn index(mapping: &str, settings: &[(&str, &str)]) -> IndexMeta {
         primary_terms: vec![1],
         system: false,
         recovery_source: None,
+        rollover_info: Default::default(),
         dialect: Default::default(),
     }
 }

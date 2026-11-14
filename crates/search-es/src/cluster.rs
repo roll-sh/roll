@@ -672,6 +672,9 @@ impl Cluster {
         if next.dialect == Dialect::Elasticsearch {
             let on = crate::meta::stack_templates::Registries::of(&self.config);
             crate::meta::stack_templates::install_missing(&mut next.metadata, on, crate::time::now_millis());
+            // ILM initializes an index that became managed right after the change
+            // (`IndexLifecycleService.triggerPolicies` on the applied state).
+            crate::xpack::ilm_run::reconcile(&self.state(), &mut next, crate::time::now_millis());
         }
         next.version += 1;
         next.metadata.version += 1;

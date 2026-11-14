@@ -963,6 +963,54 @@ async fn a_due_transform_wakes_its_sleeping_cluster() {
     assert!(!e.control.node.loaded().iter().any(|n| &**n == "idle"), "a cluster without jobs stays asleep");
 }
 
+/// A data stream lifecycle's retention wakes its sleeping cluster when a backing index comes
+/// due for deletion, as Elasticsearch's lifecycle deletes it on its next poll; the write index
+/// stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_due_retention_deletion_wakes_its_sleeping_cluster() {
+    let e = env_with(|c| c.job_wake_interval = Some(std::time::Duration::from_millis(200))).await;
+    let c = e.post("/v1/search/clusters", json!({"name": "logs"})).await;
+    let (user, pw) = creds(&c);
+    let template = json!({"index_patterns": ["logs-app*"], "data_stream": {}, "template": {"lifecycle": {"data_retention": "5s"}}});
+    let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/_index_template/app", Some(template)).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/_data_stream/logs-app", None).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&user, &pw, reqwest::Method::POST, "/logs-app/_rollover", None).await;
+    assert_eq!(s, 200, "{v}");
+    let old = v["old_index"].as_str().unwrap().to_string();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/logs/unload", Some(json!({}))).await;
+        assert_eq!(s, 200, "{v}");
+        if v["unloaded"] == true || !e.control.node.loaded().iter().any(|n| &**n == "logs") {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "never unloaded: {v}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let (_, v) = e.call(reqwest::Method::GET, "/v1/search/clusters/logs", None).await;
+    assert!(v["status"]["state"] == "loaded" || v["status"]["wakes_at"].as_i64().is_some_and(|t| t > 0), "{v}");
+    // No request: the retention's deadline loads the cluster, and the lifecycle deletes the
+    // old backing index.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !e.control.node.loaded().iter().any(|n| &**n == "logs") {
+        assert!(tokio::time::Instant::now() < deadline, "the due deletion never woke its cluster");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    loop {
+        let (s, v) = e.es(&user, &pw, reqwest::Method::GET, "/_data_stream/logs-app", None).await;
+        assert_eq!(s, 200, "{v}");
+        let indices: Vec<String> = v["data_streams"][0]["indices"].as_array().unwrap().iter().map(|i| i["index_name"].as_str().unwrap().to_string()).collect();
+        if !indices.contains(&old) {
+            assert_eq!(indices.len(), 1, "the write index stays: {indices:?}");
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the old backing index was never deleted: {indices:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 /// ES|QL and SQL read as their client: an API key limited to one index (what roll secrets hands
 /// out) sees no other index through `FROM`, a wildcard, a lookup join or SQL, and a role's
 /// document query applies to its rows.

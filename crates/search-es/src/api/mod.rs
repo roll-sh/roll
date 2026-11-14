@@ -15,6 +15,7 @@ pub mod cat;
 mod cat_columns;
 mod cat_columns_os;
 pub mod cluster;
+pub mod data_stream_lifecycle;
 pub mod data_streams;
 pub mod desired_nodes;
 pub mod disk_usage;

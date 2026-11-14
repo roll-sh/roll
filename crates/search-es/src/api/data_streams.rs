@@ -159,7 +159,7 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
     Reply::acknowledged()
 }
 
-fn dsl_enabled(ds: &DataStream) -> bool {
+pub(crate) fn dsl_enabled(ds: &DataStream) -> bool {
     ds.lifecycle.as_ref().is_some_and(|l| l.get("enabled").and_then(Value::as_bool).unwrap_or(true))
 }
 
@@ -174,7 +174,7 @@ pub(crate) fn failure_store_enabled(st: &ClusterState, ds: &DataStream) -> bool 
     !ds.system && patterns.is_some_and(|p| p.iter().any(|p| glob_match(p, &ds.name)))
 }
 
-fn time_setting(st: &ClusterState, key: &str) -> Option<TimeValue> {
+pub(crate) fn time_setting(st: &ClusterState, key: &str) -> Option<TimeValue> {
     let md = &st.metadata;
     md.transient.get(key).or_else(|| md.persistent.get(key)).and_then(|v| TimeValue::parse(v, key).ok())
 }
@@ -207,7 +207,7 @@ pub(crate) fn effective_retention(st: &ClusterState, ds: &DataStream, lifecycle:
 }
 
 /// `RolloverConfiguration.evaluateMaxAgeCondition`.
-fn automatic_max_age(retention: Option<&TimeValue>) -> &'static str {
+pub(crate) fn automatic_max_age(retention: Option<&TimeValue>) -> &'static str {
     let day = 24 * 3600 * 1000;
     match retention.map(|r| r.as_millis()) {
         None => "30d",
@@ -296,19 +296,27 @@ fn lifecycle_with_effective(st: &ClusterState, ds: &DataStream, l: &Value, inclu
     v
 }
 
-/// The failures lifecycle of a failure store: its configured retention (capped by the max
-/// global retention) or the default failures retention, and with `include_defaults` the
-/// rollover conditions.
-fn failures_lifecycle(st: &ClusterState, ds: &DataStream, include_defaults: bool) -> Value {
-    let configured = ds.options.as_ref().and_then(|o| o.get("failure_store")).and_then(|f| f.get("lifecycle")).filter(|l| !l.is_null()).cloned();
-    let l = configured.unwrap_or_else(|| obj! { "enabled" => true });
-    let v = lifecycle_value(&l);
+/// The failure store's configured lifecycle (`data_stream_options.failure_store.lifecycle`).
+fn configured_failures_lifecycle(ds: &DataStream) -> Option<Value> {
+    ds.options.as_ref().and_then(|o| o.get("failure_store")).and_then(|f| f.get("lifecycle")).filter(|l| !l.is_null()).cloned()
+}
+
+/// `DataStream.getFailuresLifecycle()`: the configured one, else the default (enabled) one when
+/// the data stream's options enable the failure store or it has failure indices.
+pub(crate) fn failures_lifecycle_of(ds: &DataStream) -> Option<Value> {
+    configured_failures_lifecycle(ds).or_else(|| (ds.failure_store_enabled() == Some(true) || !ds.failure_indices.is_empty()).then(|| obj! { "enabled" => true }))
+}
+
+/// The retention in effect for a failures lifecycle `l`, and what determined it: its configured
+/// retention capped by the max global retention, else the default failures retention.
+pub(crate) fn failures_effective_retention(st: &ClusterState, ds: &DataStream, l: &Value) -> Option<(TimeValue, &'static str)> {
     let retention = l.get("data_retention").and_then(Value::as_str).and_then(|r| TimeValue::parse(r, "data_retention").ok());
     let internal = ds.system || ds.name.starts_with('.');
     let max = if internal { None } else { time_setting(st, "data_streams.lifecycle.retention.max") };
-    let disabled = l.get("enabled").and_then(Value::as_bool) == Some(false);
-    let eff = match retention {
-        _ if disabled => None,
+    if l.get("enabled").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+    match retention {
         Some(r) => match max {
             Some(m) if m.as_millis() < r.as_millis() => Some((m, "max_global_retention")),
             _ => Some((r, "data_stream_configuration")),
@@ -317,7 +325,16 @@ fn failures_lifecycle(st: &ClusterState, ds: &DataStream, include_defaults: bool
             let default = time_setting(st, "data_streams.lifecycle.retention.failures_default").unwrap_or_else(|| TimeValue::parse("30d", "").expect("valid"));
             Some((default, "default_failures_retention"))
         }
-    };
+    }
+}
+
+/// The failures lifecycle of a failure store: its configured retention (capped by the max
+/// global retention) or the default failures retention, and with `include_defaults` the
+/// rollover conditions.
+fn failures_lifecycle(st: &ClusterState, ds: &DataStream, include_defaults: bool) -> Value {
+    let l = configured_failures_lifecycle(ds).unwrap_or_else(|| obj! { "enabled" => true });
+    let v = lifecycle_value(&l);
+    let eff = failures_effective_retention(st, ds, &l);
     let Value::Obj(m) = v else { return v };
     let mut out = Map::new();
     let has_retention = m.contains_key("data_retention");
@@ -854,7 +871,7 @@ pub async fn delete_lifecycle(ctx: &Ctx<'_>) -> EsResult<Reply> {
     update_streams(ctx, |d| d.lifecycle = None).await
 }
 
-/// `GET <index>/_lifecycle/explain`.
+/// `GET <index>/_lifecycle/explain` (`TransportExplainDataStreamLifecycleAction`).
 pub fn explain_lifecycle(ctx: &Ctx) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
     let include_defaults = ctx.bool_param("include_defaults", false)?;
@@ -865,27 +882,32 @@ pub fn explain_lifecycle(ctx: &Ctx) -> EsResult<Reply> {
         let Some(idx) = st.metadata.indices.get(&n) else { continue };
         let mut m = Map::new();
         m.insert("index".into(), Value::from(n.clone()));
-        let ds = st.metadata.data_stream_of(&n);
-        let managed = ds.and_then(|d| d.lifecycle.as_ref().filter(|_| dsl_enabled(d)).map(|l| (d, l)));
-        let ilm = idx.settings.get("index.lifecycle.name").is_some_and(|p| !p.is_empty()) && idx.settings.get("index.lifecycle.prefer_ilm") != Some("false");
-        match managed {
-            Some((d, l)) if !ilm => {
+        let ds = st.metadata.data_stream_of(&n).filter(|d| super::data_stream_lifecycle::managed_by_dsl(d, idx));
+        match ds {
+            Some(d) => {
                 m.insert("managed_by_lifecycle".into(), true.into());
                 let created = idx.creation_date();
                 m.insert("index_creation_date_millis".into(), Value::from(created));
-                m.insert("time_since_index_creation".into(), Value::from(TimeValue::millis((ctx.now_ms - created).max(0)).human()));
-                if d.write_index() != Some(n.as_str())
-                    && let Some(next) = d.indices.iter().skip_while(|i| **i != n).nth(1)
-                    && let Some(next_idx) = st.metadata.indices.get(next)
-                {
-                    let rolled = next_idx.creation_date();
-                    m.insert("rollover_date_millis".into(), Value::from(rolled));
-                    m.insert("time_since_rollover".into(), Value::from(TimeValue::millis((ctx.now_ms - rolled).max(0)).human()));
-                    m.insert("generation_time".into(), Value::from(TimeValue::millis((ctx.now_ms - rolled).max(0)).human()));
+                m.insert("time_since_index_creation".into(), Value::from(TimeValue::millis((ctx.now_ms - created).max(0)).human_with(2)));
+                if let Some(r) = super::data_stream_lifecycle::rollover_time(&st, d, idx) {
+                    m.insert("rollover_date_millis".into(), Value::from(r));
+                    m.insert("time_since_rollover".into(), Value::from(TimeValue::millis((ctx.now_ms - r).max(0)).human_with(2)));
                 }
-                m.insert("lifecycle".into(), lifecycle_with_effective(&st, d, l, include_defaults));
+                if let Some(g) = super::data_stream_lifecycle::generation_date(&st, d, idx) {
+                    m.insert("generation_time".into(), Value::from(TimeValue::millis((ctx.now_ms - g).max(0)).human_with(2)));
+                }
+                let lifecycle = if d.failure_indices.contains(&n) {
+                    failures_lifecycle(&st, d, include_defaults)
+                } else {
+                    let l = d.lifecycle.clone().unwrap_or(Value::Null);
+                    lifecycle_with_effective(&st, d, &l, include_defaults)
+                };
+                m.insert("lifecycle".into(), lifecycle);
+                if let Some(e) = super::data_stream_lifecycle::error_of(&st, idx) {
+                    m.insert("error".into(), e);
+                }
             }
-            _ => {
+            None => {
                 m.insert("managed_by_lifecycle".into(), false.into());
             }
         }
@@ -902,7 +924,10 @@ pub fn lifecycle_stats(ctx: &Ctx) -> EsResult<Reply> {
         .data_streams
         .values()
         .filter(|d| dsl_enabled(d))
-        .map(|d| obj! { "name" => d.name.clone(), "backing_indices_in_total" => d.indices.len(), "backing_indices_in_error" => 0 })
+        .map(|d| {
+            let in_error = d.indices.iter().chain(&d.failure_indices).filter(|i| st.metadata.indices.get(*i).is_some_and(|idx| super::data_stream_lifecycle::error_of(&st, idx).is_some())).count();
+            obj! { "name" => d.name.clone(), "backing_indices_in_total" => d.indices.len(), "backing_indices_in_error" => in_error }
+        })
         .collect();
     let poll = time_setting(&st, "data_streams.lifecycle.poll_interval").map(|t| t.as_millis()).unwrap_or(300_000);
     let mut m = Map::new();

@@ -265,7 +265,35 @@ fn indicator(ctx: &Ctx, st: &ClusterState, name: &str, verbose: bool, size: usiz
         ),
         "slm" => simple("green", "No Snapshot Lifecycle Management policies configured", obj! { "slm_status" => "RUNNING", "policies" => 0 }),
         "shards_availability" => shards_availability(ctx, st, verbose, size),
-        "ilm" => simple("green", "Index Lifecycle Management is running", obj! { "policies" => 0, "stagnating_indices" => 0, "ilm_status" => "RUNNING" }),
+        // `IlmHealthIndicatorService` (no index counts as stagnating).
+        "ilm" => {
+            let (policies, mode) = (crate::xpack::ilm::policy_count(st), crate::xpack::ilm::mode(st));
+            let details = obj! { "ilm_status" => mode.clone(), "policies" => policies, "stagnating_indices" => 0 };
+            if policies == 0 {
+                simple("green", "No Index Lifecycle Management policies configured", details)
+            } else if mode == "RUNNING" {
+                simple("green", "Index Lifecycle Management is running", details)
+            } else {
+                let mut v = simple("yellow", "Index Lifecycle Management is not running", details);
+                if let Value::Obj(m) = &mut v {
+                    m.insert("impacts".into(), Value::Arr(vec![obj! {
+                        "id" => "elasticsearch:health:ilm:impact:automation_disabled",
+                        "severity" => 3,
+                        "description" => "Automatic index lifecycle and data retention management is disabled. The performance and stability of the cluster could be impacted.",
+                        "impact_areas" => vec![Value::from("deployment_management")],
+                    }]));
+                    if verbose {
+                        m.insert("diagnosis".into(), Value::Arr(vec![obj! {
+                            "id" => "elasticsearch:health:ilm:diagnosis:ilm_disabled",
+                            "cause" => "Index Lifecycle Management is stopped",
+                            "action" => "Start Index Lifecycle Management using [POST /_ilm/start].",
+                            "help_url" => "https://ela.st/fix-ilm",
+                        }]));
+                    }
+                }
+                v
+            }
+        }
         _ => Value::Null,
     }
 }
