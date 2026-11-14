@@ -315,6 +315,9 @@ pub struct EnvLive {
     /// Torn down: nothing is made or adopted any more (a request or a tick that held this
     /// environment from before can't bring it back).
     closed: AtomicBool,
+    /// Let go to another node ([`Self::let_go`]): stops and removes spawned before don't run (on
+    /// a shared runtime the next owner may have kept the instance; it removes what it didn't).
+    released: Arc<AtomicBool>,
     /// Its project reached its spend limit: nothing starts, and the tick stops what runs.
     capped: AtomicBool,
     /// Its volume is being restored: nothing starts until it's done.
@@ -390,6 +393,7 @@ impl EnvLive {
             insts: Mutex::new(Vec::new()),
             wake: Arc::new(tokio::sync::Mutex::new(())),
             closed: AtomicBool::new(false),
+            released: Arc::default(),
             capped: AtomicBool::new(false),
             held: AtomicBool::new(false),
             wanted: AtomicU32::new(0),
@@ -1012,9 +1016,11 @@ impl EnvLive {
     fn crashed_with(&self, inst: &Inst, why: &str, grace: Duration) {
         *inst.phase.lock() = Phase::Crashed;
         self.count(&inst.deployment, |s| s.crashes += 1);
-        let (runtime, name) = (self.runtime.clone(), inst.name.clone());
+        let (runtime, name, released) = (self.runtime.clone(), inst.name.clone(), self.released.clone());
         *inst.stopping.lock() = Some(tokio::spawn(async move {
-            let _ = runtime.stop(&name, grace).await;
+            if !released.load(Ordering::SeqCst) {
+                let _ = runtime.stop(&name, grace).await;
+            }
         }));
         let entered = {
             let mut c = self.crashes.lock();
@@ -1210,11 +1216,14 @@ impl EnvLive {
     /// doesn't use up another's time.
     fn drain(&self, old: Vec<Arc<Inst>>, window: Duration) {
         for i in old {
-            let runtime = self.runtime.clone();
+            let (runtime, released) = (self.runtime.clone(), self.released.clone());
             tokio::spawn(async move {
                 let until = Instant::now() + window;
                 while i.in_flight() > 0 && Instant::now() < until {
                     tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                if released.load(Ordering::SeqCst) {
+                    return;
                 }
                 let grace = until.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
                 let _ = runtime.stop(&i.name, grace).await;
@@ -1432,6 +1441,7 @@ impl EnvLive {
     /// owner keeps the live deployment's instances, [`Self::adopt`], and removes the rest):
     /// nothing here sends to, wakes or stops them any more.
     pub async fn let_go(&self) {
+        self.released.store(true, Ordering::SeqCst);
         let _g = self.wake.lock().await;
         self.closed.store(true, Ordering::SeqCst);
         *self.canary.lock() = None;
@@ -1845,12 +1855,14 @@ impl EnvLive {
             let extra: Vec<Arc<Inst>> = self.instances().into_iter().filter(|i| i.phase() == Phase::Crashed && !i.done.load(Ordering::SeqCst)).collect();
             for i in extra {
                 self.insts.lock().retain(|x| !Arc::ptr_eq(x, &i));
-                let (runtime, name, stopping) = (self.runtime.clone(), i.name.clone(), i.stopping.lock().take());
+                let (runtime, name, stopping, released) = (self.runtime.clone(), i.name.clone(), i.stopping.lock().take(), self.released.clone());
                 tokio::spawn(async move {
                     if let Some(s) = stopping {
                         let _ = s.await;
                     }
-                    runtime.remove(&name).await;
+                    if !released.load(Ordering::SeqCst) {
+                        runtime.remove(&name).await;
+                    }
                 });
             }
         }
@@ -1880,8 +1892,11 @@ impl EnvLive {
             self.insts.lock().retain(|x| !Arc::ptr_eq(x, &i));
             *self.fewer_since.lock() = None;
             self.log.stream(Stream::System).line(format!("scaled in: {} instances for the backlog", up - 1));
-            let (runtime, name, grace) = (self.runtime.clone(), i.name.clone(), self.drain_of(run));
+            let (runtime, name, grace, released) = (self.runtime.clone(), i.name.clone(), self.drain_of(run), self.released.clone());
             tokio::spawn(async move {
+                if released.load(Ordering::SeqCst) {
+                    return;
+                }
                 let _ = runtime.stop(&name, grace).await;
                 runtime.remove(&name).await;
             });

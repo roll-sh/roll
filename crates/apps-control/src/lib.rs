@@ -1241,6 +1241,12 @@ impl Apps {
         let dep = self.db(move |s| s.deployment(&active)).await?;
         let sid = service.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
+        // Adopting keeps what runs on a runtime the nodes share: only the service's owner does
+        // (a request that reached this node as the service moved away mustn't take what the
+        // next owner kept).
+        if self.deps.runtime.shares_instances() && !self.owns(service) {
+            return Err(Error::Conflict(format!("{service} is moving to another node; try again")));
+        }
         let tpl = self.template(&svc, &row, &dep).await?;
         live.adopt(Arc::new(tpl)).await;
         Ok(live)

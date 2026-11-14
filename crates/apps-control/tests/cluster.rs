@@ -565,4 +565,10 @@ async fn a_handoff_on_a_shared_runtime_keeps_the_instances() {
     assert!(!moved.is_empty(), "the new node took at least one service");
     assert!(failed.is_empty(), "requests failed during the handoff: {failed:?}");
     assert_eq!(Fake::count(&shared.counts.creates), made, "the moved services kept their instances: {:?}", moved.iter().map(|m| shared.instances(m)).collect::<Vec<_>>());
+    // The node it left doesn't take them back (a request that reached it as the service moved).
+    let id = &moved[0];
+    assert!(f.nodes[0].apps.load_live(id, "production").await.is_err());
+    let req = Request::builder().uri("/").header("host", svcs.iter().find(|(s, _)| s == id).unwrap().1.as_str()).body(Body::empty()).unwrap();
+    assert_eq!(f.nodes[1].public.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(Fake::count(&shared.counts.creates), made, "the new owner still has its instance");
 }
