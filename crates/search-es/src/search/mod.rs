@@ -3150,6 +3150,7 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
     if let Some(hl) = &src.highlight {
         let mut spec = highlight::Spec::parse(hl)?;
         spec.weight_matches = highlight::weight_matches_supported(src);
+        spec.semantic = crate::xpack::inference::highlight::probes(src.query.as_ref());
         // The stored fields read at the top serve the highlighter too.
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
         let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);

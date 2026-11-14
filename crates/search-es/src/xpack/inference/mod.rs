@@ -18,6 +18,7 @@
 //! do (`how big`), which also learns a text embedding model's dimensions.
 
 pub mod chunking;
+pub mod highlight;
 pub mod http;
 pub mod query;
 pub mod rate;

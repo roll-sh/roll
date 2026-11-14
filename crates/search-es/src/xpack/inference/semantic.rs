@@ -161,9 +161,15 @@ pub fn hidden_mapper(f: &FieldMapper) -> Option<ObjectMapper> {
             emb.insert("type".into(), "dense_vector".into());
             emb.insert("dims".into(), ms.dimensions.unwrap_or(1).into());
             emb.insert("similarity".into(), ms.similarity.clone().unwrap_or_else(|| "cosine".into()).into());
-            emb.insert("element_type".into(), ms.element_type.clone().unwrap_or_else(|| "float".into()).into());
-            if let Some(o) = options.and_then(|o| o.get("dense_vector")) {
-                emb.insert("index_options".into(), o.clone());
+            // `index_options.dense_vector`: an `element_type` override for the embeddings, and the
+            // vector index options themselves when they name a `type`.
+            let dense = options.and_then(|o| o.get("dense_vector")).and_then(Value::as_object);
+            let element = dense.and_then(|d| d.get("element_type")).map(Value::to_es_string).or_else(|| ms.element_type.clone()).unwrap_or_else(|| "float".into());
+            emb.insert("element_type".into(), element.into());
+            if let Some(d) = dense.filter(|d| d.contains_key("type")) {
+                let mut d = d.clone();
+                d.shift_remove("element_type");
+                emb.insert("index_options".into(), Value::Obj(d));
             }
         }
     }
@@ -177,7 +183,27 @@ pub fn hidden_mapper(f: &FieldMapper) -> Option<ObjectMapper> {
         },
     };
     let ctx = crate::mapping::MappingCtx::from_settings(&crate::meta::settings::Settings::default());
-    Mapping::parse(mapping.as_object()?, &ctx).ok().map(|m| m.root)
+    match Mapping::parse(mapping.as_object()?, &ctx) {
+        Ok(m) => Some(m.root),
+        // Index options the vector field refuses: its defaults rather than no chunks at all.
+        Err(_) if emb_has_options(&mapping) => hidden_mapper_without_options(&mapping, &ctx),
+        Err(_) => None,
+    }
+}
+
+fn embeddings_of(m: &mut Value) -> Option<&mut Map> {
+    m.as_object_mut()?.get_mut("properties")?.as_object_mut()?.get_mut("inference")?.as_object_mut()?.get_mut("properties")?.as_object_mut()?.get_mut("chunks")?.as_object_mut()?.get_mut("properties")?.as_object_mut()?.get_mut("embeddings")?.as_object_mut()
+}
+
+fn emb_has_options(mapping: &Value) -> bool {
+    let mut m = mapping.clone();
+    embeddings_of(&mut m).is_some_and(|e| e.contains_key("index_options"))
+}
+
+fn hidden_mapper_without_options(mapping: &Value, ctx: &crate::mapping::MappingCtx) -> Option<ObjectMapper> {
+    let mut m = mapping.clone();
+    embeddings_of(&mut m)?.shift_remove("index_options");
+    Mapping::parse(m.as_object()?, ctx).ok().map(|m| m.root)
 }
 
 /// A field's recorded model settings.
@@ -331,7 +357,7 @@ pub fn index_inference(
 
 /// The values of a `semantic_text` field in a document, as the texts to embed: strings as
 /// they are, numbers and booleans as their text, arrays value by value (`null`s skipped).
-fn texts_at(doc: &Map, path: &str) -> Option<Vec<String>> {
+pub(crate) fn texts_at(doc: &Map, path: &str) -> Option<Vec<String>> {
     fn scalar(v: &Value, out: &mut Vec<String>) {
         match v {
             Value::Null | Value::Obj(_) => {}

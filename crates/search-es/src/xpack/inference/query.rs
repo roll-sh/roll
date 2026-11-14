@@ -206,6 +206,8 @@ fn semantic_query(field: &str, settings: &Option<ModelSettings>, r: Option<&supe
     nested.insert("path".into(), chunks_path(field).into());
     nested.insert("query".into(), child);
     nested.insert("score_mode".into(), "max".into());
+    // Clauses limited to other indices by `_index` still parse on every target.
+    nested.insert("ignore_unmapped".into(), true.into());
     if boost != 1.0 {
         nested.insert("boost".into(), crate::query::xparser::float_value(boost));
     }
