@@ -1690,16 +1690,20 @@ impl EnvLive {
                 _ => {}
             }
         }
-        // Left stopped by the policy: they count, so nothing replaces them.
+        // Left stopped by the policy: they count, so nothing replaces them. So do crashed ones
+        // waiting out their backoff: a new instance in their place would skip it (and run beside
+        // the crashed one once it starts again).
         let finished = insts.iter().filter(|i| i.done.load(Ordering::SeqCst)).count() as u32;
+        let mut waiting = 0;
         for i in insts.iter().filter(|i| i.phase() == Phase::Crashed && !i.done.load(Ordering::SeqCst)) {
-            if up >= target {
+            if up + finished >= target {
                 break;
             }
             // Back off: `restart_backoff` (1 s) doubling to 60 times it since it last ran.
             let crashes = i.crashes.load(Ordering::SeqCst).min(6);
             let wait = (self.cfg.restart_backoff * (1u32 << crashes)).min(self.cfg.restart_backoff * 60);
             if i.last_used.lock().elapsed() < wait {
+                waiting += 1;
                 continue;
             }
             *i.last_used.lock() = Instant::now();
@@ -1715,7 +1719,7 @@ impl EnvLive {
                 self.after_stop(i, run, clean, "it ended right after it started");
             }
         }
-        while up + finished < target {
+        while up + finished + waiting < target {
             let Ok(inst) = self.make(tpl).await else { break };
             self.insts.lock().push(inst.clone());
             let deadline = Instant::now() + self.cfg.wake_timeout;

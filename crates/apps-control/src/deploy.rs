@@ -588,6 +588,12 @@ impl Apps {
             let r = self.resolve_vars(&svc, &env, &dep.id).await?;
             fingerprint(&r.vars_for_hash(), &svc)
         };
+        // The project's secrets as it reads them (a digest, no value): what "secrets changed
+        // since" compares with. Best effort: without one, nothing says so.
+        if let Ok(Some(digest)) = self.deps.secrets.digest(&svc.project, &env.name).await {
+            let did = d.id.clone();
+            let _ = self.db(move |s| s.set_secrets_digest(&did, &digest)).await;
+        }
         let live = self.live(&svc.id, &env.name);
         // Instances of the old deployment are known here (after a restart: loaded from the store).
         self.load_live(&svc.id, &env.name).await?;

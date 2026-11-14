@@ -194,7 +194,7 @@ pub struct Apps {
     /// Each environment's `needs_deploy` as last worked out (it decrypts every variable and asks
     /// each linked product for its own): when, the settings generation and active deployment it
     /// was for, and the answer. Good for a minute, or until either moves.
-    needs: Mutex<HashMap<String, (std::time::Instant, u64, String, bool)>>,
+    needs: Mutex<HashMap<String, NeedsDeploy>>,
     /// Bumped by every change a deployment's fingerprint reads (settings, variables, links).
     settings_gen: std::sync::atomic::AtomicU64,
     /// A service changed (a deploy moved, someone changed something): its id, for the pages
@@ -210,6 +210,8 @@ pub struct Apps {
     sites: Mutex<HashMap<String, Arc<sites::Site>>>,
     /// Per environment, for the live site's key: its earlier static deployments' site keys.
     earlier_sites: Mutex<HashMap<String, sites::EarlierSites>>,
+    /// `(service, name)` → the id of the service of that name in its project, as of when.
+    service_names: Mutex<HashMap<(String, String), NameLookup>>,
     /// A site being loaded, per key: one load at a time (the rest wait for it).
     site_loads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Environments in a crash loop whose event is written (one per loop).
@@ -268,6 +270,13 @@ fn hex(b: &[u8]) -> String {
 }
 
 /// What makes up an environment's variables, highest precedence last.
+/// An environment's `needs_deploy`, worked out: when, at which settings generation, for which
+/// active deployment and secrets' digest, and the answer.
+type NeedsDeploy = (std::time::Instant, u64, String, Option<String>, bool);
+
+/// A service id looked up by name, as of when (none: no such web service).
+type NameLookup = (std::time::Instant, Option<String>);
+
 /// Another service's values a reference may read, and which of them are sealed.
 type ServiceValues = (HashMap<String, String>, BTreeSet<String>);
 
@@ -309,6 +318,7 @@ impl Apps {
             sites: Mutex::new(HashMap::new()),
             earlier_sites: Mutex::new(HashMap::new()),
             site_loads: Mutex::new(HashMap::new()),
+            service_names: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             ws_shells: Mutex::new(HashMap::new()),
             tunnels: Mutex::new(HashMap::new()),
@@ -701,9 +711,14 @@ impl Apps {
     /// deployment doesn't run with. Links and project secrets move `needs_deploy` too, unnamed.
     pub async fn pending(self: &Arc<Self>, service: &str, env: &str) -> Result<Value> {
         let (svc, row) = self.service_env(service, env).await?;
-        let Some(active) = row.active.clone() else { return Ok(json!({ "variables": null, "run": [] })) };
+        let Some(active) = row.active.clone() else { return Ok(json!({ "variables": null, "run": [], "secrets": null })) };
         let a = active.clone();
-        let (dep, then) = self.db(move |s| Ok((s.deployment(&a)?, s.snapshot(&a)?))).await?;
+        let (dep, then, digest_then) = self.db(move |s| Ok((s.deployment(&a)?, s.snapshot(&a)?, s.secrets_digest(&a)?))).await?;
+        // The project's secrets since it went live (null: no digest to compare).
+        let secrets = match (digest_then, self.deps.secrets.digest(&svc.project, env).await.ok().flatten()) {
+            (Some(then), Some(now)) => Value::Bool(then != now),
+            _ => Value::Null,
+        };
         let (sid, e) = (service.to_string(), env.to_string());
         let now = self.db(move |s| s.variables(&sid, &e)).await?;
         let variables = then.map(|then| {
@@ -719,7 +734,7 @@ impl Apps {
         let want = serde_json::to_value(svc.for_env(&row).map_or(svc.run.clone(), |s| s.run)).unwrap_or_default();
         let has = serde_json::to_value(&dep.run).unwrap_or_default();
         let run: Vec<&String> = want.as_object().into_iter().flatten().filter(|(k, v)| has.get(k.as_str()) != Some(*v)).map(|(k, _)| k).collect();
-        Ok(json!({ "variables": variables, "run": run }))
+        Ok(json!({ "variables": variables, "run": run, "secrets": secrets }))
     }
 
     /// Whether the environment's settings, variables or links changed since its active
@@ -729,9 +744,12 @@ impl Apps {
         use std::sync::atomic::Ordering::SeqCst;
         let key = env_key(&r.service, &r.name);
         let seen = self.settings_gen.load(SeqCst);
-        if let Some((at, g, a, v)) = self.needs.lock().get(&key)
+        // The project's secrets moved: worked out again at once, not after the minute.
+        let digest = self.deps.secrets.digest(&svc.project, &r.name).await.ok().flatten();
+        if let Some((at, g, a, d, v)) = self.needs.lock().get(&key)
             && *g == seen
             && a == active
+            && *d == digest
             && at.elapsed() < Duration::from_secs(60)
         {
             return Ok(*v);
@@ -744,7 +762,7 @@ impl Apps {
         };
         // Kept only if nothing changed while it was worked out.
         if self.settings_gen.load(SeqCst) == seen {
-            self.needs.lock().insert(key, (std::time::Instant::now(), seen, active.to_string(), v));
+            self.needs.lock().insert(key, (std::time::Instant::now(), seen, active.to_string(), digest, v));
         }
         Ok(v)
     }
@@ -1362,6 +1380,33 @@ impl Apps {
 
     /// What reads a job's output or opens a shell needs when the environment has values from
     /// roll secrets (a job may print them, a shell reads them all): roll secrets' own rule for
+    /// The web service named `name` in `service`'s project (a site's `service:` rewrite), looked
+    /// up at most every 30 s (a miss every 2 s).
+    pub(crate) async fn project_service(self: &Arc<Self>, service: &str, name: &str) -> Option<String> {
+        let key = (service.to_string(), name.to_string());
+        // A miss a moment only: a service made just now answers at once.
+        if let Some((at, id)) = self.service_names.lock().get(&key)
+            && at.elapsed() < Duration::from_secs(if id.is_some() { 30 } else { 2 })
+        {
+            return id.clone();
+        }
+        let (sid, n) = key.clone();
+        let id = self
+            .db(move |s| {
+                let svc = s.service(&sid)?;
+                Ok(s.services(Some(&svc.project))?.into_iter().find(|x| x.name == n && x.run.kind == RunType::Web).map(|x| x.id))
+            })
+            .await
+            .ok()
+            .flatten();
+        let mut m = self.service_names.lock();
+        if m.len() > 10_000 {
+            m.clear();
+        }
+        m.insert(key, (std::time::Instant::now(), id.clone()));
+        id
+    }
+
     /// revealing them.
     pub async fn check_secret_reveal(self: &Arc<Self>, service: &str, env: &str, who: integrations::Asker<'_>) -> Result<()> {
         let (svc, row) = self.service_env(service, env).await?;

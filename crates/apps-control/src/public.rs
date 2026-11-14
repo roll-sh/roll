@@ -95,6 +95,57 @@ fn maintenance_page(message: &str) -> Response {
     r
 }
 
+/// A static site's rewrite of this request to one of the project's services (`service:` in its
+/// `_redirects`): the service's name and the path. Not for a request a rewrite already sent (a
+/// site rewriting to a site that rewrites back).
+fn site_rewrite(apps: &Arc<Apps>, tpl: &crate::live::Template, req: &Request) -> impl std::future::Future<Output = Option<(String, String)>> + Send + use<> {
+    // Read off the request here: the future never holds it.
+    let args = (!req.headers().contains_key(VIA_SITE)).then(|| tpl.site.clone()).flatten().map(|key| {
+        (key, percent_encoding::percent_decode_str(req.uri().path()).decode_utf8_lossy().into_owned(), req.uri().query().map(str::to_string))
+    });
+    let apps = apps.clone();
+    async move {
+        let (key, path, query) = args?;
+        rewrite_of(&apps, key, path, query).await
+    }
+}
+
+async fn rewrite_of(apps: &Arc<Apps>, key: String, path: String, query: Option<String>) -> Option<(String, String)> {
+    let site = apps.site(&key).await.ok()?;
+    match site.rules.redirect(&path, query.as_deref(), crate::sites::exists(&site, &path))? {
+        crate::site_rules::Outcome::Proxy { service, path } => Some((service, path)),
+        _ => None,
+    }
+}
+
+/// Marks a request a site's rewrite sent on (roll's own: `x-roll-*` never reaches an app).
+const VIA_SITE: &str = "x-roll-via-site";
+
+/// Send `req` to the project's service `to.0` in `env` at `to.1`, where that service lives,
+/// through all of its own gates (access, allow list, firewall, rate limit, maintenance).
+fn rewrite_to(apps: Arc<Apps>, service: &str, env: &str, to: (String, String), mut req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>> {
+    // A named, boxed future: `serve` comes back here (it's the same proxy), and the compiler
+    // proves it `Send` only through a type it can see.
+    let (service, env) = (service.to_string(), env.to_string());
+    Box::pin(async move {
+        let (name, path) = to;
+        let Some(target) = apps.project_service(&service, &name).await else {
+            apps.live(&service, &env).log.stream(crate::logs::Stream::System).line(format!("a rewrite names service:{name}, which this project doesn't have"));
+            return page(StatusCode::BAD_GATEWAY, "Not here", "This site sends the address to a service that isn't there.");
+        };
+        let Ok(uri) = path.parse::<Uri>() else { return page(StatusCode::BAD_REQUEST, "Bad address", "The rewritten address isn't one.") };
+        *req.uri_mut() = uri;
+        req.headers_mut().insert(HeaderName::from_static(VIA_SITE), HeaderValue::from_static("1"));
+        serve(apps, target, env, None, req).await
+    })
+}
+
+/// How a request's lease was had: another of the same kind if its instance is gone.
+enum Again {
+    Deployment(Box<crate::live::Template>),
+    Route(Arc<crate::live::Template>),
+}
+
 /// Which of roll's pages a response is (never an app's own answer), so an environment's own
 /// page can take its place ([`their_page`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -284,6 +335,11 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
                 r.headers_mut().insert(header::LOCATION, v);
             }
             return r;
+        }
+        // Taken before the site is served ([`site_rewrite`]).
+        Some(crate::site_rules::Outcome::Proxy { .. }) => {
+            done(404, 0);
+            return not_found();
         }
         Some(crate::site_rules::Outcome::Serve(status, to)) => {
             skew_ok &= status == 200;
@@ -684,16 +740,29 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         getrandom::fill(&mut b).expect("system randomness");
         bucket = Some(b[0] % 100);
     }
+    // How the lease was had, to have another if its instance turns out gone.
+    let mut again: Option<Again> = None;
     let acquired = match deployment {
         // One deployment's own URL: that deployment, whatever is live.
         Some(d) => match apps.deployment_template(service, env, d).await {
-            Ok(t) if t.site.is_some() => return with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await),
-            Ok(t) => live.acquire_deployment(t).await,
+            Ok(t) if t.site.is_some() => {
+                if let Some(to) = site_rewrite(&apps, &t, &req).await {
+                    return rewrite_to(apps, service, env, to, req).await;
+                }
+                return with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await);
+            }
+            Ok(t) => {
+                again = Some(Again::Deployment(Box::new(t.clone())));
+                live.acquire_deployment(t).await
+            }
             Err(e) => return page(StatusCode::NOT_FOUND, "No such deployment", &e.to_string()),
         },
         None => match live.may_wake().map(|_| live.route(bucket)) {
             // A static site's files answer (a gradual rollout's bucket chose which deployment's).
             Ok(Some(t)) if t.site.is_some() => {
+                if let Some(to) = site_rewrite(&apps, &t, &req).await {
+                    return rewrite_to(apps, service, env, to, req).await;
+                }
                 let mut r = with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await);
                 if let (true, Some(b)) = (fresh, bucket) {
                     let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
@@ -703,12 +772,15 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
                 }
                 return r;
             }
-            Ok(Some(t)) => live.acquire_preferring(t, affine.as_deref()).await,
+            Ok(Some(t)) => {
+                again = Some(Again::Route(t.clone()));
+                live.acquire_preferring(t, affine.as_deref()).await
+            }
             Ok(None) => Err(WakeError::NoDeployment),
             Err(e) => Err(e),
         },
     };
-    let lease = match acquired {
+    let mut lease = match acquired {
         Ok(l) => l,
         Err(WakeError::NoDeployment) => return page(StatusCode::NOT_FOUND, "Not deployed yet", "This service has no deployment in this environment yet."),
         Err(WakeError::NotWeb) => return page(StatusCode::NOT_FOUND, "Not a web service", "This service is a worker or a cron job: it doesn't answer HTTP."),
@@ -767,7 +839,15 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         h.insert(HeaderName::from_static("x-request-id"), v);
     }
     let request_id = h.get("x-request-id").and_then(|v| v.to_str().ok()).unwrap_or("").chars().take(64).collect::<String>();
-    let (instance, cold, waited_ms) = (lease.inst.name.clone(), lease.cold, lease.waited.as_millis() as u64);
+    // A request with nothing to send again (a GET, HEAD or OPTIONS without a body) that finds
+    // its instance gone (killed, out of memory: nothing listens) is sent once more, to a fresh
+    // one, as Fly's proxy does: the app never saw it.
+    let bodiless = !upgrade
+        && matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS)
+        && !req.headers().contains_key(header::TRANSFER_ENCODING)
+        && req.headers().get(header::CONTENT_LENGTH).is_none_or(|v| v == "0");
+    let replay = bodiless.then(|| (req.method().clone(), pq.clone(), req.headers().clone(), req.version()));
+    let (mut instance, mut cold, mut waited_ms) = (lease.inst.name.clone(), lease.cold, lease.waited.as_millis() as u64);
     let send = async { if h2 { apps.client_h2.request(req).await } else { apps.client.request(req).await } };
     // Its timeout runs to the answer's head: an upgrade, or a stream that has begun, is the
     // app's to keep.
@@ -782,6 +862,46 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             }
         },
         None => send.await,
+    };
+    // Gone: nothing listened (a fresh connection), or a pooled one broke and the instance isn't
+    // running any more.
+    let gone = match &sent {
+        Err(e) if replay.is_some() && again.is_some() => e.is_connect() || !apps.deps.runtime.running(&lease.inst.name).await,
+        _ => false,
+    };
+    let sent = match (sent, replay, again) {
+        (Err(e), Some((method, pq, headers, version)), Some(how)) if gone => {
+            live.connect_failed(&lease.inst);
+            live.log.stream(crate::logs::Stream::System).line(format!("{instance} stopped answering: the request goes to a fresh instance"));
+            let next = match how {
+                Again::Deployment(t) => live.acquire_deployment(*t).await,
+                Again::Route(t) => live.acquire_tpl(t).await,
+            };
+            match next {
+                Ok(l) => {
+                    lease = l;
+                    (instance, cold, waited_ms) = (lease.inst.name.clone(), lease.cold, lease.waited.as_millis() as u64);
+                    let mut r = Request::new(Body::empty());
+                    (*r.method_mut(), *r.headers_mut(), *r.version_mut()) = (method, headers, version);
+                    *r.uri_mut() = format!("http://{}{pq}", lease.addr).parse().unwrap_or_default();
+                    let send = async { if h2 { apps.client_h2.request(r).await } else { apps.client.request(r).await } };
+                    match lease.timeout {
+                        Some(t) => match tokio::time::timeout(t, send).await {
+                            Ok(r) => r,
+                            Err(_) => {
+                                live.answered(&lease.inst, 504);
+                                live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 504, 0);
+                                access.write(504, began, 0, &instance, &request_id, cold, waited_ms);
+                                return page(StatusCode::GATEWAY_TIMEOUT, "Timed out", &format!("The service didn't answer within its {} s.", t.as_secs()));
+                            }
+                        },
+                        None => send.await,
+                    }
+                }
+                Err(_) => Err(e),
+            }
+        }
+        (sent, _, _) => sent,
     };
     let mut resp = match sent {
         Ok(r) => r,

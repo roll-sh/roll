@@ -372,7 +372,7 @@ impl Runtime for Fake {
             ("./index.html", b"<!doctype html><title>fake site</title>"),
             ("./assets/app.js", b"start()"),
             ("./404.html", b"<h1>not here</h1>"),
-            ("./_redirects", b"/old /assets/app.js 308\n/app/* /index.html 200\n"),
+            ("./_redirects", b"/old /assets/app.js 308\n/app/* /index.html 200\n/api/* service:api/v1/:splat 200\n"),
             ("./_headers", b"/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n"),
         ];
         for (name, body) in files {

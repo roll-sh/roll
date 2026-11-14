@@ -405,6 +405,29 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     assert_eq!(count().await, before + 1);
 }
 
+/// A GET that finds its instance gone (killed: nothing listens, and roll doesn't know yet) goes
+/// to a fresh instance instead of a 503; a request with a body isn't sent twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_get_to_a_vanished_instance_goes_to_a_fresh_one() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let h = host(&svc["environments"][0]["url"]);
+    let (st, body) = visit(&w, &h, "/").await;
+    assert_eq!(st, StatusCode::OK);
+    let first = body["instance"].as_str().unwrap().to_string();
+    w.fake.crash(&first);
+    let (st, body) = visit(&w, &h, "/").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let second = body["instance"].as_str().unwrap().to_string();
+    assert_ne!(second, first);
+    w.fake.crash(&second);
+    let made = w.fake.instances(svc["id"].as_str().unwrap()).len();
+    let post = Request::post("/").header("host", h.as_str()).header("content-length", "1").body(Body::from("x")).unwrap();
+    let st = w.public.clone().oneshot(post).await.unwrap().status();
+    assert!(matches!(st, StatusCode::SERVICE_UNAVAILABLE | StatusCode::BAD_GATEWAY), "{st}");
+    assert_eq!(w.fake.instances(svc["id"].as_str().unwrap()).len(), made, "not sent again");
+}
+
 /// A newer push stops a push's build that's still running (superseded, its minutes saved); the
 /// newer one goes live.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1226,6 +1249,14 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
         let r = site(&path).await.unwrap();
         assert_eq!(r.status(), want, "{path}");
     }
+    // `/api/* service:api/v1/:splat 200`: the project's api service answers on the site's origin.
+    assert_eq!(site("/api/users").await.unwrap().status(), StatusCode::BAD_GATEWAY, "no api service yet");
+    image_service(&w, "api", json!({"port": 80})).await;
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    let r = site("/api/users?page=2").await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["path"], "/v1/users", "{body}");
 
     // A cron service: runs to its exit, recorded.
     let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "nightly", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "0 3 * * *"} }))).await;
@@ -2191,14 +2222,23 @@ async fn a_replaced_instance_finishes_its_requests_within_drain_s() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
     struct FakeSecrets;
+    // Which version of the secrets is current (its digest, and DB_PASSWORD's value).
+    static VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     #[async_trait]
     impl apps_control::integrations::SecretSource for FakeSecrets {
         fn name(&self) -> &'static str {
             "fake"
         }
+        async fn digest(&self, _: &str, _: &str) -> anyhow::Result<Option<String>> {
+            Ok(Some(format!("v{}", VERSION.load(std::sync::atomic::Ordering::SeqCst))))
+        }
         async fn resolve(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
+            let pw = match VERSION.load(std::sync::atomic::Ordering::SeqCst) {
+                1 => "s3cret".to_string(),
+                n => format!("s3cret-{n}"),
+            };
             Ok(vec![
-                apps_control::integrations::SecretVar { name: "DB_PASSWORD".into(), value: "s3cret".into(), linked: false, sensitive: false },
+                apps_control::integrations::SecretVar { name: "DB_PASSWORD".into(), value: pw, linked: false, sensitive: false },
                 apps_control::integrations::SecretVar { name: "SIGNING_KEY".into(), value: "only-for-runtimes".into(), linked: false, sensitive: true },
             ])
         }
@@ -2224,6 +2264,12 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
     assert!(listed["vars"].as_array().unwrap().iter().any(|x| x["name"] == "SIGNING_KEY" && x["sealed"] == true && x["source"] == "secret"), "{listed}");
     // A shell reads them all and a job can print them: the same rule.
     let base = values.trim_end_matches("/variables/values").to_string();
+    // A secret changes after the deploy: the environment says so at once, by roll secrets' digest.
+    assert_eq!(call(&w.api, "GET", &format!("{base}/pending"), None).await.1["secrets"], false);
+    let _ = call(&w.api, "GET", &base, None).await;
+    VERSION.store(2, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(call(&w.api, "GET", &format!("{base}/pending"), None).await.1["secrets"], true);
+    assert_eq!(call(&w.api, "GET", &base, None).await.1["needs_deploy"], true, "not after the minute's cache");
     assert_eq!(call(&w.api, "POST", &format!("{base}/shell/sessions"), None).await.0, StatusCode::FORBIDDEN);
     let (_, job) = call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "exit 0"}))).await;
     assert_eq!(call(&w.api, "GET", &format!("{base}/jobs/{}/logs", job["id"].as_str().unwrap()), None).await.0, StatusCode::FORBIDDEN);
@@ -2584,11 +2630,11 @@ async fn pending_changes_say_what_the_next_deploy_does() {
     let id = svc["id"].as_str().unwrap().to_string();
     settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
     let base = format!("/v1/apps/services/{id}/environments/production");
-    assert_eq!(call(&w.api, "GET", &format!("{base}/pending"), None).await.1, json!({"variables": {"added": [], "removed": [], "changed": []}, "run": []}));
+    assert_eq!(call(&w.api, "GET", &format!("{base}/pending"), None).await.1, json!({"variables": {"added": [], "removed": [], "changed": []}, "run": [], "secrets": null}));
     call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"MODE": "new-secret-value", "ADDED": "1"}, "unset": ["GONE"]}))).await;
     call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"memory_mb": 1024}}))).await;
     let (_, p) = call(&w.api, "GET", &format!("{base}/pending"), None).await;
-    assert_eq!(p, json!({"variables": {"added": ["ADDED"], "removed": ["GONE"], "changed": ["MODE"]}, "run": ["memory_mb"]}));
+    assert_eq!(p, json!({"variables": {"added": ["ADDED"], "removed": ["GONE"], "changed": ["MODE"]}, "run": ["memory_mb"], "secrets": null}));
     assert!(!p.to_string().contains("new-secret-value"), "names only");
 }
 
