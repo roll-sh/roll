@@ -1183,6 +1183,9 @@ static ROWS: &[Row] = &[
     // A preview's own variables come back with their values: reveal (setting them is write, by
     // the prefix).
     row("GET", "/v1/previews/{id}/env", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // The share link with its access token, as a QR code for a phone (previews-next): the token in
+    // another encoding, so reveal as the link itself is.
+    row("GET", "/v1/previews/{id}/qr.png", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // Accepting a visual change is a person's call (with `visual_review = "required"` previews
     // refuses tokens anyway): admin, so a write token can't wave its own diff through.
     row("POST", "/v1/previews/{id}/visual/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
@@ -1426,6 +1429,7 @@ mod tests {
         assert_eq!(git_push(pkt(&format!("{z} {a}")).as_bytes(), Some("main")), Push::Bad);
         assert_eq!(action("POST", "/v1/previews/projects/{p}/bypass", "/v1/previews/projects/prj_a/bypass"), Some(Action::Reveal));
         assert_eq!(action("GET", "/v1/previews/{id}/env", "/v1/previews/pv_1/env"), Some(Action::Reveal), "a preview's variables have their values");
+        assert_eq!(action("GET", "/v1/previews/{id}/qr.png", "/v1/previews/pv_1/qr.png"), Some(Action::Reveal), "a QR code is the share link's token");
         assert_eq!(action("POST", "/v1/previews/{id}/visual/accept", "/v1/previews/pv_1/visual/accept"), Some(Action::Admin));
         // An apps shell runs any command with the environment's variables: admin, outside production
         // too, all of a session (closing one included). Waking an environment starts compute: write.
