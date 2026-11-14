@@ -865,6 +865,15 @@ impl roll_auth::Sessions for Resolver {
             accounts.mailer.send(&Mail { to: user.email, subject: subject.to_string(), text: text.to_string() }).await.map_err(|e| e.to_string())
         })
     }
+
+    fn admins(&self) -> roll_auth::BoxFuture<'_, Result<Vec<String>, String>> {
+        let accounts = self.0.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || accounts.db.read(|c| c.query("SELECT id FROM users WHERE admin = 1 AND disabled = 0 ORDER BY created_at LIMIT 50", (), |r| r.get::<_, String>(0))).map_err(|e| e.to_string()))
+                .await
+                .map_err(|e| e.to_string())?
+        })
+    }
 }
 
 fn load_user(c: &code_sql::Conn<'_>, id: &str) -> code_sql::Result<Option<User>> {

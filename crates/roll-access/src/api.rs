@@ -432,9 +432,11 @@ impl Access {
         let who = who(self, ext)?;
         // A person's own token past what the policy has an admin approve waits for one (one their
         // token makes is within that token, which was approved).
-        if matches!(who, Who::User(_)) && self.policy_now().needs_approval(&new.rules, new.ask_otherwise) {
-            new.pending = true;
-        }
+        let asker = match &who {
+            Who::User(u) if self.policy_now().needs_approval(&new.rules, new.ask_otherwise) => Some(u.handle.clone()),
+            _ => None,
+        };
+        new.pending = asker.is_some();
         let (by, user) = match who {
             // An admin's token is theirs too: it acts as the operator while they're an admin, and
             // stops (or narrows to their own reach) when they aren't.
@@ -446,7 +448,26 @@ impl Access {
             }
         };
         self.check_policy(new.expires_at)?;
-        blocking(self.clone(), move |a| a.store.create(&new, GrantKind::Token, &by, None, user.as_deref())).await
+        let made = blocking(self.clone(), move |a| a.store.create(&new, GrantKind::Token, &by, None, user.as_deref())).await?;
+        if let Some(handle) = asker {
+            self.tell_admins_waiting(&made.0, &handle);
+        }
+        Ok(made)
+    }
+
+    /// Admins hear that a person's token waits for one of them (GitHub mails organization owners):
+    /// who asked, what it reaches, and where to decide. Never its secret.
+    fn tell_admins_waiting(self: &Arc<Self>, g: &crate::store::Grant, handle: &str) {
+        let reaches: Vec<String> = g.rules.0.iter().map(|r| format!("  {}: {}", r.product, r.actions.keys().map(|a| a.as_str()).collect::<Vec<_>>().join(", "))).collect();
+        let text = format!(
+            "{handle} made the token \"{}\", which waits for an admin's approval. It may:\n{}{}\n\nApprove or deny it: {}/dashboard/access/tokens/{}\n",
+            g.name,
+            reaches.join("\n"),
+            if g.ask_otherwise { "\n  and ask for anything else" } else { "" },
+            self.web_url(),
+            g.id
+        );
+        self.tell_admins(&format!("pending:{}", g.id), format!("A roll token waits for your approval: \"{}\" ({handle})", g.name), text);
     }
 }
 
@@ -517,6 +538,10 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
     let who = who(&a, &ext)?;
     let target = visible_grant(&a, &who, &id).await?;
     let person = matches!(who, Who::User(_));
+    let who_handle = match &who {
+        Who::User(u) => Some(u.handle.clone()),
+        _ => None,
+    };
     if let Who::Grant(g) = who {
         // What the token is now, and what it would become, must both be within the caller's; a
         // token never widens its own addresses.
@@ -536,10 +561,14 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
         a.check_policy(change.expires_at.unwrap_or(target.expires_at))?;
     }
     // A person widening their own token past what the policy has an admin approve: it waits again.
+    let asker = match &who_handle {
+        Some(h) => h.clone(),
+        None => String::new(),
+    };
     let again = person
         && (change.rules.is_some() || change.ask_otherwise.is_some())
         && a.policy_now().needs_approval(change.rules.as_ref().unwrap_or(&target.rules), change.ask_otherwise.unwrap_or(target.ask_otherwise));
-    let updated = blocking(a, move |a| {
+    let updated = blocking(a.clone(), move |a| {
         a.store.update(&id, &change)?;
         if again {
             a.store.set_pending(&id)?;
@@ -547,6 +576,9 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
         a.store.get(&id)
     })
     .await?;
+    if again {
+        a.tell_admins_waiting(&updated, &asker);
+    }
     Ok(Json(json!(updated)))
 }
 

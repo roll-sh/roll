@@ -66,6 +66,10 @@ impl roll_auth::Sessions for People {
     fn person_now(&self, user: &str) -> Result<Option<roll_auth::SignedIn>, String> {
         Ok(self.0.lock().unwrap().get(user).cloned())
     }
+    fn admins(&self) -> roll_auth::BoxFuture<'_, Result<Vec<String>, String>> {
+        Box::pin(async { Ok(vec!["usr_root".to_string()]) })
+    }
+
     fn tell<'a>(&'a self, user: &'a str, subject: &'a str, _text: &'a str) -> roll_auth::BoxFuture<'a, Result<(), String>> {
         self.1.lock().unwrap().push(format!("{user}: {subject}"));
         Box::pin(async { Ok(()) })
@@ -857,13 +861,16 @@ async fn a_persons_token_past_the_policy_waits_for_an_admin() {
     assert_eq!(g["revoked_why"].as_str(), Some("an admin denied it"), "{g}");
     let mails = || d.people.1.lock().unwrap().clone();
     for _ in 0..50 {
-        if mails().len() >= 2 {
+        if mails().len() >= 4 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     let got = mails();
     assert!(got.iter().any(|m| m.contains("\"revealer\" was approved")) && got.iter().any(|m| m.contains("\"reader\" was denied")), "{got:?}");
+    // And an admin heard each time one waited.
+    assert!(got.iter().any(|m| m == "usr_root: A roll token waits for your approval: \"revealer\" (alice)"), "{got:?}");
+    assert!(got.iter().any(|m| m == "usr_root: A roll token waits for your approval: \"reader\" (alice)"), "{got:?}");
 }
 
 /// A signed-in user's own token acts as them (docs/permissions.md, "Users' own tokens"): it
