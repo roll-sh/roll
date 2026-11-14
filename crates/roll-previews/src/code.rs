@@ -333,11 +333,11 @@ impl Source for CodeSource {
         Ok(())
     }
 
-    async fn forget(&self, p: &Preview) {
+    async fn forget(&self, p: &Preview, teardown: Option<&str>) {
         let Some(change) = &p.change else { return };
         // Only the change's preview environment, never roll code's own preview of it.
         let ours = self.code.db.change(change).ok().flatten().and_then(|c| c.preview).and_then(|x| x.environment).is_some_and(|e| e.id == p.id);
-        if ours && let Err(e) = self.code.report_environment(change, None) {
+        if ours && let Err(e) = self.code.report_environment_gone(change, teardown) {
             tracing::warn!(preview = %p.id, error = %e, "previews: clearing the change's preview");
         }
     }

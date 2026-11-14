@@ -191,8 +191,10 @@ state. A pass of the reconciler:
    up while everything it needs is still there. It runs only at a head the preview ran (a
    fork's push nobody approved never runs it; the approved head before it does), not again
    when a removal after it is retried (a crash during the job itself runs it again, so make it
-   safe to repeat), and a failure is logged (rolld's log and the activity) without keeping the
-   preview.
+   safe to repeat). A failure doesn't keep the preview: it's in rolld's log and the activity, and
+   the change is told as the preview goes (`Code::report_environment_gone`): the `preview` event
+   carries `teardown` (its exit code and output's tail) and the pull request's comment reads
+   "deleted. Its teardown failed:" with that output in a fence it can't close.
 
 The reconciler runs every 15 s, and right away when roll code emits a `change` or `landed`
 event (the broadcast is only a nudge, so a dropped event costs at most one interval). In a
@@ -1155,6 +1157,8 @@ Ranked by what a person notices first. Done so far:
 - a look at the sheet from screenshots of a live preview with today's checks (desktop and phone):
   the data branch rows kept their names whole and their notes in word groups;
 - caught mail bounded by bytes (10 MiB a preview) as well as count;
+- a teardown's failure told to the change: the `preview` event's `teardown`, and the pull
+  request comment's "deleted. Its teardown failed:" with the job's output fenced;
 - the page's checks (speed, Core Web Vitals, accessibility, SEO, links, words) in a world of
   their own, an isolated world with the page's DOM but none of its JavaScript: a page that
   replaced `JSON.stringify` and locked a fake `window.axe` reported a 1 ms load, its own words
@@ -1262,18 +1266,12 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A teardown's failure where people look**: the preview's activity goes with it, so today a
-   failing `teardown` is only in rolld's log. The change (its page and the pull request comment)
-   should say the preview went with its teardown failing, the exit code and the output's tail,
-   so whoever owns the webhook it didn't remove finds out. It needs roll code's side: a gone
-   preview clears the change's `preview` (`report_environment(change, None)`), so the change
-   has nowhere to keep it; the `preview` event that clearing emits could carry it first.
-2. **Replies on a page's notes** (Vercel Comments' threads): a note is one comment today; a
+1. **Replies on a page's notes** (Vercel Comments' threads): a note is one comment today; a
    reply from the page or the sheet joins it, and the note's author hears of it through roll's
    notifications, resolved as one thread. roll code's threads have replies, resolving and the
    GitHub mirror already, but a thread sits on a file's lines (`ThreadInput.path`/`line`); a
    note would be a thread on a page, which roll code's reviews would have to allow first.
-3. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
+2. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
    a preview reaches real people, but its code can still call any API (a payment provider's
    sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
    (today), `"roll"` (only roll's own products and the preview's branches) or a list of hosts;
@@ -1283,19 +1281,19 @@ Ranked by what a person notices first. Done so far:
    host whose firewall roll mustn't touch) or an internal network with a forwarding sidecar for
    every product port (an image of its own, and roll code's runner changed); on the cloud fleet
    it's security groups, with the cloud thread.
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+5. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-7. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1308,12 +1306,12 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-8. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+7. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
    Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
    minutes even with the parent's history reporting `end` past it, where pg-control's own test
    (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
    old; the live script will check it once this is understood.
-9. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

@@ -859,7 +859,9 @@ impl Db {
     /// Set a change's preview when it differs from the stored one, promising the `preview`
     /// event in the same transaction. `None` when the change doesn't exist or nothing changed;
     /// else the change's repo and the promise.
-    pub fn set_change_preview_promised(&self, id: &str, preview: Option<&Preview>) -> Result<Option<(String, crate::webhooks::Promises)>> {
+    /// `teardown`: with `None` (the preview went), what its teardown said when it failed, kept for
+    /// the pull request's comment (a mark) and sent with the `preview` event.
+    pub fn set_change_preview_promised(&self, id: &str, preview: Option<&Preview>, teardown: Option<&str>) -> Result<Option<(String, crate::webhooks::Promises)>> {
         let new = preview.map(json);
         self.write(|c| {
             let row: Option<(String, Option<String>)> =
@@ -874,8 +876,14 @@ impl Db {
                 return Ok(None);
             }
             c.execute("UPDATE changes SET preview = ?, updated_at = ? WHERE id = ?", params![new, now(), id])?;
+            if preview.is_none() {
+                crate::github::set_mark_in(c, &format!("pv-teardown:{id}"), teardown.unwrap_or(""))?;
+            }
             let mut p = crate::webhooks::Promises::default();
-            let data = serde_json::json!({ "change": id, "preview": preview });
+            let mut data = serde_json::json!({ "change": id, "preview": preview });
+            if let Some(t) = teardown.filter(|_| preview.is_none()) {
+                data["teardown"] = serde_json::json!(t);
+            }
             p.promise(c, &repo, "preview", id, Some(&data))?;
             Ok(Some((repo, p)))
         })

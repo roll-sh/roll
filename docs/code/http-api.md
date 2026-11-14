@@ -474,7 +474,10 @@ POST  /v1/code/work/{id}/heartbeat | /release | /complete {agent?} → WorkItem
 `preview`, `queue`, `review`, `thread`, `push` and `budget`. Repo webhooks get the same events with the same data.
 A `budget` event is `{budget: {project, project_name, percent /* 80, 100 */, spent_usd_month, max_usd_month},
 dashboard_url}`: the repo's workspace project's previews passed that share of their monthly budget
-(docs/previews.md).
+(docs/previews.md). A `preview` event is `{change, preview}`, with `preview: null` once it's gone; a
+preview environment that went with the project's `teardown` failing adds `teardown` (what the job
+said: its exit code and its output's tail, the change's code's words), and the pull request's
+comment says so too.
 
 **Stream limits.** Each caller may hold at most 32 event streams open at once
 (`--code-max-streams-per-caller`, `ROLL_CODE_MAX_STREAMS_PER_CALLER`), and the server 10,000 in total

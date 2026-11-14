@@ -1032,8 +1032,22 @@ impl Code {
     /// or clear it (`None`), and tell the feed, webhooks and GitHub with a `preview` event
     /// promised in the same write. Nothing happens when it's unchanged, so it's cheap to repeat.
     pub fn report_environment(&self, change_id: &str, preview: Option<&Preview>) -> Result<()> {
-        let Some((repo, mut promised)) = self.db.set_change_preview_promised(change_id, preview)? else { return Ok(()) };
-        self.emit_kept(&mut promised, &repo, "preview", json!({ "change": change_id, "preview": preview }));
+        self.report_environment_with(change_id, preview, None)
+    }
+
+    /// The change's preview environment went, and its teardown (roll previews' `teardown`) failed
+    /// with `teardown`: the pull request's comment and the `preview` event say so.
+    pub fn report_environment_gone(&self, change_id: &str, teardown: Option<&str>) -> Result<()> {
+        self.report_environment_with(change_id, None, teardown)
+    }
+
+    fn report_environment_with(&self, change_id: &str, preview: Option<&Preview>, teardown: Option<&str>) -> Result<()> {
+        let Some((repo, mut promised)) = self.db.set_change_preview_promised(change_id, preview, teardown)? else { return Ok(()) };
+        let mut data = json!({ "change": change_id, "preview": preview });
+        if let Some(t) = teardown.filter(|_| preview.is_none()) {
+            data["teardown"] = json!(t);
+        }
+        self.emit_kept(&mut promised, &repo, "preview", data);
         Ok(())
     }
 

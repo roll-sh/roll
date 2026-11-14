@@ -229,8 +229,8 @@ pub trait Source: Send + Sync {
     /// Tell the change (and its pull request) where its preview is. Called after every state
     /// change; must be cheap to repeat.
     async fn report(&self, preview: &Preview, settings: &crate::Settings);
-    /// The preview is gone.
-    async fn forget(&self, preview: &Preview);
+    /// The preview is gone; `teardown`: what the project's teardown said when it failed.
+    async fn forget(&self, preview: &Preview, teardown: Option<&str>);
     /// The project's previews passed `alert.percent` of their monthly budget: tell the people
     /// who follow its repos (roll code: each repo's `budget` event). `Err` when it couldn't be
     /// queued: the engine tries again on its next pass.

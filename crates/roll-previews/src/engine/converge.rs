@@ -858,8 +858,10 @@ impl Engine {
                     self.run_job(&at, &s, &vars, "teardown", job).await
                 };
                 if let Err(e) = ran.await {
-                    warn!(preview = %r.id, error = %format!("{e:#}"), "previews: the teardown failed");
-                    self.store.log(&r.id, &format!("{e:#}"))?;
+                    let e = format!("{e:#}");
+                    warn!(preview = %r.id, error = %e, "previews: the teardown failed");
+                    self.store.log(&r.id, &e)?;
+                    self.store.set_teardown_error(&r.id, &e)?;
                 }
             }
             self.store.set_ran_head(&r.id, None)?;
@@ -879,7 +881,8 @@ impl Engine {
             self.store.drop_resource(&r.id, res.kind, &res.parent)?;
         }
         let view = self.store.preview(&r.id)?;
-        self.source.forget(&view).await;
+        // The change hears it went, and how its teardown failed if it did.
+        self.source.forget(&view, self.store.teardown_error(&r.id)?.as_deref()).await;
         // What it cost this month stays counted against the project's budget.
         self.store.add_spend(&r.project_id, crate::store::month_start(self.store.now_ms()?), view.cost.month_to_date_usd)?;
         self.store.remove(&r.id)?;

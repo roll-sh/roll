@@ -148,7 +148,9 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
     let (Some(pr), Some((r, l))) = (c.github_pr, connected(code, &c.repo_id)) else { return Ok(()) };
     let gh = |e: code_github::Error| crate::Error::Internal(e.into());
     let rules = c.preview.as_ref().and_then(|p| p.environment.as_ref()).map(|e| e.github).unwrap_or_default();
-    let body = preview_comment(c);
+    // A preview that went with its teardown failing says so (`Code::report_environment_gone`).
+    let teardown = if c.preview.is_none() { mark(code, &format!("pv-teardown:{}", c.id))?.filter(|t| !t.is_empty()) } else { None };
+    let body = preview_comment(c, teardown.as_deref());
     // The comment: edited in place once it exists (a removed preview edits it too), and only
     // when its text changed (a preview waking and sleeping doesn't touch it).
     let comment_key = format!("pv-comment:{}", c.id);
@@ -744,9 +746,18 @@ fn expiry_line(ms: i64) -> Option<String> {
 }
 
 /// The pull request comment for a preview.
-fn preview_comment(c: &Change) -> String {
+fn preview_comment(c: &Change, teardown: Option<&str>) -> String {
     let marker = format!("<!-- roll-preview:{} -->", c.id);
-    let Some(p) = &c.preview else { return format!("**roll preview**: deleted.\n\n{marker}") };
+    let Some(p) = &c.preview else {
+        return match teardown {
+            // The job's output is the change's code's: one fence nothing in it can close.
+            Some(t) => {
+                let lines: Vec<String> = t.lines().take(12).map(|l| l.replace('`', "'").chars().take(200).collect()).collect();
+                format!("**roll preview**: deleted. Its teardown failed:\n\n```\n{}\n```\n\n{marker}", lines.join("\n"))
+            }
+            None => format!("**roll preview**: deleted.\n\n{marker}"),
+        };
+    };
     let mut out = String::new();
     match &p.environment {
         Some(e) => {

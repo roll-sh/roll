@@ -26,6 +26,8 @@ pub struct FakeCode {
     pub health: Mutex<Option<String>>,
     pub reports: Mutex<Vec<Preview>>,
     pub forgotten: Mutex<Vec<String>>,
+    /// Previews that went with their teardown failing: (preview, what it said).
+    pub teardowns: Mutex<Vec<(String, String)>>,
     /// Budget alerts sent: (the repos told, the alert).
     pub budgets: Mutex<Vec<(Vec<String>, roll_previews::ports::BudgetAlert)>>,
 }
@@ -78,8 +80,11 @@ impl Source for FakeCode {
     async fn report(&self, p: &Preview, _s: &Settings) {
         self.reports.lock().push(p.clone());
     }
-    async fn forget(&self, p: &Preview) {
+    async fn forget(&self, p: &Preview, teardown: Option<&str>) {
         self.forgotten.lock().push(p.id.clone());
+        if let Some(t) = teardown {
+            self.teardowns.lock().push((p.id.clone(), t.to_string()));
+        }
     }
     async fn budget(&self, repos: &[String], alert: &roll_previews::ports::BudgetAlert) -> anyhow::Result<()> {
         self.budgets.lock().push((repos.to_vec(), alert.clone()));

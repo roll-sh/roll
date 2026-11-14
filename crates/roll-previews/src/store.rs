@@ -510,7 +510,7 @@ impl Store {
                 db.add_column("previews", col, "INTEGER")?;
             }
         }
-        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head"] {
+        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head", "teardown_error"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "TEXT")?;
             }
@@ -1050,6 +1050,19 @@ impl Store {
     pub fn set_ran_head(&self, id: &str, head: Option<&str>) -> Result<()> {
         self.db.write(|c| {
             c.execute("UPDATE previews SET ran_head = ? WHERE id = ?", params![head, id])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// What the preview's `teardown` said when it failed, kept until the change is told it went.
+    pub fn teardown_error(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT teardown_error FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    pub fn set_teardown_error(&self, id: &str, error: &str) -> Result<()> {
+        let error: String = error.chars().take(4000).collect();
+        self.db.write(|c| {
+            c.execute("UPDATE previews SET teardown_error = ? WHERE id = ?", params![error, id])?;
             Ok::<_, Error>(())
         })
     }

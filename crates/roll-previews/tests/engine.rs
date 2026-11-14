@@ -341,6 +341,8 @@ async fn the_teardown_runs_once_at_a_head_the_preview_ran_before_its_data_goes()
     let runs: Vec<_> = e.apps.runs.lock().iter().map(|(run, rev, _)| (run.clone(), rev.clone())).collect();
     assert_eq!(runs, [("node scripts/unregister.js".to_string(), "cs_4a".to_string())], "once, at the approved head, never the unapproved push");
     assert!(e.apps.seeds.lock().last().unwrap().starts_with("fake://prj_db~pv-"), "before the branch went: {:?}", e.apps.seeds.lock());
+    let told = e.code.teardowns.lock().clone();
+    assert!(told.len() == 1 && told[0].0 == p.id && told[0].1.contains("exit code 2"), "the change is told how it failed: {told:?}");
 }
 
 #[tokio::test]

@@ -770,6 +770,16 @@ async fn connect_import_webhooks_and_mirror() {
         preview_calls("/statuses/").iter().any(|(_, _, b)| b["state"] == "success" && b["description"] == "Preview removed before it was ready")
     })
     .await;
+    // Gone with its teardown failing: the comment says so, in a fence its output can't close.
+    a.code.report_environment(c5_id, Some(&env("ready"))).unwrap();
+    a.code.report_environment_gone(c5_id, Some("the teardown command failed with exit code 3\n\n```\nwebhook still registered")).unwrap();
+    until("the comment names the failed teardown", || async {
+        preview_calls("/issues/comments/").iter().any(|(_, _, b)| {
+            let body = b["body"].as_str().unwrap_or("");
+            body.starts_with("**roll preview**: deleted. Its teardown failed:") && body.contains("exit code 3") && body.matches("```").count() == 2
+        })
+    })
+    .await;
 
     // Landing the PR's change: mirrored to GitHub, the PR commented on and closed.
     let landed = a.ok("POST", &format!("/v1/code/changes/{pr_change}/land"), None).await;
