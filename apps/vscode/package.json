@@ -1,0 +1,43 @@
+{
+  "name": "roll-secrets",
+  "displayName": "roll secrets",
+  "description": "Which environments set the variables your code reads, warnings where one is missing, and .env values moved into roll as roll:// references.",
+  "version": "0.1.0",
+  "private": true,
+  "publisher": "roll",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.cjs",
+  "contributes": {
+    "commands": [
+      { "command": "roll.signIn", "title": "Sign in", "category": "roll secrets" },
+      { "command": "roll.signOut", "title": "Sign out", "category": "roll secrets" },
+      { "command": "roll.chooseEnvironment", "title": "Choose the environment", "category": "roll secrets" },
+      { "command": "roll.refresh", "title": "Refresh", "category": "roll secrets" }
+    ],
+    "configuration": {
+      "title": "roll secrets",
+      "properties": {
+        "roll.apiUrl": { "type": "string", "default": "", "description": "roll's API (default: ROLL_API_URL, else http://127.0.0.1:7070)." },
+        "roll.project": { "type": "string", "default": "", "description": "The project's id (prj_…). Default: what `roll secrets setup` remembers for this folder." },
+        "roll.environment": { "type": "string", "default": "", "description": "The environment this workspace runs. Default: the folder's setup, else development." },
+        "roll.path": { "type": "string", "default": "", "description": "The folder in roll (default: the setup's, else /)." }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/vscode": "1.90.0",
+    "esbuild": "0.28.2",
+    "typescript": "^5",
+    "vitest": "^5.0.5"
+  }
+}
