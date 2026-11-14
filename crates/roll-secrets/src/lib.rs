@@ -40,6 +40,7 @@ pub mod clouds;
 pub mod issuer;
 mod oidc;
 mod read;
+pub mod reach;
 pub mod refs;
 mod notices;
 mod purge;

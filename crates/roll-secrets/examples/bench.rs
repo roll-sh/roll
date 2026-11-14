@@ -41,4 +41,14 @@ fn main() {
         time("health", &mut || drop(s.project_health(&project, &c, false).unwrap()));
         time("compare", &mut || drop(s.compare(&project, "production", "staging", "/", &c).unwrap()));
     }
+    // Reach's walk at its cap: 300 folders import production (it stops at 256), each read once.
+    let from = vec![roll_secrets::Import { environment: "production".into(), path: "/".into(), project: None }];
+    for i in 0..300 {
+        let at = format!("/f{i:03}");
+        s.set_imports(&project, "staging", &at, from.clone(), &c).unwrap();
+        drop(s.values(&project, "staging", &at, true, None, &c).unwrap());
+    }
+    for _ in 0..2 {
+        time("reach (300 importers)", &mut || drop(s.reach(&project, "production", "/", None, &c).unwrap()));
+    }
 }
