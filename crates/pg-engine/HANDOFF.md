@@ -12367,3 +12367,12 @@ of five pairs flagged, 1.28 to 2.41 cores), again after a CHECKPOINT with flagge
 `1d59e6856` against these commits: psycopg 3 4924 / 9 failing both, node-postgres 146 / 3
 both, pgjdbc 8221 / 0 both, identical lists; psql 18 (`min_protocol_version=3.2`, a cancel,
 `\copy`), pgbench simple / extended / prepared without failures.
+Verification train on `7e293b844` (these commits on `da4c6aa34`): release, clippy (20
+warnings, none in these files), crash, power stages 0; regress newly differing 0; isolation
+1647/1648 (intra-grant-inplace as before); pg_dump 14609 passed. The debug step's one failure
+is crash_bulk's new kill_during_compactions_after_deletes overflowing its thread's stack in a
+debug build: `da4c6aa34` alone does the same (twice, a debug snapshot build), and it passes with
+RUST_MIN_STACK=16 MiB. The first train (on `65b3617ee`) found transactions.sql's chain units
+(AND CHAIN after an error in a chained transaction or a savepoint), fixed by `7fed6f2da`; its
+debug step's wire big_bytea_values_go_out_in_linear_time took 21 s against its 20 s limit
+under load (alone 14-15 s, as a debug build of the head without these commits: 15-16 s).
