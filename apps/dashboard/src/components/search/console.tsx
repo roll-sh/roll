@@ -1,6 +1,6 @@
 import { Play, RotateCcw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { parseConsole, searchApi, type ConsoleResponse, type SearchCluster } from "@/lib/search-api";
+import { envPrefix, parseConsole, searchApi, type ConsoleResponse, type SearchCluster } from "@/lib/search-api";
 import { redactSecrets } from "@/lib/search-console";
 import { formatJson } from "@/lib/search-docs";
 import { useMarkState } from "../mark-state";
@@ -71,7 +71,7 @@ export function curlOf(text: string, cluster: SearchCluster) {
   }
   const url = `${cluster.url}${parsed.path}`;
   const head = parsed.method === "HEAD" ? "-I" : `-X ${parsed.method}`;
-  let cmd = `curl -u ${cluster.username}:$ELASTICSEARCH_PASSWORD ${head} '${url.replace(/'/g, "'\\''")}'`;
+  let cmd = `curl -u ${cluster.username}:$${envPrefix(cluster.flavor)}_PASSWORD ${head} '${url.replace(/'/g, "'\\''")}'`;
   if (parsed.body !== undefined) {
     const data = parsed.body;
     cmd += ` \\\n  -H 'content-type: application/${parsed.ndjson ? "x-ndjson" : "json"}' --data-binary '${data.replace(/'/g, "'\\''")}'`;

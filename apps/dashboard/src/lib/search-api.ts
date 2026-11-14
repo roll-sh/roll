@@ -11,6 +11,12 @@ import { withSession } from "./code-token";
 
 export type Flavor = "elasticsearch" | "opensearch";
 
+/** The prefix of a cluster's environment variables, as its flavor's clients read them
+ * (`ELASTICSEARCH_URL`, `OPENSEARCH_PASSWORD`; roll apps' links name them the same). */
+export function envPrefix(flavor: Flavor) {
+  return flavor === "opensearch" ? "OPENSEARCH" : "ELASTICSEARCH";
+}
+
 export interface SearchDefaults {
   flavor: Flavor;
   idle_timeout_s: number;

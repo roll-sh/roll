@@ -1,7 +1,7 @@
 // Tests of the index browser's document helpers (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { cellText, columnsOf, deleteRequest, flatten, formatJson, hitSources, jsonSpans, parseDocument, sourceCells, tableColumns, writeRequest } from "./search-docs";
+import { cellText, columnsOf, deleteRequest, flatten, formatJson, hitSources, jsonSpans, mappingNotes, mappingRows, parseDocument, sourceCells, tableColumns, writeRequest } from "./search-docs";
 
 test("flatten", () => {
   assert.deepEqual([...flatten({ a: 1, u: { name: "x", geo: { lat: 1 } }, tags: ["a", "b"], e: {}, n: null })], [
@@ -157,4 +157,37 @@ test("column picker", async () => {
   assert.deepEqual(visibleColumns(["d", "x"], avail), ["d", "x"]);
   assert.deepEqual(toggleColumn(["a", "b"], "b"), ["a"]);
   assert.deepEqual(toggleColumn(["a"], "c"), ["a", "c"]);
+});
+
+test("mapping rows", () => {
+  const resp = {
+    a: {
+      mappings: {
+        dynamic: "strict",
+        properties: {
+          body: { type: "semantic_text", inference_id: "my-e5" },
+          title: { type: "text", analyzer: "english", fields: { keyword: { type: "keyword", ignore_above: 256 } } },
+          user: { properties: { name: { type: "keyword", doc_values: false } } },
+          vec: { type: "dense_vector", dims: 384, similarity: "cosine", index_options: { type: "bbq_hnsw" } },
+        },
+        runtime: { day: { type: "keyword", script: { source: "emit('x')" } } },
+      },
+    },
+    b: { mappings: { properties: { extra: { type: "long" }, title: { type: "text" } } } },
+  };
+  assert.deepEqual(
+    mappingRows(resp).map((r) => [r.name, r.type, r.depth, r.notes.join(" · "), !!r.multi, !!r.runtime]),
+    [
+      ["body", "semantic_text", 0, "inference my-e5", false, false],
+      ["title", "text", 0, "analyzer english", false, false],
+      ["title.keyword", "keyword", 1, "ignore above 256", true, false],
+      ["user", "object", 0, "", false, false],
+      ["user.name", "keyword", 1, "no doc values", false, false],
+      ["vec", "dense_vector", 0, "384 dims · cosine · bbq_hnsw", false, false],
+      ["extra", "long", 0, "", false, false],
+      ["day", "keyword", 0, "script", false, true],
+    ],
+  );
+  assert.deepEqual(mappingNotes(resp), ["dynamic: strict"]);
+  assert.deepEqual(mappingRows({ a: { mappings: {} } }), []);
 });

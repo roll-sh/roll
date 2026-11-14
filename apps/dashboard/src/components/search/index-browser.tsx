@@ -9,6 +9,8 @@ import {
   deleteRequest,
   formatJson,
   hitSources,
+  mappingNotes,
+  mappingRows,
   nextSort,
   parseDocument,
   sortClause,
@@ -180,7 +182,7 @@ export function IndexBrowser({
       title={
         <span className="flex min-w-0 items-center gap-2">
           <span className="truncate font-mono text-[13px]">{index.index}</span>
-          <span className="shrink-0 font-mono text-[11px] text-subtle">
+          <span className="hidden shrink-0 font-mono text-[11px] text-subtle sm:inline">
             {formatCount(index.docs)} docs · {formatBytes(index.size_bytes)}
           </span>
         </span>
@@ -243,49 +245,158 @@ export function IndexBrowser({
         </div>
       </div>
       {view === "documents" && <Documents key={generation} cluster={cluster} index={index.index} onChanged={onChanged} onOpenConsole={onOpenConsole} />}
-      {view === "mapping" && <JsonDoc cluster={cluster} path={`${path}/_mapping`} onOpenConsole={onOpenConsole} />}
+      {view === "mapping" && <MappingView cluster={cluster} path={`${path}/_mapping`} onOpenConsole={onOpenConsole} />}
       {view === "settings" && <JsonDoc cluster={cluster} path={`${path}/_settings`} onOpenConsole={onOpenConsole} />}
     </Panel>
   );
 }
 
-/** Pretty JSON of one GET (mapping, settings). */
-function JsonDoc({ cluster, path, onOpenConsole }: { cluster: SearchCluster; path: string; onOpenConsole: (text: string) => void }) {
+/** The text of one GET, reloaded when the path changes. */
+function useGet(cluster: string, path: string) {
   const [text, setText] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const { copied, copy } = useCopy();
-
   useEffect(() => {
     let alive = true;
     setText(null);
     setErr(null);
-    esRaw(cluster.id, "GET", path).then(
-      (r) => alive && setText(formatJson(r.text)),
+    esRaw(cluster, "GET", path).then(
+      (r) => alive && setText(r.text),
       (e) => alive && setErr(e instanceof Error ? e.message : String(e)),
     );
     return () => {
       alive = false;
     };
-  }, [cluster.id, path]);
+  }, [cluster, path]);
+  return { text, err };
+}
 
+/** Copy and open-in-console buttons of a GET's view. */
+function DocTools({ path, text, onOpenConsole }: { path: string; text: string | null; onOpenConsole: (text: string) => void }) {
+  const { copied, copy } = useCopy();
+  return (
+    <span className="flex gap-1">
+      {text && <CopyButton id="doc" text={text} copied={copied} onCopy={copy} />}
+      <button onClick={() => onOpenConsole(`GET ${path}`)} className="rounded-md p-1 text-subtle transition hover:text-fg" title="Open in console">
+        <SquareTerminal className="size-3.5" />
+      </button>
+    </span>
+  );
+}
+
+function Loading({ err }: { err: string | null }) {
+  return err ? (
+    <p className="px-5 py-4 text-[13px] text-danger">{err}</p>
+  ) : (
+    <p className="px-5 py-4 text-[13px] text-subtle">
+      <span className="shimmer">Loading…</span>
+    </p>
+  );
+}
+
+/** Pretty JSON of one GET (settings). */
+function JsonDoc({ cluster, path, onOpenConsole }: { cluster: SearchCluster; path: string; onOpenConsole: (text: string) => void }) {
+  const { text, err } = useGet(cluster.id, path);
+  const pretty = useMemo(() => (text === null ? null : formatJson(text)), [text]);
   return (
     <div className="relative">
-      <div className="absolute top-3 right-4 flex gap-1">
-        {text && <CopyButton id="doc" text={text} copied={copied} onCopy={copy} />}
-        <button onClick={() => onOpenConsole(`GET ${path}`)} className="rounded-md p-1 text-subtle transition hover:text-fg" title="Open in console">
-          <SquareTerminal className="size-3.5" />
-        </button>
+      <div className="absolute top-3 right-4">
+        <DocTools path={path} text={pretty} onOpenConsole={onOpenConsole} />
       </div>
-      {err ? (
-        <p className="px-5 py-4 text-[13px] text-danger">{err}</p>
-      ) : text === null ? (
-        <p className="px-5 py-4 text-[13px] text-subtle">
-          <span className="shimmer">Loading…</span>
-        </p>
+      {pretty === null ? (
+        <Loading err={err} />
       ) : (
         <pre className="rise max-h-[32rem] overflow-auto px-5 py-4 font-mono text-[12px] leading-relaxed">
-          <JsonText text={text} />
+          <JsonText text={pretty} />
         </pre>
+      )}
+    </div>
+  );
+}
+
+/** An index's mapping: its fields as a table (type, and what changes how each is indexed), or the JSON. */
+function MappingView({ cluster, path, onOpenConsole }: { cluster: SearchCluster; path: string; onOpenConsole: (text: string) => void }) {
+  const { text, err } = useGet(cluster.id, path);
+  const [raw, setRaw] = useState(false);
+  const [filter, setFilter] = useState("");
+  const pretty = useMemo(() => (text === null ? null : formatJson(text)), [text]);
+  const parsed = useMemo(() => {
+    if (text === null) return null;
+    try {
+      const resp: unknown = JSON.parse(text);
+      return { rows: mappingRows(resp), notes: mappingNotes(resp) };
+    } catch {
+      return { rows: [], notes: [] };
+    }
+  }, [text]);
+  const q = filter.trim().toLowerCase();
+  const rows = parsed ? (q ? parsed.rows.filter((r) => r.name.toLowerCase().includes(q) || r.type.includes(q)) : parsed.rows) : [];
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-3 px-5 pt-3">
+        <div className="w-36">
+          <Segmented
+            value={raw ? "json" : "fields"}
+            options={[
+              { label: "fields", value: "fields" },
+              { label: "json", value: "json" },
+            ]}
+            onChange={(v) => setRaw(v === "json")}
+          />
+        </div>
+        {!raw && parsed && parsed.rows.length > 12 && (
+          <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter fields" className={`${input} w-48`} aria-label="Filter fields" />
+        )}
+        {!raw && parsed?.notes.map((n) => (
+          <span key={n} className="font-mono text-[11px] text-subtle">
+            {n}
+          </span>
+        ))}
+        <span className="ml-auto">
+          <DocTools path={path} text={pretty} onOpenConsole={onOpenConsole} />
+        </span>
+      </div>
+      {pretty === null || parsed === null ? (
+        <Loading err={err} />
+      ) : raw ? (
+        <pre className="rise max-h-[32rem] overflow-auto px-5 py-4 font-mono text-[12px] leading-relaxed">
+          <JsonText text={pretty} />
+        </pre>
+      ) : parsed.rows.length === 0 ? (
+        <p className="px-5 py-4 text-[13px] text-muted">No fields mapped yet: the first document maps its fields (unless dynamic mapping is off).</p>
+      ) : (
+        <div className="rise max-h-[32rem] overflow-auto px-5 py-3">
+          <table className="w-full text-[13px]">
+            <thead className="sticky top-0 bg-panel text-left text-[11px] text-subtle">
+              <tr className="border-b border-line">
+                <th className="py-2 pr-3 font-normal">Field</th>
+                <th className="py-2 pr-3 font-normal">Type</th>
+                <th className="py-2 font-normal">Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={`${r.runtime ? "rt:" : ""}${r.name}`} className="border-b border-line last:border-0 align-top">
+                  <td className="py-1.5 pr-3 font-mono text-[12px]" style={q ? undefined : { paddingLeft: `${r.depth * 14}px` }}>
+                    <span className={r.multi ? "text-muted" : undefined}>{q || r.depth === 0 ? r.name : r.name.slice(r.name.lastIndexOf(".") + 1)}</span>
+                  </td>
+                  <td className="whitespace-nowrap py-1.5 pr-3 font-mono text-[12px] text-muted">
+                    {r.type}
+                    {r.runtime && <span className="text-subtle"> · runtime</span>}
+                  </td>
+                  <td className="py-1.5 text-[12px] text-muted">{r.notes.join(" · ")}</td>
+                </tr>
+              ))}
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={3} className="py-3 text-muted">
+                    No field matches.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );

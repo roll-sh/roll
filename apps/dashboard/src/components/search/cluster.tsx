@@ -295,6 +295,62 @@ function Connection({ cluster, info }: { cluster: SearchCluster; info: SearchInf
 const CLIENTS = ["curl", "python", "javascript", "go", "ruby"] as const;
 
 function snippet(client: (typeof CLIENTS)[number], c: SearchCluster) {
+  return c.flavor === "opensearch" ? openSearchSnippet(client, c) : elasticSnippet(client, c);
+}
+
+/** Quickstarts with OpenSearch's own clients (Elasticsearch's 8+ clients refuse a server that
+ * isn't Elasticsearch). */
+function openSearchSnippet(client: (typeof CLIENTS)[number], c: SearchCluster) {
+  const url = c.url;
+  const user = c.username;
+  switch (client) {
+    case "curl":
+      return `curl -u ${user}:$OPENSEARCH_PASSWORD ${url}/_cluster/health
+
+curl -u ${user}:$OPENSEARCH_PASSWORD -X PUT ${url}/products/_doc/1 \\
+  -H 'content-type: application/json' -d '{"title": "Trail running shoes"}'
+
+curl -u ${user}:$OPENSEARCH_PASSWORD "${url}/products/_search?q=title:shoes"`;
+    case "python":
+      return `# pip install opensearch-py
+import os
+from opensearchpy import OpenSearch
+
+client = OpenSearch(hosts=["${url}"], http_auth=("${user}", os.environ["OPENSEARCH_PASSWORD"]))
+client.index(index="products", id="1", body={"title": "Trail running shoes"}, refresh=True)
+print(client.search(index="products", body={"query": {"match": {"title": "shoes"}}})["hits"])`;
+    case "javascript":
+      return `// npm i @opensearch-project/opensearch
+import { Client } from "@opensearch-project/opensearch";
+
+const client = new Client({
+  node: "${url}",
+  auth: { username: "${user}", password: process.env.OPENSEARCH_PASSWORD },
+});
+await client.index({ index: "products", id: "1", body: { title: "Trail running shoes" }, refresh: true });
+console.log((await client.search({ index: "products", body: { query: { match: { title: "shoes" } } } })).body.hits);`;
+    case "go":
+      return `// go get github.com/opensearch-project/opensearch-go/v4
+client, _ := opensearchapi.NewClient(opensearchapi.Config{
+  Client: opensearch.Config{
+    Addresses: []string{"${url}"},
+    Username:  "${user}",
+    Password:  os.Getenv("OPENSEARCH_PASSWORD"),
+  },
+})
+info, _ := client.Info(context.Background(), nil)
+fmt.Println(info)`;
+    case "ruby":
+      return `# gem install opensearch-ruby
+require "opensearch"
+
+client = OpenSearch::Client.new(url: "${url}", user: "${user}", password: ENV["OPENSEARCH_PASSWORD"])
+client.index(index: "products", id: 1, body: { title: "Trail running shoes" }, refresh: true)
+puts client.search(index: "products", q: "title:shoes")["hits"]`;
+  }
+}
+
+function elasticSnippet(client: (typeof CLIENTS)[number], c: SearchCluster) {
   const url = c.url;
   const user = c.username;
   switch (client) {

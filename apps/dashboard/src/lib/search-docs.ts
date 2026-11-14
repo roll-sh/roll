@@ -361,3 +361,101 @@ export function visibleColumns(picked: string[] | null, available: string[], max
 export function toggleColumn(shown: string[], column: string): string[] {
   return shown.includes(column) ? shown.filter((c) => c !== column) : [...shown, column];
 }
+
+/** One row of an index's mapping as the browser lists it. */
+export interface MappingRow {
+  /** Full path: `user.name`, `title.keyword`. */
+  name: string;
+  type: string;
+  /** Nesting under objects and multi-fields (indents the row). */
+  depth: number;
+  /** A runtime field (computed at search time, not stored). */
+  runtime?: boolean;
+  /** A multi-field of its parent (`title.keyword`). */
+  multi?: boolean;
+  /** What changes how the field is indexed or searched, in a few words each. */
+  notes: string[];
+}
+
+/** The settings of a field worth a word in the mapping table. */
+function fieldNotes(d: Record<string, unknown>): string[] {
+  const notes: string[] = [];
+  const str = (k: string) => (typeof d[k] === "string" || typeof d[k] === "number" ? String(d[k]) : null);
+  const type = typeof d.type === "string" ? d.type : null;
+  if (type === "semantic_text") notes.push(`inference ${str("inference_id") ?? "(default endpoint)"}`);
+  if (str("search_inference_id")) notes.push(`search inference ${str("search_inference_id")}`);
+  if (type === "dense_vector") {
+    if (str("dims")) notes.push(`${str("dims")} dims`);
+    if (str("element_type") && d.element_type !== "float") notes.push(`${str("element_type")} elements`);
+    if (str("similarity")) notes.push(str("similarity")!);
+    const opts = d.index_options as { type?: string } | undefined;
+    if (opts?.type) notes.push(opts.type);
+  }
+  if (type === "knn_vector") {
+    if (str("dimension")) notes.push(`${str("dimension")} dims`);
+    if (str("space_type")) notes.push(str("space_type")!);
+    const method = d.method as { name?: string; engine?: string } | undefined;
+    if (method?.name) notes.push(method.engine ? `${method.name} (${method.engine})` : method.name);
+  }
+  if (str("analyzer")) notes.push(`analyzer ${str("analyzer")}`);
+  if (str("search_analyzer")) notes.push(`search analyzer ${str("search_analyzer")}`);
+  if (str("normalizer")) notes.push(`normalizer ${str("normalizer")}`);
+  if (str("ignore_above")) notes.push(`ignore above ${str("ignore_above")}`);
+  if (str("format")) notes.push(`format ${str("format")}`);
+  if (str("scaling_factor")) notes.push(`scaling factor ${str("scaling_factor")}`);
+  if (str("path") && type === "alias") notes.push(`→ ${str("path")}`);
+  if (str("value") && type === "constant_keyword") notes.push(`= ${str("value")}`);
+  if (d.copy_to) notes.push(`copied to ${([] as unknown[]).concat(d.copy_to).join(", ")}`);
+  if (d.index === false) notes.push("not indexed");
+  if (d.doc_values === false) notes.push("no doc values");
+  if (d.store === true) notes.push("stored");
+  if (d.enabled === false) notes.push("not parsed");
+  if (d.dynamic !== undefined && d.dynamic !== true && d.dynamic !== "true") notes.push(`dynamic ${String(d.dynamic)}`);
+  if (d.script) notes.push("script");
+  return notes;
+}
+
+/**
+ * An index's `GET /<index>/_mapping` as rows: every field in mapping order (an object before its
+ * fields, a field before its multi-fields), then runtime fields. The first index of the response
+ * gives the order; fields only other indices have (a pattern, a data stream's backing indices)
+ * follow in theirs.
+ */
+export function mappingRows(resp: unknown): MappingRow[] {
+  const rows: MappingRow[] = [];
+  const seen = new Set<string>();
+  const walk = (props: unknown, prefix: string, depth: number, extra: Partial<MappingRow>) => {
+    if (!props || typeof props !== "object") return;
+    for (const [name, def] of Object.entries(props as Record<string, unknown>)) {
+      if (!def || typeof def !== "object") continue;
+      const d = def as Record<string, unknown>;
+      const full = prefix + name;
+      if (!seen.has(full)) {
+        seen.add(full);
+        rows.push({ name: full, type: typeof d.type === "string" ? d.type : "object", depth, notes: fieldNotes(d), ...extra });
+      }
+      walk(d.properties, `${full}.`, depth + 1, {});
+      walk(d.fields, `${full}.`, depth + 1, { multi: true });
+    }
+  };
+  const indices = resp && typeof resp === "object" ? Object.values(resp as Record<string, unknown>) : [];
+  const mappings = indices.map((i) => (i as { mappings?: { properties?: unknown; runtime?: unknown } } | null)?.mappings).filter((m) => !!m);
+  for (const m of mappings) walk(m!.properties, "", 0, {});
+  for (const m of mappings) walk(m!.runtime, "", 0, { runtime: true });
+  return rows;
+}
+
+/** The index-wide settings of a mapping worth a word (`dynamic`, `_source`, `subobjects`). */
+export function mappingNotes(resp: unknown): string[] {
+  const first = resp && typeof resp === "object" ? Object.values(resp as Record<string, unknown>)[0] : null;
+  const m = (first as { mappings?: Record<string, unknown> } | null)?.mappings;
+  if (!m) return [];
+  const notes: string[] = [];
+  if (m.dynamic !== undefined && m.dynamic !== true && m.dynamic !== "true") notes.push(`dynamic: ${String(m.dynamic)}`);
+  const source = m._source as { mode?: string; enabled?: boolean } | undefined;
+  if (source?.mode) notes.push(`_source: ${source.mode}`);
+  if (source?.enabled === false) notes.push("_source: disabled");
+  if (m.subobjects === false || m.subobjects === "false") notes.push("subobjects: false");
+  if (Array.isArray(m.dynamic_templates) && m.dynamic_templates.length) notes.push(`${m.dynamic_templates.length} dynamic template${m.dynamic_templates.length === 1 ? "" : "s"}`);
+  return notes;
+}
