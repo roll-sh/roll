@@ -823,7 +823,8 @@ would go, so it carries the shape of the configuration and no value.
 
 - `roll://ENV/KEY` is a key in this project's environment, `roll://ENV/folder/sub/KEY` one in a
   folder, `roll://PROJECT@ENV/KEY` one in another project (its name, or its `prj_…` id with a
-  scoped token). Segments are letters, digits, `-`, `_` and `.` (never `.` or `..`).
+  scoped token; a name that more than one project has, under different owners, is refused: give
+  the id). Segments are letters, digits, `-`, `_` and `.` (never `.` or `..`).
 - `roll run --env-file .env` (repeatable) adds a dotenv file's entries to the environment's:
   plain values as written, references resolved, and the file's entries win over the environment's
   (the shell's own variables still win over both unless `--override`). A file such as
@@ -834,8 +835,10 @@ would go, so it carries the shape of the configuration and no value.
 - Each environment and folder is one read through the same audited `values` route, under the
   caller's own access: a reference to an environment the token can't read fails, naming it, and so
   does one to a key that isn't set or doesn't resolve. Nothing new runs on the server.
-- `roll run --watch` follows every environment a file references too (their digests), restarting
-  the command when any of them changes.
+- `roll run --watch` and `roll secrets render --watch` follow every environment a file references
+  too (their digests), and renew each dynamic credential's lease at its own project.
+- A dotenv file is one `KEY=value` per line (quoted values on one line; a quote that runs past its
+  line is refused), and its errors name the line, never its text.
 
 ### Templates
 

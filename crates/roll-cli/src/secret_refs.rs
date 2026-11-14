@@ -43,12 +43,17 @@ pub fn parse_env_file(text: &str, file: &str) -> anyhow::Result<Vec<(String, Str
             continue;
         }
         let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        // Errors name the line, never its text: it may hold a value.
         let (key, raw) = line.split_once('=').ok_or_else(|| anyhow::anyhow!("{file}:{}: not KEY=value", n + 1))?;
         let key = key.trim();
         if key.is_empty() || !key.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            anyhow::bail!("{file}:{}: {key:?} isn't a variable name", n + 1);
+            anyhow::bail!("{file}:{}: not a variable name before =", n + 1);
         }
         let raw = raw.trim();
+        let opened = raw.starts_with('"') || raw.starts_with('\'');
+        if opened && (raw.len() < 2 || !raw.ends_with(&raw[..1])) {
+            anyhow::bail!("{file}:{}: a quoted value runs past its line (multi-line values aren't read)", n + 1);
+        }
         let value = if let Some(v) = raw.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) {
             v.to_string()
         } else if let Some(v) = raw.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
@@ -106,6 +111,8 @@ mod tests {
             [("PORT", "8080"), ("DB_URL", "roll://production/DB_URL"), ("GREETING", "hi\nthere"), ("RAW", "a#b"), ("NOTE", "plain")].map(|(k, v)| (k.to_string(), v.to_string()))
         );
         let tpl = "url: \"roll://production/DB_URL\"\nkey: roll://shop@staging/KEY, port: 1";
+        let refused = parse_env_file("KEY=\"line one\nsecret=two\"\n", ".env").unwrap_err().to_string();
+        assert!(refused.contains(".env:1") && !refused.contains("secret"), "{refused}");
         assert_eq!(find_in_text(tpl).iter().map(|(s, e)| &tpl[*s..*e]).collect::<Vec<_>>(), ["roll://production/DB_URL", "roll://shop@staging/KEY"]);
     }
 }

@@ -689,12 +689,13 @@ async fn project(api: &Api, given: Option<&str>) -> anyhow::Result<String> {
         Some(p) if p.starts_with("prj_") => Ok(p.to_string()),
         Some(name) => {
             let list = api.get("/v1/workspace/projects").await.context("finding the project by name (pass its prj_… id with a scoped token)")?;
-            list.as_array()
-                .into_iter()
-                .flatten()
-                .find(|p| p["name"] == name)
-                .and_then(|p| p["id"].as_str().map(String::from))
-                .with_context(|| format!("no project named {name}"))
+            // Names are unique per owner, not across them: one that could be two is refused.
+            let found: Vec<String> = list.as_array().into_iter().flatten().filter(|p| p["name"] == name).filter_map(|p| p["id"].as_str().map(String::from)).collect();
+            match found.as_slice() {
+                [one] => Ok(one.clone()),
+                [] => bail!("no project named {name}"),
+                _ => bail!("{} projects are named {name}: give its prj_… id", found.len()),
+            }
         }
         None => {
             let who = api.get("/v1/secrets/whoami").await?;
@@ -968,7 +969,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             } else {
                 std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?
             };
-            let (text, leases) = render_env(&c, &env, &file, &tpl).await?;
+            let (text, leases, _) = render_env(&c, &env, &file, &tpl).await?;
             let Some(out) = out else {
                 print!("{text}");
                 return Ok(());
@@ -2049,14 +2050,14 @@ async fn setup_dir(api: &Api, args: &AtArgs, show: bool, clear: bool) -> anyhow:
 }
 
 /// The template filled from the environment, and the leases of the dynamic credentials in it.
-async fn render_env(c: &Client<'_>, env: &str, file: &str, tpl: &str) -> anyhow::Result<(String, Vec<String>)> {
+async fn render_env(c: &Client<'_>, env: &str, file: &str, tpl: &str) -> anyhow::Result<(String, Vec<String>, Vec<String>)> {
     let v = c.call(Method::GET, &format!("{env}/values?{}", c.q()), None).await?;
     let unresolved: std::collections::BTreeMap<String, String> = v["problems"].as_array().into_iter().flatten().map(|p| (s(&p["key"]), s(&p["problem"]))).collect();
     // `roll://…` references are resolved where they stand; `${KEY}` is filled only around them,
     // so neither kind of value is read again as a template.
     let spans = crate::secret_refs::find_in_text(tpl);
     let refs: Vec<crate::secret_refs::Ref> = spans.iter().map(|(a, b)| crate::secret_refs::Ref::parse(&tpl[*a..*b])).filter_map(Result::transpose).collect::<anyhow::Result<_>>()?;
-    let (resolved, mut leases, _) = resolve_refs(c, &refs).await?;
+    let (resolved, mut leases, mut follow) = resolve_refs(c, &refs).await?;
     let fill = |part: &str| {
         render(part, |k| v["values"][k].as_str().map(String::from)).map_err(|missing| {
             let why: Vec<String> = missing.iter().map(|k| unresolved.get(k).map_or_else(|| format!("{k} isn't set in {}:{}", c.at.env, c.at.path), |p| format!("{k}: {p}"))).collect();
@@ -2072,8 +2073,11 @@ async fn render_env(c: &Client<'_>, env: &str, file: &str, tpl: &str) -> anyhow:
         at = *b;
     }
     text.push_str(&fill(&tpl[at..])?);
-    leases.extend(v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)));
-    Ok((text, leases))
+    leases.extend(v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(|l| format!("{}/leases/{}", c.base(), enc(l)))));
+    follow.push(format!("{env}/digest?{}", c.q()));
+    follow.sort();
+    follow.dedup();
+    Ok((text, leases, follow))
 }
 
 /// Replace `path` whole (a file beside it, then a rename), readable only by its owner: a reader
@@ -2099,22 +2103,24 @@ fn replace_private(path: &str, text: &str) -> anyhow::Result<()> {
 /// the text with it, then run `exec`; renew dynamic credentials' leases every 10 minutes.
 #[allow(clippy::too_many_arguments)]
 async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &str, mut text: String, mut leases: Vec<String>, interval: u64, exec: Option<&str>) -> anyhow::Result<()> {
-    let digest_path = format!("{env}/digest?{}", c.q());
-    let mut last = c.call(Method::GET, &digest_path, None).await?["digest"].clone();
+    // The environment's digest, and every one its references read.
+    let mut follow = render_env(c, env, file, tpl).await.map(|(_, _, f)| f).unwrap_or_else(|_| vec![format!("{env}/digest?{}", c.q())]);
+    let mut last = digests(c, &follow).await?;
     let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => return Ok(()),
             _ = renew.tick(), if !leases.is_empty() => {
+                // Each lease at its own project (a reference may read another one's).
                 for l in &leases {
-                    if let Err(e) = c.call(Method::POST, &format!("{}/leases/{}/renew", c.base(), enc(l)), None).await {
+                    if let Err(e) = c.call(Method::POST, &format!("{l}/renew"), None).await {
                         eprintln!("roll secrets render: couldn't renew lease {l} ({e})");
                     }
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))) => {
-                let now = match c.call(Method::GET, &digest_path, None).await {
-                    Ok(v) => v["digest"].clone(),
+                let now = match digests(c, &follow).await {
+                    Ok(d) => d,
                     Err(e) => {
                         eprintln!("roll secrets render: couldn't check {} ({e}); {out} stays as it is", c.at.env);
                         continue;
@@ -2124,7 +2130,7 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
                     continue;
                 }
                 last = now;
-                let (next, next_leases) = match render_env(c, env, file, tpl).await {
+                let (next, next_leases, next_follow) = match render_env(c, env, file, tpl).await {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("roll secrets render: {} changed, but {e}; {out} stays as it is", c.at.env);
@@ -2132,6 +2138,7 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
                     }
                 };
                 leases = next_leases;
+                follow = next_follow;
                 if next == text {
                     continue;
                 }
@@ -2383,7 +2390,7 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(Strin
         bail!("{} of {}:{} didn't resolve (pass --allow-unresolved to run anyway):\n  {}", problems.len(), at.env, at.path, problems.join("\n  "));
     }
     let mut env: Vec<(String, String)> = v["values"].as_object().into_iter().flatten().map(|(k, val)| (k.clone(), val.as_str().unwrap_or_default().to_string())).collect();
-    let mut leases: Vec<String> = v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)).collect();
+    let mut leases: Vec<String> = v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(|l| format!("{}/leases/{}", c.base(), enc(l)))).collect();
     let mut follow = vec![format!("{}/digest?{}", c.env(&at.env), c.q())];
     // Env files: plain values as written, references resolved; theirs win over the environment's.
     for file in &r.env_files {
@@ -2409,7 +2416,8 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(Strin
 }
 
 /// Resolve `roll://` references: one read per project, environment and folder. Their values,
-/// the leases those hold, and the digests to follow (`--watch`).
+/// the leases those hold (each as its renew route, at its own project), and the digests to follow
+/// (`--watch`).
 async fn resolve_refs(c: &Client<'_>, refs: &[crate::secret_refs::Ref]) -> anyhow::Result<(std::collections::HashMap<crate::secret_refs::Ref, String>, Vec<String>, Vec<String>)> {
     let mut groups: std::collections::BTreeMap<(Option<String>, String, String), Vec<&crate::secret_refs::Ref>> = Default::default();
     for rf in refs {
@@ -2430,7 +2438,8 @@ async fn resolve_refs(c: &Client<'_>, refs: &[crate::secret_refs::Ref]) -> anyho
             })?;
             values.insert(rf.clone(), value.to_string());
         }
-        leases.extend(v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)));
+        // A lease is renewed where it was issued: its project's own route.
+        leases.extend(v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(|l| format!("/v1/secrets/projects/{}/leases/{}", enc(&id), enc(l)))));
         follow.push(format!("{base}/digest?path={}", enc(&path)));
     }
     Ok((values, leases, follow))
@@ -2491,7 +2500,7 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>,
                 }
                 _ = renew.tick(), if !leases.is_empty() => {
                     for l in &leases {
-                        if let Err(e) = c.call(Method::POST, &format!("{}/leases/{}/renew", c.base(), enc(l)), None).await {
+                        if let Err(e) = c.call(Method::POST, &format!("{l}/renew"), None).await {
                             eprintln!("roll run: couldn't renew lease {l} ({e})");
                         }
                     }
