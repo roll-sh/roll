@@ -41,6 +41,75 @@ pub struct LogLine {
     pub instance: Option<String>,
     pub deployment: Option<String>,
     pub text: String,
+    /// The level the app's own line says (JSON's `level`/`severity`, logfmt's `level=`, a leading
+    /// `ERROR`): read once as it's written; absent when it says none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<Level>,
+}
+
+/// A line's level, least to most severe (Cloud Run's severities, folded).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+    Fatal,
+}
+
+impl Level {
+    pub fn parse(s: &str) -> Option<Level> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "trace" | "verbose" => Level::Trace,
+            "debug" | "dbg" => Level::Debug,
+            "info" | "information" | "notice" | "log" => Level::Info,
+            "warn" | "warning" => Level::Warn,
+            "error" | "err" => Level::Error,
+            "fatal" | "critical" | "crit" | "panic" | "alert" | "emergency" => Level::Fatal,
+            _ => return None,
+        })
+    }
+
+    /// pino's and bunyan's numbers (10 trace … 60 fatal).
+    fn of_number(n: f64) -> Option<Level> {
+        Some(match n as i64 {
+            ..=10 => Level::Trace,
+            11..=20 => Level::Debug,
+            21..=30 => Level::Info,
+            31..=40 => Level::Warn,
+            41..=50 => Level::Error,
+            _ => Level::Fatal,
+        })
+    }
+}
+
+/// What an app's line says its level is: a JSON object's `level`, `severity`, `lvl` or
+/// `log.level` (a name or pino's number), logfmt's `level=`/`lvl=`, or an upper-case level word
+/// among its first three (`ERROR`, `[WARN]`, `level:INFO` aside, a timestamp before it).
+/// Anything else (prose that mentions an error) says none.
+pub fn level_of(text: &str) -> Option<Level> {
+    let t = text.trim_start();
+    if t.starts_with('{') {
+        let v: serde_json::Value = serde_json::from_str(t).ok()?;
+        let o = v.as_object()?;
+        let field = ["level", "severity", "lvl"].iter().find_map(|k| o.get(*k)).or_else(|| o.get("log").and_then(|l| l.get("level")))?;
+        return match field {
+            serde_json::Value::String(s) => Level::parse(s),
+            serde_json::Value::Number(n) => n.as_f64().and_then(Level::of_number),
+            _ => None,
+        };
+    }
+    for token in t.split_whitespace().take(12) {
+        if let Some(v) = token.strip_prefix("level=").or_else(|| token.strip_prefix("lvl=")) {
+            return Level::parse(v.trim_matches('"'));
+        }
+    }
+    t.split_whitespace().take(3).find_map(|w| {
+        let w = w.trim_matches(|c: char| matches!(c, '[' | ']' | '(' | ')' | ':' | '|'));
+        (w.len() >= 3 && w.bytes().all(|b| b.is_ascii_uppercase())).then(|| Level::parse(w)).flatten()
+    })
 }
 
 struct Log {
@@ -230,7 +299,7 @@ impl LogHub {
                     if l.dropped > 0 {
                         let t = lines.last().map_or_else(code_sql::now_ms, |x| x.t);
                         let text = format!("… {} lines dropped: more than {} MiB of output in a few seconds", l.dropped, UNFLUSHED_MAX >> 20);
-                        lines.push(LogLine { t, stream: Stream::System, instance: None, deployment: None, text });
+                        lines.push(LogLine { t, stream: Stream::System, instance: None, deployment: None, text, level: Some(Level::Warn) });
                     }
                     l.unflushed_bytes = 0;
                     l.dropped = 0;
@@ -347,6 +416,8 @@ impl LogSink {
                 stream: self.stream,
                 instance: self.instance.as_deref().map(str::to_string),
                 deployment: self.deployment.as_deref().map(str::to_string),
+                // The app's own lines say their level; roll's and the access log don't.
+                level: matches!(self.stream, Stream::Stdout | Stream::Stderr).then(|| level_of(&text)).flatten(),
                 text,
             },
         );
@@ -439,5 +510,30 @@ mod tests {
         hub.forget("env:svc_x/production");
         let stored = hub.tail("env:svc_x/production", 1, None).await;
         assert!(stored[0].text.contains("lines dropped"), "{:?}", stored[0].text);
+    }
+}
+
+#[cfg(test)]
+mod level_tests {
+    use super::{Level, level_of};
+
+    #[test]
+    fn a_lines_level_is_what_the_app_says_and_prose_says_none() {
+        for (line, want) in [
+            (r#"{"level":"error","msg":"db down"}"#, Some(Level::Error)),
+            (r#"{"severity":"WARNING","message":"slow"}"#, Some(Level::Warn)),
+            (r#"{"level":50,"msg":"pino"}"#, Some(Level::Error)),
+            (r#"{"log":{"level":"debug"}}"#, Some(Level::Debug)),
+            ("time=2026-11-14T10:00:00Z level=warn msg=\"retrying\"", Some(Level::Warn)),
+            ("2026-11-14 10:00:00,123 ERROR app.db: connection refused", Some(Level::Error)),
+            ("[INFO] listening on :8080", Some(Level::Info)),
+            ("FATAL: out of memory", Some(Level::Fatal)),
+            ("an error happened while retrying", None),
+            ("Error: something", None),
+            (r#"{"msg":"no level"}"#, None),
+        ] {
+            assert_eq!(level_of(line), want, "{line}");
+        }
+        assert!(Level::Warn < Level::Error && Level::Info < Level::Warn);
     }
 }

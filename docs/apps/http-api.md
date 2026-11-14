@@ -437,7 +437,7 @@ type Variables = { vars: { name: string; masked: string; source: "service" | "se
 // setting one that names another service needs `reveal` on it (403), and one naming no service of
 // the project is a 400.
 
-type LogLine = { t: number; stream: "stdout" | "stderr" | "build" | "system"; instance: string | null; deployment: string | null; text: string };
+type LogLine = { t: number; stream: "stdout" | "stderr" | "build" | "system"; instance: string | null; deployment: string | null; text: string; level?: "trace" | "debug" | "info" | "warn" | "error" | "fatal" /* what the app's own line says (JSON's level/severity/lvl/log.level, a name or pino's number; logfmt's level=; an upper-case level word among its first three); absent when it says none */ };
 
 type Metrics = {
   minutes: number[];         // unix minute of each point, oldest first

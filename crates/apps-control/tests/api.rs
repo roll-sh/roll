@@ -3275,3 +3275,23 @@ async fn a_paused_worker_stays_stopped_until_its_resumed() {
     assert!(e.get("paused").is_none(), "{e}");
     get_until(&w.api, &env, |e| e["state"] == "running").await;
 }
+
+/// What an app's line says its level is (JSON, logfmt, a leading `ERROR`) filters its log:
+/// `level=warn` is warnings and worse, and a line that says none isn't one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_apps_log_filters_by_the_level_its_lines_say() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let out = w.apps.logs.sink(format!("env:{id}/production"), apps_control::logs::Stream::Stdout);
+    for line in [r#"{"level":"info","msg":"ready"}"#, r#"{"level":"error","msg":"db down"}"#, "level=warn msg=slow", "an error in prose", "FATAL out of memory"] {
+        out.line(line);
+    }
+    let path = format!("/v1/apps/services/{id}/environments/production/logs?level=warn&tail=100");
+    let (st, lines) = call(&w.api, "GET", &path, None).await;
+    assert_eq!(st, StatusCode::OK, "{lines}");
+    let got: Vec<(&str, &str)> = lines.as_array().unwrap().iter().map(|l| (l["level"].as_str().unwrap_or(""), l["text"].as_str().unwrap())).collect();
+    assert_eq!(got, [("error", r#"{"level":"error","msg":"db down"}"#), ("warn", "level=warn msg=slow"), ("fatal", "FATAL out of memory")]);
+    let (st, v) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs?level=loud"), None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+}

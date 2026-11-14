@@ -106,6 +106,10 @@ pub struct Logs {
     /// Only this stream: `stdout`, `stderr` or `system`.
     #[arg(long)]
     pub stream: Option<String>,
+    /// Only lines whose app says this level or a worse one (`warn`: warnings, errors and fatal),
+    /// from JSON's `level`/`severity`, logfmt's `level=` or a leading `ERROR`.
+    #[arg(long, value_parser = ["trace", "debug", "info", "warn", "error", "fatal"], conflicts_with = "http")]
+    pub level: Option<String>,
     /// The requests instead (the proxy's access log): method, path, status, time.
     #[arg(long, conflicts_with = "build")]
     pub http: bool,
@@ -1676,7 +1680,7 @@ pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
         };
         since.push_str(&format!("&instance={}", enc(&name)));
     }
-    for (k, v) in [("deployment", &l.deployment), ("stream", &l.stream)] {
+    for (k, v) in [("deployment", &l.deployment), ("stream", &l.stream), ("level", &l.level)] {
         if let Some(v) = v {
             since.push_str(&format!("&{k}={}", enc(v)));
         }

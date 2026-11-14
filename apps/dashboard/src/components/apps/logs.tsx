@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { appsApi, followLog, type LogLine } from "@/lib/apps-api";
+import { appsApi, followLog, type LogLine, atLeast, type LogLevel } from "@/lib/apps-api";
 import { btn } from "../ui";
 import { LogBar, LogView } from "./shared";
 
@@ -12,6 +12,8 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
   const [paused, setPaused] = useState(false);
   const [filter, setFilter] = useState("");
   const [instance, setInstance] = useState("");
+  // Only what the app says is at this level or worse (lines that say none are left out).
+  const [level, setLevel] = useState<LogLevel | "">("");
   // The app's output, or the requests it served (the proxy's access log).
   const [requests, setRequests] = useState(false);
   // The Requests view narrowed: a status class (a 5xx alert, followed to its requests) and slow ones.
@@ -25,7 +27,7 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
     setSearching(true);
     try {
       const narrow = requests ? { status: status || undefined, min_ms: slow || undefined } : {};
-      const got = await appsApi.readLogs(service, env, { ...q, ...narrow, since: Date.now() - 7 * 86_400_000, instance: instance || undefined, http: requests, tail: q.q ? 2000 : 500 });
+      const got = await appsApi.readLogs(service, env, { ...q, ...narrow, since: Date.now() - 7 * 86_400_000, instance: instance || undefined, level: (!requests && level) || undefined, http: requests, tail: q.q ? 2000 : 500 });
       setFound({ ...q, ...got });
     } catch (e) {
       setFound({ ...q, lines: [], truncated: false, error: e instanceof Error ? e.message : String(e) });
@@ -90,8 +92,8 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
         return false;
       }
     };
-    return lines.filter((l) => (!instance || l.instance === instance) && (!q || l.text.toLowerCase().includes(q)) && request(l));
-  }, [lines, filter, instance, requests, status, slow]);
+    return lines.filter((l) => (!instance || l.instance === instance) && (!q || l.text.toLowerCase().includes(q)) && request(l) && (requests || atLeast(l, level)));
+  }, [lines, filter, instance, requests, status, slow, level]);
 
   return (
     <div>
@@ -161,6 +163,15 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
               if (Number.isFinite(t)) void read({ before: t });
             }}
           />
+          {!requests && (
+            <select value={level} onChange={(e) => setLevel(e.target.value as LogLevel | "")} className="h-8 rounded-lg border border-line bg-panel px-2 text-[12px] outline-none" aria-label="Level" title="What the app's lines say their level is (JSON's level, logfmt's level=, a leading ERROR)">
+              <option value="">every level</option>
+              <option value="warn">warnings and worse</option>
+              <option value="error">errors and worse</option>
+              <option value="info">info and worse</option>
+              <option value="debug">debug and worse</option>
+            </select>
+          )}
           {instances.length > 1 && (
             <select value={instance} onChange={(e) => setInstance(e.target.value)} className="h-8 rounded-lg border border-line bg-panel px-2 font-mono text-[12px] outline-none" aria-label="Instance">
               <option value="">every instance</option>

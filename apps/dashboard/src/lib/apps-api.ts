@@ -528,7 +528,14 @@ export interface LogLine {
   instance: string | null;
   deployment: string | null;
   text: string;
+  /** The level the app's line says (JSON's `level`/`severity`, logfmt's `level=`, a leading `ERROR`). */
+  level?: LogLevel;
 }
+
+export type LogLevel = "trace" | "debug" | "info" | "warn" | "error" | "fatal";
+export const LOG_LEVELS: LogLevel[] = ["trace", "debug", "info", "warn", "error", "fatal"];
+/** At `min` or worse: a line that says no level isn't. */
+export const atLeast = (l: LogLine, min: LogLevel | "") => !min || (!!l.level && LOG_LEVELS.indexOf(l.level) >= LOG_LEVELS.indexOf(min));
 
 export interface Metrics {
   minutes: number[];
@@ -790,7 +797,7 @@ export const appsApi = {
   readLogs: async (
     id: string,
     e: string,
-    q: { q?: string; since?: number; before?: number; instance?: string; deployment?: string; stream?: string; http?: boolean; by?: string; status?: string; min_ms?: number; tail?: number },
+    q: { q?: string; since?: number; before?: number; instance?: string; deployment?: string; stream?: string; level?: LogLevel; http?: boolean; by?: string; status?: string; min_ms?: number; tail?: number },
   ): Promise<{ lines: LogLine[]; truncated: boolean }> => {
     const res = await fetch(`${ROLL_API}${env(id, e)}/logs${qs({ ...q, http: q.http || undefined, tail: q.tail ?? 500 })}`, { headers: apiHeaders(), cache: "no-store" });
     onApiStatus(res.status);
