@@ -184,6 +184,14 @@ state. A pass of the reconciler:
    id never got recorded (a crash, a timeout) is found by its name when the preview is deleted.
 3. A step that fails records its error on the preview (`failed`) and is retried with backoff
    (15 s × 2ⁿ, at most 10 minutes). Nothing else is undone.
+4. A preview that goes (landed, closed, stale, deleted) first runs the project's `teardown`
+   once, the way the seed runs, before its services, secrets environment and branches are
+   removed, like Heroku's `pr-predestroy`: what the preview's code made outside roll with its
+   own keys (a payment provider's test webhook, an OAuth redirect URI, a DNS record) is cleaned
+   up while everything it needs is still there. It runs only at a head the preview ran (a
+   fork's push nobody approved never runs it; the approved head before it does), never twice
+   when a removal is retried, and a failure is logged (rolld's log and the activity) without
+   keeping the preview.
 
 The reconciler runs every 15 s, and right away when roll code emits a `change` or `landed`
 event (the broadcast is only a nudge, so a dropped event costs at most one interval). In a
@@ -820,6 +828,7 @@ type Settings = {
   env_for: Record<string, Record<string, string>>; // branch glob → variables, over env, under a preview's own ({})
   seed: Job | null;                   // once on fresh data
   release: Job | null;                // at each new head, before services deploy (migrations)
+  teardown: Job | null;               // once when the preview goes, before its services and branches
   masking: Record<string, Record<string, string>>; // "postgres:<ref>" → {"schema.table.column": "email"}, "nosql:<ref>" → {"ks.table.column": "mask_default()"}, "search:<ref>" → {"index.field": "redact" | "remove" | "email"}
 };
 ```
@@ -1142,6 +1151,15 @@ Ranked by what a person notices first. Done so far:
 - a look at the sheet from screenshots of a live preview with today's checks (desktop and phone):
   the data branch rows kept their names whole and their notes in word groups;
 - caught mail bounded by bytes (10 MiB a preview) as well as count;
+- a `teardown` job when a preview goes (Heroku's `pr-predestroy`): once, before its services
+  and branches, only at a head it ran (a fork's unapproved push never), checked live (it saw
+  the branch's URL, its failure didn't keep the preview);
+- the sheet's caught mail and open notes from a terminal (`roll preview mail`, `--read`;
+  `roll preview notes`, `--resolve`), checked live;
+- the stacked `feature/roll-previews-on-apps` refreshed against roll apps' `-next`: it found
+  apps' forwarded route turning every unrouted path's 404 into a 401 (previews read secrets'
+  404 as "off", so every converge failed), fixed on `feature/roll-apps-next` (9911f6e9d, with a
+  test);
 - a light previews list (each page's checks only in a preview's own view, which the sheet reads);
 - a phone-width screenshot with its own visual change;
 - every change compared with the default branch, whose preview roll keeps itself (`github.baseline`);
@@ -1228,11 +1246,14 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
-   wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
-   second copy of the project's variables. (A preview's cost now uses the memory its live
-   deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-2. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
+1. **A teardown's failure where people look**: the preview's activity goes with it, so today a
+   failing `teardown` is only in rolld's log. The change (its page and the pull request comment)
+   should say the preview went with its teardown failing, the exit code and the output's tail,
+   so whoever owns the webhook it didn't remove finds out.
+2. **Replies on a page's notes** (Vercel Comments' threads): a note is one comment today; a
+   reply from the page or the sheet joins it, and the note's author hears of it through roll's
+   notifications, resolved as one thread.
+3. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
    a preview reaches real people, but its code can still call any API (a payment provider's
    sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
    (today), `"roll"` (only roll's own products and the preview's branches) or a list of hosts;
@@ -1242,19 +1263,19 @@ Ranked by what a person notices first. Done so far:
    host whose firewall roll mustn't touch) or an internal network with a forwarding sidecar for
    every product port (an image of its own, and roll code's runner changed); on the cloud fleet
    it's security groups, with the cloud thread.
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-5. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
+6. **Alarms on previews' failures** (the cloud thread's `deploy/cloud/aws/roll-cloud.yaml`):
    `PreviewConvergeFailures` and `PreviewScreenshotFailures` are published; an alarm on a run of
    them (as `HandoffFailures` has) belongs with the stack's others.
-6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
+7. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node it's done and measured on
    the stacked `feature/roll-previews-on-apps` (#28 merged with roll apps' `-next`, `Reach` =
    #26's `Apps::reachable`; `scripts/preview-apps.sh`: the apps service screenshotted in its
    instance's network, main's baseline on roll apps, 0.08% against it; the feedback button on
@@ -1267,15 +1288,20 @@ Ranked by what a person notices first. Done so far:
    Ranked lower: the cloud fleet runs instances on Fargate, where neither `reachable` nor
    rolld's Docker screenshot works (a browser task of its own, with the cloud thread), and the
    Docker-fleet half waits on #26 too.
-7. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+8. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
    Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
    minutes even with the parent's history reporting `end` past it, where pg-control's own test
    (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
    old; the live script will check it once this is understood.
-8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+9. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.
+
+Looked at and kept: previews' copy of a preview's variables in its roll apps environment, next
+to the `pv-` secrets environment roll apps reads itself (#31's `ForApps`). roll apps reads
+secrets only for a project `Workspace::trusts` (the operator's, an admin's); for anyone else's
+project the copy is the preview's only source, and the two hold the same values.
 
 Looked at and dropped: branching from a stopped parent without starting it. pg-control already
 copies a stopped parent's directory directly; the slow first numbers (9.6–16.8 s) were brand-new

@@ -510,7 +510,7 @@ impl Store {
                 db.add_column("previews", col, "INTEGER")?;
             }
         }
-        for col in ["released", "schema_head", "schema_changes", "runs"] {
+        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "TEXT")?;
             }
@@ -1037,6 +1037,19 @@ impl Store {
     pub fn set_released(&self, id: &str, head: &str, ms: i64) -> Result<()> {
         self.db.write(|c| {
             c.execute("UPDATE previews SET released = ?, prev_release_ms = release_ms, release_ms = ? WHERE id = ?", params![head, ms, id])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The last head a converge ran (its gate passed: trusted, or approved), where the project's
+    /// `teardown` runs; `None` once it has, or when nothing of the preview ever ran.
+    pub fn ran_head(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT ran_head FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    pub fn set_ran_head(&self, id: &str, head: Option<&str>) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE previews SET ran_head = ? WHERE id = ?", params![head, id])?;
             Ok::<_, Error>(())
         })
     }

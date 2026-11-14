@@ -323,6 +323,8 @@ export interface PreviewSettings {
   seed: PreviewJob | null;
   /** Run at each new head, after the seed and before services deploy (migrations). */
   release?: PreviewJob | null;
+  /** Run once when the preview is deleted, before its services and branches go (cleanup outside roll). */
+  teardown?: PreviewJob | null;
   /** NoSQL column masks: `"nosql:<ref>"` → `{"keyspace.table.column": "mask_default()"}`. */
   masking: Record<string, Record<string, string>>;
 }

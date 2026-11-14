@@ -623,14 +623,19 @@ if [ -n "${STOP_BEFORE_LAND:-}" ]; then
   echo "stopped before landing: project $PRJ, preview $PV (run with --keep to leave the daemon up)"
   exit 0
 fi
-say "land the change: the preview and its branches go, the parents stay"
+say "land the change: the teardown runs, the preview and its branches go, the parents stay"
+# The project's teardown, as the preview goes: exit 3 only when the branch's URL reached it, and
+# its failure doesn't keep the preview.
+api PUT "/v1/previews/projects/$PRJ/settings" '{"teardown":{"image":"'"$IMAGE"'","run":"test -n \"$DATABASE_URL\" && exit 3"}}' >/dev/null
 api POST "/v1/code/changes/$CHG/land" '{}' >/dev/null
-for _ in $(seq 1 120); do
+for _ in $(seq 1 240); do
   N=$(api GET "/v1/previews?project=$PRJ" | jq_ "len(d)")
   [ "$N" = 0 ] && break
   sleep 0.5
 done
 [ "$N" = 0 ] || { api GET "/v1/previews?project=$PRJ"; exit 1; }
+TEARDOWN=$(sed 's/\x1b\[[0-9;]*m//g' "$HOME_DIR/rolld.log" | grep -c "the teardown failed preview=$PV error=the teardown command failed with exit code 3" || true)
+[ "$TEARDOWN" = 1 ] || { echo "the teardown should run once, with the branch's URL, as the preview goes: $TEARDOWN"; grep -i teardown "$HOME_DIR/rolld.log" | tail -5; exit 1; }
 PARENTS_OK=$( (api GET "/v1/redis/databases/$REDIS" | jq_ "d['id']"; api GET /v1/storage/buckets/assets | jq_ "d['name']"; api GET "/v1/nosql/databases/$NOSQL" | jq_ "d['id']"; api GET "/v1/search/clusters/$SEARCH" | jq_ "d['id']") | wc -l)
 SEARCH_BRANCH_GONE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${ROLL_ADMIN_TOKEN:-}" "http://$API/v1/search/clusters/$BRANCH_SEARCH")
 [ "$SEARCH_BRANCH_GONE" = 404 ] || { echo "the search branch should be gone after landing ($SEARCH_BRANCH_GONE)"; exit 1; }
@@ -658,6 +663,7 @@ cat <<EOF
 | A page's note resolved in roll: notes the page lists after | $RESOLVED |
 | \`roll preview connect --kind postgres\`: the branch's own role | $(role "$CONNECT") |
 | Postgres users.email in the branch / in the parent | $PG_MASKED / $PG_PARENT |
+| The teardown as the preview went (its exit code, with the branch's URL) / runs | 3 / $TEARDOWN |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |
 | First visit (cold start of the service container, image cached) | $((T3 - T2)) ms |

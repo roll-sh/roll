@@ -313,6 +313,35 @@ async fn the_seed_runs_once_on_fresh_data_before_services_deploy() {
 }
 
 #[tokio::test]
+async fn the_teardown_runs_once_at_a_head_the_preview_ran_before_its_data_goes() {
+    let e = env(json!({ "enabled": true, "teardown": { "image": "node:22", "run": "node scripts/unregister.js" } }));
+    // A fork, approved at its first head; a push nobody approved after it.
+    e.code.open(ChangeInfo { trusted: false, ..change("chg_t", 4) });
+    e.engine.pass().await.unwrap();
+    e.code.edit("chg_t", |c| c.approved = true);
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_t").unwrap().unwrap();
+    assert_eq!(p.state, State::Ready);
+    e.code.edit("chg_t", |c| {
+        c.head = "cs_4b".into();
+        c.approved = false;
+    });
+    e.engine.pass().await.unwrap();
+    // It goes: the teardown fails, and so does the first removal, which is tried again.
+    e.apps.seed_exit.store(2, Ordering::SeqCst);
+    e.apps.fail_remove.store(1, Ordering::SeqCst);
+    e.engine.delete(&p.id).unwrap();
+    for _ in 0..4 {
+        e.engine.store.update(&p.id, |r| r.next_at = 0).ok();
+        e.engine.pass().await.unwrap();
+    }
+    assert!(e.engine.store.row(&p.id).is_err(), "a failed teardown doesn't keep the preview");
+    let runs: Vec<_> = e.apps.runs.lock().iter().map(|(run, rev, _)| (run.clone(), rev.clone())).collect();
+    assert_eq!(runs, [("node scripts/unregister.js".to_string(), "cs_4a".to_string())], "once, at the approved head, never the unapproved push");
+    assert!(e.apps.seeds.lock().last().unwrap().starts_with("fake://prj_db~pv-"), "before the branch went: {:?}", e.apps.seeds.lock());
+}
+
+#[tokio::test]
 async fn the_release_runs_at_each_new_head_before_services_and_its_schema_changes_show() {
     let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" } }));
     *e.pg.schema.lock() = Some((vec!["table public.users".into()], vec!["table public.users".into(), "column public.users.nick text".into()]));

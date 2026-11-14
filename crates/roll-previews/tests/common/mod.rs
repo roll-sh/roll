@@ -202,6 +202,8 @@ pub struct FakeApps {
     /// The next deploys that answer "still deploying", then the next that fail.
     pub still: AtomicUsize,
     pub fail_deploy: AtomicUsize,
+    /// The next removals that fail.
+    pub fail_remove: AtomicUsize,
     /// Runs inside a deploy (an API call landing while the reconciler works).
     pub on_deploy: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     /// The PNG every screenshot is (unset: the backend can't take one), and the previews taken.
@@ -247,6 +249,10 @@ impl Apps for FakeApps {
     }
     async fn sleep(&self, _: &str, _: &str) {}
     async fn remove(&self, p: &str, s: &str) -> anyhow::Result<()> {
+        if self.fail_remove.load(Ordering::SeqCst) > 0 {
+            self.fail_remove.fetch_sub(1, Ordering::SeqCst);
+            anyhow::bail!("the runtime is busy");
+        }
         self.deployed.lock().remove(&(p.to_string(), s.to_string()));
         self.removed.lock().push((p.to_string(), s.to_string()));
         Ok(())

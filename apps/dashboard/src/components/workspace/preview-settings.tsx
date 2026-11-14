@@ -357,7 +357,7 @@ function Form({
         </Field>
       </Section>
 
-      <Section title="Seed and release">
+      <Section title="Seed, release and teardown">
         <Job
           label="Seed"
           note="Runs once on a preview's fresh data, before its services start: anonymise rows, load fixtures."
@@ -371,6 +371,13 @@ function Form({
           job={s.release ?? null}
           placeholder={["node:22", "npm ci && npm run migrate"]}
           onChange={(j) => set("release", j)}
+        />
+        <Job
+          label="Teardown"
+          note="Runs once when a preview goes, before its services and branches: remove what its code made outside roll (test webhooks, OAuth redirect URIs). A failure is logged; the preview goes anyway."
+          job={s.teardown ?? null}
+          placeholder={["node:22", "node scripts/unregister-webhooks.js"]}
+          onChange={(j) => set("teardown", j)}
         />
       </Section>
 

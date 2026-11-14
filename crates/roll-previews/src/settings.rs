@@ -75,6 +75,11 @@ pub struct Settings {
     /// and again after a reset): migrations, Heroku's release phase. A failure fails the preview,
     /// and its services stay on what they ran.
     pub release: Option<Seed>,
+    /// A command run once when the preview is deleted, before its services, secrets environment
+    /// and branches go (Heroku's `pr-predestroy`): what its code made outside roll (a test-mode
+    /// webhook, an OAuth redirect URI, a DNS record) cleaned up with the preview's own variables.
+    /// Only at a head the preview ran; a failure is logged and the deletion goes on.
+    pub teardown: Option<Seed>,
     /// Column masks for NoSQL branches: `"nosql:<ref>"` → `{"keyspace.table.column": "mask_inner(1, 1)"}`
     /// (Cassandra 5's mask functions). Merged onto what the branch inherits from its parent,
     /// whenever it's made or reset: the preview reads masked values, the parent is untouched.
@@ -283,6 +288,7 @@ impl Default for Settings {
             warm: true,
             seed: None,
             release: None,
+            teardown: None,
             masking: BTreeMap::new(),
         }
     }
@@ -370,7 +376,7 @@ impl Settings {
         if is_production(base) && !self.secrets.allow_production {
             return bad(format!("secrets.base {base:?} is production's: set secrets.allow_production to inherit it"));
         }
-        for (name, job) in [("seed", &self.seed), ("release", &self.release)] {
+        for (name, job) in [("seed", &self.seed), ("release", &self.release), ("teardown", &self.teardown)] {
             let Some(job) = job else { continue };
             if job.image.trim().is_empty() || job.image.len() > 255 || job.image.contains(char::is_whitespace) {
                 return bad(format!("{name}.image: an image reference"));

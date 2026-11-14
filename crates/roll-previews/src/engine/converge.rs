@@ -104,6 +104,10 @@ impl Engine {
             self.store.update(&r.id, |row| row.state = State::Creating)?;
             self.store.log(&r.id, "approved: starting")?;
         }
+        // A head that may run: where the project's `teardown` runs when the preview goes.
+        if self.store.ran_head(&r.id)?.as_deref() != Some(r.build()) {
+            self.store.set_ran_head(&r.id, Some(r.build()))?;
+        }
         let project = self.workspace.get(roll_workspace::Scope::All, &r.project_id)?;
         let name = branch_name(&r.id);
 
@@ -303,23 +307,12 @@ impl Engine {
             }
             anyhow::bail!("this preview may not inherit the production environment {:?}", s.secrets.base);
         }
-        let urls = self.resource_env(&r.id).await?;
+        let vars = self.preview_vars(r, &s).await?;
         let branches = self.branch_vars(&r.id).await?;
         let (access_token, bypass) = match self.store.access(&r.id)? {
             Some(crate::store::Access { token: t, required: true, bypass }) if !t.is_empty() => (Some(t), bypass),
             _ => (None, None),
         };
-        let mut vars: Vec<(String, String)> = project_env(&s, r.branch.as_deref());
-        for (k, v) in self.store.vars(&r.id)? {
-            set(&mut vars, &k, v);
-        }
-        // A deploy elsewhere (roll apps) never emails real people either.
-        if s.mail == crate::settings::MailRule::Catch {
-            self.catch_mail_vars(&r.id, &mut vars)?;
-        }
-        for (k, v) in urls {
-            set(&mut vars, &k, v);
-        }
         // Every converge (at least every few minutes, for usage) pushes its expiry out: only a
         // preview nobody converges any more lets it lapse.
         let trusted = s.secrets.allow_production && r.trusted;
@@ -712,6 +705,24 @@ impl Engine {
     /// Run the project's seed or release to its end on the preview's tree: its secrets
     /// environment (as services get it: untrusted unless the project allows production and the
     /// change is trusted), the branches and overrides on top.
+    /// What the preview's secrets environment and jobs get: the project's `env`, the preview's own
+    /// variables, the mail catcher's settings, and the branches' URLs over them all.
+    async fn preview_vars(&self, r: &Row, s: &Settings) -> anyhow::Result<Vec<(String, String)>> {
+        let urls = self.resource_env(&r.id).await?;
+        let mut vars: Vec<(String, String)> = project_env(s, r.branch.as_deref());
+        for (k, v) in self.store.vars(&r.id)? {
+            set(&mut vars, &k, v);
+        }
+        // A deploy elsewhere (roll apps) never emails real people either.
+        if s.mail == crate::settings::MailRule::Catch {
+            self.catch_mail_vars(&r.id, &mut vars)?;
+        }
+        for (k, v) in urls {
+            set(&mut vars, &k, v);
+        }
+        Ok(vars)
+    }
+
     async fn run_job(&self, r: &Row, s: &Settings, vars: &[(String, String)], what: &str, job: &crate::settings::Seed) -> anyhow::Result<()> {
         let untrusted = !(s.secrets.allow_production && r.trusted);
         let mut env = self.resolve_secrets(r, untrusted).await?;
@@ -835,6 +846,23 @@ impl Engine {
         if r.state != State::Deleting {
             let row = self.store.update(&r.id, |row| row.state = State::Deleting)?;
             self.report(row).await;
+        }
+        // The project's teardown, once, at a head the preview ran, while what it made is still
+        // there. A failure is logged and the preview goes regardless (Heroku's `pr-predestroy`).
+        if let Some(head) = self.store.ran_head(&r.id)? {
+            let s = self.store.settings(&r.project_id)?;
+            if let Some(job) = &s.teardown {
+                let at = Row { runs: Some(head), ..r.clone() };
+                let ran = async {
+                    let vars = self.preview_vars(&at, &s).await?;
+                    self.run_job(&at, &s, &vars, "teardown", job).await
+                };
+                if let Err(e) = ran.await {
+                    warn!(preview = %r.id, error = %format!("{e:#}"), "previews: the teardown failed");
+                    self.store.log(&r.id, &format!("{e:#}"))?;
+                }
+            }
+            self.store.set_ran_head(&r.id, None)?;
         }
         for p in self.store.pinned(&r.id)? {
             let name = format!("{}@{}", p.service, p.revision);
