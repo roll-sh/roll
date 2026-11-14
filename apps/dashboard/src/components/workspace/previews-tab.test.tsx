@@ -15,7 +15,7 @@ vi.mock("@/lib/previews-api", async (orig) => {
 
 vi.mock("@/lib/code-api", async (orig) => {
   const real = await orig<typeof import("@/lib/code-api")>();
-  return { ...real, codeApi: { ...real.codeApi, submitReview: vi.fn() } };
+  return { ...real, codeApi: { ...real.codeApi, submitReview: vi.fn(), reviews: vi.fn() } };
 });
 
 const api = vi.mocked(previewsApi);
@@ -136,5 +136,22 @@ describe("the Previews tab", () => {
     });
     expect(await screen.findByText(/Posted on the change/)).toBeInTheDocument();
     expect(posted).toHaveBeenCalledOnce();
+  });
+
+  it("resolves a note from the preview page's Resolve, on the preview", async () => {
+    const u = userEvent.setup({ delay: null });
+    vi.mocked(codeApi.reviews).mockResolvedValue([{ id: "rv_1", body: "**Feedback on the preview** · `/`\n\nThe button is cut off", dismissed: false }] as never);
+    api.resolveNote.mockResolvedValue({ resolved: "rv_1" });
+    const done = vi.fn();
+    render(
+      <MarkStateProvider>
+        <ProjectPreviews project={project} inventory={new Map()} open="pv_abc" resolve="rv_1" onFeedbackPosted={done} />
+      </MarkStateProvider>,
+    );
+    expect(await screen.findByText("The button is cut off")).toBeInTheDocument();
+    await u.click(screen.getByRole("button", { name: "Resolve" }));
+    expect(api.resolveNote).toHaveBeenCalledWith("pv_abc", "rv_1");
+    expect(await screen.findByText(/This note is resolved/)).toBeInTheDocument();
+    expect(done).toHaveBeenCalledOnce();
   });
 });

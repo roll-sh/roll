@@ -31,6 +31,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/screenshot", get(screenshot))
         .route("/v1/previews/{id}/qr.png", get(qr))
         .route("/v1/previews/{id}/connect", get(connect))
+        .route("/v1/previews/{id}/notes/{note}/resolve", post(resolve_note))
         .route("/v1/previews/{id}/mail", get(mails))
         .route("/v1/previews/{id}/mail/{mail}", get(mail_raw))
         .route("/v1/previews/{id}/screenshot.png", get(screenshot_link))
@@ -288,6 +289,18 @@ async fn vars(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serde
     })
     .await?;
     Ok(Json(serde_json::json!({ "vars": vars })))
+}
+
+/// Resolve a note left on the preview's page (its review's id): the page stops listing it.
+async fn resolve_note(AxState(e): S, Path((id, note)): Path<(String, String)>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<Json<serde_json::Value>> {
+    check_id(&id)?;
+    let by = match (who, grant) {
+        (Some(axum::Extension(u)), None) => u.handle,
+        (_, Some(axum::Extension(g))) => format!("token:{}", g.name),
+        (None, None) => "operator".into(),
+    };
+    e.resolve_note(&id, &note, &by).await?;
+    Ok(Json(serde_json::json!({ "resolved": note })))
 }
 
 /// The mail the preview's services sent, caught (newest first; the last 50).

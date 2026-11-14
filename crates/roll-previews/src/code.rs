@@ -281,7 +281,7 @@ impl Source for CodeSource {
             .filter(|r| !r.dismissed && r.verdict == code_control::review::Verdict::Comment)
             .filter_map(|r| {
                 let (path, selector, note) = crate::notes::parse(&r.body)?;
-                Some(crate::notes::Note { path, selector, note, by: r.reviewer.name, at: r.created_at })
+                Some(crate::notes::Note { id: r.id, path, selector, note, by: r.reviewer.name, at: r.created_at })
             })
             .collect())
     }

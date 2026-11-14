@@ -778,13 +778,17 @@ async fn a_pages_notes_by_its_environment_name() {
     e.code.open(change("chg_n", 4));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_n").unwrap().unwrap();
-    let note = |path: &str, text: &str| roll_previews::notes::Note { path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1 };
+    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1 };
     e.code.feedback.lock().insert("chg_n".into(), vec![note("/", "Too big"), note("/about", "Typo")]);
     let env_name = roll_previews::branch_name(&p.id);
     let got = e.engine.notes_for(&env_name, "/").await.unwrap();
     assert_eq!(got.iter().map(|n| n.note.as_str()).collect::<Vec<_>>(), ["Too big"]);
     assert!(e.engine.notes_for("production", "/").await.unwrap().is_empty());
     assert!(e.engine.notes_for("pv-nope", "/").await.unwrap().is_empty());
+    // Resolved (from the page's Resolve, in roll), it folds away; only the change's notes resolve.
+    e.engine.resolve_note(&p.id, "rv_Too big", "bob").await.unwrap();
+    assert!(e.engine.notes_for(&env_name, "/").await.unwrap().is_empty());
+    assert!(e.engine.resolve_note(&p.id, "rv_someone else's", "bob").await.is_err());
 }
 
 /// A preview's services send mail to roll's catcher, signed in as the preview, never with the

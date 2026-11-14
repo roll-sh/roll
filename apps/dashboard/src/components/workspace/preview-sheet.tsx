@@ -1,5 +1,6 @@
 import { Boxes, Check, Copy, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Smartphone, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { a11yWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
@@ -48,6 +49,7 @@ export function PreviewSheet({
   onChange,
   onClose,
   feedback,
+  resolve,
   onFeedbackPosted,
 }: {
   preview: Preview;
@@ -60,6 +62,8 @@ export function PreviewSheet({
   onClose: () => void;
   /** A note from the preview page's feedback button, to post on the change. */
   feedback?: PreviewFeedback;
+  /** A note the preview page's Resolve names (its review id), to resolve on the change. */
+  resolve?: string;
   /** It was posted (the link that brought it is spent). */
   onFeedbackPosted?: () => void;
 }) {
@@ -123,6 +127,11 @@ export function PreviewSheet({
             {feedback && (
               <div className="mb-3">
                 <FeedbackForm preview={p} feedback={feedback} onPosted={onFeedbackPosted} />
+              </div>
+            )}
+            {resolve && p.change && (
+              <div className="mb-3">
+                <ResolveNote previewId={p.id} change={p.change} review={resolve} onDone={onFeedbackPosted} />
               </div>
             )}
             {p.state === "awaiting_approval" && (
@@ -775,6 +784,51 @@ function Screenshot({
         <p className="text-[11.5px] text-muted">No screenshot of {path} yet.</p>
       )}
     </>
+  );
+}
+
+/** A note from the preview's page, resolved by someone on the project (Vercel Comments): the
+ * page's button stops listing it. Its words come from the change's review. */
+function ResolveNote({ previewId, change, review, onDone }: { previewId: string; change: string; review: string; onDone?: () => void }) {
+  const [note, setNote] = useState<string | null>(null);
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    codeApi.reviews(change).then(
+      (all) => {
+        const r = all.find((x) => x.id === review);
+        if (!r) return setError("That note isn't on this change.");
+        setNote(r.body.split("\n\n")[1] ?? r.body);
+      },
+      (e) => setError(errorText(e)),
+    );
+  }, [change, review]);
+  if (error) return <p className="text-[11.5px] text-danger">{error}</p>;
+  if (state === "done") return <p className="text-[11.5px] text-subtle">This note is resolved: the page no longer lists it.</p>;
+  return (
+    <div className="rounded-lg border border-line-2 bg-raised px-2.5 py-2 text-[11.5px] inset-shadow-highlight">
+      <p className="text-muted">Resolve this note from the preview's page?</p>
+      {note && <p className="mt-1 break-words text-fg">{note}</p>}
+      <div className="mt-2 flex justify-end">
+        <button
+          type="button"
+          disabled={state === "busy" || note === null}
+          onClick={async () => {
+            setState("busy");
+            try {
+              await previewsApi.resolveNote(previewId, review);
+              setState("done");
+              onDone?.();
+            } catch (e) {
+              setError(errorText(e));
+            }
+          }}
+          className="h-6 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
+        >
+          {state === "busy" ? "Resolving…" : "Resolve"}
+        </button>
+      </div>
+    </div>
   );
 }
 

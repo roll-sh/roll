@@ -148,6 +148,13 @@ CREATE TABLE IF NOT EXISTS visual_page_accepts (
     at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, path)
 );
+CREATE TABLE IF NOT EXISTS resolved_notes (
+    preview_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, review_id)
+);
 CREATE TABLE IF NOT EXISTS mail (
     id TEXT PRIMARY KEY,
     preview_id TEXT NOT NULL,
@@ -725,7 +732,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "base_history", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1469,6 +1476,22 @@ impl Store {
             return Ok(false);
         }
         Ok(crate::runtime::same(&self.mail_password(&r.id)?, password))
+    }
+
+    /// `by` resolved a note left on the preview's page (its review's id): the page stops listing
+    /// it. Resolving one already resolved changes nothing.
+    pub fn resolve_note(&self, preview: &str, review: &str, by: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            c.execute("INSERT INTO resolved_notes (preview_id, review_id, by, at) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id, review_id) DO NOTHING", params![preview, review, by, now])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The notes resolved on a preview's page (their reviews' ids).
+    pub fn resolved_notes(&self, preview: &str) -> Result<std::collections::HashSet<String>> {
+        let ids: Vec<String> = self.db.read(|c| c.query("SELECT review_id FROM resolved_notes WHERE preview_id = ?", [preview], |r| r.get(0)))?;
+        Ok(ids.into_iter().collect())
     }
 
     /// A caught message, kept with its preview (its last 50).

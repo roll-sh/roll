@@ -11,10 +11,25 @@ impl Engine {
     pub async fn notes_of(&self, preview: &str, path: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
         let Ok(row) = self.store.row(preview) else { return Ok(Vec::new()) };
         let Some(change) = &row.change_id else { return Ok(Vec::new()) };
-        let mut here: Vec<crate::notes::Note> = self.source.feedback(change).await?.into_iter().filter(|n| n.path == path).collect();
+        let resolved = self.store.resolved_notes(preview)?;
+        let mut here: Vec<crate::notes::Note> = self.source.feedback(change).await?.into_iter().filter(|n| n.path == path && !resolved.contains(&n.id)).collect();
         let skip = here.len().saturating_sub(50);
         here.drain(..skip);
         Ok(here)
+    }
+
+    /// `by` resolves a note on a change's preview page (Vercel Comments): it must be one of the
+    /// change's feedback notes; the page's button stops listing it.
+    pub async fn resolve_note(&self, id: &str, note: &str, by: &str) -> Result<()> {
+        let r = self.store.row(id)?;
+        let change = r.change_id.as_deref().ok_or_else(|| Error::BadRequest("only a change's preview has notes".into()))?;
+        let notes = self.source.feedback(change).await.map_err(|e| Error::Internal(format!("{e:#}")))?;
+        if !notes.iter().any(|n| n.id == note) {
+            return Err(Error::NotFound(format!("no note {note} on this preview's change")));
+        }
+        self.store.resolve_note(id, note, by)?;
+        self.store.log(id, &format!("{by} resolved a note on its page"))?;
+        Ok(())
     }
 
     /// [`Engine::notes_of`] by the preview's environment name (`pv-<id>`, as roll apps knows it).

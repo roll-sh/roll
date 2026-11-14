@@ -295,6 +295,11 @@ NOTE_BODY='**Feedback on the preview** · [`/`](http://x/) · `body > h1`\n\nThe
 api POST "/v1/code/changes/$CHG/reviews" "{\"verdict\":\"comment\",\"body\":\"$NOTE_BODY\"}" >/dev/null
 NOTES=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F")
 echo "$NOTES" | grep -q "The heading is cut off" || { echo "the page's notes should list the feedback: $NOTES"; exit 1; }
+# Resolved (what the page's Resolve opens roll to do), it folds away there.
+NOTE_ID=$(echo "$NOTES" | jq_ "d[0]['id']")
+[ "$(api POST "/v1/previews/$PV/notes/$NOTE_ID/resolve" '{}' | jq_ "d.get('resolved')")" = "$NOTE_ID" ] || { echo "resolving the page's note should answer with it"; exit 1; }
+RESOLVED=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F" | jq_ "len(d)")
+[ "$RESOLVED" = 0 ] || { echo "a resolved note should fold away on the page: $RESOLVED left"; exit 1; }
 # A share link for someone outside the team: in through its own token (no preview cookie), out
 # once it's revoked.
 SHARE=$(api POST "/v1/previews/$PV/shares" '{"hours":1}')
@@ -627,6 +632,7 @@ cat <<EOF
 | The release's time on the preview's data (at its head) / on the change | $RELEASE / $CHG_RELEASE ms |
 | The preview's link as a QR code (PNG, no-store) | $QR |
 | Mail: the provider's key in the service / sent as the preview, caught | gone / $MAIL |
+| A page's note resolved in roll: notes the page lists after | $RESOLVED |
 | \`roll preview connect --kind postgres\`: the branch's own role | $(role "$CONNECT") |
 | Postgres users.email in the branch / in the parent | $PG_MASKED / $PG_PARENT |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |

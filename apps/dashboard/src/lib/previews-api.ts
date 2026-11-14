@@ -357,6 +357,8 @@ export const previewsApi = {
   unshare: (id: string, share: string) => call<void>("DELETE", `${one(id)}/shares/${encodeURIComponent(share)}`),
   /** Its own variables, over the project's `env`. */
   vars: (id: string) => call<{ vars: Record<string, string> }>("GET", `${one(id)}/env`),
+  /** Resolve a note left on its page (the note's review id): the page's button stops listing it. */
+  resolveNote: (id: string, note: string) => call<{ resolved: string }>("POST", `${one(id)}/notes/${encodeURIComponent(note)}/resolve`, {}),
   /** The mail its services sent, caught instead of delivered (newest first; the last 50). */
   mail: (id: string) => call<{ mail: CaughtMail[] }>("GET", `${one(id)}/mail`),
   /** One caught message as it was sent, as text. */
