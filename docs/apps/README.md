@@ -1507,7 +1507,12 @@ Vercel, Cloud Run and Heroku, and integration with the other branches' heads) se
    on a random port serving the API and public routers as rolld mounts them, so forwarding to a
    service's owner, a site's rewrite to a service another node owns, a takeover resuming a deploy,
    and the waking proxy through a node that doesn't own the service are each covered once
-   (`apps-control/tests/cluster.rs`, as code's and storage's).
+   (`apps-control/tests/cluster.rs`, as code's and storage's). The first question it answers:
+   `Cluster::dispatch` forwards to the owner's advertise URL, which is rolld's internal API router
+   (with `accept_forwarded`), not the apps listener; whether that router hands a forwarded
+   public request (routed by `Host`, or a rewrite's `x-roll-rewrite-to`) to
+   `apps_control::public::router` isn't visible from apps' side, so a public request that reaches
+   a node not owning its service may not be served (the edge splicing to the owner would hide it).
 2. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
