@@ -57,6 +57,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/deploys` | | `Deployment[]`, newest first | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}` | | `Deployment` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs?follow=&tail=` | | `LogLine[]` or SSE | read |
+| `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/commits` | | `DeployCommits`: what a repo deployment brings over the live one (for the live one: the one live before it), along its first parents, newest first, at most 50 | read |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback` | `{ keep_variables? }` (default false: the variables come back as they were when it was live) | 202 `Deployment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/rollback` | `{ keep_variables? }` | 202 `Deployment`: back to the deployment live before what runs, walking back through rollbacks (after B → A the next goes before A, never forward to B); 409 when there's none | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/redeploy` | `{ message? }` | 202 `Deployment` (trigger `settings`) | deploy* |
@@ -341,6 +342,12 @@ type DeployStatus = "queued" | "building" | "deploying" | "active" | "inactive" 
  *  `<id without dep_>--<environment's host>` (`abc123def456--web-prod.up.roll.site`), behind the
  *  environment's access token when it's private; one instance at most, gone a minute after its
  *  last request, metered with the environment. */
+type DeployCommits = {
+  since: { id: string; revision: string } | null; // the deployment it's measured against; null: nothing to compare
+  commits: { sha: string; summary: string; author: string }[] | null;
+  complete: boolean;         // `since` was reached (false: more than 50, or not in its history: a rollback, another branch)
+};
+
 type NewDeploy = { revision?: string; image?: string; message?: string; no_traffic?: boolean; no_cache?: boolean /* build from scratch (400 with an image): no cached layer, base images pulled again, the service's cache mounts empty from then on; an upload says it with `X-Roll-No-Cache: 1` */ };
 
 type Deployment = {

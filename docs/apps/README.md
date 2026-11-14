@@ -175,6 +175,10 @@ every deployment is immutable with instant rollback.
   whichever node queued it, and a build that lost its status while it ran never rolls out; a
   deploy already rolling out finishes, and a deploy someone asked for (not a push) is never
   stopped. Different environments deploy in parallel.
+- **What a deploy brings** (Render's deploy view): `GET …/deploys/{dep}/commits` and the
+  dashboard's build log list the commits a repo deployment has over the live one (for the live
+  one, over the one live before it), newest first, at most 50, through roll code's first-parent
+  history (`Sources::commits`); one not in its history (a rollback) says so.
 - **States**: `queued → building → deploying → active`, or `failed`, `canceled`, `superseded`;
   an active deployment becomes `inactive` when another replaces it. The dashboard maps them onto
   the shared mark states through `MarkStateProvider` (`deploying` while building or rolling out,
@@ -271,9 +275,8 @@ every deployment is immutable with instant rollback.
   failure (a connection closed before it answered) is a 502 that says so without the error, which
   goes to the environment's log.
 - **A request that finds its instance gone** (killed or out of memory, before roll noticed:
-  nothing listens on its port, or a kept-alive connection to it broke and the runtime says it
-  isn't running) goes, if it's a GET, HEAD or OPTIONS without a body, once more to a fresh
-  instance (Fly's proxy retries the same way), the instance counted as
+  nothing listens on its port: the app never saw it) goes, if it's a GET, HEAD or OPTIONS with
+  no body (by its headers and the body itself), once more to a fresh instance (Fly's proxy retries the same way), the instance counted as
   crashed and the environment's log saying so; a request with a body gets the "Restarting" 503,
   never sent twice.
 
@@ -922,9 +925,14 @@ rewrites, only ever to the project's own): `/api/* service:api/v1/:splat 200` se
 to the `api` web service in the same environment at `/v1/users?x=1`, its method, headers and body
 as they came, on whichever node owns it, so a single-page app calls its API on its own origin with
 no CORS. It goes through that service's own gates (its access, allow list, firewall, rate limit and
-maintenance) and wakes it as any request does; a private service is reachable this way, by the
-project's own rule. A request a rewrite sent is never rewritten again (no loops); a name the
-project has no web service for is a 502, said in the site's log.
+maintenance) and wakes it as any request does. A private target is reachable this way: its visitors passed
+the site's own access, and the project's own rule sends them on (a visitor who claims to be a
+rewrite never is: roll's rewrite headers are taken off where a request comes in). On a fleet the
+request goes to the target's owner naming it (`x-roll-rewrite-to`, signed as every forward) with
+the rewritten path; the decision is made before the site reads its gradual-rollout and affinity
+cookies, so the target reads them. A path with a `.` or `..` segment is refused; a request a
+rewrite sent is never rewritten again (no loops); a name the project has no web service for is a
+502, said in the site's log.
 
 Text-like files (HTML, CSS, scripts, JSON, XML, SVG, WebAssembly, TTF/OTF, icons) are sent
 compressed to a client whose `Accept-Encoding` takes it, as Render's and Vercel's are: the
@@ -1376,6 +1384,10 @@ b691d1029 (#24), feature/roll-secrets 55a618718, feature/roll-previews 8c7f6ecdf
 feature/roll-search 7f92c2f28, the held apps work being wip/roll-apps-next (pairwise
 `git merge-tree` too). Ours are done or in `## Next`; theirs have been told.
 
+- **roll-mcp, the prefix check per method** (#24): a route only a prefix row decides is listed
+  in `roll-access/src/prefix-reviewed.txt`. apps-next adds one since a7065490d: `GET
+  /v1/apps/services/{id}/environments/{env}/deploys/{dep}/commits` (a read; the line goes in
+  with whichever of #24 and #26 merges second).
 - **roll-mcp** (#19 merged into main at 11:15; #24, feature/roll-mcp-next, follows): every route
   in `api::router` resolves to a catalogue row, and http-api.md's
   classes follow the catalogue (restore is `delete`, a domain's PATCH `deploy*`, a job's logs

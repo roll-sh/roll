@@ -16,9 +16,13 @@ use std::time::Instant;
 
 /// Every request on the apps listener: routed by `Host`.
 pub fn router(apps: Arc<Apps>) -> axum::Router {
-    axum::Router::new().fallback(move |req: Request| {
+    axum::Router::new().fallback(move |mut req: Request| {
         let apps = apps.clone();
         async move {
+            // A rewrite's request another node sent on (signed): to the service it names.
+            if let Some((service, env)) = rewritten_to(&mut req) {
+                return serve(apps, service, env, None, req).await;
+            }
             let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             // A domain that redirects (www → apex): a 308 to the same path and query there.
             if let Some(to) = apps.redirect_for_host(&host).await {
@@ -40,10 +44,29 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
 
 /// A listener that's one environment's own port (local development without wildcard DNS).
 pub fn port_router(apps: Arc<Apps>, service: String, env: String) -> axum::Router {
-    axum::Router::new().fallback(move |req: Request| {
+    axum::Router::new().fallback(move |mut req: Request| {
         let (apps, service, env) = (apps.clone(), service.clone(), env.clone());
-        async move { serve(apps, service, env, None, req).await }
+        async move {
+            if let Some((service, env)) = rewritten_to(&mut req) {
+                return serve(apps, service, env, None, req).await;
+            }
+            serve(apps, service, env, None, req).await
+        }
     })
+}
+
+/// Where a static site's rewrite sends a request (`x-roll-rewrite-to: <service>/<env>`), when
+/// another roll node sent it (signed). From a visitor, roll's rewrite headers are taken off here,
+/// the first node, so on any later hop they're a node's own.
+fn rewritten_to(req: &mut Request) -> Option<(String, String)> {
+    if req.extensions().get::<roll_cluster::Forwarded>().is_none() {
+        req.headers_mut().remove(REWRITE_TO);
+        req.headers_mut().remove(VIA_SITE);
+        return None;
+    }
+    let to = req.headers().get(REWRITE_TO)?.to_str().ok()?;
+    let (s, e) = to.split_once('/')?;
+    Some((s.to_string(), e.to_string()))
 }
 
 /// Run the request where the service lives (`deployment`: one deployment's own URL).
@@ -118,8 +141,11 @@ async fn rewrite_of(apps: &Arc<Apps>, key: String, path: String, query: Option<S
     }
 }
 
-/// Marks a request a site's rewrite sent on (roll's own: `x-roll-*` never reaches an app).
+/// Marks a request a site's rewrite sent on (roll's own: `x-roll-*` never reaches an app, and a
+/// visitor's is taken off where it came in, [`rewritten_to`]).
 const VIA_SITE: &str = "x-roll-via-site";
+/// The service and environment a rewrite sends a request to, for the node that owns it.
+const REWRITE_TO: &str = "x-roll-rewrite-to";
 
 /// Send `req` to the project's service `to.0` in `env` at `to.1`, where that service lives,
 /// through all of its own gates (access, allow list, firewall, rate limit, maintenance).
@@ -133,9 +159,20 @@ fn rewrite_to(apps: Arc<Apps>, service: &str, env: &str, to: (String, String), m
             apps.live(&service, &env).log.stream(crate::logs::Stream::System).line(format!("a rewrite names service:{name}, which this project doesn't have"));
             return page(StatusCode::BAD_GATEWAY, "Not here", "This site sends the address to a service that isn't there.");
         };
+        // Never above the rule's own path: no `.` or `..` segment.
+        let p = path.split('?').next().unwrap_or("");
+        if p.split('/').any(|s| matches!(percent_encoding::percent_decode_str(s).decode_utf8_lossy().as_ref(), "." | "..")) {
+            return page(StatusCode::BAD_REQUEST, "Bad address", "The rewritten address isn't one.");
+        }
         let Ok(uri) = path.parse::<Uri>() else { return page(StatusCode::BAD_REQUEST, "Bad address", "The rewritten address isn't one.") };
         *req.uri_mut() = uri;
-        req.headers_mut().insert(HeaderName::from_static(VIA_SITE), HeaderValue::from_static("1"));
+        // A forward to the target's owner carries this path, not the one the visitor asked for.
+        req.extensions_mut().remove::<axum::extract::OriginalUri>();
+        let h = req.headers_mut();
+        h.insert(HeaderName::from_static(VIA_SITE), HeaderValue::from_static("1"));
+        if let Ok(v) = HeaderValue::from_str(&format!("{target}/{env}")) {
+            h.insert(HeaderName::from_static(REWRITE_TO), v);
+        }
         serve(apps, target, env, None, req).await
     })
 }
@@ -694,8 +731,10 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         }
         return r;
     }
-    // A private environment answers only visitors with its token, before anything wakes.
-    if let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
+    // A private environment answers only visitors with its token, before anything wakes. A
+    // site's rewrite (a header only roll sets) was let in by the site, by the project's own rule.
+    let rewritten = req.headers().contains_key(VIA_SITE);
+    if !rewritten && let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
         return turned_away;
     }
     // roll previews' feedback button: its script from the preview's own host, and a page load
@@ -730,6 +769,19 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     {
         return maintenance_page(m);
     }
+    // A static site's rewrite to one of the project's services, before its own cookies (a
+    // gradual rollout's bucket, affinity) are read: they're the target's to read too.
+    if !rewritten {
+        let site = match deployment {
+            Some(d) => apps.deployment_template(service, env, d).await.ok().filter(|t| t.site.is_some()),
+            None => live.template().filter(|t| t.site.is_some()).map(|t| (*t).clone()),
+        };
+        if let Some(t) = site
+            && let Some(to) = site_rewrite(&apps, &t, &req).await
+        {
+            return rewrite_to(apps, service, env, to, req).await;
+        }
+    }
     // A gradual rollout keeps each visitor on one deployment: their bucket, from the cookie it
     // gave them (never passed to the app), or a new one while a canary runs.
     let mut bucket = take_bucket(&mut req);
@@ -745,12 +797,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     let acquired = match deployment {
         // One deployment's own URL: that deployment, whatever is live.
         Some(d) => match apps.deployment_template(service, env, d).await {
-            Ok(t) if t.site.is_some() => {
-                if let Some(to) = site_rewrite(&apps, &t, &req).await {
-                    return rewrite_to(apps, service, env, to, req).await;
-                }
-                return with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await);
-            }
+            Ok(t) if t.site.is_some() => return with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await),
             Ok(t) => {
                 again = Some(Again::Deployment(Box::new(t.clone())));
                 live.acquire_deployment(t).await
@@ -760,9 +807,6 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         None => match live.may_wake().map(|_| live.route(bucket)) {
             // A static site's files answer (a gradual rollout's bucket chose which deployment's).
             Ok(Some(t)) if t.site.is_some() => {
-                if let Some(to) = site_rewrite(&apps, &t, &req).await {
-                    return rewrite_to(apps, service, env, to, req).await;
-                }
                 let mut r = with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await);
                 if let (true, Some(b)) = (fresh, bucket) {
                     let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
@@ -845,7 +889,9 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     let bodiless = !upgrade
         && matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS)
         && !req.headers().contains_key(header::TRANSFER_ENCODING)
-        && req.headers().get(header::CONTENT_LENGTH).is_none_or(|v| v == "0");
+        && req.headers().get(header::CONTENT_LENGTH).is_none_or(|v| v == "0")
+        // The body itself: an HTTP/2 GET can carry one with no length said.
+        && axum::body::HttpBody::size_hint(req.body()).exact() == Some(0);
     let replay = bodiless.then(|| (req.method().clone(), pq.clone(), req.headers().clone(), req.version()));
     let (mut instance, mut cold, mut waited_ms) = (lease.inst.name.clone(), lease.cold, lease.waited.as_millis() as u64);
     let send = async { if h2 { apps.client_h2.request(req).await } else { apps.client.request(req).await } };
@@ -863,12 +909,10 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         },
         None => send.await,
     };
-    // Gone: nothing listened (a fresh connection), or a pooled one broke and the instance isn't
-    // running any more.
-    let gone = match &sent {
-        Err(e) if replay.is_some() && again.is_some() => e.is_connect() || !apps.deps.runtime.running(&lease.inst.name).await,
-        _ => false,
-    };
+    // Gone: nothing listened, so the app never saw it (a pooled connection that had closed is
+    // the client's to try again on a fresh one, which then fails to connect). A request it may
+    // have seen (one that broke after it was written) is never sent twice, as Fly's proxy.
+    let gone = matches!(&sent, Err(e) if e.is_connect());
     let sent = match (sent, replay, again) {
         (Err(e), Some((method, pq, headers, version)), Some(how)) if gone => {
             live.connect_failed(&lease.inst);

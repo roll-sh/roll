@@ -14,6 +14,15 @@ pub struct Revision {
     pub message: String,
 }
 
+/// One commit of a range ([`Sources::commits`]).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct CommitInfo {
+    pub sha: String,
+    /// Its message's first line.
+    pub summary: String,
+    pub author: String,
+}
+
 /// A landing on a branch (roll code's durable land log).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Landing {
@@ -49,6 +58,12 @@ pub trait Sources: Send + Sync {
     /// (gitignore-style, from the repo's root). A source that can't tell says yes.
     async fn touches(&self, _repo: &str, _from: &str, _to: &str, _patterns: &[String]) -> anyhow::Result<bool> {
         Ok(true)
+    }
+    /// The commits `to` has that `from` doesn't, newest first, along `to`'s first parents: at
+    /// most `limit`, and whether that's all of them (`from` reached). None: a source that can't
+    /// tell.
+    async fn commits(&self, _repo: &str, _from: &str, _to: &str, _limit: usize) -> anyhow::Result<Option<(Vec<CommitInfo>, bool)>> {
+        Ok(None)
     }
     /// Report a deploy on its commit (roll code's commit statuses; mirrored to GitHub):
     /// `state` is `pending`, `success` or `failure`.

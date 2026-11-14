@@ -72,6 +72,15 @@ impl Sources for FakeCode {
         }
         Ok(())
     }
+    async fn commits(&self, _repo: &str, from: &str, to: &str, limit: usize) -> anyhow::Result<Option<(Vec<apps_control::integrations::CommitInfo>, bool)>> {
+        // Its landings are its history, oldest first.
+        let l = self.landings.lock();
+        let Some(end) = l.iter().position(|x| x.revision.sha == to) else { return Ok(None) };
+        let start = l.iter().position(|x| x.revision.sha == from);
+        let mut out: Vec<_> = l[start.map_or(0, |s| s + 1)..=end].iter().rev().map(|x| apps_control::integrations::CommitInfo { sha: x.revision.sha.clone(), summary: x.revision.message.clone(), author: x.author.clone().unwrap_or_default() }).collect();
+        out.truncate(limit);
+        Ok(Some((out, start.is_some())))
+    }
     async fn landings(&self, after: i64, limit: usize) -> anyhow::Result<Vec<Landing>> {
         Ok(self.landings.lock().iter().filter(|l| l.seq > after).take(limit).cloned().collect())
     }
@@ -465,6 +474,10 @@ async fn a_newer_push_stops_the_build_of_an_older_one() {
     let (slow, fast) = (by_rev(&all, "b2b2b2b2b2b2").unwrap(), by_rev(&all, "c3c3c3c3c3c3").unwrap());
     assert_eq!((slow["status"].as_str(), slow["error"].as_str(), fast["status"].as_str()), (Some("superseded"), Some("a newer push replaced it"), Some("active")), "{all}");
     assert!(began.elapsed() < Duration::from_secs(10), "the slow build didn't run to its end");
+    // What it brought over the deployment live before it: both pushes, newest first.
+    let (_, c) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{}/commits", fast["id"].as_str().unwrap()), None).await;
+    let shas: Vec<&str> = c["commits"].as_array().unwrap().iter().map(|x| x["sha"].as_str().unwrap()).collect();
+    assert_eq!((shas, c["complete"].as_bool(), c["since"]["revision"].as_str()), (vec!["c3c3c3c3c3c3", "b2b2b2b2b2b2"], Some(true), Some("a1a1a1a1a1a1")), "{c}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1251,12 +1264,20 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     }
     // `/api/* service:api/v1/:splat 200`: the project's api service answers on the site's origin.
     assert_eq!(site("/api/users").await.unwrap().status(), StatusCode::BAD_GATEWAY, "no api service yet");
-    image_service(&w, "api", json!({"port": 80})).await;
+    let (api, _) = image_service(&w, "api", json!({"port": 80})).await;
     tokio::time::sleep(Duration::from_millis(2100)).await;
     let r = site("/api/users?page=2").await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let body: Value = serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["path"], "/v1/users", "{body}");
+    assert_eq!(site("/api/..%2F..%2Fadmin").await.unwrap().status(), StatusCode::BAD_REQUEST, "never above the rule's path");
+    // A private api: the site lets its visitors through by the project's rule; a visitor who
+    // says it's a rewrite, straight to the api, still needs the api's access.
+    let api_env = format!("/v1/apps/services/{}/environments/production", api["id"].as_str().unwrap());
+    assert_eq!(call(&w.api, "PUT", &api_env, Some(json!({"access": {"token": "api-only-token-0123456789"}}))).await.0, StatusCode::OK);
+    assert_eq!(site("/api/users").await.unwrap().status(), StatusCode::OK);
+    let forged = Request::builder().uri("/").header("host", host(&api["environments"][0]["url"])).header("x-roll-via-site", "1").body(Body::empty()).unwrap();
+    assert_ne!(w.public.clone().oneshot(forged).await.unwrap().status(), StatusCode::OK);
 
     // A cron service: runs to its exit, recorded.
     let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "nightly", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "0 3 * * *"} }))).await;
@@ -1979,8 +2000,9 @@ async fn a_crashing_worker_restarts_and_its_crash_loop_is_one_event() {
 /// wake timeout get a 503 page that says when to try again, and the retry gets the app.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_crowd_wakes_one_instance_and_a_slow_start_says_when_to_retry() {
+    // Ten times the wake timeout to start: a crowd held up by a busy machine still meets it.
     let w = world_with(|c| c.live.wake_timeout = Duration::from_millis(300)).await;
-    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "slow", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80}, "variables": {"FAKE_BOOT_MS": "900"} }))).await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "slow", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80}, "variables": {"FAKE_BOOT_MS": "3000"} }))).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let id = svc["id"].as_str().unwrap().to_string();
     assert_eq!(settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");

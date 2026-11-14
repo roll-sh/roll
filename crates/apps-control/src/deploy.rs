@@ -363,6 +363,30 @@ impl Apps {
         Ok(d)
     }
 
+    /// `GET …/deploys/{dep}/commits`: what a repo deployment brings over the one it's measured
+    /// against (Render's deploy view): the live one, or for the live one, the one live before
+    /// it. Up to 50 commits, newest first, and whether that's all; null when there's nothing to
+    /// compare (not a repo deployment, the first one, a source that can't tell).
+    pub async fn deploy_commits(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<Value> {
+        let d = self.deployment(service, env, dep).await?;
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (svc, row, all) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?, s.deployments(&sid, &e, 100)?))).await?;
+        let none = json!({ "since": null, "commits": null, "complete": false });
+        let (Source::Repo { repo, .. }, Some(to), Some(sources)) = (&svc.source, d.revision.as_deref(), self.deps.sources.clone()) else { return Ok(none) };
+        let since = if row.active.as_deref() == Some(dep) {
+            all.iter().filter(|x| x.created_at < d.created_at && x.revision.is_some() && x.image.is_some() && x.status == DeployStatus::Inactive).max_by_key(|x| x.created_at)
+        } else {
+            all.iter().find(|x| row.active.as_deref() == Some(x.id.as_str()))
+        };
+        let Some(since) = since.filter(|s| s.revision.is_some()) else { return Ok(none) };
+        let from = since.revision.clone().unwrap_or_default();
+        match sources.commits(repo, &from, to, 50).await {
+            Ok(Some((commits, complete))) => Ok(json!({ "since": { "id": since.id, "revision": from }, "commits": commits, "complete": complete })),
+            Ok(None) => Ok(none),
+            Err(e) => Err(Error::BadRequest(format!("{repo}: {e}"))),
+        }
+    }
+
     pub fn deploy_log(self: &Arc<Self>, dep: &str) -> LogSink {
         self.logs.sink(format!("build:{dep}"), Stream::Build).deployment(dep)
     }
@@ -568,6 +592,17 @@ impl Apps {
                 Err(e) => log.stream(Stream::System).line(format!("static site: its files couldn't be exported ({e:#}); a container serves it")),
             }
         }
+        // Read before the instances' values are (a change in between then says "changed", the
+        // safe side, never that nothing did): the secrets' digest, the environment's own
+        // variables (what a rollback to it restores, kept with its switch to live) and the hash
+        // of everything it reads.
+        let secrets_digest = self.deps.secrets.digest(&svc.project, &env.name).await.ok().flatten();
+        let (sid, e, did) = (svc.id.clone(), env.name.clone(), d.id.clone());
+        let snapshot = self.db(move |s| s.seal_snapshot(&did, &sid, &e)).await?;
+        let vars_hash = {
+            let r = self.resolve_vars(&svc, &env, &dep.id).await?;
+            fingerprint(&r.vars_for_hash(), &svc)
+        };
         let tpl = Arc::new(self.template(&svc, &env, &dep).await?);
         let did = d.id.clone();
         let no_traffic = self.db(move |s| s.no_traffic(&did)).await?;
@@ -580,19 +615,13 @@ impl Apps {
             self.pre_deploy(&tpl, &cmd, log, &cancel).await?;
         }
         self.step(&d.service, &d.id, "rollout").await;
-        // The environment's own variables as this deployment reads them: what a rollback to it
-        // restores, kept with its switch to live.
-        let (sid, e, did) = (svc.id.clone(), env.name.clone(), d.id.clone());
-        let snapshot = self.db(move |s| s.seal_snapshot(&did, &sid, &e)).await?;
-        let vars_hash = {
-            let r = self.resolve_vars(&svc, &env, &dep.id).await?;
-            fingerprint(&r.vars_for_hash(), &svc)
-        };
-        // The project's secrets as it reads them (a digest, no value): what "secrets changed
-        // since" compares with. Best effort: without one, nothing says so.
-        if let Ok(Some(digest)) = self.deps.secrets.digest(&svc.project, &env.name).await {
+        // The project's secrets as the instances read them (a digest, no value): what "secrets
+        // changed since" compares with. Best effort: without one, nothing says so.
+        if let Some(digest) = secrets_digest {
             let did = d.id.clone();
-            let _ = self.db(move |s| s.set_secrets_digest(&did, &digest)).await;
+            if let Err(e) = self.db(move |s| s.set_secrets_digest(&did, &digest)).await {
+                warn!(deployment = %d.id, error = %e, "apps: the secrets' digest wasn't kept");
+            }
         }
         let live = self.live(&svc.id, &env.name);
         // Instances of the old deployment are known here (after a restart: loaded from the store).

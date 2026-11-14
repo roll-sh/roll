@@ -363,6 +363,13 @@ export interface Environment extends EnvironmentSummary {
   created_at: number;
 }
 
+/** `…/deploys/{dep}/commits`: newest first, at most 50; `complete`: the one it's measured against was reached. Null: nothing to compare. */
+export interface DeployCommits {
+  since: { id: string; revision: string } | null;
+  commits: { sha: string; summary: string; author: string }[] | null;
+  complete: boolean;
+}
+
 export interface NewDeploy {
   revision?: string;
   image?: string;
@@ -607,6 +614,8 @@ export const appsApi = {
   deploy: (id: string, e: string, body: NewDeploy = {}) => call<Deployment>("POST", `${env(id, e)}/deploys`, body),
   deploys: (id: string, e: string) => call<Deployment[]>("GET", `${env(id, e)}/deploys`),
   deployment: (id: string, e: string, d: string) => call<Deployment>("GET", dep(id, e, d)),
+  /** What a repo deployment brings over the live one (for the live one, the one before it). */
+  commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
   rollback: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`),
   /** Back to the one live before what runs (the server walks back through rollbacks). */

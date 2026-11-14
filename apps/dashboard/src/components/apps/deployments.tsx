@@ -1,7 +1,7 @@
 import { HorizonMark } from "@roll/brand";
 import { ExternalLink, Rocket, RotateCcw, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { appsApi, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type Environment, type LogLine } from "@/lib/apps-api";
+import { appsApi, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type DeployCommits, type Environment, type LogLine } from "@/lib/apps-api";
 import { btn, panel } from "../ui";
 import { PlanDetails } from "./new-service";
 import { usePageVisible } from "./live";
@@ -177,9 +177,47 @@ function useSteps(service: string, env: string, d: Deployment) {
   return full ? stepDurations(full) : [];
 }
 
+/** A repo deployment's commits over the live one (Render's deploy view), read once it's opened. */
+function useCommits(service: string, env: string, d: Deployment) {
+  const [c, setC] = useState<DeployCommits | null>(null);
+  useEffect(() => {
+    if (!d.revision) return setC(null);
+    let live = true;
+    appsApi.commits(service, env, d.id).then((x) => live && setC(x), () => live && setC(null));
+    return () => {
+      live = false;
+    };
+  }, [service, env, d.id, d.revision, d.status]);
+  return c;
+}
+
+function Commits({ c }: { c: DeployCommits }) {
+  if (!c.commits || !c.since) return null;
+  if (!c.commits.length) return <p className="mb-2 text-[12px] text-subtle">The same commit as {shortSha(c.since.revision)}.</p>;
+  return (
+    <details className="mb-2 text-[12px]">
+      <summary className="cursor-pointer text-muted">
+        {c.commits.length}
+        {c.complete ? "" : "+"} {c.commits.length === 1 ? "commit" : "commits"} since {shortSha(c.since.revision)}
+        {!c.complete && " (it isn't in this one's history: a rollback, or another branch)"}
+      </summary>
+      <ul className="mt-1.5 space-y-1">
+        {c.commits.map((x) => (
+          <li key={x.sha} className="flex min-w-0 gap-2">
+            <span className="shrink-0 font-mono text-[11.5px] text-subtle">{shortSha(x.sha)}</span>
+            <span className="min-w-0 flex-1 truncate">{x.summary}</span>
+            <span className="shrink-0 text-subtle">{x.author}</span>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
 function BuildLog({ service, env, d }: { service: string; env: string; d: Deployment }) {
   const { lines, error } = useBuildLog(service, env, d);
   const steps = useSteps(service, env, d);
+  const commits = useCommits(service, env, d);
   return (
     <section className="min-w-0">
       <div className="mb-2 flex items-center gap-2">
@@ -189,6 +227,7 @@ function BuildLog({ service, env, d }: { service: string; env: string; d: Deploy
           {d.image ?? ""}
         </span>
       </div>
+      {commits && <Commits c={commits} />}
       {steps.length > 0 && (
         <ol className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px]" aria-label="Steps">
           {steps.map((s, i) => (

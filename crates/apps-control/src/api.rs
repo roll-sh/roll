@@ -75,6 +75,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys"), get(deploys).post(create_deploy).layer(DefaultBodyLimit::max(apps.cfg.upload_max)))
         .route(&format!("{env}/deploys/{{dep}}"), get(get_deploy))
         .route(&format!("{env}/deploys/{{dep}}/logs"), get(deploy_logs))
+        .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
         .route(&format!("{env}/rollback"), post(rollback_previous))
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
@@ -447,6 +448,10 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
         apps.deploy(&id, &env, body(&b)?, By { trigger: Trigger::Manual, actor }, None, key).await?
     };
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
+}
+
+async fn deploy_commits(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
+    ok(apps.deploy_commits(&id, &env, &dep).await?)
 }
 
 async fn get_deploy(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
