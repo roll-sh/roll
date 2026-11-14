@@ -455,6 +455,7 @@ previews are listed once those products are on.
 | `apps_set_variables` | Set or unset an environment's variables (production is a "deploy" action). | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_metrics` | CPU, memory and requests of an environment. | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
 | `apps_plan` | How roll would build and run a repo, before making a service (a dry run). | `POST /v1/apps/plan` |
+| `apps_import` | What a roll.toml or compose file would make, making nothing (apps-next). | `POST /v1/apps/import` |
 | `apps_get_environment` | One environment: URL, state, live deploy, branch, size. | `GET /v1/apps/services/{id}/environments/{env}` |
 | `apps_delete_environment` | Delete an environment with its deploys and domains. | `DELETE /v1/apps/services/{id}/environments/{env}` |
 | `apps_link` | Give a service a roll resource's connection variables (reveal on the resource). | `PUT /v1/apps/services/{id}/links/{kind}/{ref}` |
@@ -554,8 +555,9 @@ person an hour; workload tokens capped per owner and a person's listed before th
 token's retry within its grace audited; apps settings that change what production runs, its source,
 build, start and pre-deploy commands, schedule, kind, port, volume and `run.public`, are deploy;
 `create_grant` refuses extensions that name no caller; the expiry digest leaves out tokens made for
-a day or less); the approval UI checked in a browser against `users-live` (the policy's checkboxes,
-a waiting token's badge with an admin's Approve and Deny, "Needs attention" leading with it, the
+a day or less); `apps_import` (a roll.toml or compose file checked before `roll up --all`;
+apps-next); the approval UI checked in a browser against `users-live` (the policy's checkboxes, a
+waiting token's badge with an admin's Approve and Deny, "Needs attention" leading with it, the
 person's view without them), which moved rotation's choice into a step Rotate opens (it was a select
 on every row); the `tune_slow_query` prompt (Neon's query tuning: the plan, an index tried on a
 branch, both plans compared, main only when you say so); the sixteenth review (this round's token
