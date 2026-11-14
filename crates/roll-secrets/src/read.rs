@@ -9,7 +9,7 @@ use crate::links::{Link, Mode};
 use crate::refs::{self, Part};
 use crate::write::{Item, ItemAction, SecretType};
 use crate::{Error, Result, Secrets, Value, from_json, json, names};
-use code_sql::{Conn, params};
+use code_sql::{Conn, params, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value as Json;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -141,6 +141,10 @@ pub struct Values {
     /// Keys whose value is a dynamic link's short-lived credential (it ends with its lease: a
     /// consumer that can't renew it, such as a service that scales to zero, should refuse them).
     pub dynamic: Vec<String>,
+    /// Sensitive keys left out (only roll's runtimes and syncs read them).
+    pub withheld: Vec<String>,
+    /// Sensitive keys whose values are here (a runtime's read): it uses them and never shows them.
+    pub sensitive: Vec<String>,
     /// Keys whose value comes from a link to a resource (any mode): a consumer that reaches
     /// resources another way (a container on a private network) knows which addresses to rewrite.
     pub linked: Vec<String>,
@@ -290,7 +294,7 @@ impl Secrets {
     /// `e` as the API shows it. Its fingerprint only to a caller who may reveal it: a writer
     /// could otherwise test guesses against values it can't read.
     fn secret_of(&self, dek: &Dek, project: &str, e: Entry, caller: &Caller) -> Secret {
-        let reveal = caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path));
+        let reveal = caller.sees(project, &e.env, &e.row.path, &e.row.tags);
         let fp = if reveal { e.row.fp.clone() } else { String::new() };
         let references = e.row.references(dek, project);
         Secret {
@@ -345,6 +349,9 @@ impl Secrets {
         let dek = self.project(project)?;
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let e = entries.iter().find(|e| e.row.key == key).ok_or_else(|| Error::NotFound(format!("no secret {key} in {slug}:{path}")))?;
+        if names::sensitive(&e.row.tags) && !caller.runtime {
+            return Err(Error::Forbidden(format!("{key} is sensitive: its value reaches only roll's runtimes and syncs, never a person or a token")));
+        }
         let mut r = Resolver::new(self, project, &dek, caller, resolve, &caller.principal);
         let (v, problem) = r.entry(e);
         let leases = r.finish(slug)?;
@@ -365,8 +372,17 @@ impl Secrets {
         let mut r = Resolver::new(self, project, &dek, caller, resolve, &who);
         let mut values = BTreeMap::new();
         let mut problems = vec![];
+        let mut withheld = vec![];
+        let mut sensitive = vec![];
         for e in &entries {
+            if names::sensitive(&e.row.tags) && !caller.runtime {
+                withheld.push(e.row.key.clone());
+                continue;
+            }
             let (v, problem) = r.entry(e);
+            if r.tainted(e) {
+                sensitive.push(e.row.key.clone());
+            }
             if let Some(p) = problem {
                 problems.push(Problem { key: e.row.key.clone(), problem: p });
             }
@@ -390,7 +406,7 @@ impl Secrets {
         self.audit_now(project, caller, action, Some(slug), Some(&path), &keys, &summary);
         let dynamic = entries.iter().filter(|e| e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic)).map(|e| e.row.key.clone()).collect();
         let linked = entries.iter().filter(|e| e.row.link.is_some()).map(|e| e.row.key.clone()).collect();
-        Ok(Values { values, problems, leases, dynamic, linked })
+        Ok(Values { values, problems, leases, dynamic, linked, withheld, sensitive })
     }
 
     /// A folder's own values as they were after change `seq` (or at time `at`): what was stored
@@ -413,7 +429,19 @@ impl Secrets {
         let mut values = BTreeMap::new();
         let mut problems = vec![];
         let mut linked = vec![];
+        let mut withheld = vec![];
+        // Keys sensitive now: none of their versions shows, however old.
+        let now_sensitive: std::collections::HashSet<String> = if caller.runtime {
+            Default::default()
+        } else {
+            self.db.read(|c| c.query("SELECT id, tags FROM secrets WHERE project_id = ?", [project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?.into_iter().filter(|(_, t)| names::sensitive(&crate::from_json::<Vec<String>>(t))).map(|(id, _)| id).collect()
+        };
         for v in state.into_iter().filter(|v| v.owner.is_empty() && v.path == path) {
+            // A version of a key sensitive now, or written while it was, stays out of reach.
+            if !caller.runtime && (now_sensitive.contains(&v.secret_id) || names::sensitive(&crate::from_json::<Vec<String>>(&v.tags))) {
+                withheld.push(v.key);
+                continue;
+            }
             let link: Option<Link> = v.link.as_deref().and_then(|l| serde_json::from_str(l).ok());
             if link.is_some() {
                 linked.push(v.key.clone());
@@ -433,7 +461,7 @@ impl Secrets {
         }
         let keys: Vec<String> = values.keys().cloned().collect();
         self.audit_now(project, caller, "secrets.export", Some(slug), Some(&path), &keys, &format!("exported {} as of change #{seq}", crate::write::plural(keys.len(), "value")));
-        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked }))
+        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, withheld, sensitive: vec![] }))
     }
 
     /// A digest of a folder's effective secrets (keys, where they come from, versions,
@@ -530,15 +558,21 @@ impl Secrets {
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
         let owner = self.owner_of(kind, caller);
-        let (id, ct, link): (String, Option<Vec<u8>>, Option<String>) = self.db.read(|c| {
+        let (id, ct, link, tags): (String, Option<Vec<u8>>, Option<String>, String) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             c.query_row(
-                "SELECT secret_id, value, link FROM versions WHERE env_id = ? AND path = ? AND key = ? AND owner = ? AND version = ?",
+                "SELECT secret_id, value, link, tags FROM versions WHERE env_id = ? AND path = ? AND key = ? AND owner = ? AND version = ?",
                 params![env.id, path, key, owner, version],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .map_err(|_| Error::NotFound(format!("no version {version} of {key}")))
         })?;
+        // Any version of a key that's sensitive now (tagging one keeps its value: an older version
+        // holds it too), and any written while it was.
+        let now_sensitive = self.db.read(|c| c.query_row("SELECT tags FROM secrets WHERE id = ?", [&id], |r| r.get::<_, String>(0)).optional())?.is_some_and(|t: String| names::sensitive(&crate::from_json::<Vec<String>>(&t)));
+        if !caller.runtime && (now_sensitive || names::sensitive(&crate::from_json::<Vec<String>>(&tags))) {
+            return Err(Error::Forbidden(format!("{key} is sensitive: none of its versions reaches a person or a token")));
+        }
         let v = match (ct, link) {
             (Some(ct), _) => dek.open(&value_aad(project, &id, version), &ct)?,
             (None, Some(l)) => {
@@ -600,11 +634,13 @@ impl Secrets {
                 let mut fps: Vec<Option<&str>> = vec![];
                 for (env, view) in envs.iter().zip(&by_key) {
                     let found = view.get(key.as_str()).copied();
-                    fps.push(found.map(|e| e.row.fp.as_str()));
+                    // A sensitive row's fingerprint takes no part in comparing (a guess written in
+                    // another environment would show "same"): it compares as itself alone.
+                    fps.push(found.map(|e| if caller.sees(project, &e.env, &e.row.path, &e.row.tags) { e.row.fp.as_str() } else { e.row.id.as_str() }));
                     let cell = found.map(|e| {
                         // A row another project shares: its fingerprint is that project's, and its
                         // value its key's, so neither shows here.
-                        let reveal = e.row.project_id == project && caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path));
+                        let reveal = e.row.project_id == project && caller.sees(project, &e.env, &e.row.path, &e.row.tags);
                         let refs = e.row.references(&dek, project);
                         let misfit = match (typed.get(key.as_str()), &e.row.value) {
                             (Some(r), Some(ct)) if reveal && e.row.link.is_none() && refs.is_empty() => {
@@ -660,6 +696,7 @@ impl Secrets {
             .map(|k| {
                 let (x, y) = (ia.get(k).copied(), ib.get(k).copied());
                 let status = match (x, y) {
+                    (Some(x), Some(y)) if !caller.sees(project, &x.env, &x.row.path, &x.row.tags) || !caller.sees(project, &y.env, &y.row.path, &y.row.tags) => "hidden",
                     (Some(x), Some(y)) if x.row.fp == y.row.fp => "same",
                     (Some(_), Some(_)) => "different",
                     (Some(_), None) => "only_from",
@@ -732,6 +769,8 @@ pub(crate) struct Resolver<'a> {
     views: HashMap<(String, String), HashMap<String, Entry>>,
     done: HashMap<String, (Value, Option<String>)>,
     stack: Vec<String>,
+    /// Entries whose value holds a sensitive one (itself, or through a reference).
+    tainted: std::collections::HashSet<String>,
     /// The project's resources, loaded at the first link.
     members: Option<std::collections::BTreeSet<(String, String)>>,
     /// Dynamic credentials issued during this resolve, by (environment, kind, ref, credential).
@@ -743,7 +782,7 @@ pub(crate) struct Resolver<'a> {
 
 impl<'a> Resolver<'a> {
     pub fn new(s: &'a Secrets, project: &'a str, dek: &'a Dek, caller: &'a Caller, resolve: bool, consumer: &str) -> Self {
-        Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], members: None, issued: BTreeMap::new(), no_dynamic: false, deks: HashMap::new() }
+        Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], tainted: Default::default(), members: None, issued: BTreeMap::new(), no_dynamic: false, deks: HashMap::new() }
     }
 
     fn env(&mut self, slug: &str) -> Option<EnvRow> {
@@ -765,12 +804,26 @@ impl<'a> Resolver<'a> {
 
     /// An entry's value and the first problem resolving it (the value then keeps the
     /// unresolved reference's text).
+    /// Whether `e`'s value holds a sensitive one (after [`Resolver::entry`]).
+    pub(crate) fn tainted(&self, e: &Entry) -> bool {
+        self.tainted.contains(&format!("{}:{}:{}", e.row.env_id, e.row.path, e.row.key))
+    }
+
     pub fn entry(&mut self, e: &Entry) -> (Value, Option<String>) {
         // By the environment's id, not its slug: a folder another project shares may have the same
         // slug and path as one of this project's.
         let id = format!("{}:{}:{}", e.row.env_id, e.row.path, e.row.key);
+        // A sensitive value taints whatever resolves through it, cached or not.
+        if names::sensitive(&e.row.tags) || self.tainted.contains(&id) {
+            let chain: Vec<String> = self.stack.iter().cloned().chain([id.clone()]).collect();
+            self.tainted.extend(chain);
+        }
         if let Some(d) = self.done.get(&id) {
             return d.clone();
+        }
+        // A reference can't carry a sensitive value to someone who couldn't read it directly.
+        if names::sensitive(&e.row.tags) && !self.caller.runtime {
+            return (Value::default(), Some(format!("{} is sensitive: only roll's runtimes and syncs read it", e.row.key)));
         }
         if let Some(at) = self.stack.iter().position(|s| *s == id) {
             let mut chain: Vec<String> = self.stack[at..].iter().map(|s| s.rsplit(':').next().unwrap_or_default().to_string()).collect();

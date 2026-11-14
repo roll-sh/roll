@@ -177,7 +177,7 @@ impl Secrets {
             } else {
                 c.execute("UPDATE shares SET views_left = views_left - 1, opened_at = ? WHERE id = ?", params![now, id])?;
             }
-            let opener = Caller { principal: "share-link".into(), grants: std::sync::Arc::new(crate::access::Everything), ip: ip.clone() };
+            let opener = Caller { principal: "share-link".into(), grants: std::sync::Arc::new(crate::access::Everything), ip: ip.clone(), runtime: false };
             audit::record(c, &project, &opener, "share.open", None, None, &[], &format!("share {} opened ({} left)", &id[..12.min(id.len())], (left - 1).max(0)), now)?;
             Ok(URL_SAFE_NO_PAD.encode(ct))
         })
