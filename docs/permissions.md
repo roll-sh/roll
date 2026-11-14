@@ -78,7 +78,7 @@ type Grant = {
   kind: "token" | "oauth";
   rules: Rule[];         // at least one; nothing else is allowed
   expires_at: number | null; // unix ms; the builder defaults to 30 days
-  not_before?: number | null; // unix ms: it works only from then on (Cloudflare's TTL start); refused before, as an unknown token
+  not_before?: number | null; // unix ms: it works only from then on (Cloudflare's TTL start); before, 401 not_yet_valid saying when
   ip_allow: string[];    // CIDRs; empty: any address
   created_by: string;    // "operator", or the grant that made it ("tok_…")
   created_at: number;
