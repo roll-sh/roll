@@ -1316,9 +1316,13 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Promote a preview's deployment to production on roll apps** (Vercel's promote): its `pv-`
-   environment's built image deployed to production as is (deployments are immutable, so no
-   rebuild), from the sheet, for someone who may deploy production. Waits on #26.
+1. **Promote a preview's deployment to production on roll apps** (Vercel's promote): built on
+   the stacked `feature/roll-previews-on-apps`. The sheet's "Promote <service> to production"
+   (its name typed to confirm) calls roll apps' own `POST …/environments/production/promote`
+   with `from: pv-<id>` as the signed-in person, so roll apps decides who may deploy production
+   (a `deploy`); previews holds no power of its own there. Production gets the preview's image
+   as is (no build) with its own variables (live in `scripts/preview-apps.sh`: production served
+   main, then the change's page). It merges into #28 with #26.
 2. **Egress rules for previews**: caught mail and removed provider keys close the commonest way
    a preview reaches real people, but its code can still call any API (a payment provider's
    sandbox key is fine, a webhook to a customer isn't). A project chooses `egress: "open"`
