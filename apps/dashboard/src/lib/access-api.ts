@@ -366,6 +366,8 @@ export const accessApi = {
   /** The consent screen's answer: where to send the browser (the client's redirect, with a code). */
   authorize: (c: Consent) => call<{ redirect: string }>("POST", "/v1/access/oauth/authorize", c),
   /** A search cluster's indices by name (search's own route; it wakes the cluster), for the builder. */
+  /** Each product's tool count and context cost, for the connect panel (counts only). */
+  toolsetCosts: () => call<{ products: ToolsetCost[] }>("GET", "/v1/mcp/toolsets").then((r) => r.products),
   searchIndices: (cluster: string) => call<{ index: string }[]>("GET", `/v1/search/clusters/${encodeURIComponent(cluster)}/indices`),
   /** A secrets project's encryption keys by name (secrets' own route), for the builder. */
   encryptionKeys: (project: string) => call<{ name: string }[]>("GET", `/v1/secrets/projects/${encodeURIComponent(project)}/transit`),
@@ -494,6 +496,27 @@ export const CLIENT_NAMES: Record<McpClient, string> = {
   codex: "Codex",
   other: "Any MCP client",
 };
+
+/** One product's tools as `GET /v1/mcp/toolsets` counts them (the whole list, no narrowing). */
+export type ToolsetCost = { product: string; tools: number; read_only: number; context_tokens: number };
+
+/**
+ * Tools a client can take in one request. VS Code: 128, its own built-in tools included (its
+ * docs, "Use tools with agents"). Cursor: reported to drop tools past about 40.
+ */
+export const CLIENT_TOOL_LIMIT: Partial<Record<McpClient, { tools: number; note: string }>> = {
+  vscode: { tools: 128, note: "VS Code refuses a chat request with more than 128 tools, its own built-in ones included" },
+  cursor: { tools: 40, note: "Cursor is reported to drop tools past about 40" },
+};
+
+/** What a choice of toolsets lists (none picked: every product; the access tools always). */
+export function toolsetCost(costs: ToolsetCost[], picked: string[], readonly: boolean): { tools: number; tokens: number } {
+  const listed = costs.filter((c) => c.product === "access" || picked.length === 0 || picked.includes(c.product));
+  const tools = listed.reduce((n, c) => n + (readonly ? c.read_only : c.tools), 0);
+  // Read-only lists fewer tools: their share of the product's cost, near enough.
+  const tokens = listed.reduce((n, c) => n + (readonly && c.tools ? Math.round((c.context_tokens * c.read_only) / c.tools) : c.context_tokens), 0);
+  return { tools, tokens };
+}
 
 /** The MCP server's address for an API base. */
 export const mcpUrl = (api: string = ROLL_API) => `${api.replace(/\/+$/, "")}/v1/mcp`;
