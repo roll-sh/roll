@@ -82,6 +82,7 @@ describe("toolsets", () => {
   it("narrows the MCP URL to the products picked, and leaves it whole for none", () => {
     expect(withToolsets("https://api.roll.sh/v1/mcp", ["redis", "postgres"])).toBe("https://api.roll.sh/v1/mcp?toolsets=postgres,redis");
     expect(withToolsets("https://api.roll.sh/v1/mcp", [])).toBe("https://api.roll.sh/v1/mcp");
+    expect(withToolsets("https://api.roll.sh/v1/mcp", ["postgres"], true)).toBe("https://api.roll.sh/v1/mcp?toolsets=postgres&readonly=1");
   });
 });
 

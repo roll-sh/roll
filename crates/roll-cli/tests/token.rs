@@ -96,5 +96,8 @@ async fn a_token_from_the_cli_is_held_to_its_rules() {
     assert!(roll(&api, "", &["token", "revoke", &id]).status.success());
     assert!(!roll(&api, &token, &["db", "list"]).status.success());
     let audit = json_of(&roll(&api, "", &["--json", "mcp", "audit", "--token", &id]));
+    // And as CSV, for a spreadsheet: a header, then a row an event.
+    let csv = String::from_utf8(roll(&api, "", &["mcp", "audit", "--token", &id, "--format", "csv"]).stdout).unwrap();
+    assert!(csv.starts_with("at,token,token_name,") && csv.lines().count() > 1, "{csv}");
     assert!(audit.as_array().unwrap().iter().any(|e| e["decision"] == "ask"), "{audit}");
 }

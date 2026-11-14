@@ -434,6 +434,21 @@ pub fn classified(route: &str) -> Option<&'static str> {
     None
 }
 
+/// Whether `method route` is decided by a prefix row: no row of the route's own names that method
+/// (a route with its own `GET` row can still have a `PUT` a prefix decides), and a prefix row
+/// covers it.
+pub fn method_by_prefix(method: &str, route: &str) -> bool {
+    let shape = shape(route);
+    let own = ROWS.iter().any(|r| self::shape(r.route) == shape && (r.method == "*" || r.method == method));
+    !own && !OPERATOR_ONLY.iter().any(|(r, _)| self::shape(r) == shape) && ROWS.iter().any(|r| r.route.ends_with('/') && shape.starts_with(&self::shape(r.route)))
+}
+
+/// Whether `method route`, decided by a prefix row, was looked at (`prefix-reviewed.txt`, one
+/// `METHOD route` a line).
+pub fn prefix_reviewed(method: &str, route: &str) -> bool {
+    include_str!("prefix-reviewed.txt").lines().map(str::trim).any(|l| l.split_once(' ').is_some_and(|(m, r)| m == method && r == route))
+}
+
 /// A route listed for a nest (`/v1/storage`, `/v1/storage/`): its rows are matched by path.
 fn is_nest(route: &str) -> bool {
     NESTS.iter().any(|n| route == *n || route.starts_with(&format!("{n}/")))
@@ -735,6 +750,8 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/access/tokens/{id}/rotate", "access", ADMIN, Tgt::Product),
     row("GET", "/v1/access/tokens/{id}/tighten", "access", R, Tgt::Product),
     row("GET", "/v1/access/tokens/{id}/networks", "access", R, Tgt::Product),
+    // What an agent with the token is offered over MCP (roll-mcp reads the token as the caller first).
+    row("GET", "/v1/access/tokens/{id}/tools", "access", R, Tgt::Product),
     row("GET", "/v1/access/checkup", "access", R, Tgt::Product),
     row("POST", "/v1/access/tokens/{id}/tighten", "access", ADMIN, Tgt::Product),
     row("DELETE", "/v1/access/tokens/{id}/temporary/{approval}", "access", ADMIN, Tgt::Product),
@@ -991,6 +1008,8 @@ static ROWS: &[Row] = &[
     row("*", "/v1/search/clusters/{id}/indices/{index}", "search", M, one(PG, "cluster")).index("index"),
     row("*", "/v1/search/clusters/{id}/indices/{index}/", "search", M, one(PG, "cluster")).index("index"),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/search", "search", R, one(PG, "cluster")).index("index"),
+    // Analyzing text with an index's analyzers reads the index.
+    row("POST", "/v1/search/clusters/{id}/indices/{index}/analyze", "search", R, one(PG, "cluster")).index("index"),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/delete_by_query", "search", D, one(PG, "cluster")).index("index"),
     // A bulk can delete as well as index: its action lines decide.
     row("POST", "/v1/search/clusters/{id}/indices/{index}/bulk", "search", Act::Raw(bulk_action), one(PG, "cluster")).index("index"),
@@ -1158,6 +1177,12 @@ static ROWS: &[Row] = &[
     // A share link lets someone outside the team in, its token only in the answer: reveal, as the
     // bypass secret is. Listing (no tokens) is read and revoking one is delete, by the prefix.
     row("POST", "/v1/previews/{id}/shares", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A preview's own variables come back with their values: reveal (setting them is write, by
+    // the prefix).
+    row("GET", "/v1/previews/{id}/env", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Accepting a visual change is a person's call (with `visual_review = "required"` previews
+    // refuses tokens anyway): admin, so a write token can't wave its own diff through.
+    row("POST", "/v1/previews/{id}/visual/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // ── roll code ──
     row("GET", "/v1/code", "code", R, Tgt::AnyGrant),
     row("GET", "/v1/code/health", "code", R, Tgt::AnyGrant),
@@ -1170,6 +1195,10 @@ static ROWS: &[Row] = &[
     row("PATCH", "/v1/code/repos/{owner}/{repo}", "code", ADMIN, one(REPO, "repo")),
     row("DELETE", "/v1/code/repos/{owner}/{repo}", "code", D, one(REPO, "repo")),
     row("*", "/v1/code/repos/{owner}/{repo}/", "code", M, one(REPO, "repo")),
+    // Where a repo's committed secrets are (key, environment, path, line; never the value): it
+    // tells a reader which line holds production's key, so it's the repo's managers' (roll code
+    // checks manage too): admin.
+    row("*", "/v1/code/repos/{owner}/{repo}/leaks", "code", ADMIN, one(REPO, "repo")),
     row("POST", "/v1/code/repos/{owner}/{repo}/land", "code", DEPLOY, one(REPO, "repo")),
     row("POST", "/v1/code/repos/{owner}/{repo}/queue/pause", "code", ADMIN, one(REPO, "repo")),
     row("POST", "/v1/code/repos/{owner}/{repo}/queue/resume", "code", ADMIN, one(REPO, "repo")),
@@ -1393,6 +1422,8 @@ mod tests {
         assert_eq!(git_push(b"0000", Some("main")), Push::Bad);
         assert_eq!(git_push(pkt(&format!("{z} {a}")).as_bytes(), Some("main")), Push::Bad);
         assert_eq!(action("POST", "/v1/previews/projects/{p}/bypass", "/v1/previews/projects/prj_a/bypass"), Some(Action::Reveal));
+        assert_eq!(action("GET", "/v1/previews/{id}/env", "/v1/previews/pv_1/env"), Some(Action::Reveal), "a preview's variables have their values");
+        assert_eq!(action("POST", "/v1/previews/{id}/visual/accept", "/v1/previews/pv_1/visual/accept"), Some(Action::Admin));
         // An apps shell runs any command with the environment's variables: admin, outside production
         // too, all of a session (closing one included). Waking an environment starts compute: write.
         for (m, p) in [("POST", "/v1/apps/services/{s}/environments/{e}/shell/sessions/{sh}/resize"), ("DELETE", "/v1/apps/services/{s}/environments/{e}/shell/sessions/{sh}")] {

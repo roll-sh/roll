@@ -636,6 +636,13 @@ async fn oauth_connects_an_mcp_client() {
     assert_eq!(s, StatusCode::CREATED, "{client}");
     assert!(client.as_object().unwrap().values().all(|v| !v.is_null()), "RFC 7591: unset fields are left out: {client}");
     let client_id = client["client_id"].as_str().unwrap();
+    // Registration stores nothing (a flood has nothing to fill): the id is the client, signed, and
+    // a forged one is no client.
+    assert!(client_id.starts_with("rlc_"), "{client_id}");
+    assert!(d.access.store.list_clients().unwrap().is_empty(), "nothing kept before consent");
+    let (body, _) = client_id.split_once('.').unwrap();
+    let forged = format!("{body}.AAAA");
+    assert!(d.access.store.client(&forged).unwrap().is_none(), "a forged id is no client");
     let bad = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "redirect_uris": ["http://evil.example/cb"] }))).await;
     assert_eq!(bad.1["error"], "invalid_redirect_uri");
 
@@ -648,6 +655,7 @@ async fn oauth_connects_an_mcp_client() {
     });
     let (s, out) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(consent)).await;
     assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(d.access.store.list_clients().unwrap().len(), 1, "kept once a person consented");
     let url = url::Url::parse(out["redirect"].as_str().unwrap()).unwrap();
     let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
     assert_eq!(q["state"], "xyz");
@@ -1419,4 +1427,17 @@ async fn a_workload_gets_a_token_for_minutes() {
     d.people.remove("usr_alice");
     assert!(d.access.mint_workload(new(json!({ "read": "allow" })), &within, 15, Some("usr_alice")).await.is_err(), "its owner can't sign in");
     d.access.store.prune(30).unwrap();
+}
+
+/// Open registration (RFC 7591) can't be flooded: a network registers at most 20 clients a minute
+/// on a node, then 429 with Retry-After.
+#[tokio::test]
+async fn registration_from_one_network_is_limited() {
+    let d = Daemon::new(50);
+    let register = || d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "client_name": "flood", "redirect_uris": ["http://127.0.0.1:9/cb"] })));
+    for _ in 0..20 {
+        assert_eq!(register().await.0, StatusCode::CREATED);
+    }
+    let (s, e) = register().await;
+    assert_eq!((s, e["error"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("too_many_requests")), "{e}");
 }

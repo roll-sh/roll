@@ -299,6 +299,24 @@ impl Api {
     async fn get(&self, p: &str) -> anyhow::Result<Value> {
         self.call(reqwest::Method::GET, p, None).await
     }
+    /// A `GET` whose answer isn't JSON (an export), as text.
+    async fn get_text(&self, p: &str) -> anyhow::Result<String> {
+        let mut req = self.http.get(format!("{}{p}", self.base));
+        if let Some(k) = &self.key {
+            req = req.bearer_auth(k);
+        }
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+        let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            bail!("{}", value["error"].as_str().map(str::to_string).unwrap_or_else(|| format!("{status}")));
+        }
+        Ok(text)
+    }
     async fn post(&self, p: &str, b: Value) -> anyhow::Result<Value> {
         self.call(reqwest::Method::POST, p, Some(b)).await
     }

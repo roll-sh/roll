@@ -40,6 +40,9 @@ pub struct McpCall {
     pub elicits: bool,
     /// The MCP client's name and version, as it said in `initialize`.
     pub client: Option<Arc<str>>,
+    /// Asked for nobody's sake (an argument's completions): what would ask a person is refused at
+    /// once instead, so typing never opens an approval.
+    pub quiet: bool,
 }
 
 /// What a client calls itself, fit for a log line: one line, no control characters, at most 120
@@ -71,7 +74,7 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> crate::Result<T> + Send
 
 /// The client's address: the MCP call's, the one the first node saw (a signed hop), the forwarded
 /// one behind the edge, or the peer.
-pub fn client_ip(req: &Request, trust_forwarded_for: bool) -> Option<IpAddr> {
+pub fn client_ip(req: &Request, config: &crate::Config) -> Option<IpAddr> {
     if let Some(c) = req.extensions().get::<McpCall>() {
         return c.ip;
     }
@@ -81,12 +84,37 @@ pub fn client_ip(req: &Request, trust_forwarded_for: bool) -> Option<IpAddr> {
     if let Some(f) = req.extensions().get::<roll_cluster::Forwarded>() {
         return f.client.as_deref().and_then(|c| c.parse().ok());
     }
-    if trust_forwarded_for
-        && let Some(ip) = req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.split(',').next()).and_then(|v| v.trim().parse().ok())
-    {
-        return Some(ip);
+    let peer = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_canonical());
+    if config.trust_forwarded_for {
+        // Every X-Forwarded-For line, in order: a proxy may add its own line rather than append.
+        let xff = req.headers().get_all("x-forwarded-for").iter().filter_map(|v| v.to_str().ok()).collect::<Vec<_>>().join(",");
+        if !xff.is_empty()
+            && let Some(ip) = forwarded_client(&xff, peer, &config.trusted_proxies)
+        {
+            return Some(ip);
+        }
     }
-    req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip())
+    peer
+}
+
+/// The client an `X-Forwarded-For` names: only from a listed proxy (`peer` one of `trusted`), the
+/// right-most entry that isn't a proxy; entries left of it are whatever the client sent. Nothing
+/// listed, nothing counts (roll's edge hands the client's address over as the connection's own),
+/// and an entry that doesn't parse (`ip:port`) stops the walk: the peer is the answer then.
+pub fn forwarded_client(xff: &str, peer: Option<IpAddr>, trusted: &[ipnet::IpNet]) -> Option<IpAddr> {
+    let is_trusted = |ip: &IpAddr| trusted.iter().any(|n| n.contains(&ip.to_canonical()));
+    if trusted.is_empty() || !peer.is_some_and(|p| is_trusted(&p)) {
+        return None;
+    }
+    let mut last = None;
+    for hop in xff.split(',').map(str::trim).filter(|h| !h.is_empty()).rev() {
+        let ip = hop.parse::<IpAddr>().ok()?.to_canonical();
+        if !is_trusted(&ip) {
+            return Some(ip);
+        }
+        last = Some(ip);
+    }
+    last
 }
 
 fn deny(status: StatusCode, code: &str, message: String, extra: Value) -> Response {
@@ -255,7 +283,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         Ok(None) => return invalid_token(&access),
         Err(e) => return e.into_response(),
     };
-    let ip = client_ip(&req, access.config.trust_forwarded_for);
+    let ip = client_ip(&req, &access.config);
     let route = req.extensions().get::<MatchedPath>().map_or_else(|| "unmatched".to_string(), |m| m.as_str().to_string());
     // Forwarded by a node that decided it for this grant already (a signed hop to an owner): a
     // person isn't asked twice, and the first node logs it. Everything else is decided again.
@@ -776,6 +804,10 @@ struct Asked<'a> {
 
 /// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.
 async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req: Asked<'_>) -> Result<String, Box<Response>> {
+    // A completion never asks a person, nor waits on (or uses up) an approval an agent's call opened.
+    if ctx.mcp.as_ref().is_some_and(|m| m.quiet) {
+        return Err(Box::new(deny(StatusCode::FORBIDDEN, "would_ask", "this would ask a person, and a completion never does".into(), json!({}))));
+    }
     let Asked { headers, path, body, request_hash, args, environment, scope_path, scope_index, product: about } = req;
     let access = &ctx.access;
     let mut existing = headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
@@ -960,4 +992,23 @@ async fn post_process(
     let out = serde_json::to_vec(&v).unwrap_or_default();
     parts.headers.remove(header::CONTENT_LENGTH);
     Response::from_parts(parts, Body::from(out))
+}
+
+
+#[cfg(test)]
+mod forwarded_tests {
+    /// Behind listed proxies, what a client wrote into X-Forwarded-For isn't its address, and a
+    /// peer that isn't a proxy can't send the header at all.
+    #[test]
+    fn the_client_is_who_the_edge_saw() {
+        let trusted: Vec<ipnet::IpNet> = vec!["10.0.0.0/8".parse().unwrap()];
+        let edge = Some("10.1.2.3".parse().unwrap());
+        // The client claimed 1.1.1.1; the edge appended what it saw, 203.0.113.9.
+        assert_eq!(super::forwarded_client("1.1.1.1, 203.0.113.9", edge, &trusted), Some("203.0.113.9".parse().unwrap()));
+        assert_eq!(super::forwarded_client("1.1.1.1", Some("198.51.100.7".parse().unwrap()), &trusted), None, "not from a proxy");
+        assert_eq!(super::forwarded_client("1.1.1.1, 203.0.113.9", edge, &[]), None, "no proxies listed: the header counts for nothing");
+        assert_eq!(super::forwarded_client("1.1.1.1, 203.0.113.9:443", edge, &trusted), None, "an entry that doesn't parse stops the walk");
+        // An IPv4 address as a dual-stack listener reports it.
+        assert_eq!(super::forwarded_client("203.0.113.9", Some("::ffff:10.1.2.3".parse().unwrap()), &trusted), Some("203.0.113.9".parse().unwrap()));
+    }
 }

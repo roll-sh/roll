@@ -223,8 +223,13 @@ pub struct Config {
     pub locked: bool,
     /// Days of audit log kept.
     pub audit_days: i64,
-    /// Take the client's address from `X-Forwarded-For`'s first entry (behind roll's edge).
+    /// Take the client's address from `X-Forwarded-For` (behind roll's edge): its first entry, or,
+    /// with `trusted_proxies`, the right-most one that isn't a proxy.
     pub trust_forwarded_for: bool,
+    /// When set, `X-Forwarded-For` counts only from these peers (the edge's addresses), and the
+    /// client is the right-most address in it that isn't one of them: what a client wrote into the
+    /// header itself is never taken (`ROLL_TRUSTED_PROXIES`).
+    pub trusted_proxies: Vec<ipnet::IpNet>,
     /// How long a request waits for an approval before answering `approval_pending`.
     pub approval_wait: std::time::Duration,
     /// A spent refresh token presented again within this is a retry, not a stolen copy.
@@ -244,6 +249,7 @@ impl Default for Config {
             locked: false,
             audit_days: 90,
             trust_forwarded_for: false,
+            trusted_proxies: Vec::new(),
             approval_wait: std::time::Duration::from_secs(55),
             refresh_grace: std::time::Duration::from_millis(store::REFRESH_GRACE_MS as u64),
             metadata_allow_private: false,
@@ -454,6 +460,8 @@ pub struct Access {
     pub(crate) mail_gate: std::sync::Mutex<MailGate>,
     /// GitHub's secret scanning keys, cached.
     pub(crate) github_keys: leaks::GithubKeys,
+    /// OAuth registrations lately, per network: `(minute, count)` (open registration's limit).
+    pub(crate) registrations: std::sync::Mutex<std::collections::HashMap<String, (i64, u32)>>,
     /// The token policy as last read (`policy_now`).
     policy_cache: std::sync::Mutex<Option<(std::time::Instant, Policy)>>,
 }
@@ -473,7 +481,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -923,6 +931,10 @@ impl roll_auth::Grants for Access {
     /// evaluator answers their requests. Blocking; looked up on every call.
     fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
         let g = self.store.get(id).ok()?;
+        // Stopped for being idle (the token policy), as the evaluator answers its requests.
+        if self.policy_now().idle(&g, code_sql::now_ms()) {
+            return None;
+        }
         if let Some(user) = g.user.as_deref() {
             let people = self.people.get()?;
             people.person_now(user).ok()??;

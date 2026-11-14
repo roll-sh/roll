@@ -98,7 +98,7 @@ type Rule = {
 
 type Selector =
   | { project: string }             // a workspace project: every resource in it, as it is now
-  | { id: string; index?: string }; // one resource, by its product's id; search: only some indices
+  | { id: string; index?: string }; // one resource, by its product's id; search and secrets: only some indices or encryption keys
 // A selector has exactly these fields: any other is refused, never dropped.
 
 type Product = "workspace" | "postgres" | "redis" | "storage" | "streams" | "nosql" | "queues"
@@ -292,6 +292,20 @@ A rule can grant some indices of a search cluster: `{id: "cl_1", index: "logs-*,
 - An approval about some indices names them (`cl_1/logs-a`), and remembering it allows those
   indices only.
 
+### Secrets' encryption keys
+
+A rule can grant some of a project's encryption keys: `{id: "prj_1", index: "payments,pay-*"}`,
+names (letters, digits, `-`, `_`) and `prefix*` patterns. Unlike indices, names are literal: a
+request names one key, so `_all`, a list or a `*` in a key's place reaches no key, and an approval
+remembers only a request that named one. The builder writes it `prj_1/payments,pay-*` and lists
+a project's keys to tick, as it lists a cluster's indices.
+
+It covers the routes of one key (`/v1/secrets/projects/{project}/transit/{name}/…`: encrypt,
+decrypt, sign, verify, HMAC, the public key), at their own actions, so a service that signs with
+one key needs write on that key only, not on the project. Listing, creating, rotating and deleting
+keys stay the project's (`roll_auth::scope::sub_resources` lists the products that have such
+names; secrets' rows name `{name}` with `.index("name")`).
+
 ### Presets
 
 The builder starts from a preset and the user narrows or widens it (`GET /v1/access/catalog` has
@@ -315,7 +329,13 @@ One function, `roll_access::evaluate`, in front of every route rolld serves. On 
    credentials skip this; a request with neither passes or fails as it always has.
 2. **The grant.** It must not be revoked or expired. The client's address must be in `ip_allow`
    when that's set (the peer address, or the edge's forwarded address when rolld is behind the
-   edge).
+   edge, which hands the client's address over as the connection's own). `X-Forwarded-For` counts
+   only from the peers in `ROLL_TRUSTED_PROXIES` (CIDRs or addresses: a load balancer in front of
+   the edge), every line of it, and the client is its right-most entry that isn't one of them; an
+   entry that doesn't parse stops the walk at the peer. With none listed the header counts for
+   nothing, so a request that reaches the API listener directly can't name its own address. A
+   wrong entry stops rolld. MCP tool calls carry the address the gate worked out, and the same
+   address is what open registration's per-network limit counts.
 3. **The route.** The matched route pattern and method find the catalogue row: an exact row (one
    naming the method beats `*`), else the longest prefix row. Routes that are a product's own
    router in disguise (tasks' `{*rest}`, storage's `nest_service`) are matched by the request's
@@ -730,13 +750,14 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `POST /v1/access/tokens/{id}/tighten` | operator | `{from, days?}`: apply the proposal, made again now, if its rules are still `from` (else 409) → the grant |
 | `GET /v1/access/checkup` | access read | the live tokens that need attention: `[{grant, findings: [{kind, why, fix}]}]` ("Checkup") |
 | `GET /v1/access/tokens/{id}/networks` | access read | the networks it's been used from: `[{network, first_at, last_at}]`, newest first ("New networks") |
+| `GET /v1/access/tokens/{id}/tools` | access read | what an agent connected with it is offered over MCP: `{tools: [{name, title, product, read_only, destructive}], prompts, context_tokens}` (served by roll-mcp, which reads the token as the caller first); the token page shows it |
 | `GET /v1/access/tokens/{id}/tighten` | access read | `?days=` (1-90, 30): `{since, days, used: [{product, action, resource, count, last_at}], rules, narrower}`: its rules narrowed to what it used ("Tighten to what it used") |
 | `POST /v1/access/tokens/{id}/rotate` | access admin | a new secret with the same rules (the old one stops at once) → `{grant, token}`; not for OAuth connections |
 | `GET /v1/access/approvals` | access read | newest first; `?state=pending`, `?grant=<id>` (one token's), `?limit=` (at most 500) |
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
 | `POST /v1/access/approvals/{id}/approve` | operator | `{remember?: "1h" \| "8h" \| "1d" \| "always"}`: also allow the same action on the same resource ("Remembered approvals") |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
-| `GET /v1/access/audit` | access read | `?grant=&product=&action=&decision=&source=&resource=&before=&limit=`; `resource` is who touched it: that resource or anything under it (`cl_1` finds `cl_1/logs-a`); `&format=jsonl` answers one event per line, as a download |
+| `GET /v1/access/audit` | access read | `?grant=&product=&action=&decision=&source=&resource=&before=&limit=`; `resource` is who touched it: that resource or anything under it (`cl_1` finds `cl_1/logs-a`); `&format=jsonl` answers one event per line and `&format=csv` a row each (UTC times, every cell quoted; a formula character is defused with `'` at a cell's start and after a `;`, tab or `|` inside it, which some spreadsheets split on), as a download (the audit page and `roll mcp audit --format csv` or `jsonl`) |
 | `POST /v1/access/leaks/github` | public (GitHub's signature) | GitHub secret scanning reports: `[{token, type, url, source}]` → `[{token_hash, token_type, label}]`; live tokens are revoked |
 | `GET /v1/access/audit/sinks` | operator | where the log streams: `Sink[]` (`{id, url, status, error, cursor_at, delivered_at, created_at, created_by}`) |
 | `POST /v1/access/audit/sinks` | operator | `{url, from_start?}` → 201 `{sink, secret}`; the secret is shown this once |
@@ -758,7 +779,13 @@ Every route rolld serves is in the catalogue, or deliberately left to its own cr
 startup rolld logs each route with its access and its classification
 (`RUST_LOG=rolld::auth=debug`: `route=/v1/projects scoped=postgres access=operator`), and
 `crates/rolld/tests/auth.rs` fails on any route that no grant could be classified for, outside
-this list:
+the list below. It also fails on a method decided only by a prefix row (`/v1/previews/{id}/`, by
+method: no row of the route's own names that method; rolld logs each route's methods) that isn't
+in `crates/roll-access/src/prefix-reviewed.txt` as `METHOD route`: such a route takes the prefix's
+action whatever it answers (a preview's variables, with their values, were a read until they got
+a row of their own), so each new one is either given its own row or looked at and listed. The
+operator's routes (public routes, which anyone may call without a token, aren't a grant's to
+classify, so the check skips them):
 
 | routes | why |
 | --- | --- |

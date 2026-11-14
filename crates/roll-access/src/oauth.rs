@@ -114,8 +114,35 @@ fn reg_error(code: &'static str, desc: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": code, "error_description": desc }))).into_response()
 }
 
+/// Registrations from one network (/24, /48) a minute at most, on a node: registration is open.
+const REGISTER_PER_MINUTE: u32 = 20;
+
 /// RFC 7591: open registration of public clients (PKCE, no secret).
-async fn register(State(a): S, body: axum::body::Bytes) -> Response {
+async fn register(State(a): S, req: axum::extract::Request) -> Response {
+    let ip = crate::evaluate::client_ip(&req, &a.config);
+    let network = ip.and_then(|i| crate::store::network_of(&i.to_string())).unwrap_or_else(|| "unknown".into());
+    {
+        let now = code_sql::now_ms() / 60_000;
+        let mut seen = a.registrations.lock().unwrap_or_else(|e| e.into_inner());
+        // A new minute starts the counts again; within one, the map holds at most 10,000 networks
+        // and refuses the rest (one sweep a minute, never a scan per request).
+        if seen.get("").is_none_or(|(minute, _)| *minute != now) {
+            seen.clear();
+            seen.insert(String::new(), (now, 0));
+        }
+        if !seen.contains_key(&network) && seen.len() > 10_000 {
+            return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "60")], Json(json!({ "error": "too_many_requests", "error_description": "too many registrations lately: try again in a minute" }))).into_response();
+        }
+        let (minute, n) = seen.entry(network).or_insert((now, 0));
+        if *minute != now {
+            (*minute, *n) = (now, 0);
+        }
+        if *n >= REGISTER_PER_MINUTE {
+            return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "60")], Json(json!({ "error": "too_many_requests", "error_description": "too many registrations from this network: try again in a minute" }))).into_response();
+        }
+        *n += 1;
+    }
+    let Ok(body) = axum::body::to_bytes(req.into_body(), (16 << 10) + 1).await else { return reg_error("invalid_client_metadata", "the registration is too large") };
     if body.len() > 16 << 10 {
         return reg_error("invalid_client_metadata", "the registration is too large");
     }
@@ -129,7 +156,11 @@ async fn register(State(a): S, body: axum::body::Bytes) -> Response {
     if r.grant_types.as_ref().is_some_and(|g| g.iter().any(|t| t != "authorization_code" && t != "refresh_token")) {
         return reg_error("invalid_client_metadata", "grant_types: authorization_code and refresh_token");
     }
-    let name: String = r.client_name.as_deref().map(str::trim).filter(|n| !n.is_empty()).unwrap_or("MCP client").chars().filter(|c| !c.is_control()).take(80).collect();
+    // A name as consent and agents show it: no control or invisible formatting characters (bidi
+    // overrides, zero-width), no backticks, at most 64 (what a token's name may be).
+    let invisible = |c: char| matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}' | '`');
+    let cleaned: String = r.client_name.as_deref().unwrap_or("").chars().filter(|c| !c.is_control() && !invisible(*c)).take(64).collect();
+    let name = if cleaned.trim().is_empty() { "MCP client".to_string() } else { cleaned.trim().to_string() };
     let uri = r.client_uri.filter(|u| u.starts_with("https://") && u.len() <= 500);
     let uris = r.redirect_uris.clone();
     let client = match tokio::task::spawn_blocking(move || a.store.register_client(&name, uri.as_deref(), &uris)).await {

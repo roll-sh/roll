@@ -32,6 +32,8 @@ pub enum Ty {
     Obj,
     Arr,
     Num,
+    /// More than one shape (`true`, `false` or an object): no `type` in the schema.
+    Any,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -138,18 +140,23 @@ impl Tool {
                 Ty::Obj => "object",
                 Ty::Arr => "array",
                 Ty::Num => "number",
+                Ty::Any => "",
             };
-            props.insert(p.name.into(), json!({ "type": ty, "description": p.desc }));
+            let schema = if ty.is_empty() { json!({ "description": p.desc }) } else { json!({ "type": ty, "description": p.desc }) };
+            props.insert(p.name.into(), schema);
             if p.required {
                 required.push(p.name);
             }
         }
         props.insert(
             "approval".into(),
-            json!({ "type": "string", "description": "An approval id (apr_…) from an earlier call that needed the user's approval: waits for it, and runs once it's approved" }),
+            // Every tool takes it: kept short (roll://guide and the server's instructions explain it).
+            json!({ "type": "string", "description": "apr_… from an approval_pending answer: waits, then runs" }),
         );
         let actions = self.find_actions();
-        let read_only = !actions.is_empty() && actions.iter().all(|a| matches!(a, Action::Read | Action::Reveal));
+        // Read-only changes nothing and makes nothing: a reveal that's a POST (a presigned PUT URL,
+        // a share link) makes something someone can use.
+        let read_only = !actions.is_empty() && (actions.iter().all(|a| *a == Action::Read) || (self.method == "GET" && actions.iter().all(|a| matches!(a, Action::Read | Action::Reveal))));
         let destructive = self.hint == Hint::Destructive || actions.iter().any(|a| matches!(a, Action::Delete | Action::Deploy));
         let idempotent = read_only || self.method == "PUT" || self.method == "DELETE";
         json!({
@@ -157,7 +164,7 @@ impl Tool {
             "title": self.title,
             "description": self.description,
             "inputSchema": { "type": "object", "properties": props, "required": required, "additionalProperties": false },
-            "annotations": { "title": self.title, "readOnlyHint": read_only, "destructiveHint": destructive, "idempotentHint": idempotent, "openWorldHint": false },
+            "annotations": { "readOnlyHint": read_only, "destructiveHint": destructive, "idempotentHint": idempotent, "openWorldHint": false },
             "_meta": { "roll/product": self.product, "roll/route": format!("{} {}", self.method, self.path), "roll/actions": actions },
         })
     }
@@ -496,9 +503,29 @@ static TOOLS: &[Tool] = &[
     // ── secrets (roll secrets) ──
     t("secrets_list_environments", "List environments", "A project's secret environments.", "secrets", "GET", "/v1/secrets/projects/{project}/environments", &[SECRET_PROJECT]),
     t("secrets_list", "List secrets", "Secret names and metadata in an environment (never values).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder, e.g. /api")]),
-    t("secrets_reveal", "Reveal a secret", "A secret's value.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
+    t("secrets_reveal", "Reveal a secret", "A secret's value. A key tagged sensitive is never returned to anyone (403): only running services get it, so don't retry or look for it another way.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
     t("secrets_set", "Set a secret", "Create or change a secret's value.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), breq("value", Ty::Str, "The value"), q("path", Ty::Str, "Folder")]),
     t("secrets_delete", "Delete a secret", "Delete a secret.", "secrets", "DELETE", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
+    t("secrets_list_aws_roles", "List AWS roles", "A project's registered AWS roles, which dynamic AWS keys are made from (registering one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/aws-roles", &[req("project", "Workspace project")]),
+    t("secrets_list_outside_databases", "List outside databases", "Postgres servers roll doesn't run whose roles a project's secrets rotate (name, host, roles; never the admin URL; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/outside-databases", &[req("project", "Workspace project")]),
+    t("secrets_list_aws_users", "List AWS users", "A project's AWS IAM users whose access keys roll rotates (name, role, user; never a key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/aws-users", &[req("project", "Workspace project")]),
+    t("secrets_list_cloud_accounts", "List cloud accounts", "A project's GCP and Azure accounts that dynamic credentials come from (no secrets; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/cloud-accounts", &[req("project", "Workspace project")]),
+    t("secrets_list_cas", "List certificate authorities", "A project's own certificate authorities: their public certificates, domains and limits (never a CA's key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/cas", &[req("project", "Workspace project")]),
+    t("secrets_list_ssh_cas", "List SSH certificate authorities", "A project's SSH CAs: their public keys, principals and limits (never a private key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/ssh-cas", &[req("project", "Workspace project")]),
+    t("secrets_changes", "Secret changes", "What changed in an environment, newest first: who, when, which keys (fingerprints, never values).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/changes", &[SECRET_PROJECT, ENV, q("before", Ty::Int, "Changes before this sequence number"), q("limit", Ty::Int, "How many")]),
+    t("secrets_versions", "A secret's versions", "A secret's history, newest first (fingerprints, who and when; never values).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
+    t("secrets_compare", "Compare environments", "Which keys differ between two environments (missing, or a different value by fingerprint; never values).", "secrets", "GET", "/v1/secrets/projects/{project}/compare", &[SECRET_PROJECT, qreq("from", "Environment"), qreq("to", "Environment"), q("path", Ty::Str, "Folder")]),
+    t("secrets_rotate", "Rotate a secret", "Make a new value for a secret that has a rotator (a database password, an API key), and switch to it.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/rotate", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
+    t("secrets_promote", "Promote secrets", "Copy an environment's secrets into this one (all, or some keys). Into a protected environment it opens a change request for a person instead.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/promote", &[SECRET_PROJECT, ENV, qreq("from", "The environment to copy from"), b("keys", Ty::Arr, "Only these keys"), b("path", Ty::Str, "Folder"), b("message", Ty::Str, "Why")]),
+    t("secrets_list_requests", "Change requests", "An environment's change requests (proposed changes waiting on review).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, q("state", Ty::Str, "open, applied or closed")]),
+    t("secrets_propose", "Propose a change", "Propose changes to an environment for a person to review and apply: ops [{op: set, key, value?} or {op: delete, key}]. The way to change a protected environment.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, breq("ops", Ty::Arr, "[{op: set|delete, key, value?, comment?}]"), b("message", Ty::Str, "Why"), b("path", Ty::Str, "Folder")]),
+    t("secrets_transit_encrypt", "Encrypt with a key", "Encrypt with one of a project's encryption keys; the key never leaves roll. plaintext is base64. Returns ciphertext (roll:v<n>:…) to store.", "secrets", "POST", "/v1/secrets/projects/{project}/transit/{name}/encrypt", &[SECRET_PROJECT, req("name", "Encryption key name"), breq("plaintext", Ty::Str, "Base64"), b("context", Ty::Str, "Base64 context, if the key derives per context")]),
+    t("secrets_transit_decrypt", "Decrypt with a key", "Decrypt a ciphertext (roll:v<n>:…, or vault:v<n>:… for a key brought from Vault). Returns plaintext as base64. Audited.", "secrets", "POST", "/v1/secrets/projects/{project}/transit/{name}/decrypt", &[SECRET_PROJECT, req("name", "Encryption key name"), breq("ciphertext", Ty::Str, "roll:v<n>:…"), b("context", Ty::Str, "Base64 context")]),
+    t("secrets_transit_sign", "Sign with a key", "An Ed25519 signature over input's raw bytes, by a project's signing key. input is base64. Returns signature (roll:v<n>:…).", "secrets", "POST", "/v1/secrets/projects/{project}/transit/{name}/sign", &[SECRET_PROJECT, req("name", "Signing key name"), breq("input", Ty::Str, "Base64")]),
+    t("secrets_transit_verify", "Verify a signature", "Whether signature (roll:v<n>:…) is the key's over input (base64): valid true or false; a retired version is false.", "secrets", "POST", "/v1/secrets/projects/{project}/transit/{name}/verify", &[SECRET_PROJECT, req("name", "Signing key name"), breq("input", Ty::Str, "Base64"), breq("signature", Ty::Str, "roll:v<n>:…")]),
+    t("secrets_transit_public_key", "A signing key's public key", "Each version's public key (raw base64, PEM and JWK), for checking signatures outside roll.", "secrets", "GET", "/v1/secrets/projects/{project}/transit/{name}/public", &[SECRET_PROJECT, req("name", "Signing key name")]),
+    t("secrets_list_rotations", "Rotations", "A project's secret rotations: what rotated, when, and what's due.", "secrets", "GET", "/v1/secrets/projects/{project}/rotations", &[req("project", "Workspace project")]),
+    t("secrets_ca_certificates", "A CA's certificates", "The certificates a project's CA has issued (public, with their expiry; never a key).", "secrets", "GET", "/v1/secrets/projects/{project}/cas/{ca}/certificates", &[req("project", "Workspace project"), req("ca", "CA id")]),
     t("secrets_health", "Secrets health", "What needs fixing in a project's secrets: expired, missing, exposed, weak, expiring, stale or unread ones, by name (never values), in the environments you may read.", "secrets", "GET", "/v1/secrets/projects/{project}/health", &[
         SECRET_PROJECT,
         q("code", Ty::Bool, "Also keys no repository on the project's canvas mentions (needs code read on every one)"),
@@ -522,7 +549,7 @@ static TOOLS: &[Tool] = &[
     ),
     t("apps_list_environments", "List environments", "A service's environments.", "apps", "GET", "/v1/apps/services/{service}/environments", &[SERVICE]),
     t("apps_get_service", "Get a service", "A service with its environments' summaries (apps_list_deploys lists an environment's deploys).", "apps", "GET", "/v1/apps/services/{service}", &[SERVICE]),
-    t("apps_set_environment", "Set up an environment", "Create an environment or change one: the branch it deploys, its own run settings, following an image tag, waiting for CI. Production changes are \"deploy\" actions; copying another environment's variables needs reveal there.", "apps", "PUT", "/v1/apps/services/{service}/environments/{env}", &[
+    t("apps_set_environment", "Set up an environment", "Create an environment or change one: the branch it deploys, its own run settings, following an image tag, waiting for CI, and who gets in (maintenance, allowed addresses, a rate limit, firewall rules). Production changes are \"deploy\" actions; copying another environment's variables needs reveal there.", "apps", "PUT", "/v1/apps/services/{service}/environments/{env}", &[
         SERVICE,
         ENV,
         b("branch", Ty::Str, "The git branch it deploys"),
@@ -531,6 +558,11 @@ static TOOLS: &[Tool] = &[
         b("follow_tag", Ty::Bool, "An image service: redeploy when its tag points at a new digest"),
         b("wait_for_ci", Ty::Bool, "Deploy a commit only once its checks pass"),
         b("variables_from", Ty::Str, "Creating it: start with this environment's variables"),
+        // Who gets in (apps-next #26): in production each change is deploy.
+        b("maintenance", Ty::Any, "true, {message} or false: answer a maintenance page instead of the app"),
+        b("allow_ips", Ty::Arr, "Only these addresses get in: [cidr or {cidr, description}]"),
+        b("rate_limit", Ty::Obj, "{per_minute, burst?}: requests a client address may make"),
+        b("firewall", Ty::Arr, "[{action: allow|deny, path?, methods?, user_agent?}], first match wins"),
     ]),
     t("apps_update_service", "Update a service", "Change a service's name, source, build or run settings (fields given are changed; run takes alerts {memory_pct, error_pct, p95_ms} for metric alerts).", "apps", "PATCH", "/v1/apps/services/{service}", &[
         SERVICE,
@@ -584,7 +616,7 @@ static TOOLS: &[Tool] = &[
     ),
     t("apps_job_logs", "Job logs", "A job's output (it ends with the job).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/logs", &[SERVICE, ENV, req("job", "Job id"), q("tail", Ty::Int, "Last lines")]),
     t("apps_events", "App events", "What happened to services (deploys going live or failing, crash loops, failed cron runs and jobs, memory, error and latency alerts, and audit.* changes to settings, variables, domains and links), in order after a cursor.", "apps", "GET", "/v1/apps/events", &[q("after", Ty::Int, "The last answer's next"), q("limit", Ty::Int, "At most this many")]),
-    t("apps_list_variables", "List variables", "An environment's variables, values masked.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/variables", &[SERVICE, ENV]),
+    t("apps_list_variables", "List variables", "An environment's variables, values masked. A sealed variable is never readable again by anyone (only the running service gets it): set a new value or delete it, never look for the old one.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/variables", &[SERVICE, ENV]),
     t(
         "apps_set_variables",
         "Set variables",
@@ -595,6 +627,15 @@ static TOOLS: &[Tool] = &[
         &[SERVICE, ENV, b("set", Ty::Obj, "{NAME: value}"), b("unset", Ty::Arr, "Names to remove")],
     ),
     t("apps_metrics", "Service metrics", "CPU, memory and requests of an environment.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/metrics", &[SERVICE, ENV, q("minutes", Ty::Int, "Window")]),
+    t("apps_plan", "Plan a service", "How roll would build and run a repo (provider, framework, install, build and start commands, port), before making a service: a dry run.", "apps", "POST", "/v1/apps/plan", &[breq("repo", Ty::Str, "owner/name"), b("revision", Ty::Str, "A branch or commit"), b("root", Ty::Str, "The app's folder in the repo")]),
+    t("apps_activity", "Service activity", "Who changed what on a service, newest first (never a value).", "apps", "GET", "/v1/apps/services/{service}/activity", &[SERVICE]),
+    t("apps_get_deploy", "Get a deploy", "One deploy: its status, commit, image and when it went live.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}", &[SERVICE, ENV, req("deploy", "Deploy id")]),
+    t("apps_list_links", "List links", "The databases, buckets, streams and other services a service is linked to.", "apps", "GET", "/v1/apps/services/{service}/links", &[SERVICE]),
+    t("apps_list_cron_runs", "Cron runs", "A cron service's runs, newest first.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs", &[SERVICE, ENV]),
+    t("apps_run_cron", "Run a cron now", "Run a cron service's job now (in production this is a deploy action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/runs", &[SERVICE, ENV]),
+    t("apps_limits", "Spend limits", "A project's apps spend limits and how much of them is used.", "apps", "GET", "/v1/apps/projects/{project}/limits", &[req("project", "Workspace project")]),
+    t("apps_pending", "What the next deploy changes", "Before deploying: which variables (names, never values), run settings and project secrets the next deploy changes against what's live.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/pending", &[SERVICE, ENV]),
+    t("apps_deploy_commits", "A deploy's commits", "The commits a deploy brings over the one live before it, newest first (at most 50).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/commits", &[SERVICE, ENV, req("deploy", "Deploy id")]),
     t("apps_rollback", "Roll back", "Roll an environment back to an earlier deploy, with the variables it went live with (keep_variables: true keeps today's).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback", &[SERVICE, ENV, req("deploy", "Deploy id"), b("keep_variables", Ty::Bool, "Keep the variables as they are now")]),
     t("apps_rollback_previous", "Roll back to the last deploy", "Put back the deploy that was live before this one, with its variables (keep_variables: true keeps today's).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/rollback", &[SERVICE, ENV, b("keep_variables", Ty::Bool, "Keep the variables as they are now")]),
     t("apps_logs", "Service logs", "Recent logs of a service's environment, or with http its requests (method, path, status, ms): the quickest way to find failing or slow ones.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/logs", &[
@@ -646,7 +687,12 @@ static TOOLS: &[Tool] = &[
     t("previews_sleep", "Sleep a preview", "Stop a preview's services until it's woken (its data stays).", "previews", "POST", "/v1/previews/{id}/sleep", &[req("id", "Preview id")]),
     t("previews_wake", "Wake a preview", "Start a sleeping preview's services again.", "previews", "POST", "/v1/previews/{id}/wake", &[req("id", "Preview id")]),
     t("previews_usage", "Previews usage", "What a project's previews used and cost this month, against its budget.", "previews", "GET", "/v1/previews/projects/{project}/usage", &[req("project", "Workspace project")]),
+    t("previews_list_shares", "List a preview's share links", "Who a preview is shared with outside the team, and until when (never the links' tokens).", "previews", "GET", "/v1/previews/{id}/shares", &[req("id", "Preview id")]),
+    t("previews_env", "A preview's variables", "A preview's own variables, with their values (reveal).", "previews", "GET", "/v1/previews/{id}/env", &[req("id", "Preview id")]),
+    t("previews_screenshot", "Screenshot a preview", "A preview's page as an image the agent can look at; diff against the base or the previous deploy, another page, or the phone view.", "previews", "GET", "/v1/previews/{id}/screenshot", &[req("id", "Preview id"), q("diff", Ty::Str, "base or previous: highlight what changed"), q("page", Ty::Str, "Path of the page (default /)"), q("view", Ty::Str, "phone for a phone-sized view")]),
     t("previews_share", "Share a preview", "A link for someone outside the team to open a preview for some hours (its token is in this answer only; anyone with the link gets in).", "previews", "POST", "/v1/previews/{id}/shares", &[req("id", "Preview id"), breq("hours", Ty::Int, "How long the link works")]),
+    t("previews_revoke_share", "Revoke a share link", "Stop a preview's share link at once (who it's shared with: previews_list_shares).", "previews", "DELETE", "/v1/previews/{id}/shares/{share}", &[req("id", "Preview id"), req("share", "Share id")]),
+    t("previews_settings", "Preview settings", "A project's preview rules: which branches get one, how long they live, private or not, budgets (changing them is the project admin's).", "previews", "GET", "/v1/previews/projects/{project}/settings", &[req("project", "Workspace project")]),
     t("previews_delete", "Delete a preview", "Tear a preview down with its branches.", "previews", "DELETE", "/v1/previews/{id}", &[req("id", "Preview id")]),
 ];
 
@@ -688,6 +734,8 @@ mod tests {
         }
         let def = |n: &str| all().iter().find(|t| t.name == n).unwrap().definition();
         assert_eq!(def("postgres_query")["annotations"]["readOnlyHint"], true);
+        assert_eq!(def("storage_presign")["annotations"]["readOnlyHint"], false, "a presigned PUT writes");
+        assert_eq!(def("secrets_reveal")["annotations"]["readOnlyHint"], true);
         assert_eq!(def("postgres_execute")["annotations"]["destructiveHint"], true);
         assert_eq!(def("postgres_delete_project")["annotations"]["destructiveHint"], true);
         assert_eq!(def("postgres_create_branch")["annotations"]["readOnlyHint"], false);
