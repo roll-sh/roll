@@ -1058,9 +1058,11 @@ fn open_scan_as(
 /// Whether index scan `s` reads one key of a unique index: `=` on every key column of a valid
 /// btree index that a non-deferrable constraint (or none) keeps unique, plain integer columns
 /// compared with values of their own types. At an MVCC snapshot such a key has at most one
-/// visible row: the rows of its other entries are versions the snapshot doesn't see. Not
-/// under a row mark or for an UPDATE's or DELETE's rows (their newer versions are followed),
-/// nor where serializable reads take predicate locks.
+/// visible row: the rows of its other entries are versions the snapshot doesn't see. An
+/// UPDATE's or DELETE's rows (`with_key`) too: the newer version of the row found is followed
+/// after the scan, by the row lock (`Locked::Newer` and the plan's recheck), as
+/// ExecUpdate's EvalPlanQual is. Not under a row mark, nor where serializable reads take
+/// predicate locks.
 fn unique_point(s: &ScanPlan, ctx: &ExecCtx) -> bool {
     ctx.snapshot().is_some() && !predicate_locked(&s.table, ctx) && unique_point_plan(s)
 }
@@ -1084,7 +1086,6 @@ fn unique_point_plan(s: &ScanPlan) -> bool {
         || b.upper.is_some()
         || !b.order.is_empty()
         || s.mark.is_some()
-        || s.with_key
         || s.sys
         || s.reverse
         || s.limit.is_some()
