@@ -14,8 +14,11 @@
 //! - `…/cas/{id}/sign` signs a CSR, for a device or a mesh that keeps its own private key: only
 //!   the request's public key and names are taken (every name within the policy); the usages,
 //!   lifetime and everything else are this CA's, as for a link's certificates.
-//! - A certificate can't be taken back: there are no revocation lists, so lifetimes stay short. A
-//!   lease that ends leaves its certificate valid until it expires.
+//! - Every certificate a CA signs is listed until it expires (`ca_certs`: serial, names, end), and
+//!   one can be revoked: by hand (`…/revoke`, a lost device), or by roll when its lease ends or a
+//!   managed one's grace runs out. The CA signs a CRL of the revoked ones that haven't expired,
+//!   served without a token (`/v1/secrets/crl/{id}`), and every certificate names it (its CRL
+//!   distribution point) once rolld has said where it's reached.
 
 use crate::access::{Action, Caller, Scope};
 use crate::crypto::Keyring;
@@ -37,6 +40,19 @@ CREATE TABLE IF NOT EXISTS cas (
     created_at INTEGER NOT NULL,
     created_by TEXT NOT NULL,
     UNIQUE (project_id, name)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS ca_certs (
+    ca_id TEXT NOT NULL,
+    serial TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    names TEXT NOT NULL,
+    source TEXT NOT NULL,
+    not_after INTEGER NOT NULL,
+    issued_at INTEGER NOT NULL,
+    issued_by TEXT NOT NULL,
+    revoked_at INTEGER,
+    revoked_by TEXT,
+    PRIMARY KEY (ca_id, serial)
 ) WITHOUT ROWID;
 ";
 
@@ -122,6 +138,7 @@ impl Policy {
 pub(crate) struct Provider {
     pub db: Db,
     pub keys: Keyring,
+    pub public_api: std::sync::Arc<std::sync::OnceLock<String>>,
 }
 
 impl Provider {
@@ -197,7 +214,7 @@ impl LinkProvider for Provider {
         Ok(())
     }
 
-    fn issue(&self, r#ref: &str, _credential: &str, link: &Link, _label: &str, ttl_minutes: Option<u64>) -> Result<Issued> {
+    fn issue(&self, r#ref: &str, _credential: &str, link: &Link, label: &str, ttl_minutes: Option<u64>) -> Result<Issued> {
         let (ca_pem, ca_key, policy) = self.open(r#ref)?;
         let names = names_of(link);
         allowed(&names, &policy)?;
@@ -209,15 +226,21 @@ impl LinkProvider for Provider {
         let ca_key = rcgen::KeyPair::from_pem(ca_key.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
         let issuer = rcgen::Issuer::from_ca_cert_pem(&ca_pem, &ca_key).map_err(|e| Error::Internal(format!("the CA's certificate: {e}")))?;
         let key = rcgen::KeyPair::generate().map_err(|e| Error::Internal(format!("a certificate's key: {e}")))?;
-        let params = leaf(&ca_pem, &names, minutes)?;
+        let params = leaf(&ca_pem, &names, minutes, crl_url(&self.public_api, r#ref))?;
         let cert = params.signed_by(&key, &issuer).map_err(|e| Error::Internal(format!("signing a certificate: {e}")))?;
         let not_after = (params.not_after.unix_timestamp_nanos() / 1_000_000) as i64;
+        let project: String = self.db.read(|c| c.query_row("SELECT project_id FROM cas WHERE id = ?", [r#ref], |r| r.get(0)))?;
+        record(&self.db, r#ref, &project, &hex(&serial_of(&params)), &names, "link", not_after, label)?;
         let parts = BTreeMap::from([("certificate".to_string(), Value::new(cert.pem())), ("private_key".to_string(), Value::new(key.serialize_pem())), ("ca".to_string(), Value::new(ca_pem))]);
         Ok(Issued { parts, handle: json!({ "serial": hex(&serial_of(&params)), "names": names, "not_after": not_after }) })
     }
 
-    /// A certificate can't be taken back (no revocation lists): it ends at its own expiry.
-    fn revoke(&self, _: &str, _: &Json) -> Result<()> {
+    /// A lease that ends, or a managed certificate past its grace: on the CA's CRL until it expires.
+    fn revoke(&self, r#ref: &str, handle: &Json) -> Result<()> {
+        if let Some(serial) = handle["serial"].as_str() {
+            let now = self.db.now_ms()?;
+            self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE ca_certs SET revoked_at = ?, revoked_by = 'roll' WHERE ca_id = ? AND serial = ? AND revoked_at IS NULL", params![now, r#ref, serial])?))?;
+        }
         Ok(())
     }
 
@@ -228,7 +251,7 @@ impl LinkProvider for Provider {
 
 /// A leaf certificate's parameters: `names`, `minutes` long (never past the CA's own end), and
 /// only this CA's usages.
-fn leaf(ca_pem: &str, names: &[String], minutes: u64) -> Result<rcgen::CertificateParams> {
+fn leaf(ca_pem: &str, names: &[String], minutes: u64, crl: Option<String>) -> Result<rcgen::CertificateParams> {
     let now = time::OffsetDateTime::now_utc();
     let mut params = rcgen::CertificateParams::new(names.to_vec()).map_err(|e| Error::BadRequest(format!("a certificate's names: {e}")))?;
     params.distinguished_name = rcgen::DistinguishedName::new();
@@ -245,7 +268,41 @@ fn leaf(ca_pem: &str, names: &[String], minutes: u64) -> Result<rcgen::Certifica
     params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
     params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth, rcgen::ExtendedKeyUsagePurpose::ClientAuth];
     params.use_authority_key_identifier_extension = true;
+    params.crl_distribution_points = crl.into_iter().map(|u| rcgen::CrlDistributionPoint { uris: vec![u] }).collect();
     Ok(params)
+}
+
+/// Where a CA's CRL is fetched, once rolld has said where its API is.
+fn crl_url(public_api: &std::sync::OnceLock<String>, ca: &str) -> Option<String> {
+    public_api.get().map(|a| format!("{}/v1/secrets/crl/{ca}", a.trim_end_matches('/')))
+}
+
+/// A certificate the CA signed, listed until it expires; what has expired goes in the same write.
+#[allow(clippy::too_many_arguments)]
+fn record(db: &Db, ca: &str, project: &str, serial: &str, names: &[String], source: &str, not_after: i64, by: &str) -> Result<()> {
+    let now = db.now_ms()?;
+    db.write(|c| {
+        c.execute("DELETE FROM ca_certs WHERE ca_id = ? AND not_after < ?", params![ca, now])?;
+        c.execute(
+            "INSERT INTO ca_certs (ca_id, serial, project_id, names, source, not_after, issued_at, issued_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![ca, serial, project, serde_json::to_string(names).expect("JSON"), source, not_after, now, by],
+        )?;
+        Ok::<_, Error>(())
+    })
+}
+
+/// A certificate a CA signed and that hasn't expired.
+#[derive(Debug, Serialize)]
+pub struct Certificate {
+    pub serial: String,
+    pub names: Vec<String>,
+    /// `csr` or `link`.
+    pub source: String,
+    pub not_after: i64,
+    pub issued_at: i64,
+    pub issued_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<i64>,
 }
 
 /// A CSR to sign, and how long its certificate lives (`days` or `ttl_minutes`; 30 days, or the
@@ -283,6 +340,11 @@ fn serial_of(p: &rcgen::CertificateParams) -> Vec<u8> {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    (s.len().is_multiple_of(2) && s.len() <= 40).then_some(())?;
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
 }
 
 impl Secrets {
@@ -360,6 +422,7 @@ impl Secrets {
                 return Err(Error::Conflict("in_use", format!("{name} still issues {}: unlink them first", linked.join(", "))));
             }
             c.execute("DELETE FROM cas WHERE id = ?", [id])?;
+            c.execute("DELETE FROM ca_certs WHERE ca_id = ?", [id])?;
             audit::record(c, project, caller, "ca.delete", None, None, &[], &format!("deleted CA {name}"), now)
         })
     }
@@ -384,7 +447,7 @@ impl Secrets {
                 _ => return Err(Error::BadRequest("a CSR's names are DNS names and IP addresses (subjectAltName), nothing else".into())),
             });
         }
-        let (ca_pem, ca_key, policy) = Provider { db: self.db.clone(), keys: self.keys()?.clone() }.open(id)?;
+        let (ca_pem, ca_key, policy) = self.pki()?.open(id)?;
         if names.is_empty() {
             return Err(Error::BadRequest("a CSR names what it's for in subjectAltName (DNS names, or IP addresses where the CA allows them); the subject's CN isn't read".into()));
         }
@@ -401,12 +464,84 @@ impl Secrets {
         }
         let ca_key = rcgen::KeyPair::from_pem(ca_key.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
         let issuer = rcgen::Issuer::from_ca_cert_pem(&ca_pem, &ca_key).map_err(|e| Error::Internal(format!("the CA's certificate: {e}")))?;
-        let params = leaf(&ca_pem, &names, minutes)?;
+        let params = leaf(&ca_pem, &names, minutes, crl_url(&self.public_api, id))?;
         let not_after = (params.not_after.unix_timestamp_nanos() / 1_000_000) as i64;
         let serial = hex(&serial_of(&params));
         let cert = rcgen::CertificateSigningRequestParams { params, public_key: csr.public_key }.signed_by(&issuer).map_err(|e| Error::BadRequest(format!("signing the CSR: {e}")))?;
+        record(&self.db, id, project, &serial, &names, "csr", not_after, &caller.principal)?;
         self.audit_now(project, caller, "ca.sign", None, None, &[], &format!("{ca_name} signed a CSR for {} (serial {serial})", names.join(", ")));
         Ok(Signed { certificate: cert.pem(), ca: ca_pem, serial, names, not_after })
+    }
+
+    fn pki(&self) -> Result<Provider> {
+        Ok(Provider { db: self.db.clone(), keys: self.keys()?.clone(), public_api: self.public_api.clone() })
+    }
+
+    /// Where clients reach rolld's API (`ROLL_CODE_PUBLIC_URL`), for certificates' CRL distribution
+    /// point. Set once, at startup.
+    pub fn set_public_api(&self, url: String) {
+        let _ = self.public_api.set(url);
+    }
+
+    /// The certificates a CA signed that haven't expired, newest first.
+    pub fn ca_certificates(&self, project: &str, id: &str, caller: &Caller) -> Result<Vec<Certificate>> {
+        caller.need(Action::Read, &Scope::project(project))?;
+        self.project(project)?;
+        let now = self.db.now_ms()?;
+        self.db.read(|c| {
+            if c.query_row("SELECT 1 FROM cas WHERE id = ? AND project_id = ?", [id, project], |_| Ok(())).optional()?.is_none() {
+                return Err(Error::NotFound(format!("no CA {id}")));
+            }
+            Ok(c.query(
+                "SELECT serial, names, source, not_after, issued_at, issued_by, revoked_at FROM ca_certs WHERE ca_id = ? AND not_after >= ? ORDER BY issued_at DESC LIMIT 1000",
+                params![id, now],
+                |r| Ok(Certificate { serial: r.get(0)?, names: serde_json::from_str(&r.get::<_, String>(1)?).unwrap_or_default(), source: r.get(2)?, not_after: r.get(3)?, issued_at: r.get(4)?, issued_by: r.get(5)?, revoked_at: r.get(6)? }),
+            )?)
+        })
+    }
+
+    /// Revoke a certificate the CA signed: on its CRL from now until it expires. Audited.
+    pub fn revoke_certificate(&self, project: &str, id: &str, serial: &str, caller: &Caller) -> Result<()> {
+        caller.need(Action::Write, &Scope::project(project))?;
+        self.project(project)?;
+        let serial = serial.trim().to_ascii_lowercase().replace(':', "");
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            let ca: String = c.query_row("SELECT name FROM cas WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?.ok_or_else(|| Error::NotFound(format!("no CA {id}")))?;
+            let row: Option<(String, Option<i64>)> = c.query_row("SELECT names, revoked_at FROM ca_certs WHERE ca_id = ? AND serial = ? AND not_after >= ?", params![id, serial, now], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            let (names, revoked) = row.ok_or_else(|| Error::NotFound(format!("{ca} signed no certificate {serial} that's still valid")))?;
+            if revoked.is_some() {
+                return Ok(());
+            }
+            c.execute("UPDATE ca_certs SET revoked_at = ?, revoked_by = ? WHERE ca_id = ? AND serial = ?", params![now, caller.principal, id, serial])?;
+            let names: Vec<String> = serde_json::from_str(&names).unwrap_or_default();
+            audit::record(c, project, caller, "ca.revoke", None, None, &[], &format!("{ca} revoked {serial} ({})", names.join(", ")), now)
+        })
+    }
+
+    /// The CA's CRL (DER): the revoked certificates that haven't expired, signed now and good for
+    /// an hour. Public: a CRL is what anyone checking a certificate fetches.
+    pub fn crl(&self, id: &str) -> Result<Vec<u8>> {
+        let now_ms = self.db.now_ms()?;
+        let revoked: Vec<(String, i64)> = self.db.read(|c| Ok::<_, Error>(c.query("SELECT serial, revoked_at FROM ca_certs WHERE ca_id = ? AND revoked_at IS NOT NULL AND not_after >= ? ORDER BY serial", params![id, now_ms], |r| Ok((r.get(0)?, r.get(1)?)))?))?;
+        let (ca_pem, ca_key, _) = self.pki()?.open(id).map_err(|_| Error::NotFound(format!("no CA {id}")))?;
+        let ca_key = rcgen::KeyPair::from_pem(ca_key.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
+        let issuer = rcgen::Issuer::from_ca_cert_pem(&ca_pem, &ca_key).map_err(|e| Error::Internal(format!("the CA's certificate: {e}")))?;
+        let now = time::OffsetDateTime::now_utc();
+        let at = |ms: i64| time::OffsetDateTime::from_unix_timestamp(ms / 1000).unwrap_or(now);
+        let params = rcgen::CertificateRevocationListParams {
+            this_update: now - time::Duration::minutes(1),
+            next_update: now + time::Duration::hours(1),
+            // Increasing: the time it was made.
+            crl_number: rcgen::SerialNumber::from(now_ms.max(0) as u64),
+            issuing_distribution_point: None,
+            revoked_certs: revoked
+                .iter()
+                .filter_map(|(s, t)| Some(rcgen::RevokedCertParams { serial_number: rcgen::SerialNumber::from_slice(&unhex(s)?), revocation_time: at(*t), reason_code: None, invalidity_date: None }))
+                .collect(),
+            key_identifier_method: rcgen::KeyIdMethod::Sha256,
+        };
+        Ok(params.signed_by(&issuer).map_err(|e| Error::Internal(format!("signing a CRL: {e}")))?.der().to_vec())
     }
 
     pub(crate) fn ca_refs(&self, project: &str) -> Result<Vec<(String, String)>> {

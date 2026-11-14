@@ -1,4 +1,4 @@
-import { Check, Copy, FileSignature, Plus, ShieldCheck, Trash2 } from "lucide-react";
+import { Check, Copy, FileSignature, ListChecks, Plus, ShieldCheck, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { Ca, SignedCertificate } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
@@ -23,6 +23,7 @@ export function Cas() {
   const [deleting, setDeleting] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [signing, setSigning] = useState<string | null>(null);
+  const [viewing, setViewing] = useState<string | null>(null);
   const list_ = domains.split(",").map((d) => d.trim().toLowerCase()).filter(Boolean);
   const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name) && list_.length > 0 && list_.every((d) => DOMAIN.test(d));
 
@@ -109,7 +110,10 @@ export function Cas() {
                 <span className="ml-auto text-[11px] text-subtle">
                   made {ago(c.created_at)} · <ActorMark who={c.created_by} />
                 </span>
-                <button className={ghost} onClick={() => setSigning((s) => (s === c.id ? null : c.id))} aria-expanded={signing === c.id} aria-label={`Sign a CSR with ${c.name}`} title="Sign a CSR: the device or mesh keeps its private key">
+                <button className={ghost} onClick={() => (setSigning(null), setViewing((v) => (v === c.id ? null : c.id)))} aria-expanded={viewing === c.id} aria-label={`Certificates ${c.name} signed`} title="What it signed that hasn't expired; revoke one">
+                  <ListChecks className="size-3.5" />
+                </button>
+                <button className={ghost} onClick={() => (setViewing(null), setSigning((s) => (s === c.id ? null : c.id)))} aria-expanded={signing === c.id} aria-label={`Sign a CSR with ${c.name}`} title="Sign a CSR: the device or mesh keeps its private key">
                   <FileSignature className="size-3.5" />
                 </button>
                 <button className={ghost} onClick={() => copy(c)} aria-label={`Copy ${c.name}'s certificate`} title="Copy the CA's certificate (PEM) for clients to trust">
@@ -130,6 +134,7 @@ export function Cas() {
                   </button>
                 )}
                 {signing === c.id && <SignCsr ca={c} />}
+                {viewing === c.id && <Certificates ca={c} />}
               </div>
             ))}
           </div>
@@ -216,6 +221,63 @@ function SignCsr({ ca }: { ca: Ca }) {
           </div>
         </form>
       )}
+    </div>
+  );
+}
+
+/** What a CA signed that hasn't expired; revoking one puts it on the CA's CRL. */
+function Certificates({ ca }: { ca: Ca }) {
+  const { api } = useSecrets();
+  const list = useLoad(() => api.caCertificates(ca.id), [api, ca.id]);
+  const [confirm, setConfirm] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const revoke = (serial: string) =>
+    api.revokeCertificate(ca.id, serial).then(
+      () => (setConfirm(null), list.reload()),
+      (e) => (setConfirm(null), setError(errorText(e))),
+    );
+  const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  return (
+    <div className="rise basis-full space-y-2 pt-1">
+      <ErrorNote error={error ?? list.error} onDismiss={error ? () => setError(null) : undefined} />
+      {list.data && list.data.length === 0 && <p className="text-[11.5px] text-muted">Nothing it signed is still valid.</p>}
+      {list.data && list.data.length > 0 && (
+        <div className="divide-y divide-line rounded-lg border border-line">
+          {list.data.map((x) => (
+            <div key={x.serial} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-2.5 py-1.5 text-[11.5px]">
+              <span className="font-mono text-fg">{x.names.join(", ")}</span>
+              <span className="rounded border border-line-2 px-1 text-[10.5px] text-subtle">{x.source === "csr" ? "CSR" : "link"}</span>
+              <span className="font-mono text-[10.5px] text-subtle" title={x.serial}>
+                {x.serial.slice(0, 12)}…
+              </span>
+              {x.revoked_at ? (
+                <span className="ml-auto text-danger">revoked {day(x.revoked_at)}</span>
+              ) : (
+                <>
+                  <span className="ml-auto text-subtle">until {day(x.not_after)}</span>
+                  {confirm === x.serial ? (
+                    <span className="flex gap-1">
+                      <button className={dangerButton} onClick={() => void revoke(x.serial)}>
+                        Revoke
+                      </button>
+                      <button className={ghost} onClick={() => setConfirm(null)}>
+                        Keep
+                      </button>
+                    </span>
+                  ) : (
+                    <button className={`${ghost} h-6`} onClick={() => setConfirm(x.serial)} title="Put it on the CA's revocation list until it expires">
+                      Revoke
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="text-[11px] text-subtle">
+        Clients that check revocation fetch the CA&apos;s list at <span className="font-mono">/v1/secrets/crl/{ca.id}</span>, which every certificate names.
+      </p>
     </div>
   );
 }

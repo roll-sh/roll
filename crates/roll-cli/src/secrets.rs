@@ -552,6 +552,10 @@ pub enum CasCmd {
         #[arg(long)]
         chain: bool,
     },
+    /// The certificates a CA signed that haven't expired.
+    Certs { id: String },
+    /// Revoke a certificate (on the CA's CRL until it expires).
+    Revoke { id: String, serial: String },
     Rm { id: String },
 }
 
@@ -1307,10 +1311,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 } else {
                     std::fs::read_to_string(&csr).with_context(|| format!("reading {csr}"))?
                 };
-                // A name works as well as an id.
-                let list = c.call(Method::GET, &format!("{}/cas", c.base()), None).await?;
-                let ca = list.as_array().into_iter().flatten().find(|a| a["id"] == id.as_str() || a["name"] == id.as_str()).ok_or_else(|| anyhow::anyhow!("no CA {id}"))?;
-                let v = c.call(Method::POST, &format!("{}/cas/{}/sign", c.base(), enc(&s(&ca["id"]).to_string())), Some(json!({ "csr": pem, "days": days, "ttl_minutes": ttl_minutes }))).await?;
+                let v = c.call(Method::POST, &format!("{}/cas/{}/sign", c.base(), enc(&ca_id(&c, &id).await?)), Some(json!({ "csr": pem, "days": days, "ttl_minutes": ttl_minutes }))).await?;
                 if json_out {
                     return print(&v);
                 }
@@ -1319,6 +1320,21 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     print!("{}", s(&v["ca"]));
                 }
                 eprintln!("signed for {} until {} (serial {})", v["names"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", "), day(v["not_after"].as_i64().unwrap_or_default()), s(&v["serial"]));
+            }
+            CasCmd::Certs { id } => {
+                let v = c.call(Method::GET, &format!("{}/cas/{}/certificates", c.base(), enc(&ca_id(&c, &id).await?)), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for x in v.as_array().into_iter().flatten() {
+                    let names: Vec<&str> = x["names"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    let state = x["revoked_at"].as_i64().map_or_else(|| format!("until {}", day(x["not_after"].as_i64().unwrap_or_default())), |t| format!("revoked {}", day(t)));
+                    println!("{}  {:<4} {}  {}", s(&x["serial"]), s(&x["source"]), names.join(","), state);
+                }
+            }
+            CasCmd::Revoke { id, serial } => {
+                c.call(Method::POST, &format!("{}/cas/{}/revoke", c.base(), enc(&ca_id(&c, &id).await?)), Some(json!({ "serial": serial }))).await?;
+                println!("Revoked {serial}: on the CA's CRL until it expires");
             }
             CasCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/cas/{}", c.base(), enc(&id)), None).await?;
@@ -2661,4 +2677,11 @@ async fn stop(child: &mut tokio::process::Child) {
         }
     }
     let _ = child.kill().await;
+}
+
+/// A CA's id from its id or its name.
+async fn ca_id(c: &Client<'_>, id: &str) -> anyhow::Result<String> {
+    let list = c.call(Method::GET, &format!("{}/cas", c.base()), None).await?;
+    let ca = list.as_array().into_iter().flatten().find(|a| a["id"] == id || a["name"] == id).ok_or_else(|| anyhow::anyhow!("no CA {id}"))?;
+    Ok(s(&ca["id"]).to_string())
 }

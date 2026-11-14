@@ -584,9 +584,18 @@ TLS certificates for services (mTLS between them), with no CA to run.
   minutes to `max_days`) and everything else are the CA's own, whatever the CSR asks (being a CA
   itself, signing code). It answers `{certificate, ca, serial, names, not_after}`. Checked with
   OpenSSL's CSRs (P-256 and RSA): `openssl verify -x509_strict` passes against the CA.
-- A certificate can't be taken back: there are no revocation lists, so lifetimes stay short, and a
-  lease that ends leaves its certificate valid until it expires. A CA a key links to can't be
-  deleted; deleting one leaves what it signed valid until it expires.
+- Every certificate a CA signs is listed until it expires (`GET …/cas/{id}/certificates`: serial,
+  names, `csr` or `link`, its end, who asked, when it was revoked; `roll secrets cas certs NAME`).
+  `…/cas/{id}/revoke {serial}` (`write`, audited; `roll secrets cas revoke NAME SERIAL`, the
+  dashboard's Revoke) takes one back, a lost device's, say; roll revokes a lease's certificate
+  when the lease ends and a managed one's when its grace runs out. The CA signs a CRL of the
+  revoked certificates that haven't expired, made on each request and good for an hour:
+  `GET /v1/secrets/crl/{id}` (DER, `application/pkix-crl`; `?format=pem`), without a token, as any
+  CRL is fetched. Every certificate names it in its CRL distribution point (rolld's
+  `ROLL_CODE_PUBLIC_URL`). Checked with OpenSSL: `openssl verify -crl_check` refuses a revoked one
+  (`certificate revoked`) and passes the rest. Clients that don't check CRLs still trust a revoked
+  certificate until it ends, so lifetimes stay short. A CA a key links to can't be deleted;
+  deleting one leaves what it signed valid until it expires.
 
 ### SSH certificates
 
@@ -642,7 +651,8 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
-roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain] | rm ID
+roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain]
+                     | certs ID | revoke ID SERIAL | rm ID
 roll secrets ssh-cas ls | add NAME --principal P… [--max-hours N] | key ID | rm ID
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 roll ssh [-p project] [-e production] [--cert SSH_CERT] [--identity SSH_KEY] -- <ssh arguments…>
@@ -1484,6 +1494,9 @@ isn't in the workspace is 404.
 | `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
 | `POST /cas` | `{name, domains, allow_ip?, max_days?}` | 201 `Ca` (`admin`) |
 | `DELETE /cas/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `GET /cas/{id}/certificates` | | `CaCertificate[]`: `{serial, names, source, not_after, issued_at, issued_by, revoked_at?}`, what it signed that hasn't expired, newest first (`read`) |
+| `POST /cas/{id}/revoke` | `{serial}` | 204; 404 for a serial it didn't sign or that has expired (`write`, audited) |
+| `GET /v1/secrets/crl/{id}` | | the CA's CRL, DER (`application/pkix-crl`) or `?format=pem`; no token |
 | `POST /cas/{id}/sign` | `{csr, days?, ttl_minutes?}` | `{certificate, ca, serial, names, not_after}` (`write`, audited); 400 for a name outside the policy or a lifetime past `max_days` |
 | `GET /ssh-cas` | | `SshCa[]` (`read` on the project; public keys, never private ones) |
 | `POST /ssh-cas` | `{name, principals, max_hours?}` | 201 `SshCa` (`admin`) |
@@ -1655,6 +1668,12 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
+Built on 2026-11-14 from the last ranking, without waiting on a merge: a rotations overview (#48:
+`GET …/rotations`, Health's "Managed credentials", `roll secrets rotations`); signing and HMAC
+with encryption keys (#47: Ed25519 a stock library checks with the exported public key, HMAC
+blind indexes, `transit(name)` in `@roll/secrets`); CSR signing (#44: `…/cas/{id}/sign`, checked
+with OpenSSL's P-256 and RSA CSRs under `openssl verify -x509_strict`).
+
 A third independent review (of #46 and #47) found four ways a sensitive value still reached a person
 (older versions, change requests that add the tag, syncs and sandboxes counted as runtimes) and
 guessing oracles, plus backups leaving out encryption keys: all fixed and tested. roll apps (#26)
@@ -1680,13 +1699,14 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A rotations overview** (on #48), as Infisical's secret rotation page: every managed
-   credential in the project (environment, keys, resource), when it last rotated, when it's next
-   due, and why its last scheduled rotation failed; rotate from there.
-2. **Signing and HMAC with encryption keys** (on #47), as Vault's Transit: `…/sign` and `…/verify`
-   (Ed25519) for webhooks and tokens an app issues, and `…/hmac` for lookups over encrypted fields.
-3. **Certificates for keys that stay put** (on #44): `…/cas/{id}/sign` signs a CSR within the CA's
-   policy, so a device or a service mesh keeps its private key.
+1. **Revoking certificates** (on #44), as Vault's and Infisical's PKI: a CSR's certificate lives
+   up to the CA's `max_days` with no lease, so a lost device needs one. `…/cas/{id}/revoke
+   {serial}` (audited) and a CRL the CA signs, served without a token (`GET /v1/secrets/cas/{id}/crl`,
+   as the issuer's JWKS is), named in every certificate's CRL distribution point.
+2. **SQL Server outside roll** (on #39), Vault's other common database: two logins take turns, or
+   a login per lease in a role, over verified TLS to a public address, as Postgres and MySQL do.
+3. **Bringing a key** (on #47), as Vault's transit import: an encryption key's version from
+   outside (wrapped to a one-time key roll makes), so data encrypted before roll still opens.
 4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
 5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
@@ -1721,16 +1741,18 @@ Open pull requests after this one:
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
 - **#48, failing rotations in health** (after #20): `rotation_failing` and `revoke_failing`
-  findings, with the reason, until roll succeeds.
+  findings, with the reason, until roll succeeds; a rotations overview of every managed credential.
 - **#47, encryption keys** (after #20): encryption as a service, as Vault's Transit: named,
-  versioned keys that never leave roll; encrypt, decrypt (audited), rewrap, data keys.
+  versioned keys that never leave roll; encrypt, decrypt (audited), rewrap, data keys, Ed25519
+  signatures and HMACs.
 - **#46, sensitive keys** (after #20): a key tagged `sensitive` reaches only roll's runtimes, syncs
   and workload identities, never a person or a token; the tag is for good.
 - **#45, SSH certificates** (after #44): a project's SSH CA signs short-lived user certificates
   for the logins it allows, and `roll ssh` uses them for one session; OpenSSH's formats, checked
   with `ssh-keygen` and a real `sshd` login.
 - **#44, a project's own certificate authority** (after #20): short-lived TLS certificates for the
-  names its name-constrained CA allows, dynamic or managed; checked with a real TLS handshake.
+  names its name-constrained CA allows, dynamic or managed, and CSRs it signs; checked with a real
+  TLS handshake.
 - **#43, dynamic GCP and Azure credentials** (after #20): roll as an OIDC issuer
   (`/v1/secrets/oidc`); GCP's workload identity federation and Azure's federated credentials trust
   its token for one project, checked with a decoy project at registration.

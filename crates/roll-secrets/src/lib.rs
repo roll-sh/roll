@@ -330,6 +330,8 @@ pub struct Secrets {
     logins: oidc::Window,
     /// roll code's search, once rolld has it (health's `code` check).
     code_refs: std::sync::OnceLock<Arc<dyn health::CodeRefs>>,
+    /// Where clients reach rolld's API, once rolld says (certificates' CRL distribution point).
+    public_api: Arc<std::sync::OnceLock<String>>,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -398,11 +400,12 @@ impl Secrets {
             links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), deliver: deliver.clone() }));
         }
         // A project's CAs are roll secrets' own: nothing to reach outside.
+        let public_api: Arc<std::sync::OnceLock<String>> = Default::default();
         if let Ok(keys) = &opts.keyring {
-            links.register(Arc::new(pki::Provider { db: db.clone(), keys: keys.clone() }));
+            links.register(Arc::new(pki::Provider { db: db.clone(), keys: keys.clone(), public_api: public_api.clone() }));
             links.register(Arc::new(ssh::Provider { db: db.clone(), keys: keys.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), public_api })
     }
 
     pub fn links(&self) -> &Links {
@@ -507,7 +510,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators", "cas", "ssh_cas"];
+const REGISTRIES: &[&str] = &["rotators", "cas", "ca_certs", "ssh_cas"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked.
 fn forget_if_done(c: &code_sql::Conn<'_>, project: &str) -> Result<()> {
