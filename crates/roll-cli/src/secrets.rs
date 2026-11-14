@@ -2138,7 +2138,11 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
                     }
                 };
                 leases = next_leases;
-                follow = next_follow;
+                // References may have changed: compare the new set from here on.
+                if next_follow != follow {
+                    follow = next_follow;
+                    last = digests(c, &follow).await.unwrap_or(last);
+                }
                 if next == text {
                     continue;
                 }
@@ -2522,7 +2526,11 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>,
                             eprintln!("roll run: {}:{} changed, restarting {}", at.env, at.path, r.command[0]);
                             env = next;
                             leases = next_leases;
-                            follow = next_follow;
+                            // References may have changed: compare the new set from here on.
+                            if next_follow != follow {
+                                follow = next_follow;
+                                last = digests(c, &follow).await.unwrap_or(last);
+                            }
                             stop(&mut child).await;
                             break;
                         }
