@@ -254,9 +254,8 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    already refuse one, connector and Fleet secrets always seal), and chunking, the semantic
    highlighter and `TOP_SNIPPETS` are linear in the text. Sealing binds the kind, not the
    cluster: branches copy a cluster's state under a new id. Left, low: file service tokens are
-   node-wide (off unless the operator sets `path.conf`), a simplified `rrf`/`linear` reads the
-   mappings of every index it expands to (no data returned), the inference `timeout` has no upper
-   bound.
+   node-wide (off unless the operator sets `path.conf`), the inference `timeout` has no upper
+   bound. (A simplified `rrf`/`linear` now expands only against indices the caller may read.)
 3. **Vector search's cost and speed** (scale to zero meets HNSW): RAM loaded and idle, cold start
    to the first `knn` answer, indexing, latency and recall@10 (filtered, in `rrf`), store bytes,
    against Elasticsearch 9.5.5 and OpenSearch 3.9 on 1M × 384 dims; then fix where roll loses. In
