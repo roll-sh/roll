@@ -619,6 +619,8 @@ async fn api_keys() {
     assert_eq!(e.es(&user, &pw, reqwest::Method::GET, "/notes/_count", None).await.0, 200);
     // A data key writes documents but can't make keys or users of its own.
     let d = e.post("/v1/search/clusters/keys/keys", json!({"name": "app", "access": "data"})).await;
+    // The answer says which access it made (the default is admin).
+    assert_eq!((d["access"].as_str(), k["access"].as_str()), (Some("data"), Some("admin")));
     let h = format!("ApiKey {}", d["api_key"].as_str().unwrap());
     let send = |m: reqwest::Method, path: &str, body: Value| {
         let r = e.http.request(m, format!("{}{path}", e.es)).header("Authorization", h.clone()).json(&body).send();

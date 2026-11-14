@@ -1252,7 +1252,7 @@ impl Control {
         if c.flavor == "opensearch" {
             let expires_ms = expires_in_s.map(|s| crate::meter::now_ms().saturating_add(s.saturating_mul(1000)));
             let (user, password) = self.os_user(&c, OS_KEY_PREFIX, data, &format!("roll key: {name}"), expires_ms).await?;
-            let mut out = json!({ "id": user, "name": name, "username": format!("{user}@{}", c.name), "password": password, "url": connection_of(&self.cfg, &c.name)["url"] });
+            let mut out = json!({ "id": user, "name": name, "access": if data { "data" } else { "admin" }, "username": format!("{user}@{}", c.name), "password": password, "url": connection_of(&self.cfg, &c.name)["url"] });
             if let Some(ms) = expires_ms {
                 out["expires_at"] = json!(ms / 1000);
             }
@@ -1274,7 +1274,8 @@ impl Control {
             return Err(ControlError::Internal(anyhow::anyhow!("the cluster answered without a key: {v}")));
         };
         let api_key = base64::engine::general_purpose::STANDARD.encode(format!("{key_id}@{}:{key}", c.name));
-        let mut out = json!({ "id": key_id, "name": name, "api_key": api_key, "url": connection_of(&self.cfg, &c.name)["url"] });
+        // The access the key was made with: a client (roll secrets) checks it got what it asked.
+        let mut out = json!({ "id": key_id, "name": name, "access": if data { "data" } else { "admin" }, "api_key": api_key, "url": connection_of(&self.cfg, &c.name)["url"] });
         if let Some(ms) = v["expiration"].as_i64() {
             out["expires_at"] = json!(ms / 1000);
         }
