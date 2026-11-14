@@ -174,6 +174,7 @@ type Run = {
   schedule?: string;        // cron: five fields, in `timezone` (UTC when unset)
   timezone?: string;        // cron: an IANA zone (Europe/Budapest), its daylight saving kept; 400 for an unknown one
   timeout_s?: number;       // cron: a run's limit (default 3600); web: a request's time to its answer's head, 1–3600, then a 504 (unset: no limit; upgrades and streams that began are the app's)
+  retries?: number;         // cron: a failed or timed-out run is tried again this many times (0–5), after 30 s, then twice as long each time (10 min at most); each try its own run, `cron.failed` only for the last (a canceled run isn't tried again)
   min_instances: number;    // web: 0 scales to zero (default 0); worker: at least 1
   max_instances: number;    // default 3
   concurrency: number;      // requests in flight per instance before scaling out (default 50)
@@ -502,7 +503,7 @@ type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "
   created_at: number; secret?: string };
 type Delivery = { id: string; event: number; kind: string; status: "pending" | "delivered" | "failed"; attempts: number; code: number | null; error: string | null; at: number };
 type RunStatus = "running" | "succeeded" | "failed" | "skipped" | "timed_out" | "canceled";
-type CronRun = { id: string; deployment: string; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null };
+type CronRun = { id: string; deployment: string; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null; attempt: number /* which try of its due time: 1, then up to run.retries more after a failure */ };
 /** A one-off command in a fresh container of the active deployment: its variables and project
  *  network, no port, no volume. timeout_s 1–86400 (default 3600). */
 type Job = { id: string; deployment: string; command: string; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null };

@@ -1892,6 +1892,16 @@ impl Apps {
 
     /// One run of a cron service now (`POST …/runs`, or the schedule).
     pub async fn run_cron(self: &Arc<Self>, service: &str, env: &str) -> Result<CronRun> {
+        self.run_cron_try(service, env, 1).await
+    }
+
+    /// One try of a run: a failed or timed-out one (not a canceled one) is tried again after a
+    /// backoff while `run.retries` allows, its `cron.failed` only when no try follows.
+    fn run_cron_try<'a>(self: &'a Arc<Self>, service: &'a str, env: &'a str, attempt: u32) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CronRun>> + Send + 'a>> {
+        Box::pin(self.run_cron_inner(service, env, attempt))
+    }
+
+    async fn run_cron_inner(self: &Arc<Self>, service: &str, env: &str, attempt: u32) -> Result<CronRun> {
         let (sid, e) = (service.to_string(), env.to_string());
         let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
         if svc.run.kind != RunType::Cron {
@@ -1911,7 +1921,7 @@ impl Apps {
         let cancel = CancellationToken::new();
         self.cancels.lock().insert(rid.clone(), cancel.clone());
         let r2 = rid.clone();
-        let run = match self.db(move |s| s.start_run(&r2, &sid, &e, &a, t)).await {
+        let run = match self.db(move |s| s.start_run(&r2, &sid, &e, &a, t, attempt)).await {
             Ok(r) if r.status != RunStatus::Skipped => r,
             other => {
                 self.running_runs.lock().remove(&rid);
@@ -1923,13 +1933,14 @@ impl Apps {
             Ok(l) => l,
             Err(err) => {
                 let r2 = rid.clone();
-                let _ = self.db(move |s| s.finish_run(&r2, RunStatus::Failed, None)).await;
+                let _ = self.db(move |s| s.finish_run(&r2, RunStatus::Failed, None, false)).await;
                 self.running_runs.lock().remove(&rid);
                 self.cancels.lock().remove(&rid);
                 return Err(err);
             }
         };
         let (this, id, sid, run_dep) = (self.clone(), run.id.clone(), service.to_string(), run.deployment.clone());
+        let retries = svc.run.retries.unwrap_or(0) as u32;
         tokio::spawn(async move {
             // Its output stays in the environment's log (drains read it there); its container's
             // name, its own id in it, is what picks its own lines out.
@@ -1945,13 +1956,31 @@ impl Apps {
                 }
             };
             this.cancels.lock().remove(&id);
+            // Tried again while retries allow (never a canceled one): only the last try's failure
+            // is an incident.
+            let retry = matches!(status, RunStatus::Failed | RunStatus::TimedOut) && attempt <= retries;
             // A failed or timed-out run is an incident's start: its event (notified by default)
             // in the same transaction, and only if it was still running (a takeover may have
             // failed it already).
             let id2 = id.clone();
-            let _ = this.db(move |s| s.finish_run(&id2, status, code)).await;
+            let still = this.db(move |s| s.finish_run(&id2, status, code, retry)).await.unwrap_or(false);
             this.running_runs.lock().remove(&id);
             this.changed(&sid);
+            if retry && still {
+                let wait = this.cfg.cron_retry_after.saturating_mul(1 << (attempt - 1).min(10)).min(Duration::from_secs(600));
+                live.log.stream(Stream::System).line(format!("the run {}: trying again in {} s (try {} of {})", status.as_str().replace('_', " "), wait.as_secs().max(1), attempt + 1, retries + 1));
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
+                    _ = this.stop.cancelled() => return,
+                }
+                // Still this node's, still a cron service, not paused: run_cron_try says no otherwise.
+                if this.owns(&sid) {
+                    let env = live.env.clone();
+                    if let Err(e) = this.run_cron_try(&sid, &env, attempt + 1).await {
+                        live.log.stream(Stream::System).line(format!("the retry didn't start: {e}"));
+                    }
+                }
+            }
         });
         Ok(run)
     }
@@ -1974,7 +2003,7 @@ impl Apps {
             // instead of holding the schedule back until its timeout.
             None => {
                 let i = id.to_string();
-                self.db(move |s| s.finish_run(&i, RunStatus::Canceled, None)).await?;
+                self.db(move |s| s.finish_run(&i, RunStatus::Canceled, None, false)).await?;
             }
         }
         Ok(run)

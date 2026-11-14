@@ -3325,3 +3325,25 @@ async fn a_paused_cron_skips_its_runs_and_pausing_stops_one() {
     let ended = get_until(&w.api, &runs, |r| r[0]["status"] != "running").await;
     assert_eq!(ended[0]["status"], "canceled", "{ended}");
 }
+
+/// A failed cron run is tried again as `run.retries` allows (Cloud Run Jobs' retries), each try
+/// its own run; only the last failure is a `cron.failed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_cron_run_is_retried_and_only_the_last_failure_is_an_incident() {
+    let w = world_with(|c| c.cron_retry_after = Duration::from_millis(20)).await;
+    let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "nightly", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "0 3 * * *", "retries": 2}, "variables": {"FAKE_EXIT": "1"} }))).await;
+    let cid = cron["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &cid, "production", cron["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
+    let runs = format!("/v1/apps/services/{cid}/environments/production/runs");
+    let (st, r) = call(&w.api, "POST", &runs, Some(json!({}))).await;
+    assert!(st.is_success(), "{r}");
+    let all = get_until(&w.api, &runs, |r| r.as_array().is_some_and(|a| a.len() == 3 && a.iter().all(|x| x["status"] == "failed"))).await;
+    let attempts: Vec<u64> = all.as_array().unwrap().iter().map(|x| x["attempt"].as_u64().unwrap()).collect();
+    assert_eq!(attempts, [3, 2, 1], "newest first: {all}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(call(&w.api, "GET", &runs, None).await.1.as_array().unwrap().len(), 3, "no fourth try");
+    let events = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    assert_eq!(events["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "cron.failed").count(), 1, "{events}");
+    let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{cid}"), Some(json!({ "run": {"retries": 9} }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+}

@@ -306,6 +306,9 @@ pub enum AppsCmd {
         /// A cron run's limit; a web service's request limit (unanswered by then is a 504).
         #[arg(long, value_name = "SECONDS")]
         timeout: Option<u32>,
+        /// A cron service's failed run is tried again this many times (0–5), after a backoff.
+        #[arg(long)]
+        retries: Option<u8>,
         /// A volume, `<mount>:<size in GB>` (`/data:5`); `none` removes it.
         #[arg(long)]
         volume: Option<String>,
@@ -1973,7 +1976,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale, public, drain, cpu_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale, public, drain, cpu_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() {
@@ -2082,6 +2085,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("suspend_after_s", suspend_after.map(Value::from)),
                 ("sleep_after_s", sleep_after.map(Value::from)),
                 ("timeout_s", timeout.map(Value::from)),
+                ("retries", retries.map(Value::from)),
                 ("volume", volume),
                 ("rollout", rollout),
                 ("h2c", h2c.map(Value::from)),
@@ -2367,7 +2371,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                             _ => "-".into(),
                         };
                         let code = r["exit_code"].as_i64().map(|c| format!("exit {c}")).unwrap_or_default();
-                        println!("{}  {:<10} {at}  {took:<6} {code}", s(&r["id"]), s(&r["status"]));
+                        let attempt = r["attempt"].as_u64().filter(|a| *a > 1).map(|a| format!("  try {a}")).unwrap_or_default();
+                        println!("{}  {:<10} {at}  {took:<6} {code}{attempt}", s(&r["id"]), s(&r["status"]));
                     }
                     return Ok(());
                 }

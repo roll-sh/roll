@@ -55,6 +55,8 @@ export interface Run {
   /** The zone a cron schedule's fields are in (IANA); UTC when unset. */
   timezone?: string;
   timeout_s?: number;
+  /** A cron service's failed run is tried again this many times (0–5). */
+  retries?: number;
   min_instances: number;
   max_instances: number;
   concurrency: number;
@@ -663,6 +665,8 @@ export interface CronRun {
   exit_code: number | null;
   started_at: number;
   finished_at: number | null;
+  /** Which try of its due time (1: the first; `run.retries` more may follow a failure). */
+  attempt: number;
 }
 
 /** A one-off command in a fresh container of the active deployment (`roll apps run`). */

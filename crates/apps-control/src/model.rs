@@ -405,6 +405,10 @@ pub struct Run {
     pub timezone: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_s: Option<u32>,
+    /// A cron run that fails or times out is tried again this many times (Cloud Run Jobs'
+    /// `--max-retries`), each try its own run after a backoff; `cron.failed` only for the last.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retries: Option<u8>,
     pub min_instances: u32,
     pub max_instances: u32,
     pub concurrency: u32,
@@ -582,6 +586,7 @@ impl Default for Run {
             schedule: None,
             timezone: None,
             timeout_s: None,
+            retries: None,
             min_instances: 0,
             max_instances: 3,
             concurrency: 50,
@@ -730,6 +735,9 @@ impl Run {
                 crate::cron::Schedule::parse(s, self.timezone.as_deref())?;
                 if self.timeout_s.is_some_and(|t| !(1..=86_400).contains(&t)) {
                     return bad("timeout_s is 1–86400");
+                }
+                if self.retries.is_some_and(|r| r > 5) {
+                    return bad("retries is 0–5");
                 }
                 self.min_instances = 0;
             }
@@ -1575,6 +1583,8 @@ pub struct CronRun {
     pub exit_code: Option<i32>,
     pub started_at: i64,
     pub finished_at: Option<i64>,
+    /// Which try of its due time it is (1: the first; `run.retries` more may follow a failure).
+    pub attempt: u32,
 }
 
 /// `<prefix>_` and 12 random characters of lowercase base32.

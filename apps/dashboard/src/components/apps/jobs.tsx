@@ -246,6 +246,7 @@ function ScheduledRuns({ service, env, runner }: { service: string; env: string;
                   <span className="font-mono text-[11.5px] text-subtle">
                     {clock(r.started_at, true)}
                     {r.finished_at ? ` · ${Math.max(1, Math.round((r.finished_at - r.started_at) / 1000))} s` : ""}
+                    {r.attempt > 1 ? ` · try ${r.attempt}` : ""}
                   </span>
                 </button>
               </li>

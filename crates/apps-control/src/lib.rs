@@ -132,6 +132,8 @@ pub struct AppsConfig {
     pub allow_private: bool,
     /// Between two passes over spend limits (`spend`).
     pub spend_every: Duration,
+    /// A failed cron run's first retry waits this long, each next one twice as long (10 min at most).
+    pub cron_retry_after: Duration,
     /// Built deployments each environment keeps to roll back to; older ones' images go
     /// ([`Apps::prune`]).
     pub keep_deployments: usize,
@@ -159,6 +161,7 @@ impl AppsConfig {
             web_url: None,
             allow_private: false,
             spend_every: Duration::from_secs(30),
+            cron_retry_after: Duration::from_secs(30),
             keep_deployments: 10,
             keep_recent: Duration::from_secs(24 * 3600),
         }

@@ -38,6 +38,7 @@ interface Form {
   schedule: string;
   timezone: string;
   timeout: string;
+  retries: string;
   min: string;
   max: string;
   concurrency: string;
@@ -94,6 +95,7 @@ export function formOf(s: Service): Form {
     schedule: str(s.run.schedule),
     timezone: str(s.run.timezone),
     timeout: str(s.run.timeout_s),
+    retries: str(s.run.retries),
     min: str(s.run.min_instances),
     max: str(s.run.max_instances),
     concurrency: str(s.run.concurrency),
@@ -162,6 +164,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.schedule !== before.schedule) run.schedule = text(f.schedule);
   if (f.timezone !== before.timezone) run.timezone = text(f.timezone);
   if (f.timeout !== before.timeout) run.timeout_s = num(f.timeout);
+  if (f.retries !== before.retries) run.retries = num(f.retries);
   if (f.min !== before.min) run.min_instances = num(f.min);
   if (f.max !== before.max) run.max_instances = num(f.max);
   if (f.concurrency !== before.concurrency) run.concurrency = num(f.concurrency);
@@ -200,7 +203,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "min", "max", "concurrency", "healthTimeout", "drain", "cpuTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "drain", "cpuTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -381,6 +384,9 @@ export function SettingsTab({
                 </Field>
                 <Field label="Timeout (s)" hint="a run's limit">
                   {t("timeout", "3600")}
+                </Field>
+                <Field label="Retries" hint="a failed run tried again, 0–5; only the last failure notifies">
+                  {t("retries", "0")}
                 </Field>
               </>
             )}
