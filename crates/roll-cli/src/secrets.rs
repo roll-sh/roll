@@ -1085,13 +1085,14 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 body["ttl_days"] = json!(d);
             }
             let token = c.call(Method::POST, &format!("{}/tokens", c.base()), Some(body)).await?;
-            let mut query = "dynamic=false".to_string();
+            let mut query = "dynamic=false&strict=1".to_string();
             if c.at.path != "/" {
                 query.push_str(&format!("&path={}", enc(&c.at.path)));
             }
             let q = |v: &str| serde_json::to_string(v).expect("a string");
             let ns = namespace.map(|n| format!("\n  namespace: {n}")).unwrap_or_default();
-            let store = format!("{server}{}/environments/{{{{ .remoteRef.key }}}}/values?{query}", c.base());
+            // `urlquery`: a key can't add its own query (`staging/values?dynamic=true&x=`).
+            let store = format!("{server}{}/environments/{{{{ .remoteRef.key | urlquery }}}}/values?{query}", c.base());
             println!(
                 "# roll secrets {}:{} ({}), pulled by External Secrets Operator (docs/secrets.md).\n\
                  apiVersion: v1\nkind: Secret\nmetadata:\n  name: {name}-roll-token{ns}\n  labels:\n    external-secrets.io/type: webhook\n\

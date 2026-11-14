@@ -359,7 +359,8 @@ impl Secrets {
     }
 
     /// [`Secrets::values`], with `dynamic: false` for a reader that can't renew a lease (External
-    /// Secrets Operator, a cron): a dynamic key is a problem instead of a fresh credential.
+    /// Secrets Operator, a cron): a dynamic key is left out (and named in `dynamic`) instead of
+    /// issuing a fresh credential each read.
     #[allow(clippy::too_many_arguments)]
     pub fn values_for(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, caller: &Caller) -> Result<Values> {
         let path = names::path(path)?;
@@ -374,6 +375,9 @@ impl Secrets {
         let mut values = BTreeMap::new();
         let mut problems = vec![];
         for e in &entries {
+            if !dynamic && e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic) {
+                continue;
+            }
             let (v, problem) = r.entry(e);
             if let Some(p) = problem {
                 problems.push(Problem { key: e.row.key.clone(), problem: p });

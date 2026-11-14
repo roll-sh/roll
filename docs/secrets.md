@@ -1092,7 +1092,7 @@ metadata:
 spec:
   provider:
     webhook:
-      url: "https://roll.example/v1/secrets/projects/prj_…/environments/{{ .remoteRef.key }}/values?dynamic=false"
+      url: "https://roll.example/v1/secrets/projects/prj_…/environments/{{ .remoteRef.key | urlquery }}/values?dynamic=false&strict=1"
       headers:
         Authorization: "Bearer {{ .auth.token }}"
       result:
@@ -1118,9 +1118,14 @@ spec:
   by it (`secrets.export`), so a short `refreshInterval` fills the audit log.
 - A folder is `&path=/api` on the store's URL (a store per folder).
 - `dynamic=false`: ESO can't renew a lease, so a dynamic key would be a new credential on every
-  refresh that lapses on its own. With it, a dynamic key comes through empty and is named in
-  `problems`; link it as `managed` (one credential roll rotates) or `live` instead, which ESO's
-  next refresh follows.
+  refresh that lapses on its own. With it, a dynamic key is left out (named in `dynamic`); link it
+  as `managed` (one credential roll rotates) or `live` instead, which ESO's next refresh follows.
+- `strict=1`: a key that doesn't resolve (a reference to a key that's gone, a live link whose
+  resource doesn't answer) fails the whole read with 409 `unresolved`, naming the keys. ESO keeps
+  the Secret it has and marks the ExternalSecret not synced, instead of writing an empty value
+  over a working one.
+- `urlquery` on the key: whoever may make an ExternalSecret can't add their own query
+  (`staging/values?dynamic=true&x=`) to the store's URL.
 - Checked against ESO 2.15 on k3s 1.33: `dataFrom` and `data` from one store, and a change in roll
   reaching the Secret on the next refresh.
 
@@ -1429,7 +1434,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
-| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is a problem, with an empty value, instead of a fresh credential; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
+| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked}` |

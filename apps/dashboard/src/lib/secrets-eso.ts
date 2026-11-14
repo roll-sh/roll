@@ -38,8 +38,9 @@ export function esoManifest(i: EsoInput): string {
   const server = i.server.replace(/\/+$/, "");
   const q = JSON.stringify;
   const ns = i.namespace ? `\n  namespace: ${i.namespace}` : "";
-  const query = i.path === "/" ? "dynamic=false" : `dynamic=false&path=${enc(i.path)}`;
-  const url = `${server}/v1/secrets/projects/${enc(i.project)}/environments/{{ .remoteRef.key }}/values?${query}`;
+  const query = i.path === "/" ? "dynamic=false&strict=1" : `dynamic=false&strict=1&path=${enc(i.path)}`;
+  // `urlquery`: a key can't add its own query (`staging/values?dynamic=true&x=`).
+  const url = `${server}/v1/secrets/projects/${enc(i.project)}/environments/{{ .remoteRef.key | urlquery }}/values?${query}`;
   return `# roll secrets ${i.env}:${i.path} (${i.project}), pulled by External Secrets Operator (docs/secrets.md).
 apiVersion: v1
 kind: Secret

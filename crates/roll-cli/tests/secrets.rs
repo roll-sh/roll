@@ -93,7 +93,7 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     // made, reads the environment.
     let yaml = ok(&api, &[], &["secrets", "-p", "shop", "-e", "production", "kubernetes", "--url", &api], None).await;
     let field = |k: &str| yaml.lines().find_map(|l| l.trim().strip_prefix(k)).unwrap().trim_matches('"').to_string();
-    let url = field("url: ").replace("{{ .remoteRef.key }}", "production");
+    let url = field("url: ").replace("{{ .remoteRef.key | urlquery }}", "production");
     let pulled: serde_json::Value = reqwest::Client::new().get(url).bearer_auth(field("token: ")).send().await.unwrap().json().await.unwrap();
     assert_eq!(pulled["values"]["HOST"], "db.internal");
 
