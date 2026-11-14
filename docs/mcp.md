@@ -142,6 +142,10 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
 - Redirect URIs must be `https`, `http` on a loopback address (RFC 8252), or an app's own scheme
   (`cursor://…`). Never `javascript:`, `data:` or `file:`. The redirect must match a registered URI
   exactly.
+- Registration is open, so it's bounded: a network (/24, /48) registers at most 20 clients a minute
+  on a node (then `429` with `Retry-After`), and at 10,000 clients the ones that never connected and
+  are over an hour old go first. A newer one is never pushed out (a person may be on its consent
+  screen); with none to drop, registering is `429` until one is.
 - Codes are good for one minute, once. Access tokens (`rlo_`) last an hour. Refresh tokens (`rlf_`)
   rotate on every use, and a used one fails; a connection expires 30 days after its last refresh.
 - `scope` (`read-only`, `agent`, `project`, `development`, `previews`, `full`) picks the preset the
@@ -429,10 +433,11 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); `secrets_list_cas` (secrets
-#44); the prefix check skips public routes (no grant classifies what anyone may call);
-`secrets_list_cloud_accounts` (secrets #43); the audit log as CSV (the audit page, `roll mcp audit
---format csv`; formula-safe cells); what an agent sees, on the token page (`GET
+revoked as leaked, about to expire; only their own, never a secret); open client registration
+bounded (20 a minute a network; a flood never pushes out a client a person is connecting);
+`secrets_list_cas` (secrets #44); the prefix check skips public routes (no grant classifies what
+anyone may call); `secrets_list_cloud_accounts` (secrets #43); the audit log as CSV (the audit page,
+`roll mcp audit --format csv`; formula-safe cells); what an agent sees, on the token page (`GET
 /v1/access/tokens/{id}/tools`: the tools and prompts a token is offered and what the list costs an
 agent's context); completions named as such in the audit log (`completion/complete:<tool>`); a
 connection's tool names worked out once per request; every open sibling's head passes the route

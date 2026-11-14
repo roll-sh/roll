@@ -454,6 +454,8 @@ pub struct Access {
     pub(crate) mail_gate: std::sync::Mutex<MailGate>,
     /// GitHub's secret scanning keys, cached.
     pub(crate) github_keys: leaks::GithubKeys,
+    /// OAuth registrations lately, per network: `(minute, count)` (open registration's limit).
+    pub(crate) registrations: std::sync::Mutex<std::collections::HashMap<String, (i64, u32)>>,
     /// The token policy as last read (`policy_now`).
     policy_cache: std::sync::Mutex<Option<(std::time::Instant, Policy)>>,
 }
@@ -473,7 +475,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.

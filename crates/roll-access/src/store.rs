@@ -139,6 +139,8 @@ const TOUCH_MS: i64 = 60 * 1000;
 /// Live grants kept at most, and per person.
 pub const MAX_GRANTS: usize = 10_000;
 pub const USER_MAX_GRANTS: usize = 100;
+/// Registered OAuth clients at most (registration is open; RFC 7591).
+pub const MAX_CLIENTS: i64 = 10_000;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Grant {
@@ -1343,12 +1345,17 @@ impl Store {
         let uris = serde_json::to_string(redirect_uris).unwrap_or_default();
         self.db.write(|c| {
             let count: i64 = c.query_row("SELECT COUNT(*) FROM oauth_clients", (), |r| r.get(0))?;
-            if count >= 10_000 {
-                // Registration is open: forget the clients that never connected, oldest first.
-                c.execute(
-                    "DELETE FROM oauth_clients WHERE id IN (SELECT id FROM oauth_clients WHERE last_used_at IS NULL AND id NOT IN (SELECT client_id FROM grants WHERE client_id IS NOT NULL) ORDER BY created_at LIMIT 100)",
-                    (),
+            if count >= MAX_CLIENTS {
+                // Registration is open: forget the clients that never connected, oldest first, and
+                // only those an hour old (a person may be on the consent screen of a newer one), so
+                // a flood of registrations can't push out a client being connected.
+                let evicted = c.execute(
+                    "DELETE FROM oauth_clients WHERE id IN (SELECT id FROM oauth_clients WHERE last_used_at IS NULL AND created_at < ? AND id NOT IN (SELECT client_id FROM grants WHERE client_id IS NOT NULL) ORDER BY created_at LIMIT 100)",
+                    [now - 3_600_000],
                 )?;
+                if evicted == 0 {
+                    return Err(Error::TooMany("too many clients registered lately: try again in an hour".into()));
+                }
             }
             c.execute("INSERT INTO oauth_clients (id, name, uri, redirect_uris, created_at) VALUES (?, ?, ?, ?, ?)", params![id, name, uri, uris, now])?;
             Ok::<_, Error>(())
