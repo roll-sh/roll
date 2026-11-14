@@ -1589,7 +1589,11 @@ Done and in PR #20:
 Then change policies per folder (#53), as Infisical's approval policies on secret paths.
 
 Then (2026-11-14, latest): `roll run` masks values in what the command prints when it isn't a
-terminal (#54), as 1Password's `op run` and GitHub Actions do.
+terminal (#54), as 1Password's `op run` and GitHub Actions do; pulling into Kubernetes with External
+Secrets Operator (#55: its webhook provider, checked against ESO 2.15 on k3s) and
+`values?dynamic=false` for readers that can't renew a lease. #50, #51 and #53 merge cleanly
+together, and the merged tree passes roll-secrets', rolld's auth and the dashboard's tests. #52's
+import dialog names Vault trees and AWS (screenshots on #52).
 
 An eighth independent review (2026-11-14, of moving in, change policies per folder and the
 seventh review's fixes) found no high-severity issue; it found folder gates a reviewer, a
@@ -1684,10 +1688,11 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A screenshot of moving in** for #52's dashboard import dialog (it shows the CLI commands).
-2. **When #50, #51 and #53 meet** (whichever land later): `requests.rs` and `write.rs` keep the
-   canvas check before the provider (#51), check-and-set (#50) and folder gates (#53); a test of
-   the three together.
+1. **A ninth independent review** of `roll run`'s masking (#54) and the eighth review's fixes
+   (running), and its fixes.
+2. **`roll secrets kubernetes`** prints ESO's `SecretStore`, `ExternalSecret` and token `Secret`
+   for an environment (a fresh `--for-env` token, this server's URL, `dynamic=false`), and the
+   dashboard's Export menu offers the same, so nobody writes the webhook template by hand (#55).
 3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
 4. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
@@ -1727,6 +1732,8 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#55, pulling into Kubernetes with External Secrets Operator** (after #20): its webhook
+  provider (one store for whole environments and single keys) and `values?dynamic=false`.
 - **#54, `roll run` masks values in the command's output** (after #20): stdout and stderr that
   aren't a terminal go through roll, which writes `<concealed by roll>` for each value it added
   (as is, by line, JSON- and URL-encoded); `--mask`, `--no-mask`.
