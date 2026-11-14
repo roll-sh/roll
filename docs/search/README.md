@@ -234,32 +234,31 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-1. **Indexing CPU and benchmarks on a quiet host** (docs/benchmarks/search.md). Indexing: the
-   direct document parser now takes float types, plain objects and the opensearch dialect
-   (nyc_taxis 8 clients 90k docs/s against Elasticsearch's 66k and OpenSearch's 60k; an ECS log
-   74.5k against 59.0k and 41.3k), but with one client roll spends more CPU per document than
-   Elasticsearch (51.8 against 34.6 µs on the ECS log). BP reordering at merge is about a quarter
-   of it and stays: measured off, it saves 32% of indexing CPU on the ECS log but makes
-   `@timestamp` descending sorts 24x slower, and the cheaper variants cost `so`'s text queries
-   20-55% (docs/benchmarks/search.md). The direct parser now takes arrays of objects too (an ECS
-   log with arrays: 36k → 57-73k docs/s). In progress (`wip/search-sort`): descending sorts that
-   prune on ascending data (logs arrive oldest first: `@timestamp` desc is 24x slower without
-   BP's reshuffle), then BP over text fields only (about 28% less indexing CPU on logs). Then
-   the request path's allocations (malloc/free are ~10% of the bulk threads). Queries: roll ahead of both engines on
-   every Rally measure but `autohisto_agg` (now counted from the points tree: 27.8 → 3.0 ms in an
-   A/B; Rally rerun pending) and `terms_enum`; a full rerun of every Rally track with variance;
-   one allocator policy (rolld's against search-dev's purge governor); `terms_enum`'s per-request
-   overhead.
+1. **Indexing CPU and benchmarks on a quiet host** (docs/benchmarks/search.md). Indexing leads
+   both engines with 8 clients (nyc_taxis 90k docs/s against Elasticsearch's 66k and
+   OpenSearch's 60k; an ECS log 74.5k against 59.0k and 41.3k), but with one client roll spends
+   more CPU per document than Elasticsearch (51.8 against 34.6 µs on the ECS log), about a quarter
+   of it BP reordering at merge. Landed: top-k numeric sorts collect by bands when documents arrive
+   against the sort (`@timestamp` desc on logs indexed oldest first, without BP: 84.9 → 1.4 ms;
+   with BP, nyc_taxis term + sort 14.7 → 1.4, http_logs range + sort 6.2 → 1.9; a BP index's `so`
+   range + sort +13%). BP over text fields only now costs no log sort (ECS indexing 61.0 → 41.5
+   µs/doc) but loses keyword-filtered and other sorts up to 60% (not adopted); next is applying it
+   only to time-series and log indices (`index.mode: logsdb`, data streams), measured. Then the
+   request path's allocations (malloc/free are ~10% of the bulk threads), a full rerun of every
+   Rally track with variance (after the vector lane's benchmarks: `autohisto_agg`, counted from the
+   points tree, 27.8 → 3.0 ms in an A/B), one allocator policy (rolld's against search-dev's purge
+   governor), `terms_enum`'s per-request overhead.
 2. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
    Elasticsearch 9.5.5 and OpenSearch 3.9). Roll leads on indexing (4,735 docs/s against 3,585
    and 2,978 at 8 clients), merged `knn` (1.9 ms CPU against 6.1 and 4.9), `rrf` (3.2 against 13.8
    and 8.3), cold start (36 ms to the first `knn` against a ~25-29 s node start) and memory
    (34 MiB idle against 2.5 and 4.1 GiB); filtered `knn` now reads its filter as a bitset (about
-   half the CPU, identical hits). It loses on store bytes (2.67 GB against Elasticsearch's 1.71):
-   vectors are stored twice, in the vector field and in `_source`. In progress
-   (`wip/search-source-vectors`): `_source` stored without them under
-   `index.mapping.exclude_source_vectors` (Elasticsearch 9's default) and rebuilt from the vector
-   field for every reader. Then: 1-bit quantization quality (rescoring only the best candidates
+   half the CPU, identical hits). Store bytes are now Elasticsearch's (1.74 GB force-merged
+   against 1.71, was 2.67): `_source` is stored without indexed vectors under
+   `index.mapping.exclude_source_vectors` (Elasticsearch 9's default) and every reader patches
+   them back as Elasticsearch prints them; fetching `_source` got cheaper too (vectors hidden 7.9
+   → 2.0 ms CPU per `knn`, shown 13.5 → 8.7). Left in `_source`: vectors in `nested` objects and
+   `sparse_vector` values. Next: 1-bit quantization quality (rescoring only the best candidates
    halves CPU but drops recall to 0.43), AVX-512 distances for float HNSW indexing (1,250 against
    1,174 µs/doc), searching unmerged segments in parallel (filtered latency 2-3x Elasticsearch's
    there).
