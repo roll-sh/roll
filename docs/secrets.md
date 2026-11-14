@@ -488,6 +488,11 @@ A link is `{kind, ref, field, mode, options}`:
   every 10 minutes. `Values.dynamic` names the keys that hold one, for a consumer that can't renew
   (a service that scales to zero refuses them). Only
   the lease's metadata is stored, never the credential.
+- **When a secret, an environment or the project goes**, what it issued is revoked first, while
+  the project's key and registries (rotators…) can still reach it. A revocation that fails (the
+  product or the customer's endpoint is down) stays as a lease that's already due, and the sweeper
+  retries it; a deleted project keeps its key and registries (`projects.forgotten_at`) until its
+  last lease is revoked, then they go too. Nothing it issued outlives it unrevoked.
 
 **Suggested links.** `GET …/suggestions` lists each resource on the project's canvas with the
 standard environments that neither link it nor have its usual keys at `/`, and those keys: the
@@ -1584,55 +1589,123 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
-Reviewed again on 2026-11-13 (evening): against Doppler, Infisical, Vault and 1Password Developer,
-and across the five branches. The core is level with them (environments, versions, references,
-approvals, dynamic secrets and rotation, OIDC identities, syncs, scanning, audit sinks). The gaps
-that matter: two permission systems; roll apps deploys without project secrets (`NoSecrets`); no
-time-boxed access requests; a runtime client only for TypeScript;
-no Terraform provider.
+Then (2026-11-14, latest): certificates ending as health findings (#44: `certificate_expiring`)
+and ClickHouse outside roll (#39, merged up into #41 and #42: its HTTPS interface, `sha256_hash`
+passwords, checked live against ClickHouse 25.8).
 
-Ranked (work that can start now):
+A fourth independent review (2026-11-14, of the rotations overview, transit signing, HMAC and
+brought keys, CSR signing, revocation and the CRL, SQL Server) found no high-severity issue; it
+found an ended SQL Server lease whose login could stay usable, generated passwords SQL Server's
+policy refuses, deleted CAs undoing their revocations, a public CRL signed per request, P-384 CSRs
+mislabelled, unrevocable serials, a batch failed by one retired version and a restore that forgot
+brought keys: all fixed, tested where a test guards behaviour, and checked live (SQL Server 2022,
+OpenSSL). Then SSH host certificates (#45, checked against a real `sshd`).
 
-1. **One permission system** (agreed with roll MCP, 2026-11-13): done on
-   `feature/roll-secrets-access` (#20 + #25), to land after both. `rlst_` goes outright: it never reached main. New tokens
-   are roll-access grants made through `POST /v1/access/tokens` with one rule (`secrets ×
-   {project} × environments × paths × actions`, `ip_allow`, expiry), passing the request's own
-   extensions; `roll secrets tokens` and the dashboard call it. A project's tokens are `GET
-   /v1/access/tokens?product=secrets&resource=<project>`, a list acted on one token at a time
-   (never revoked in bulk: it holds tokens people made in the builder too). Workload identities
-   keep their trust configuration and OIDC verification here and mint short-lived `workload`
-   grants (`Access::mint_workload`, 5–60 minutes, the identity's scope, owned by its creator; 409
-   past 1,000 per owner). `TokenScope`, the `tokens` table's use and the built-in token check go.
-2. **roll apps' variables from roll secrets.** rolld's `SecretSource` for apps resolves the
-   service's project's environment as `app:<svc>` (`Secrets::values`, resolved), only where the
-   project trusts the service (`Workspace::trusts`); an environment roll secrets doesn't have is
-   no variables, never a failed deploy. apps' `variables?reveal` shows secrets' values: it needs
-   `reveal` on secrets too (a second resource in roll-access's catalogue row). With roll apps.
-3. **Access requests through roll-access's "ask"**: a person asks for time-boxed `reveal` on a
-   protected environment, and an approver grants it for minutes (the approval names the
-   environment and folder).
-4. **Runtime clients beyond TypeScript.** `@roll/secrets` (packages/secrets) already fetches an
-   environment's values with a token, opens sealed exports, watches the digest and renews dynamic
-   leases. Go and Python clients with the same surface (and a workload identity's login built in),
-   as Doppler's and Infisical's SDKs have.
-5. **Products say who owns a resource**, so a person's project can link their own databases,
-   buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
-6. **A Terraform provider** (`roll_secret`, `roll_secrets_environment`, data sources for values),
-   as Doppler's and Infisical's.
+Built on 2026-11-14 (later), again without a merge: revoking certificates (#44: a list of what a
+CA signed, `…/revoke`, revocation when a lease ends, a public CRL every certificate names, checked
+with `openssl verify -crl_check`); SQL Server outside roll (#39, merged up into #41 and #42;
+checked live against SQL Server 2022); bringing an encryption key (#47: Vault's `vault:v<n>:`
+ciphertexts decrypt and rewrap, checked against Vault 1.20).
 
-Waiting on other pull requests:
+Built on 2026-11-14 from the last ranking, without waiting on a merge: a rotations overview (#48:
+`GET …/rotations`, Health's "Managed credentials", `roll secrets rotations`); signing and HMAC
+with encryption keys (#47: Ed25519 a stock library checks with the exported public key, HMAC
+blind indexes, `transit(name)` in `@roll/secrets`); CSR signing (#44: `…/cas/{id}/sign`, checked
+with OpenSSL's P-256 and RSA CSRs under `openssl verify -x509_strict`).
 
-- **Merge with roll search** (#22), whichever merges second. Checked live on a branch with both
-   (2026-11-13): a key linked to a cluster's `api_key` gets the cluster's own API key (200 with it,
-   401 without), rotating issues a new one while the old works through the grace period and fails
-   once its retired lease is revoked, and a `dynamic` link's key dies with its lease. The merge
-   conflicts are additive: CI's matrix (`secrets` and `search` rows), roll-cli's test dependencies,
-   rolld's `main.rs` (search's router, then workspace and secrets) and `DbBudget` (`search`,
-   `secrets` and `accounts`, one reserved connection each for the always-on ones).
-- **roll apps' `SecretSource`** wired to `Secrets::values` as `app:<svc>`, whichever of #20 and
-  #21 merges second.
+A third independent review (of #46 and #47) found four ways a sensitive value still reached a person
+(older versions, change requests that add the tag, syncs and sandboxes counted as runtimes) and
+guessing oracles, plus backups leaving out encryption keys: all fixed and tested. roll apps (#26)
+now seals sensitive variables and redeploys when an environment's digest moves (#31 implements
+it). An independent security review of #43–#45 found no cross-tenant path; it found managed
+certificates that could lapse, an issuer key that a deployment-key rotation would have broken, a
+fail-open decoy check and leases outliving cloud tokens, all fixed and tested. Measured again on 2026-11-14 (load about 20): values at 9,900 keys took 89–122 ms on SQLite and
+155 ms on Postgres, within the noise of the Performance table; nothing to fix. Reviewed again on
+2026-11-14: an independent security review of #39–#41 found racing rotations
+could reset the login in use (now a claim never takes a busy role), a `#` in a password shown as
+the host, Postgres connections outliving their timeout, and deleted projects leaving credentials
+unrevoked (now revoked first, the rest retried by the sweeper); all fixed and tested. Earlier,
+2026-11-13 (later): the Link dialog crashed on a kind that isn't a canvas
+resource (a rotator, an AWS role): `KIND_ICON` only knows the workspace's. It names roll secrets'
+own kinds now and falls back to a plain link icon for any it doesn't know. Earlier, 2026-11-13 (late): #39's own review found two ways a rotation could reset the
+role in use (a refused `ALTER ROLE`, two environments sharing the pair); both fixed and tested.
+The other threads' heads need nothing from roll secrets (MCP lists outside databases; previews
+waits on #31). Earlier, on 2026-11-13 (night): the core and the stacked pull requests are level with
+Doppler, Infisical, Vault and 1Password (clients, IaC, CI, Kubernetes, BYOK). The gap that's left
+is Vault's signature: dynamic credentials for clouds and databases roll doesn't run. CI stays
+under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
-Done since the last review: signed-in people manage the secrets of their own projects (People,
+Ranked: first what can be built now, without a merge; then what waits on one (merges are the
+user's call).
+
+1. **Transit keys scoped by name**: a grant's resources include one encryption key
+   (`secrets:transit/<name>`), so signing with one key doesn't need write on the project. Needs a
+   resource kind in roll-access's catalogue (the MCP thread's), so agree it there first.
+2. **Certificates for keys that stay put on SSH too**: `roll ssh` signs a key the user already has
+   (`…/ssh-cas/{id}/sign-user {public_key}`), for people who keep their key in an agent or a
+   hardware token.
+3. **Rotation for roll's own resources from outside**: `roll secrets rotate --all-due`, for an
+   operator's maintenance window, rotating every managed credential due within a week in one run
+   and reporting what failed.
+4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
+   already seals such variables). One line once both are on #20.
+5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
+   token; the trust policy pins `sub`, as GCP's and Azure's do).
+6. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
+   notice.
+7. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
+   project can link their own databases, buckets and streams.
+8. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+   environment).
+
+Open pull requests after this one:
+
+- **#30, one permission system** (after #20 and #25): a project's tokens are roll-access grants,
+  identities' logins get `workload` tokens, `rlst_` is gone.
+- **#31, roll apps' deploys get their project's secrets** (after #20 and #26): `ForApps`, linked
+  keys marked for apps to rewrite, `may_reveal` by secrets' own rules (`Secrets::caller_of`).
+  #30 and #31 both change `caller()`: whichever lands second keeps #30's (no `rlst_`) with
+  #31's `caller_of` split.
+- **#32, Go and Python clients** (after #20): `sdk/go/secrets`, `sdk/python/roll_secrets`.
+- **#33, a Terraform provider** (after #20): environments, keys (a value or a link), identities,
+  syncs, tokens and values.
+- **#34, a GitHub Action** (after #20): a job's environment through its own OIDC token, masked;
+  `scan: true` fails a pull request that adds a stored value.
+- **#35, `roll run --fallback`** (after #20): an encrypted copy of the last values, used through an
+  outage.
+- **#36, a Kubernetes operator** (after #32): RollSecrets pulled with the cluster's own identity,
+  and its Helm chart.
+- **#37, customer-managed keys** (after #20): a project's data key wrapped by the customer's KMS key,
+  set from the project's settings.
+- **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
+- **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
+  after its grace; a user with two keys already is refused, never pruned.
+- **#48, failing rotations in health** (after #20): `rotation_failing` and `revoke_failing`
+  findings, with the reason, until roll succeeds; a rotations overview of every managed credential.
+- **#47, encryption keys** (after #20): encryption as a service, as Vault's Transit: named,
+  versioned keys that never leave roll; encrypt, decrypt (audited), rewrap, data keys, Ed25519
+  signatures and HMACs; keys brought from outside, Vault's ciphertexts included.
+- **#46, sensitive keys** (after #20): a key tagged `sensitive` reaches only roll's runtimes, syncs
+  and workload identities, never a person or a token; the tag is for good.
+- **#45, SSH certificates** (after #44): a project's SSH CA signs short-lived user certificates
+  for the logins it allows, and `roll ssh` uses them for one session; OpenSSH's formats, checked
+  with `ssh-keygen` and a real `sshd` login.
+- **#44, a project's own certificate authority** (after #20): short-lived TLS certificates for the
+  names its name-constrained CA allows, dynamic or managed, and CSRs it signs; revocation and a
+  public CRL; checked with a real TLS handshake and `openssl verify -crl_check`.
+- **#43, dynamic GCP and Azure credentials** (after #20): roll as an OIDC issuer
+  (`/v1/secrets/oidc`); GCP's workload identity federation and Azure's federated credentials trust
+  its token for one project, checked with a decoy project at registration.
+- **#42, MongoDB outside roll** (after #41): rotation and a user per lease for Atlas and replica
+  sets; the primary only among the seeds, SRV targets inside their domain, SCRAM with the server's
+  signature checked.
+- **#41, Redis outside roll** (after #39): two ACL users take turns (`#<sha256>` passwords), or a
+  user per lease copying a template user's rules; the tenant's replies read by a bounded parser.
+- **#39, Postgres, MySQL and SQL Server outside roll** (after #20): two login roles take turns (rotation), or a
+  login per lease in a group role (dynamic), over verified TLS to a public address rolld resolved
+  itself (Postgres gets a SCRAM verifier, never the password).
+
+Done since the last review: roll search's merge (#22: its links checked live, the conflicts additive); signed-in people manage the secrets of their own projects (People,
 under Access), with the canvas guards. main (roll MCP #19 and accounts #18) merged in. roll secrets asks the
 caller's roll-access Grant (`GrantGrants`): a grant's request is checked inside the product too,
 health and leaks filter themselves, search and findings take any grant, ephemeral environments are
