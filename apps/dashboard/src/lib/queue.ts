@@ -36,7 +36,7 @@ export function canWrite(info: Pick<CodeInfo, "auth"> | null | undefined, repo: 
 // ── blockers ──
 
 /** `ready`: mark it ready · `approve`: approve running it · `review`: go to the review composer. */
-export type BlockerAction = "ready" | "approve" | "review" | null;
+export type BlockerAction = "ready" | "approve" | "review" | "visual" | null;
 
 export interface BlockerCopy {
   title: string;
@@ -74,7 +74,7 @@ export function blockerCopy(b: Blocker): BlockerCopy {
     case "review_required":
       return { title: "Review required", detail: b.message, action: null };
     case "visual":
-      return { title: "Visual change to accept", detail: `${b.message} (Accept on its preview's sheet, or roll preview accept).`, action: null };
+      return { title: "Visual change to accept", detail: b.message, action: "visual" };
     default:
       return { title: b.message, detail: "", action: null };
   }

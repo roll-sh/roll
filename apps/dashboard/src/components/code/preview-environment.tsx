@@ -103,14 +103,27 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
 /** The change's visual review (`roll/visual`): who accepted it, or the way to. */
 function VisualReview({ previewId, review }: { previewId: string; review: NonNullable<PreviewEnvironment["visual_review"]> }) {
   const [by, setBy] = useState<string | null>(review.state === "accepted" ? (review.by ?? "someone") : null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   if (by) return <p className="text-[12px] text-subtle">Its look was accepted by {by} at this push.</p>;
   return (
     <div className="flex flex-wrap items-center gap-2 text-[12px]">
       <span className="text-soft">
         A visual change to review{review.required ? " before it lands" : ""}: {Math.max(review.percent, 0.1).toFixed(1)}% unlike {review.branch}.
       </span>
+      <AcceptVisual previewId={previewId} review={review} onAccepted={setBy} />
+    </div>
+  );
+}
+
+/** Accept a change's visual change as it was looked at (its screenshot's head): the panel's and
+ * the "Before it can land" blocker's button. A newer screenshot, or the change's own author, is
+ * refused and says so. */
+export function AcceptVisual({ previewId, review, onAccepted }: { previewId: string; review: NonNullable<PreviewEnvironment["visual_review"]>; onAccepted?: (by: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  if (done && !onAccepted) return <span className="text-[12px] text-subtle">Accepted.</span>;
+  return (
+    <span className="inline-flex flex-wrap items-center gap-2">
       <button
         type="button"
         disabled={busy}
@@ -119,7 +132,8 @@ function VisualReview({ previewId, review }: { previewId: string; review: NonNul
           setError(null);
           try {
             const p = await previewsApi.acceptVisual(previewId, review.head);
-            setBy(p.visual_review?.by ?? "you");
+            setDone(true);
+            onAccepted?.(p.visual_review?.by ?? "you");
           } catch (e) {
             setError(errorText(e));
           } finally {
@@ -131,6 +145,6 @@ function VisualReview({ previewId, review }: { previewId: string; review: NonNul
         {busy ? "Accepting…" : "Accept"}
       </button>
       {error && <span className="text-[11.5px] text-danger">{error}</span>}
-    </div>
+    </span>
   );
 }
