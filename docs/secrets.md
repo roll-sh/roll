@@ -779,12 +779,17 @@ roll secrets import --from aws --source prod/shop/ -e production      # your aws
 - `--recursive` (Vault) walks a KV v2 tree: each secret goes into its own folder under `--path`
   (`secret/shop/db` → `/db`, the secret at the source itself → `--path`), one change per folder;
   a Vault name that can't be a roll folder (letters, digits, `_`, `-`) stops it, naming it, and
-  so do more than 500 secrets or 8 levels (import in parts).
+  so do more than 500 secrets, 8 levels or 2,000 paths (import in parts). A secret the token can't
+  read stops it too, naming it (only a 404 is "nothing there"), so nothing is left out unsaid;
+  secrets are read and folders listed only as Vault lists them, so a token with read on `app/*`
+  but not on `app` itself works. Answers are read up to 4 MiB.
 - `--from aws` reads Secrets Manager through the user's own `aws` CLI (its profiles, SSO and
   roles; `ROLL_AWS_CLI` names another binary): every secret whose name starts with `--source`
   (500 at most). A JSON object's fields come in as keys; any other string as one key named after
   the secret's last segment (`prod/shop/sendgrid-key` → `SENDGRID_KEY`); binary secrets are left
-  out, named. Values come back on the CLI's output, never on a command line.
+  out, named; JSON `null` fields too. Two secrets that give one key stop it, naming both (import
+  them into different folders), and so do more than 500 under the prefix. Values come back on the
+  CLI's output, never on a command line.
 - Checked against Vault 1.20 (a three-level tree into three folders) and Secrets Manager on
   LocalStack (a JSON secret, a plain one, and one outside the prefix left alone).
 

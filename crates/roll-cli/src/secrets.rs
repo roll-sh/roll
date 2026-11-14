@@ -1732,14 +1732,20 @@ async fn import_from(from: &str, source: &str) -> anyhow::Result<serde_json::Map
             // The user's own `aws` CLI (profiles, SSO, roles); values come back on its stdout,
             // never on a command line.
             let list = aws(&["secretsmanager", "list-secrets", "--filters", &format!("Key=name,Values={source}"), "--output", "json"]).await?;
-            let names: Vec<String> = list["SecretList"].as_array().into_iter().flatten().filter_map(|x| x["Name"].as_str().map(String::from)).filter(|n| n.starts_with(source)).take(500).collect();
+            let names: Vec<String> = list["SecretList"].as_array().into_iter().flatten().filter_map(|x| x["Name"].as_str().map(String::from)).filter(|n| n.starts_with(source)).collect();
+            anyhow::ensure!(names.len() <= 500, "{} secrets start with {source}: 500 at most at once; import a narrower prefix", names.len());
+            // Where each key came from: two secrets that give one key stop it, naming both.
+            let mut from: std::collections::BTreeMap<String, String> = Default::default();
             for name in names {
-                let v = aws(&["secretsmanager", "get-secret-value", "--secret-id", &name, "--output", "json"]).await?;
+                let v = aws(&["secretsmanager", "get-secret-value", &format!("--secret-id={name}"), "--output", "json"]).await?;
                 let Some(text) = v["SecretString"].as_str() else {
                     eprintln!("{name}: binary, left out");
                     continue;
                 };
                 for (k, val) in aws_entries(&name, source, text) {
+                    if let Some(other) = from.insert(k.clone(), name.clone()) {
+                        bail!("{other} and {name} both give {k}: import them into different folders (a narrower --source each)");
+                    }
                     put(&k, &Value::String(val));
                 }
             }
@@ -2521,7 +2527,7 @@ async fn aws(args: &[&str]) -> anyhow::Result<Value> {
 /// named after the secret's last segment (`prod/app/db-url` → `DB_URL`).
 fn aws_entries(name: &str, prefix: &str, text: &str) -> Vec<(String, String)> {
     if let Ok(Value::Object(fields)) = serde_json::from_str::<Value>(text) {
-        return fields.into_iter().map(|(k, v)| (k, v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))).collect();
+        return fields.into_iter().filter(|(_, v)| !v.is_null()).map(|(k, v)| (k, v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))).collect();
     }
     let last = name.strip_prefix(prefix).unwrap_or(name).rsplit('/').next().unwrap_or(name);
     let mut key: String = last.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' }).collect();
@@ -2540,35 +2546,62 @@ async fn vault_tree(source: &str) -> anyhow::Result<Vec<(String, serde_json::Map
     let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build()?;
     let url = |kind: &str, p: &str| format!("{}/v1/{mount}/{kind}/{}", addr.trim_end_matches('/'), p.trim_matches('/'));
     let segment = |s: &str| !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    // An answer read whole, up to 4 MiB; `None` for a 404 (nothing there). Anything else stops
+    // it: a secret the token can't read must not be left out unsaid.
+    let fetch = |req: reqwest::RequestBuilder, what: String| async move {
+        let mut res = req.send().await.with_context(|| what.clone())?;
+        if res.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok::<_, anyhow::Error>(None);
+        }
+        anyhow::ensure!(res.status().is_success(), "{what}: {} (the token needs read and list on it)", res.status());
+        let mut body = Vec::new();
+        while let Some(chunk) = res.chunk().await.with_context(|| what.clone())? {
+            anyhow::ensure!(body.len() + chunk.len() <= 4 << 20, "{what}: the answer is over 4 MiB");
+            body.extend_from_slice(&chunk);
+        }
+        Ok(Some(serde_json::from_slice::<Value>(&body).with_context(|| format!("{what}: not JSON"))?))
+    };
     let mut out = vec![];
+    let mut visits = 0usize;
     // (path under the mount, folder under the source, depth)
-    let mut queue = vec![(base.clone(), String::new(), 0usize)];
-    while let Some((at, folder, depth)) = queue.pop() {
-        // The secret at this path, if there is one.
-        let res = http.get(url("data", &at)).header("x-vault-token", &token).send().await.with_context(|| format!("vault {mount}/{at}"))?;
-        if res.status().is_success() {
-            let v: Value = res.json().await.context("vault: not JSON")?;
-            let fields: serde_json::Map<String, Value> = v["data"]["data"].as_object().into_iter().flatten().filter(|(_, x)| !x.is_null()).map(|(k, x)| (k.clone(), Value::String(x.as_str().map(String::from).unwrap_or_else(|| x.to_string())))).collect();
-            if !fields.is_empty() {
-                out.push((folder.clone(), fields));
+    // (path under the mount, folder under the source, depth, a secret to read, a folder to list).
+    // Vault lists a secret as `name` and a folder as `name/`: each is read only as what it is,
+    // so a token with read on `app/*` but not on `app` itself still imports `app/…`.
+    let mut queue = vec![(base.clone(), String::new(), 0usize, true, true)];
+    while let Some((at, folder, depth, secret, listed)) = queue.pop() {
+        visits += 1;
+        anyhow::ensure!(visits <= 2_000, "vault {mount}/{base}: more than 2,000 paths; import it in parts");
+        if secret {
+            let read = fetch(http.get(url("data", &at)).header("x-vault-token", &token), format!("vault {mount}/{at}")).await;
+            // The source itself may be only a folder the token can't read as a secret.
+            let read = match read {
+                Err(e) if at == base && e.to_string().contains("403") => {
+                    eprintln!("vault {mount}/{at}: not readable as a secret itself, its folders only");
+                    None
+                }
+                other => other?,
+            };
+            if let Some(v) = read {
+                let fields: serde_json::Map<String, Value> = v["data"]["data"].as_object().into_iter().flatten().filter(|(_, x)| !x.is_null()).map(|(k, x)| (k.clone(), Value::String(x.as_str().map(String::from).unwrap_or_else(|| x.to_string())))).collect();
+                if !fields.is_empty() {
+                    out.push((folder.clone(), fields));
+                }
             }
         }
-        // What's under it.
-        let res = http.request(reqwest::Method::from_bytes(b"LIST").expect("LIST"), url("metadata", &at)).header("x-vault-token", &token).send().await.with_context(|| format!("vault {mount}/{at}"))?;
-        if !res.status().is_success() {
+        if !listed {
             continue;
         }
-        let v: Value = res.json().await.context("vault: not JSON")?;
+        let Some(v) = fetch(http.request(reqwest::Method::from_bytes(b"LIST").expect("LIST"), url("metadata", &at)).header("x-vault-token", &token), format!("vault {mount}/{at} (list)")).await? else {
+            continue;
+        };
         for k in v["data"]["keys"].as_array().into_iter().flatten().filter_map(Value::as_str) {
             let name = k.trim_end_matches('/');
             anyhow::ensure!(segment(name), "vault {mount}/{at}/{name}: a roll folder is letters, digits, _ and - (rename it, or import it alone)");
             anyhow::ensure!(depth < 8 && out.len() + queue.len() < 500, "vault {mount}/{base}: more than 500 secrets or 8 levels; import it in parts");
             let child_at = if at.is_empty() { name.to_string() } else { format!("{at}/{name}") };
             let child_folder = if folder.is_empty() { name.to_string() } else { format!("{folder}/{name}") };
-            // A key with `/` is a folder only; without, a secret (and maybe a folder too).
-            if !k.ends_with('/') || !queue.iter().any(|(a, _, _)| *a == child_at) {
-                queue.push((child_at, child_folder, depth + 1));
-            }
+            let is_folder = k.ends_with('/');
+            queue.push((child_at, child_folder, depth + 1, !is_folder, is_folder));
         }
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
