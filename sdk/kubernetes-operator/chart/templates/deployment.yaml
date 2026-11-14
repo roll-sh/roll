@@ -1,0 +1,56 @@
+{{- if and (not .Values.roll.identity) (not .Values.roll.tokenSecret.name) }}
+{{- fail "set roll.identity (a workload identity) or roll.tokenSecret.name" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-roll-secrets-operator
+  namespace: {{ .Release.Namespace }}
+  labels: { app.kubernetes.io/name: roll-secrets-operator, app.kubernetes.io/instance: {{ .Release.Name }} }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: roll-secrets-operator, app.kubernetes.io/instance: {{ .Release.Name }} }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: roll-secrets-operator, app.kubernetes.io/instance: {{ .Release.Name }} }
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: operator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - { name: ROLL_API_URL, value: {{ .Values.roll.apiUrl | quote }} }
+            - { name: ROLL_SYNC_EVERY, value: {{ .Values.roll.syncEvery | quote }} }
+            {{- if .Values.roll.identity }}
+            - { name: ROLL_IDENTITY, value: {{ .Values.roll.identity | quote }} }
+            - { name: ROLL_OIDC_TOKEN_FILE, value: /var/run/secrets/roll/token }
+            {{- else }}
+            - name: ROLL_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ .Values.roll.tokenSecret.name | quote }}, key: {{ .Values.roll.tokenSecret.key | quote }} } }
+            {{- end }}
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.roll.identity }}
+          volumeMounts:
+            - { name: roll-token, mountPath: /var/run/secrets/roll, readOnly: true }
+          {{- end }}
+      {{- if .Values.roll.identity }}
+      volumes:
+        # The pod's own OIDC token for roll: its audience is the API's URL, as the identity expects.
+        - name: roll-token
+          projected:
+            sources:
+              - serviceAccountToken: { path: token, audience: {{ .Values.roll.apiUrl | quote }}, expirationSeconds: 3600 }
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

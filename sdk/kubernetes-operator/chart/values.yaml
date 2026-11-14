@@ -1,0 +1,27 @@
+# rolld's API, and what the operator logs in as.
+roll:
+  apiUrl: https://api.roll.example
+  # A workload identity (idn_…) for this cluster's issuer and the operator's service account.
+  identity: ""
+  # Or a roll token in an existing Secret (for a cluster whose issuer roll can't reach).
+  tokenSecret:
+    name: ""
+    key: token
+  # How often environments' digests are checked.
+  syncEvery: 30s
+
+image:
+  repository: ghcr.io/roll-sh/roll-secrets-operator
+  tag: ""   # the chart's appVersion when empty
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  name: roll-secrets-operator
+
+resources:
+  requests: { cpu: 10m, memory: 16Mi }
+  limits: { memory: 64Mi }
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

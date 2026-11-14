@@ -152,6 +152,17 @@ steps:
   candidates as `roll secrets scan` cuts them and checked with `POST …/leaks` (fingerprints; only
   values the token may reveal), and each stored value found fails the check with an annotation on
   its file and line naming the key and environment, never the value.
+## Kubernetes
+Two ways, as the best products offer:
+- **Pull (`sdk/kubernetes-operator`)**: a `RollSecret` names an environment and a folder (and a
+  project or an identity, when not the operator's own), and the operator keeps a Secret beside it
+  in step. It logs in with its own service account token through a workload identity, so roll
+  holds no credential for the cluster. It checks the digest every 30 s and reads values only when
+  it moved; it writes only Secrets it made (labelled, owned by their RollSecret, so they go with
+  it) and leaves a same-named Secret someone else made alone; values that don't resolve leave the
+  Secret as it was. Its status says what happened.
+- **Push (the `kubernetes` sync)**: roll writes a Secret with credentials for the cluster it holds,
+  sealed. For clusters roll can reach and the operator can't run in.
 
 ## Where it runs
 
@@ -1903,6 +1914,14 @@ user's call).
    project can link their own databases, buckets and streams.
 11. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
    environment).
+1. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
+   and the deploy notice when apps reads secrets (#31), refreshed once those land.
+2. **Products say who owns a resource**, so a person's project can link their own databases,
+   buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
+   Waits on products serving signed-in people (today they're the operator's).
+3. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
+   a project has members besides its owner. Tokens already ask through roll-access (`ask` rules,
+   approvals for a while); a project's one owner reaches all of it.
 
 Open pull requests after this one:
 

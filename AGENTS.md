@@ -341,6 +341,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     against a fake rolld).
     The GitHub Action is `sdk/github-action` (no dependencies; every value masked before anything
     is printed).
+    The Kubernetes operator (`sdk/kubernetes-operator`) builds on the Go client and talks to the
+    Kubernetes API over plain HTTP; it only ever writes Secrets its RollSecret owns.
   - Values are encrypted with the project's data key, sealed by `ROLL_SECRET_KEY`, and bound to
     their row (project, secret, version) as associated data. A value never goes in a log, a
     `Debug`, an error, an audit row, a change's or request's diff, or a command line: `Value`
