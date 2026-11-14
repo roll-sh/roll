@@ -62,7 +62,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   };
 
   return (
-    <Panel title={`Notifications for ${projectName}`} aside={<span className="text-[12px] text-muted">every service in the project</span>}>
+    <Panel title={`Notifications for ${projectName}`} aside={<span className="text-[12px] text-muted">the project's services</span>}>
       {targets && targets.length > 0 && (
         <ul className="divide-y divide-line border-b border-line">
           {targets.map((t) => (
