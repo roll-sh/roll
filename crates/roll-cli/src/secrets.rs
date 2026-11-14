@@ -694,6 +694,22 @@ pub struct Run {
     pub command: Vec<String>,
 }
 
+/// `roll ssh`: `ssh` with the environment's certificate and key.
+#[derive(Args)]
+pub struct Ssh {
+    #[command(flatten)]
+    pub at: AtArgs,
+    /// The key holding the certificate.
+    #[arg(long, default_value = "SSH_CERT")]
+    pub cert: String,
+    /// The key holding the private key.
+    #[arg(long = "identity", default_value = "SSH_KEY")]
+    pub identity: String,
+    /// ssh's own arguments: the destination, a command, options.
+    #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
+    pub args: Vec<String>,
+}
+
 fn enc(s: &str) -> String {
     urlencoding::encode(s).into_owned()
 }
@@ -2504,6 +2520,43 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
         let status = cmd.status().with_context(|| format!("running {}", r.command[0]))?;
         std::process::exit(status.code().unwrap_or(1));
     }
+}
+
+/// `roll ssh`: resolve the certificate and key (a dynamic link gets a new pair, for this session),
+/// write them to a private temporary directory, run `ssh` with them, and delete both when it exits.
+pub async fn ssh_command(api: &Api, a: Ssh) -> anyhow::Result<()> {
+    let at = a.at.resolve();
+    let project = project(api, at.project.as_deref()).await?;
+    let c = Client { project, api, at: at.clone() };
+    let v = c.call(Method::GET, &format!("{}/values?{}", c.env(&at.env), c.q()), None).await?;
+    let get = |k: &str| -> anyhow::Result<String> {
+        v["values"][k].as_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("{}:{} doesn't set {k}: link it to an SSH CA (roll secrets ssh-cas)", at.env, at.path))
+    };
+    let (cert, key) = (get(&a.cert)?, get(&a.identity)?);
+    // The directory is the user's alone (0700) and goes when this returns, key and all.
+    let dir = tempfile::Builder::new().prefix("roll-ssh-").tempdir().context("making a private directory for the key")?;
+    let (id, cert_path) = (dir.path().join("id"), dir.path().join("id-cert.pub"));
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new();
+        f.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut f, 0o600);
+        f.open(&id).and_then(|mut file| file.write_all(key.as_bytes())).context("writing the key")?;
+    }
+    std::fs::write(&cert_path, format!("{}\n", cert.trim())).context("writing the certificate")?;
+    let status = std::process::Command::new("ssh")
+        .arg("-i")
+        .arg(&id)
+        .arg("-o")
+        .arg(format!("CertificateFile={}", cert_path.display()))
+        .arg("-o")
+        .arg("IdentitiesOnly=yes")
+        .args(&a.args)
+        .status()
+        .context("running ssh")?;
+    drop(dir);
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 /// `roll run --watch`: the command as a child, restarted (SIGTERM, then SIGKILL after 10 s) when

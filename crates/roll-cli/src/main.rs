@@ -111,6 +111,10 @@ enum Cmd {
     /// Run a command with an environment's secrets in its environment, without writing files:
     /// `roll run -p shop -e production -- npm start`.
     Run(secrets::Run),
+    /// SSH with an environment's short-lived certificate (an SSH CA's `ssh` link): the key and
+    /// certificate go to a private temporary directory for the session, then are deleted:
+    /// `roll ssh -e production -- deploy@db1.example.com`.
+    Ssh(secrets::Ssh),
     /// Preview environments: every service and a branch of every data resource of a project,
     /// per change or pull request.
     #[command(subcommand, alias = "previews")]
@@ -470,6 +474,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
         Cmd::Secrets { at, cmd } => return secrets::run(&secrets_api(&api).await?, cli.json, at, cmd).await,
         Cmd::Run(r) => return secrets::run_command(&secrets_api(&api).await?, r).await,
+        Cmd::Ssh(a) => return secrets::ssh_command(&secrets_api(&api).await?, a).await,
         Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
         Cmd::Token(cmd) => return access::token(&api, cli.json, cmd).await,
         Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,

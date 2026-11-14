@@ -597,6 +597,11 @@ long-lived public keys on every server. Servers trust one CA key (`TrustedUserCA
   and checked against OpenSSH 10: `ssh-keygen -L` reads them, and `sshd` with `TrustedUserCAKeys`
   takes the certificate for its principal and nobody else's. A certificate can't be taken back, so
   lifetimes stay short; an SSH CA a key links to can't be deleted.
+- **`roll ssh -e production -- deploy@host`** (as `vault ssh` and `tsh ssh`): resolves the
+  environment's `SSH_CERT` and `SSH_KEY` (`--cert`, `--identity` for other keys; a dynamic link gets
+  a pair for this session), writes them to a private temporary directory (0700, the key 0600), runs
+  `ssh -i … -o CertificateFile=… -o IdentitiesOnly=yes` with the rest of the arguments, deletes both
+  when it exits, and exits with ssh's code. A person never handles the key.
 
 ## Consumption
 
@@ -629,6 +634,7 @@ roll secrets leases  [--renew ID | --revoke ID]
 roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | rm ID
 roll secrets ssh-cas ls | add NAME --principal P… [--max-hours N] | key ID | rm ID
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
+roll ssh [-p project] [-e production] [--cert SSH_CERT] [--identity SSH_KEY] -- <ssh arguments…>
 ```
 
 - The project is `-p`/`ROLL_PROJECT` (a name or id), the environment `-e`/`ROLL_ENV`, the path
