@@ -185,7 +185,12 @@ impl roll_previews::ports::Apps for RollApps {
         // Otherwise deploy, keyed so a retry after a crash returns the same deployment.
         let at_sha = t.git.is_some() && env["active"]["revision"].as_str() == t.git.as_deref();
         let deployment = if at_sha {
-            self.api.post(&format!("{path}/redeploy"), json!({ "message": format!("roll preview {}: new variables", t.preview) })).await?
+            // Keyed too (roll apps takes `Idempotency-Key` on a redeploy): what's deployed and the
+            // deployment it replaces, so a retry after a crash gets the same one, and variables
+            // that come back to an earlier set never get that earlier, superseded, redeploy back.
+            let idem = format!("redeploy:{key}:{}", s(&env["active"]["id"]).unwrap_or_default());
+            let body = json!({ "message": format!("roll preview {}: new variables", t.preview) });
+            self.api.call_with(Method::POST, &format!("{path}/redeploy"), Some(body), Some(&idem)).await?
         } else {
             let body = match &t.git {
                 Some(sha) => json!({ "revision": sha, "message": format!("roll preview {}", t.preview) }),
