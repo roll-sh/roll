@@ -190,6 +190,14 @@ CREATE TABLE IF NOT EXISTS requests (
     applied_seq INTEGER
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS requests_env ON requests (env_id, at);
+-- How many times roll rotated a resource's own credential (a live link's): every digest of a
+-- folder that links it live moves with it, so watches, syncs and deploys pick the new one up.
+CREATE TABLE IF NOT EXISTS source_generations (
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    PRIMARY KEY (kind, ref)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS leases (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,

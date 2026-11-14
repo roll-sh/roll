@@ -1154,8 +1154,8 @@ roll completions bash|zsh|fish|powershell
   as the read): a write that lands while the command's values are
   being read (or re-read, or newly referenced) is still a change, never folded into what it
   compares against. The message names the folders that moved (`production:/ changed`). A change
-  that doesn't resolve keeps the running command. A live link's resource rotating doesn't change
-  the digest.
+  that doesn't resolve keeps the running command. A live link's resource rotated through roll
+  moves the digest of every folder that links it (a password changed outside roll can't).
 - `roll secrets edit` opens the folder's own keys as a `.env` in `$EDITOR` (a 0600 file under
   `$XDG_RUNTIME_DIR` when there is one, removed after) and applies what changed as one change
   (`import` with `replace`: a removed line deletes its key; linked and personal keys aren't in the

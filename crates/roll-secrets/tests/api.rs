@@ -799,8 +799,11 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     // One credential for the pair; the live URL follows the resource.
     let v = api.values("production", "/").await["values"].clone();
     assert_eq!((v["AWS_ACCESS_KEY_ID"].as_str(), v["AWS_SECRET_ACCESS_KEY"].as_str(), v["BUCKET_URL"].as_str()), (Some("AK1"), Some("sk-1"), Some("s3://assets?pw=0")));
+    // Rotating the resource's own credential moves the digest, so watches and deploys see it.
+    let digest = api.ok(Method::GET, "/environments/production/digest", None).await["digest"].clone();
     api.ok(Method::POST, "/environments/production/secrets/BUCKET_URL/rotate", None).await;
     assert_eq!(api.values("production", "/").await["values"]["BUCKET_URL"], "s3://assets?pw=1");
+    assert_ne!(api.ok(Method::GET, "/environments/production/digest", None).await["digest"], digest);
 
     // Rotation issues a new pair as one change; the old key works until its grace ends.
     let r = api.ok(Method::POST, "/environments/production/secrets/AWS_SECRET_ACCESS_KEY/rotate", None).await;

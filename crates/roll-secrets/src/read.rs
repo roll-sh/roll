@@ -496,8 +496,15 @@ impl Secrets {
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let dek = self.project(project)?;
         let mut h = Sha256::new();
+        // A live link's value is the resource's credential as it is: it moves when roll rotates it.
+        let generations: HashMap<(String, String), i64> = self.db.read(|c| c.query("SELECT kind, ref, generation FROM source_generations", (), |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?))))?.into_iter().collect();
         // No fingerprint: a digest is readable without reveal, and a version moves with every value.
-        let stamp = |h: &mut Sha256, e: &Entry| h.update(format!("{}\0{}\0{}\0{}\0{}\n", e.row.key, e.env, e.row.id, e.row.version, e.row.link.as_ref().map(json).unwrap_or_default()));
+        let stamp = |h: &mut Sha256, e: &Entry| {
+            let generation = e.row.link.as_ref().filter(|l| l.mode == Mode::Live).and_then(|l| generations.get(&(l.kind.clone(), l.r#ref.clone()))).copied().unwrap_or(0);
+            // Only once rotated, so a digest taken before there were generations stays the same.
+            let rotated = if generation > 0 { format!("\0{generation}") } else { String::new() };
+            h.update(format!("{}\0{}\0{}\0{}\0{}{rotated}\n", e.row.key, e.env, e.row.id, e.row.version, e.row.link.as_ref().map(json).unwrap_or_default()))
+        };
         for e in &entries {
             stamp(&mut h, e);
         }
