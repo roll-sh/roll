@@ -452,7 +452,8 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
         let (n, v) = blocking(s, move |s| s.values_at(&project, &env, &path_of(&q), seq, at, &c)).await?;
         (v, Some(n))
     } else {
-        (blocking(s, move |s| s.values(&project, &env, &path_of(&q), resolve, None, &c)).await?, None)
+        let dynamic = flag(&q, "dynamic", true);
+        (blocking(s, move |s| s.values_for(&project, &env, &path_of(&q), resolve, None, dynamic, &c)).await?, None)
     };
     let r = match format {
         None if as_of.is_some() => {

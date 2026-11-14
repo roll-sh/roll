@@ -618,6 +618,10 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     let renewed = api.ok(Method::POST, &format!("/leases/{lease}/renew"), Some(json!({ "ttl_minutes": 120 }))).await;
     assert!(renewed["expires_at"].as_i64().unwrap() > before + 60 * 60_000);
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
+    // A reader that can't renew (External Secrets Operator) asks for none: a problem, not a lease.
+    let pulled = api.ok(Method::GET, "/environments/staging/values?dynamic=false", None).await;
+    assert!(pulled["problems"].as_array().unwrap().iter().any(|p| p["key"] == "TEMP_KEY"), "{pulled}");
+    assert_eq!((pulled["leases"].as_array().map(Vec::len), api.fake.live_keys.lock().unwrap().len()), (Some(0), 3));
 
     // An environment that goes takes its managed credentials with it.
     api.ok(Method::POST, "/environments", Some(json!({ "slug": "tmp" }))).await;

@@ -1062,6 +1062,62 @@ folder. roll never replaces a Secret without that label, so it can't clobber one
 The synced values must fit a Secret's 1 MiB. Pods read it as usual (`envFrom.secretRef`); a pod
 restart or a reloader picks up a change.
 
+#### Pulling instead: External Secrets Operator
+
+A cluster whose API server isn't public (a private EKS endpoint, a cluster on a private network)
+can pull instead, with [External Secrets Operator](https://external-secrets.io)'s webhook
+provider: the cluster calls roll, and roll never calls the cluster. One `SecretStore` per project
+serves a whole environment (`dataFrom`) and single keys (`data` with `property`):
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: roll-token
+  labels:
+    external-secrets.io/type: webhook   # ESO reads only labelled Secrets
+stringData:
+  token: rlst_…                         # roll secrets -p shop tokens create k8s --for-env production
+---
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: roll-shop
+spec:
+  provider:
+    webhook:
+      url: "https://roll.example/v1/secrets/projects/prj_…/environments/{{ .remoteRef.key }}/values?dynamic=false"
+      headers:
+        Authorization: "Bearer {{ .auth.token }}"
+      result:
+        jsonPath: "$.values{{ with .remoteRef.property }}.{{ . }}{{ end }}"
+      secrets:
+        - name: auth
+          secretRef:
+            name: roll-token
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: shop-production
+spec:
+  refreshInterval: 1h
+  secretStoreRef: { name: roll-shop, kind: SecretStore }
+  target: { name: shop-production }
+  dataFrom:
+    - extract: { key: production }        # every key; or data: [{secretKey: url, remoteRef: {key: production, property: DATABASE_URL}}]
+```
+
+- The token is a project token for the environment (`--for-env`); each refresh is one audited read
+  by it (`secrets.export`), so a short `refreshInterval` fills the audit log.
+- A folder is `&path=/api` on the store's URL (a store per folder).
+- `dynamic=false`: ESO can't renew a lease, so a dynamic key would be a new credential on every
+  refresh that lapses on its own. With it, a dynamic key comes through empty and is named in
+  `problems`; link it as `managed` (one credential roll rotates) or `live` instead, which ESO's
+  next refresh follows.
+- Checked against ESO 2.15 on k3s 1.33: `dataFrom` and `data` from one store, and a change in roll
+  reaching the Secret on the next refresh.
+
 ### `webhook` and `notify`
 
 Both POST JSON to a public HTTPS `url` the creator chose: fetched through the `PublicOnly` resolver,
@@ -1367,7 +1423,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
-| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&name=&namespace=&seq=&at=` | | `Values` (with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
+| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is a problem, with an empty value, instead of a fresh credential; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked}` |
