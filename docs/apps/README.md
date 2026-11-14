@@ -1468,7 +1468,8 @@ feature/roll-search 7f92c2f28, the held apps work being wip/roll-apps-next (pair
   - Redeploy when they change (`redeploy_on_secrets`, off by default; `roll apps env
     --redeploy-on-secrets true`, Settings): each minute, on the service's owner, the digest
     against the live deployment's; when it moved and nothing is on its way, a redeploy of the same
-    image with the new values (`settings`, actor `secrets watch`). The environment remembers the
+    image with the new values (`settings`, actor `secrets watch`, keyed by the digest so two
+    nodes' watches across a takeover make one redeploy). The environment remembers the
     digest it acted on (as a tag watch does), so a redeploy that failed isn't tried every minute;
     a live deployment with no digest kept starts the count.
   - Done on apps' side: `SecretVar.sensitive` (secrets' #46: a key tagged `sensitive` reaches only

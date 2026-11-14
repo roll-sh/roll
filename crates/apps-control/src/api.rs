@@ -656,8 +656,12 @@ fn actor(ext: &Extensions) -> Option<String> {
     roll_auth::Operator::on(ext).then(|| "operator".to_string())
 }
 
-async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
-    let d = apps.redeploy(&id, &env, if b.is_empty() { Value::Null } else { body(&b)? }, actor(&ext)).await?;
+async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
+    let key = match headers.get("idempotency-key") {
+        Some(v) => Some(v.to_str().map_err(|_| Error::BadRequest("Idempotency-Key is printable ASCII".into()))?),
+        None => None,
+    };
+    let d = apps.redeploy(&id, &env, if b.is_empty() { Value::Null } else { body(&b)? }, actor(&ext), key).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 

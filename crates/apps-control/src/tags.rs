@@ -45,7 +45,12 @@ impl Apps {
                 if then.as_deref().is_none_or(|t| t == now) {
                     continue;
                 }
-                match self.redeploy(&svc.id, &env.name, json!({ "message": "the project's secrets changed" }), Some("secrets watch".into())).await {
+                // Keyed by the digest: two nodes' watches (a takeover mid-minute) make one redeploy.
+                let key = {
+                    use sha2::{Digest, Sha256};
+                    format!("secrets:{}", Sha256::digest(now.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>())
+                };
+                match self.redeploy(&svc.id, &env.name, json!({ "message": "the project's secrets changed" }), Some("secrets watch".into()), Some(&key)).await {
                     Ok(d) => started.push(d.id),
                     Err(e) => self.logs.sink(format!("env:{}/{}", svc.id, env.name), crate::logs::Stream::System).line(format!("redeploying for the project's new secrets: {e}")),
                 }

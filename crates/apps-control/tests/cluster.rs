@@ -318,8 +318,10 @@ async fn a_deploy_in_flight_on_a_killed_owner_finishes_on_the_node_left() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_joining_node_takes_services_with_no_request_failing() {
     let mut f = fleet(1).await;
+    // Placement hashes each service's key: with 12, the chance that none prefers the new node
+    // is 1 in 4096 (with 4 it was 1 in 16, a flaky test).
     let mut svcs = Vec::new();
-    for i in 0..4 {
+    for i in 0..12 {
         svcs.push(f.image_service(&f.nodes[0], &format!("web{i}")).await);
     }
     f.join("n1").await;

@@ -1190,6 +1190,20 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     assert_eq!((r["status"].as_str(), r["trigger"].as_str()), (Some("active"), Some("settings")), "{r}");
     assert_eq!(r["image"], d["image"]);
     assert_eq!(Fake::count(&w.fake.counts.builds), builds, "no build");
+    // A retry with its Idempotency-Key answers the same redeploy.
+    let keyed = |w: &World| {
+        let (api, base) = (w.api.clone(), base.clone());
+        async move {
+            let req = Request::post(format!("{base}/redeploy")).header("idempotency-key", "redeploy-1").body(Body::empty()).unwrap();
+            let resp = api.oneshot(req).await.unwrap();
+            let st = resp.status();
+            (st, serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap())
+        }
+    };
+    let (st1, k1) = keyed(&w).await;
+    let (st2, k2) = keyed(&w).await;
+    assert_eq!((st1, st2, &k1["id"]), (StatusCode::ACCEPTED, StatusCode::ACCEPTED, &k2["id"]), "{k1} {k2}");
+    settled(&w, &id, "production", k1["id"].as_str().unwrap()).await;
     let (_, env) = call(&w.api, "GET", &base, None).await;
     // A static upload: its files answer (no instance reads variables at run time), with its
     // own `_redirects` and `_headers`, which aren't served themselves.

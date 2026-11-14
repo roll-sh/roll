@@ -180,8 +180,22 @@ impl Apps {
     /// settings and variables (variables are read when its instances are made), without a build
     /// and without moving to another revision. What a change of variables or settings needs,
     /// for every source (an upload service has no source to deploy again).
-    pub async fn redeploy(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>) -> Result<Deployment> {
+    /// With `key` (an `Idempotency-Key`), a retry answers the redeploy the first call queued, as a
+    /// deploy's does (one table of keys per environment for both).
+    pub async fn redeploy(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>, key: Option<&str>) -> Result<Deployment> {
         self.refuse_capped(service)?;
+        if let Some(k) = key {
+            if k.is_empty() || k.len() > 200 || !k.bytes().all(|b| b.is_ascii_graphic()) {
+                return Err(Error::BadRequest("Idempotency-Key is 1–200 printable ASCII characters".into()));
+            }
+            let (sid, e, kk) = (service.to_string(), env.to_string(), k.to_string());
+            if let Some(d) = self.db(move |s| s.keyed_deployment(&sid, &e, &kk)).await? {
+                if d.trigger != Trigger::Settings {
+                    return Err(Error::Conflict(format!("Idempotency-Key {k} was used for another deploy ({})", d.id)));
+                }
+                return Ok(d);
+            }
+        }
         let o = body.as_object().cloned().unwrap_or_default();
         if let Some(k) = o.keys().find(|k| k.as_str() != "message") {
             return Err(Error::BadRequest(format!("unknown field {k}")));
@@ -215,7 +229,8 @@ impl Apps {
             no_cache: false,
         };
         let (sid, e) = (service.to_string(), env.to_string());
-        let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
+        let k = key.map(str::to_string);
+        let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", k.as_deref())).await?;
         self.deploy_log(&dep.id).line("queued (redeploy)");
         self.kick(service, env);
         Ok(dep)
