@@ -23,6 +23,7 @@ import { AnalyzeTab } from "./analyze";
 import { DataStreams } from "./data-streams";
 import { ImportPanel } from "./import";
 import { NewIndexPanel } from "./new-index";
+import { Templates } from "./templates";
 import { InferenceTab } from "./inference";
 import { ApiKeys } from "./api-keys";
 import { SearchConsole } from "./console";
@@ -558,6 +559,7 @@ function IndicesTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpen
         </p>
       </Panel>
       {rows && <DataStreams cluster={cluster} indices={rows} onSelect={setSelected} />}
+      {rows && <Templates cluster={cluster} onOpenConsole={onOpenConsole} />}
       {creating && (
         <NewIndexPanel
           cluster={cluster}
