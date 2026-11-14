@@ -102,6 +102,8 @@ impl EnvSource for Engine {
             branches: Vec::new(),
             access_token: None,
             bypass_sha256: None,
+            // The runtime's proxy adds the button per request (`runtime::Tagger`).
+            feedback: false,
         };
         Ok((t, env))
     }

@@ -20,12 +20,16 @@ pub struct RollApps {
     api: Api,
     /// (preview, service) → service id, learned at deploy (looked up again after a restart).
     ids: std::sync::Mutex<std::collections::HashMap<(String, String), String>>,
+    /// roll apps takes `feedback` on an environment (roll apps' #26; an older one refuses an
+    /// unknown field): previews' button on its pages.
+    pub feedback: bool,
 }
 
 impl RollApps {
     pub fn new(api: Api) -> RollApps {
-        RollApps { api, ids: Default::default() }
+        RollApps { api, ids: Default::default(), feedback: false }
     }
+
 
     /// The roll apps service `name` of `project`.
     async fn service_in(&self, project: &str, name: &str) -> anyhow::Result<Option<String>> {
@@ -116,7 +120,11 @@ impl roll_previews::ports::Apps for RollApps {
             Some(hash) => json!({ "token": token, "bypass_sha256": hash }),
             None => json!({ "token": token }),
         });
-        self.api.call(Method::PUT, &path, Some(json!({ "branch": null, "ephemeral": true, "access": access }))).await?;
+        let mut body = json!({ "branch": null, "ephemeral": true, "access": access });
+        if self.feedback {
+            body["feedback"] = json!(t.feedback);
+        }
+        self.api.call(Method::PUT, &path, Some(body)).await?;
         // Every variable the preview sets: the branches' plain names and the project's overrides,
         // and each prefixed link to a branched parent pointed at the branch (a link is roll apps'
         // own variable, which would still reach production).
@@ -157,7 +165,13 @@ impl roll_previews::ports::Apps for RollApps {
                     h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
                 }
             }
-            let mut key = format!("{}@{}@{h:016x}{}", t.environment, t.git.as_deref().unwrap_or("image"), if t.access_token.is_some() { "p" } else { "" });
+            let mut key = format!(
+                "{}@{}@{h:016x}{}{}",
+                t.environment,
+                t.git.as_deref().unwrap_or("image"),
+                if t.access_token.is_some() { "p" } else { "" },
+                if self.feedback && t.feedback { "f" } else { "" }
+            );
             // After a failed or canceled deploy, a retry is a new deploy (a registry timeout
             // doesn't fail the preview until the next push); a crash's retry still finds its own.
             if matches!(env["latest"]["status"].as_str(), Some("failed" | "canceled"))

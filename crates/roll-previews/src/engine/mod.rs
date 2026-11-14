@@ -484,7 +484,7 @@ const BUDGET_LEVELS: [u32; 2] = [80, 100];
 /// What a service is deployed with (its variables, its access, whether it may read protected
 /// secrets), as a digest (FNV-1a: change detection, not a secret): a change to any redeploys it,
 /// so a service that lost trust drops what it read.
-fn config_fingerprint(vars: &[(String, String)], private: bool, bypass: Option<&str>, trusted: bool) -> String {
+fn config_fingerprint(vars: &[(String, String)], private: bool, bypass: Option<&str>, trusted: bool, feedback: bool) -> String {
     let mut sorted: Vec<&(String, String)> = vars.iter().collect();
     sorted.sort();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -494,7 +494,7 @@ fn config_fingerprint(vars: &[(String, String)], private: bool, bypass: Option<&
             h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
         }
     }
-    format!("{h:016x}{}{}", if private { "p" } else { "" }, if trusted { "t" } else { "" })
+    format!("{h:016x}{}{}{}", if private { "p" } else { "" }, if trusted { "t" } else { "" }, if feedback { "f" } else { "" })
 }
 
 /// Whether a change gets a preview under the project's rules (approval aside).

@@ -196,6 +196,8 @@ pub struct FakeApps {
     pub on_deploy: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     /// The PNG every screenshot is (unset: the backend can't take one), and the previews taken.
     pub shot: Mutex<Option<Vec<u8>>>,
+    /// Each service's last deploy asked for the feedback button.
+    pub feedback: Mutex<HashMap<(String, String), bool>>,
     pub shots: Mutex<Vec<String>>,
 }
 
@@ -217,6 +219,7 @@ impl Apps for FakeApps {
         }
         self.deployed.lock().insert((t.preview.clone(), t.service.clone()), t.revision.clone());
         self.vars.lock().insert((t.preview.clone(), t.service.clone()), t.vars.clone());
+        self.feedback.lock().insert((t.preview.clone(), t.service.clone()), t.feedback);
         Ok(None)
     }
     async fn catalog(&self, _project: &str) -> anyhow::Result<Option<Vec<roll_previews::ports::CatalogService>>> {
