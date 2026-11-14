@@ -10,16 +10,19 @@ export const ACTIONS = ["read", "write", "delete", "reveal", "deploy", "admin"] 
 export type Action = (typeof ACTIONS)[number];
 export type Effect = "allow" | "ask";
 
-/** `index`: only some indices of it (search: `logs-*`, `a,b`). */
+/** `index`: only some named parts of it (search's indices, `logs-*,a`; secrets' encryption keys). */
 export type Selector = { project: string } | { id: string; index?: string };
 
+/** What a product's resources narrow to by name (`{id, index}`), as roll-auth's `sub_resources`. */
+export const SUB_RESOURCES: Record<string, string> = { search: "indices", secrets: "encryption keys" };
+
 /**
- * A selector as the builder writes it: an id, or for search `cluster/indices` (`cl_1/logs-*`;
- * neither a cluster id nor an index name has a `/`).
+ * A selector as the builder writes it: an id, or `id/names` where the product has named parts
+ * (`cl_1/logs-*`, `prj_1/payments`; neither an id nor such a name has a `/`).
  */
 export const selectorText = (s: { id: string; index?: string }): string => (s.index ? `${s.id}/${s.index}` : s.id);
 export function selectorOf(product: string, text: string): { id: string; index?: string } {
-  const at = product === "search" ? text.indexOf("/") : -1;
+  const at = SUB_RESOURCES[product] ? text.indexOf("/") : -1;
   return at > 0 && at < text.length - 1 ? { id: text.slice(0, at), index: text.slice(at + 1) } : { id: text };
 }
 
@@ -404,7 +407,7 @@ export function describeRule(r: Rule, projectName: (id: string) => string = (id)
     r.resources === "*"
       ? "all resources"
       : r.resources
-          .map((s) => ("project" in s ? `project ${projectName(s.project)}` : s.index ? `${resourceName(r.product, s.id)} indices ${s.index}` : resourceName(r.product, s.id)))
+          .map((s) => ("project" in s ? `project ${projectName(s.project)}` : s.index ? `${resourceName(r.product, s.id)} ${SUB_RESOURCES[r.product] ?? "parts"} ${s.index}` : resourceName(r.product, s.id)))
           .join(", ");
   const parts = [productName(r.product), actions.join(", ") || "nothing", where];
   if (r.environments?.length) parts.push(r.environments.join(", "));

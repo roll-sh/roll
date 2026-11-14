@@ -92,9 +92,10 @@ pub enum Selector {
     },
     Id {
         id: String,
-        /// Only some indices of it (search: `logs-*`, `a,b`), as Elasticsearch names them: each
-        /// name or pattern a request's index expression lists must be one of these, or start with
-        /// what's before one's trailing `*`. A request about the resource as a whole never matches.
+        /// Only some named parts of it ([`sub_resources`]: search's indices, `logs-*,a`; secrets'
+        /// encryption keys), named as Elasticsearch names indices: each name or pattern a
+        /// request's `{index}` lists must be one of these, or start with what's before one's
+        /// trailing `*`. A request about the resource as a whole never matches.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         index: Option<String>,
     },
@@ -116,6 +117,17 @@ impl<'de> Deserialize<'de> for Selector {
             Raw { project: None, id: Some(id), index } => Ok(Selector::Id { id, index }),
             _ => Err(serde::de::Error::custom("a resource is {\"project\": …} or {\"id\": …, \"index\"?: …}")),
         }
+    }
+}
+
+/// What a product's selectors can narrow to by name (`{id, index}`), and the catalogue rows that
+/// name it: search's indices (`…/indices/{index}/…`), secrets' encryption keys
+/// (`…/transit/{name}/…`, so signing with one key needn't be write on the whole project).
+pub fn sub_resources(product: &str) -> Option<&'static str> {
+    match product {
+        "search" => Some("indices"),
+        "secrets" => Some("encryption keys"),
+        _ => None,
     }
 }
 
@@ -403,10 +415,12 @@ impl Scope {
                             out.push(format!("{at}: a resource id must be 1-200 characters, one line without backticks"));
                         }
                         if let Selector::Id { index: Some(ix), .. } = s {
-                            if r.product != "search" {
-                                out.push(format!("{at}: only search resources have indices"));
-                            } else if index_names(ix).next().is_none() || ix.len() > 200 || !plain(ix) {
-                                out.push(format!("{at}: an index is 1-200 characters naming at least one index or pattern"));
+                            if let Some(kind) = sub_resources(&r.product) {
+                                if index_names(ix).next().is_none() || ix.len() > 200 || !plain(ix) {
+                                    out.push(format!("{at}: `index` is 1-200 characters naming at least one of its {kind} or a pattern"));
+                                }
+                            } else {
+                                out.push(format!("{at}: only search's indices and secrets' encryption keys narrow a resource by name"));
                             }
                         }
                     }
@@ -469,6 +483,7 @@ mod tests {
         assert!(whole.matches(&at(Some("anything"))) && whole.covers(&r) && r.covers(&one) && !one.covers(&r) && !r.covers(&whole));
         assert!(!Scope(vec![rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1", "index": "-x" }], "actions": { "read": "allow" } }))]).problems().is_empty());
         assert!(!Scope(vec![rule(serde_json::json!({ "product": "redis", "resources": [{ "id": "rdb_1", "index": "x" }], "actions": { "read": "allow" } }))]).problems().is_empty());
+        assert!(Scope(vec![rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "payments" }], "actions": { "write": "allow" } }))]).problems().is_empty(), "an encryption key");
         // A field a selector doesn't have is refused, never dropped (that would widen the rule).
         for bad in [serde_json::json!({ "project": "p", "index": "logs-*" }), serde_json::json!({ "id": "a", "extra": 1 }), serde_json::json!({})] {
             assert!(serde_json::from_value::<Selector>(bad.clone()).is_err(), "{bad}");
