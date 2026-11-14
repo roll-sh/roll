@@ -55,19 +55,6 @@ pub fn open_need(plan: &Arc<Plan>, need: Option<Vec<bool>>, ctx: &ExecCtx) -> Re
     open(plan, ctx)
 }
 
-/// An Aggregate's input, opened with the columns its groups and aggregates read (as its
-/// node opens it, and as a rescan opens it again when the input can't rescan itself).
-pub(super) fn open_agg_input(input: &Arc<Plan>, groups: &[Expr], aggs: &[crate::sql::plan::AggCall], ctx: &ExecCtx) -> Result<BoxNode> {
-    let need = (|| {
-        let mut ex: Vec<&Expr> = groups.iter().collect();
-        for a in aggs {
-            ex.extend(super::need::agg_exprs(a)?);
-        }
-        super::need::of(ex)
-    })();
-    open_need(input, need, ctx)
-}
-
 /// An UPDATE's node: a postgres_fdw statement sent whole, or ModifyTable's. (Out of
 /// `open_node`, whose frame is on every plan level's stack.)
 #[inline(never)]
@@ -382,7 +369,16 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             aggs,
         } => Box::new(
             super::agg::AggNode::new(
-                open_agg_input(input, groups, aggs, ctx)?,
+                {
+                    let need = (|| {
+                        let mut ex: Vec<&Expr> = groups.iter().collect();
+                        for a in aggs {
+                            ex.extend(nd::agg_exprs(a)?);
+                        }
+                        nd::of(ex)
+                    })();
+                    open_need(input, need, ctx)?
+                },
                 groups.clone(),
                 sets.clone(),
                 aggs.clone(),
@@ -621,9 +617,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 let lneed = nd::join_left(need, *nleft, params.iter().chain(memo_keys), cond.as_ref());
                 let mut nl = NestLoopNode::new(
                     *kind,
-                    open_need(left, lneed.clone(), ctx)?,
-                    left.clone(),
-                    lneed,
+                    open_need(left, lneed, ctx)?,
                     right.clone(),
                     cond.clone(),
                     params.clone(),
@@ -4709,10 +4703,6 @@ struct Memoize {
 struct NestLoopNode {
     kind: JoinKind,
     left: BoxNode,
-    /// The outer side's plan and the columns it was opened with: opened again by a rescan
-    /// (ExecReScanNestLoop) when the outer node can't rescan itself (a sequential scan).
-    left_plan: Arc<Plan>,
-    left_need: Option<Vec<bool>>,
     right_plan: Arc<Plan>,
     cond: Option<Expr>,
     /// The condition compiled (`exec::kernel`), checked on the outer and inner row in place:
@@ -4746,12 +4736,6 @@ struct NestLoopNode {
     level: u8,
     tried: bool,
     stage: Option<Arc<super::pipe::Stage>>,
-    /// Rescans of the join (a correlated SubPlan's tree run again for its next outer row).
-    rescans: u32,
-    /// An unparameterized inner side's node, kept once the join has been rescanned and
-    /// rescanned for each collection of its rows (they may read the enclosing row), not
-    /// opened again.
-    right_node: Option<BoxNode>,
 }
 
 /// A nested loop's inner rows for one outer row: collected (a Material's, a memo's, a
@@ -4883,12 +4867,9 @@ impl NestLoopNode {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn new(
         kind: JoinKind,
         left: BoxNode,
-        left_plan: Arc<Plan>,
-        left_need: Option<Vec<bool>>,
         right_plan: Arc<Plan>,
         cond: Option<Expr>,
         params: Vec<Expr>,
@@ -4901,8 +4882,6 @@ impl NestLoopNode {
         NestLoopNode {
             kind,
             left,
-            left_plan,
-            left_need,
             right_plan,
             cond_kernel: compile_boxed(cond.as_ref()),
             cond,
@@ -4923,20 +4902,7 @@ impl NestLoopNode {
             level: super::pipe::ALL,
             tried: false,
             stage: None,
-            rescans: 0,
-            right_node: None,
         }
-    }
-
-    /// Whether a rescan can start the join over in place: a join that returns no unmatched
-    /// inner rows and keeps nothing across outer rows but what a new outer row replaces (no
-    /// memo, no fixed side), run on this thread (no lookup stage in a parallel scan's workers).
-    fn rescannable(&self) -> bool {
-        matches!(self.kind, JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti)
-            && self.memo.is_none()
-            && !self.fixed
-            && self.stage.is_none()
-            && self.level == super::pipe::ALL
     }
 
     /// Its inner scans as a stage a parallel scan's workers run (`lookup`), when they can
@@ -4971,47 +4937,10 @@ impl NestLoopNode {
     }
 
     /// The inner side's rows, read with only the columns the join's output and condition
-    /// read (the others NULL: a scan doesn't decode them). Once the join has been rescanned,
-    /// an unparameterized side's node is kept and rescanned for the next collection (a
-    /// SubPlan's tree run per outer row: the inner side reads the enclosing row).
-    fn collect_right(&mut self, ctx: &ExecCtx) -> Result<Vec<Row>> {
-        let kept = self.rescans > 0 && self.params.is_empty() && !ctx.instrumented();
-        if kept && let Some(n) = self.right_node.as_mut() {
-            let rows = ctx.temp_cleanup.run(|| {
-                ctx.statement(|| {
-                    if !n.rescan(ctx)? {
-                        return Ok(None);
-                    }
-                    let mut out = Vec::new();
-                    while let Some(r) = n.next(ctx)? {
-                        out.push(r);
-                    }
-                    Ok(Some(out))
-                })
-            })?;
-            if let Some(rows) = rows {
-                return Ok(rows);
-            }
-        }
-        self.right_node = None;
+    /// read (the others NULL: a scan doesn't decode them).
+    fn collect_right(&self, ctx: &ExecCtx) -> Result<Vec<Row>> {
         let need = self.keep.as_ref().map(|k| (self.nleft..self.nleft + self.nright).map(|i| k.get(i).copied().unwrap_or(false)).collect());
-        if !kept {
-            return super::collect_need(&self.right_plan, need, ctx, |r| r);
-        }
-        let (rows, node) = ctx.temp_cleanup.run(|| {
-            ctx.statement(|| {
-                let mut n = open_need(&self.right_plan, need, ctx)?;
-                let mut out = Vec::new();
-                while let Some(r) = n.next(ctx)? {
-                    out.push(r);
-                }
-                Ok((out, n))
-            })
-        })?;
-        if node.can_rescan() {
-            self.right_node = Some(node);
-        }
-        Ok(rows)
+        super::collect_need(&self.right_plan, need, ctx, |r| r)
     }
 
     fn right_rows(&mut self, left: &[Value], ctx: &ExecCtx) -> Result<Rc<Vec<Row>>> {
@@ -5289,30 +5218,6 @@ impl NestLoopNode {
 }
 
 impl Node for NestLoopNode {
-    /// ExecReScanNestLoop: the outer side read again from its start (rescanned, or opened
-    /// again when it can't be), an unparameterized inner side's rows collected again for the
-    /// enclosing row pushed now (`collect_right`), a parameterized one rescanned per outer
-    /// row as before.
-    fn rescan(&mut self, ctx: &ExecCtx) -> Result<bool> {
-        if !self.rescannable() || ctx.instrumented() {
-            return Ok(false);
-        }
-        if !self.left.rescan(ctx)? {
-            self.left = open_need(&self.left_plan, self.left_need.clone(), ctx)?;
-        }
-        self.cur = None;
-        if self.params.is_empty() {
-            self.right = None;
-        }
-        self.right_matched.clear();
-        self.rescans += 1;
-        Ok(true)
-    }
-
-    fn can_rescan(&self) -> bool {
-        self.rescannable()
-    }
-
     /// The outer side's order: each outer row's joined rows come together, in the outer
     /// rows' order, the outer columns first (a right or full join's unmatched inner rows
     /// come last: none).

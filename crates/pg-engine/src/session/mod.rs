@@ -339,6 +339,9 @@ pub struct Session {
     /// the transaction `ensure_txn` or BEGIN opens (now(), xact_start), however many
     /// messages later it does.
     xact_from: std::cell::Cell<Option<i64>>,
+    /// The statement timestamp of the message whose transaction's end last touched the
+    /// database (`finish_txn`).
+    touched: std::cell::Cell<i64>,
     /// (Looked up by name at every Bind and Execute: hashed with hashbrown's hasher, not
     /// SipHash.)
     pub prepared: hashbrown::HashMap<String, Arc<Prepared>>,
@@ -528,6 +531,7 @@ impl Session {
             txn_time: 0,
             stmt_start: std::cell::Cell::new(0),
             xact_from: std::cell::Cell::new(None),
+            touched: std::cell::Cell::new(0),
             prepared: Default::default(),
             prepared_meta: Default::default(),
             prepared_listed: false,
@@ -936,7 +940,14 @@ impl Session {
             .borrow_mut()
             .end_transaction(commit && r.is_ok());
         crate::exec::pgstat::clear_snapshot(&self.state);
-        self.state.db.touch();
+        // (`Database::touch` keeps the last use to a millisecond: not read again for the
+        // transactions of messages less than one apart. A database with a session is never
+        // idle, and the session's end touches it.)
+        let at = self.stmt_start.get();
+        if at == 0 || at - self.touched.get() >= 1000 {
+            self.touched.set(at);
+            self.state.db.touch();
+        }
         r
     }
 

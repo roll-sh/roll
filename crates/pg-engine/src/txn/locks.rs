@@ -435,16 +435,33 @@ struct Hold {
 /// A process-wide order of holds: when they were taken (a thread's own in the order it took
 /// them), without a counter every backend's locks write.
 fn next_seq() -> u64 {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     thread_local! {
         static LAST: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
-    let ns = START.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64;
+    let t = hold_clock();
     LAST.with(|l| {
-        let s = (ns << 6).max(l.get() + 1);
+        let s = (t << 6).max(l.get() + 1);
         l.set(s);
         s
     })
+}
+
+/// `next_seq`'s clock, from the process's first lock: on x86-64 the time stamp counter
+/// (one instruction, the same on every core of a CPU with an invariant one, where a clock
+/// read through the vDSO was three a point select's locks took), elsewhere nanoseconds.
+fn hold_clock() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        static START: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        // SAFETY: rdtsc reads a counter; it has no other effect.
+        let now = unsafe { core::arch::x86_64::_rdtsc() };
+        now.saturating_sub(*START.get_or_init(|| now))
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
+    }
 }
 
 impl Hold {

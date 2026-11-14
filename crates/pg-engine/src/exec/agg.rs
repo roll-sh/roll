@@ -3572,12 +3572,7 @@ impl Node for AggNode {
             return Ok(false);
         };
         if !input.rescan(ctx)? {
-            // (An input that can't rescan, a bitmap heap scan's, opened again from the plan:
-            // the aggregation's node and what it compiled stay.)
-            let Some(crate::sql::plan::Plan::Agg { input: plan, groups, aggs, .. }) = self.plan.as_deref() else {
-                return Ok(false);
-            };
-            *input = super::nodes::open_agg_input(plan, groups, aggs, ctx)?;
+            return Ok(false);
         }
         if self.input.is_none() {
             self.input = self.spent.take();
@@ -3587,9 +3582,7 @@ impl Node for AggNode {
     }
 
     fn can_rescan(&self) -> bool {
-        self.rescans_plain()
-            && self.stream.is_none()
-            && self.input.as_ref().or(self.spent.as_ref()).is_some_and(|i| i.can_rescan() || matches!(self.plan.as_deref(), Some(crate::sql::plan::Plan::Agg { .. })))
+        self.rescans_plain() && self.stream.is_none() && self.input.as_ref().or(self.spent.as_ref()).is_some_and(|i| i.can_rescan())
     }
 
     /// A streaming grouping's groups come in its input's order: by the sorted keys (a
