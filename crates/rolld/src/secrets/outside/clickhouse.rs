@@ -179,7 +179,9 @@ pub(super) async fn create_login(c: &Conn, name: &str, password: &str, group: &s
 
 pub(super) async fn drop_login(c: &Conn, name: &str) -> Result<(), String> {
     let who = ident(name)?;
-    // Its running queries stop where the admin may (KILL QUERY); dropped, it can't run another.
+    // Dropped first, so it can start nothing new; then what it's still running stops (KILL QUERY
+    // matches by name, where the admin may).
+    query(c, &format!("DROP USER IF EXISTS {who}"), &[]).await?;
     let _ = query(c, "KILL QUERY WHERE user = {n:String} ASYNC", &[("n", name)]).await;
-    query(c, &format!("DROP USER IF EXISTS {who}"), &[]).await.map(|_| ())
+    Ok(())
 }
