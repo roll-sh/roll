@@ -213,6 +213,25 @@ struct Api {
     headers: Vec<(String, String)>,
 }
 
+/// Once a run: the token used expires within a week (`Roll-Token-Expiration`, as GitHub's), so
+/// its holder renews it before scripts start failing.
+fn warn_expiry(h: &reqwest::header::HeaderMap) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let Some(at) = h.get("roll-token-expiration").and_then(|v| v.to_str().ok()).and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok()) else { return };
+    let left = at.with_timezone(&chrono::Utc) - chrono::Utc::now();
+    if left < chrono::Duration::days(7) {
+        WARNED.call_once(|| eprintln!("note: this token expires in {} ({}): roll token edit <id> --expires 30d, or make a new one", human_left(left), at.format("%Y-%m-%d %H:%M UTC")));
+    }
+}
+
+fn human_left(d: chrono::Duration) -> String {
+    match d.num_hours() {
+        h if h >= 48 => format!("{} days", h / 24),
+        h if h >= 1 => format!("{h} hours"),
+        _ => format!("{} minutes", d.num_minutes().max(0)),
+    }
+}
+
 impl Api {
     /// A GET whose body is read as it comes (server-sent events): the response, once its
     /// status is a success.
@@ -250,6 +269,7 @@ impl Api {
         }
         let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
         let status = res.status();
+        warn_expiry(res.headers());
         let text = res.text().await?;
         if !status.is_success() {
             // Errors are `{"error": ...}`, but whatever answered may not be the roll API at all.
