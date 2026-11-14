@@ -229,6 +229,12 @@ pub async fn index_one_ahead(ctx: &Ctx<'_>, expr: &str, args: WriteArgs, source:
     } else {
         write::resolve_target(cluster, expr, &args, ctx.now_ms).await?
     };
+    // An index the write created and no pipeline can move it out of (otherwise `index_resolved`
+    // warns where the document lands).
+    let pipeline_of = |k: &str| target.index.settings.get(k).is_some_and(|p| p != "_none");
+    if named.fresh && !pipelined && (args.pipeline.as_deref() == Some("_none") || !pipeline_of("index.default_pipeline")) && !pipeline_of("index.final_pipeline") {
+        warn_auto_created(ctx, &named.name);
+    }
     // Backing indices only take writes that carry their sequence numbers (`IndexRequest`
     // targeting a backing index directly).
     let direct = target.index.name == expr;
@@ -313,6 +319,23 @@ pub async fn index_one_ahead(ctx: &Ctx<'_>, expr: &str, args: WriteArgs, source:
     }
 }
 
+/// Elasticsearch's deprecation warnings for a dot-prefixed index a write created
+/// (`DotPrefixValidator`, which Elastic products skip, and `AutoCreateAction`'s notice for a
+/// visible one). Data streams and system indices get none.
+fn warn_auto_created(ctx: &Ctx<'_>, name: &str) {
+    if !name.starts_with('.') || crate::meta::names::dot_name_allowed(name) {
+        return;
+    }
+    let st = ctx.state();
+    let Some(idx) = st.metadata.indices.get(name) else { return };
+    ctx.warn_all(crate::meta::names::index_name_warnings(name));
+    if !idx.is_hidden() {
+        ctx.warn_even_for_products(format!(
+            "index name [{name}] starts with a dot '.', in the next major version, index names starting with a dot are reserved for hidden indices and system indices"
+        ));
+    }
+}
+
 /// The index a write named, as it stood before the write resolved (and maybe created) it.
 struct Original {
     /// The name, date math resolved.
@@ -386,7 +409,14 @@ async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, mut args: WriteArg
                 crate::xpack::security::check_moved_write(ctx, &t.index.name)?;
             }
             if let Some(ingested) = ingested {
-                let crate::ingest::Ingested { args: changed, executed: ran } = *ingested;
+                let crate::ingest::Ingested { args: changed, executed: ran, created } = *ingested;
+                // The pipelines ran: warn where the document landed.
+                if original.fresh && t.index.name == requested {
+                    warn_auto_created(ctx, &original.name);
+                }
+                for c in &created {
+                    warn_auto_created(ctx, c);
+                }
                 let new_id = changed.id.clone().unwrap_or_else(|| id.clone());
                 if new_id != id {
                     id = new_id;

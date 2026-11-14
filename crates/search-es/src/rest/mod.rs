@@ -165,6 +165,18 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// An Elasticsearch deprecation warning that requests from Elastic products get too.
+    pub fn warn_even_for_products(&self, msg: impl Into<String>) {
+        if self.cluster.dialect == Dialect::OpenSearch {
+            return;
+        }
+        let msg = msg.into();
+        let mut w = self.warnings.lock();
+        if !w.contains(&msg) {
+            w.push(msg);
+        }
+    }
+
     /// A warning in the cluster's dialect (`None` skips it for that dialect).
     pub fn warn_dialect(&self, elasticsearch: Option<String>, opensearch: Option<String>) {
         let msg = match self.cluster.dialect {

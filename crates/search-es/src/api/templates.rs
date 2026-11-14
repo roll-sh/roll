@@ -53,6 +53,10 @@ pub async fn put_index_template(ctx: &Ctx<'_>) -> EsResult<Reply> {
             return Err(EsError::invalid_index_template(&name, &format!("provided a template property which is managed by the system: {shown}")));
         }
     }
+    // `DotPrefixValidator` filters the action: each dot-prefixed pattern that isn't a system
+    // index's is deprecated (Elastic products are exempt, as `Ctx::warn` makes them).
+    let dot: Vec<String> = t.index_patterns.iter().flat_map(|p| crate::meta::names::index_name_warnings(p)).collect();
+    ctx.warn_all(dot);
     let warnings = ctx
         .cluster
         .update(move |st| {
