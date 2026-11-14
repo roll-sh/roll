@@ -658,7 +658,7 @@ long-lived public keys on every server. Servers trust one CA key (`TrustedUserCA
   logged in to a real `sshd` as `deploy` with roll's certificate, and not as `root`.
 - **Host certificates**, as Vault's SSH engine signs host keys: an SSH CA with `host_domains`
   (`--host-domain svc.internal`, a domain of the project's own: a top-level or common public
-suffix such as `com`, `co.uk` or `github.io` is refused; `max_host_days`, 90 by default, 397 at most) signs a server's own
+suffix such as `com`, `co.uk` or `github.io` is refused (from a built-in list of the common ones, not the whole Public Suffix List: signing hosts is an admin's, and a CA's `@cert-authority` line only reaches clients that add it); `max_host_days`, 90 by default, 397 at most) signs a server's own
   public key for its names. `POST …/ssh-cas/{id}/sign-host {public_key, hosts, days?}` (admin, since
   a host certificate lets a server stand in for those names; audited; `roll secrets ssh-cas
   sign-host NAME /etc/ssh/ssh_host_ed25519_key.pub --host db1.svc.internal`) takes the key line
