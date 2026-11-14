@@ -13,6 +13,34 @@ use serde_json::{Value, json};
 pub struct Postgres(pub Api);
 
 impl Postgres {
+    /// A branch of `parent` named `name` (`at`: as the parent was then), with its own role; one
+    /// made just before a crash is found and finished instead.
+    async fn create(&self, parent: &str, name: &str, mode: Mode, at: Option<i64>) -> anyhow::Result<Branched> {
+        let (id, has_role) = match self.find(parent, name).await? {
+            Some(b) => {
+                let id = s(&b["id"]).unwrap_or_default();
+                // From before a crash: it may still hold rows, so empty it again (idempotent).
+                if mode == Mode::Schema {
+                    self.0.post(&format!("/v1/projects/{}/branches/{}/reset", seg(parent), seg(&id)), json!({ "schema_only": true })).await?;
+                }
+                (id, false)
+            }
+            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "schema_only": mode == Mode::Schema, "app_role": true, "at": at })).await {
+                Ok(v) => (s(&v["branch"]["id"]).ok_or_else(|| anyhow::anyhow!("a branch without an id"))?, v["app_connection_uri"].is_string()),
+                Err(e) if conflict_is_ours(&e) => {
+                    let b = self.find(parent, name).await?.ok_or(e)?;
+                    (s(&b["id"]).unwrap_or_default(), false)
+                }
+                Err(e) => return Err(e),
+            },
+        };
+        // A branch found again (a crash) gets its role now (idempotent).
+        if !has_role {
+            self.0.post(&format!("/v1/projects/{}/branches/{}/app-role", seg(parent), seg(&id)), json!({})).await?;
+        }
+        Ok(Branched { r#ref: id, kept: Some(APP_ROLE.into()) })
+    }
+
     async fn find(&self, project: &str, name: &str) -> anyhow::Result<Option<Value>> {
         let p = self.0.get(&format!("/v1/projects/{}", seg(project))).await?;
         Ok(p["branches"].as_array().and_then(|b| b.iter().find(|b| b["name"] == name).cloned()))
@@ -36,30 +64,20 @@ impl Brancher for Postgres {
     /// `Mode::Schema`: branched, then every user table emptied (`schema_only`). Either way the
     /// branch gets a role of its own for the preview's code (pg-control's `app_role`).
     async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
-        let (id, has_role) = match self.find(parent, name).await? {
-            Some(b) => {
-                let id = s(&b["id"]).unwrap_or_default();
-                // From before a crash: it may still hold rows, so empty it again (idempotent).
-                if mode == Mode::Schema {
-                    self.0.post(&format!("/v1/projects/{}/branches/{}/reset", seg(parent), seg(&id)), json!({ "schema_only": true })).await?;
-                }
-                (id, false)
-            }
-            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "schema_only": mode == Mode::Schema, "app_role": true })).await {
-                Ok(v) => (s(&v["branch"]["id"]).ok_or_else(|| anyhow::anyhow!("a branch without an id"))?, v["app_connection_uri"].is_string()),
-                Err(e) if conflict_is_ours(&e) => {
-                    let b = self.find(parent, name).await?.ok_or(e)?;
-                    (s(&b["id"]).unwrap_or_default(), false)
-                }
-                Err(e) => return Err(e),
-            },
-        };
-        // A branch found again (a crash) gets its role now (idempotent).
-        if !has_role {
-            self.0.post(&format!("/v1/projects/{}/branches/{}/app-role", seg(parent), seg(&id)), json!({})).await?;
-        }
-        Ok(Branched { r#ref: id, kept: Some(APP_ROLE.into()) })
+        self.create(parent, name, mode, None).await
     }
+
+    /// From the parent's history (pg-control's point in time: unix seconds).
+    async fn branch_at(&self, parent: &str, name: &str, mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
+        self.create(parent, name, mode, Some(at)).await.map(Some)
+    }
+
+    /// A reset in place can't go back in time: branched again from there instead.
+    async fn reset_at(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
+        self.delete(parent, branch, name).await?;
+        self.create(parent, name, mode, Some(at)).await.map(Some)
+    }
+
 
     /// In place: same branch, endpoint and `DATABASE_URL` (pg-control makes the branch's role
     /// again, same password).
@@ -113,7 +131,7 @@ impl Brancher for Postgres {
     /// Rewrite the masked columns in the branch, in one transaction, then `VACUUM FULL` those
     /// tables so the rows as they were leave the branch's files (`roll_previews::mask`). Run again
     /// it's harmless: masked values stay masked.
-    async fn mask(&self, parent: &str, branch: &str, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+    async fn mask(&self, parent: &str, branch: &str, _kept: Option<&str>, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
         let mut salt = [0u8; 16];
         getrandom::fill(&mut salt).map_err(|e| anyhow::anyhow!("randomness: {e}"))?;
         let salt: String = salt.iter().map(|b| format!("{b:02x}")).collect();
@@ -295,6 +313,18 @@ impl Brancher for Nosql {
         Ok((d["parent_id"] == parent_id && !parent_id.is_null()).then(|| s(&d["id"])).flatten())
     }
 
+    /// From the parent's history (`at`, unix seconds).
+    async fn branch_at(&self, parent: &str, name: &str, mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
+        let v = self.0.post(&format!("/v1/nosql/databases/{}/branches", seg(parent)), json!({ "name": name, "schema_only": mode == Mode::Schema, "at": at })).await?;
+        Ok(Some(Branched::plain(s(&v["id"]).ok_or_else(|| anyhow::anyhow!("a database without an id"))?)))
+    }
+
+    /// In place, to the parent as it was then (same id, endpoint and credentials).
+    async fn reset_at(&self, _parent: &str, branch: &str, _kept: Option<&str>, _name: &str, _mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
+        self.0.post(&format!("/v1/nosql/databases/{}/reset", seg(branch)), json!({ "at": at })).await?;
+        Ok(Some(Branched::plain(branch)))
+    }
+
     async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         let body = json!({ "name": name, "schema_only": mode == Mode::Schema });
         match self.0.post(&format!("/v1/nosql/databases/{}/branches", seg(parent)), body).await {
@@ -310,13 +340,18 @@ impl Brancher for Nosql {
     }
 
     /// Merge masks onto the branch's own policy (inherited from its parent at branching).
-    async fn mask(&self, _parent: &str, branch: &str, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+    async fn mask(&self, _parent: &str, branch: &str, _kept: Option<&str>, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
         let d = self.0.get(&format!("/v1/nosql/databases/{}", seg(branch))).await?;
         let mut policy = d["masking"].as_object().cloned().unwrap_or_default();
         for (col, f) in columns {
             policy.insert(col.clone(), json!(f));
         }
         self.0.call(Method::PATCH, &format!("/v1/nosql/databases/{}", seg(branch)), Some(json!({ "masking": policy }))).await.map(|_| ())
+    }
+
+    async fn mask_problems(&self, parent: &str, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<Vec<String>> {
+        let schema = self.0.get(&format!("/v1/nosql/databases/{}/schema", seg(parent))).await?;
+        Ok(roll_previews::mask::nosql_key_masks(&schema, columns))
     }
 
     /// NoSQL resets in place: same id, endpoint and credentials.
@@ -690,6 +725,52 @@ impl Brancher for Tasks {
 
 // ── Search: a zero-copy branch of an Elasticsearch-compatible cluster (roll search) ──
 
+/// Masks one field (`params.path`) of a document: `redact`, `remove` or `email`. It goes through
+/// arrays at every step (an object field, `nested` ones included) and literal dotted keys
+/// (`{"user.email": …}`) as well as objects, and a document it changes nothing in is a `noop`.
+const SEARCH_MASK_SCRIPT: &str = "boolean mask(def m, List p, int i, String rule, String id) { \
+if (m instanceof List) { boolean c = false; for (def e : m) { if (mask(e, p, i, rule, id)) { c = true; } } return c; } \
+if (!(m instanceof Map)) { return false; } \
+boolean c = false; String key = ''; \
+for (int j = i; j < p.size(); j++) { \
+key = j == i ? p.get(j) : key + '.' + p.get(j); \
+if (!m.containsKey(key)) { continue; } \
+if (j == p.size() - 1) { \
+if (rule == 'remove') { m.remove(key); } else if (rule == 'email') { m.put(key, 'user-' + id + '@example.invalid'); } else { m.put(key, '[masked]'); } \
+c = true; \
+} else if (mask(m.get(key), p, j + 1, rule, id)) { c = true; } \
+} \
+return c; } \
+if (!mask(ctx._source, params.path, 0, params.rule, ctx._id)) { ctx.op = 'noop'; }";
+
+/// A `_mapping` answer as lines: each index (not the system ones, `.…`), and each field with its
+/// type, nested ones by path (`field users.address.city text`) and multi-fields too. Bounded.
+fn mapping_lines(v: &Value) -> Vec<String> {
+    fn walk(props: &Value, prefix: &str, depth: usize, out: &mut Vec<String>) {
+        let Some(props) = props.as_object() else { return };
+        for (name, f) in props {
+            if out.len() >= 5000 || depth > 20 {
+                return;
+            }
+            let path = format!("{prefix}.{name}");
+            let ty = f["type"].as_str().unwrap_or(if f.get("properties").is_some() { "object" } else { "?" });
+            out.push(format!("field {path} {ty}"));
+            walk(&f["properties"], &path, depth + 1, out);
+            walk(&f["fields"], &path, depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    for (index, m) in v.as_object().into_iter().flatten().filter(|(i, _)| !i.starts_with('.')) {
+        out.push(format!("index {index}"));
+        walk(&m["mappings"]["properties"], index, 0, &mut out);
+    }
+    out
+}
+
+fn percent_decode(s: &str) -> String {
+    urlencoding::decode(s).map(|c| c.into_owned()).unwrap_or_else(|_| s.to_string())
+}
+
 pub struct Search(pub Api);
 
 impl Search {
@@ -757,6 +838,68 @@ impl Brancher for Search {
         Ok(kept.as_object().into_iter().flatten().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect())
     }
 
+    /// Both clusters' mappings as lines (`index products`, `field products.price float`), through
+    /// the operator's console request (no cluster password needed).
+    async fn schema(&self, parent: &str, branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
+        let read = |id: String| async move {
+            let v = self.0.post(&format!("/v1/search/clusters/{}/request", seg(&id)), json!({ "method": "GET", "path": "/_mapping" })).await?;
+            anyhow::ensure!(v["status"].as_u64() == Some(200), "reading {id}'s mappings: {}", v["status"]);
+            let body: Value = serde_json::from_str(v["body"].as_str().unwrap_or("{}"))?;
+            anyhow::Ok(mapping_lines(&body))
+        };
+        Ok(Some((read(parent.to_string()).await?, read(branch.to_string()).await?)))
+    }
+
+    /// Rewrite the masked fields in the branch's documents (`_update_by_query`, Painless): the
+    /// parent's segments are shared, so the branch's rewritten documents are its own and the
+    /// parent keeps its values. Run again it's harmless: masked values stay masked.
+    async fn mask(&self, _parent: &str, branch: &str, kept: Option<&str>, fields: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+        let vars = self.connect("", branch, kept).await?;
+        let url = vars.iter().find(|(k, _)| k == "ELASTICSEARCH_URL").map(|(_, v)| v.clone()).ok_or_else(|| anyhow::anyhow!("the search branch {branch} has no URL"))?;
+        let mut u = reqwest::Url::parse(&url)?;
+        let (user, pass) = (percent_decode(u.username()), u.password().map(percent_decode));
+        let _ = u.set_username("");
+        let _ = u.set_password(None);
+        let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(300)).build()?;
+        let send = |req: reqwest::RequestBuilder| if user.is_empty() { req } else { req.basic_auth(&user, pass.as_deref()) };
+        let mut masked: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for (spec, rule) in fields {
+            let Some((index, path)) = spec.split_once('.') else { anyhow::bail!("{spec:?} isn't index.field") };
+            let target = u.join(&format!("{}/_update_by_query?conflicts=proceed&refresh=true", seg(index)))?;
+            // Every document, not those `exists` finds: a field that isn't indexed (or has no doc
+            // values) is in `_source` all the same.
+            let body = json!({
+                "query": { "match_all": {} },
+                "script": { "lang": "painless", "source": SEARCH_MASK_SCRIPT, "params": { "path": path.split('.').collect::<Vec<_>>(), "rule": rule } },
+            });
+            let res = send(http.post(target).json(&body)).send().await?;
+            let status = res.status();
+            let v: Value = res.json().await.unwrap_or(Value::Null);
+            // An index the branch doesn't have holds nothing to mask.
+            if status.as_u16() == 404 {
+                continue;
+            }
+            // A document skipped on a version conflict kept its value: masking isn't done.
+            let failures = v["failures"].as_array().map_or(0, Vec::len);
+            let conflicts = v["version_conflicts"].as_u64().unwrap_or(0);
+            anyhow::ensure!(status.is_success() && failures == 0 && conflicts == 0, "masking {spec}: {status} {}", v.to_string().chars().take(300).collect::<String>());
+            masked.insert(index);
+        }
+        // The documents as they were stay in the segments the branch shares with its parent,
+        // marked deleted only in the branch, and a term dictionary keeps their terms
+        // (`_terms_enum`, suggesters): every segment that holds one is rewritten as the branch's
+        // own without it (as Postgres masking's VACUUM FULL), the parent's untouched.
+        for index in masked {
+            let settings = u.join(&format!("{}/_settings", seg(index)))?;
+            let res = send(http.put(settings).json(&json!({ "index.merge.policy.expunge_deletes_allowed": 0.0 }))).send().await?;
+            anyhow::ensure!(res.status().is_success(), "masking {index}: its merge policy: {}", res.status());
+            let merge = u.join(&format!("{}/_forcemerge?only_expunge_deletes=true", seg(index)))?;
+            let res = send(http.post(merge)).send().await?;
+            anyhow::ensure!(res.status().is_success(), "masking {index}: expunging what was masked: {} {}", res.status(), res.text().await.unwrap_or_default().chars().take(300).collect::<String>());
+        }
+        Ok(())
+    }
+
     async fn usage(&self, _parent: &str, branch: &str) -> anyhow::Result<Usage> {
         let c = self.0.get(&format!("/v1/search/clusters/{}", seg(branch))).await?;
         // What the branch wrote, when roll search says (`own_bytes`); else everything it
@@ -769,6 +912,21 @@ impl Brancher for Search {
 #[cfg(test)]
 mod tests {
     use super::bucket_name;
+
+    #[test]
+    fn a_search_mapping_becomes_lines() {
+        let v = serde_json::json!({
+            ".kibana": { "mappings": { "properties": { "x": { "type": "text" } } } },
+            "products": { "mappings": { "properties": {
+                "name": { "type": "text", "fields": { "raw": { "type": "keyword" } } },
+                "seller": { "properties": { "city": { "type": "text" } } }
+            } } }
+        });
+        assert_eq!(
+            super::mapping_lines(&v),
+            ["index products", "field products.name text", "field products.name.raw keyword", "field products.seller object", "field products.seller.city text"]
+        );
+    }
 
     #[test]
     fn bucket_branches_are_named_after_their_parent() {

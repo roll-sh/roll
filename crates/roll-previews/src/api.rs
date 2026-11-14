@@ -24,8 +24,17 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}", get(one).delete(delete))
         .route("/v1/previews/{id}/refresh", post(refresh))
         .route("/v1/previews/{id}/keep", post(keep))
+        .route("/v1/previews/{id}/visual/accept", post(accept_visual))
         .route("/v1/previews/{id}/env", get(vars).put(put_vars))
+        .route("/v1/previews/{id}/shares", get(shares).post(share))
+        .route("/v1/previews/{id}/shares/{share}", axum::routing::delete(unshare))
         .route("/v1/previews/{id}/screenshot", get(screenshot))
+        .route("/v1/previews/{id}/qr.png", get(qr))
+        .route("/v1/previews/{id}/connect", get(connect))
+        .route("/v1/previews/{id}/notes", get(notes))
+        .route("/v1/previews/{id}/notes/{note}/resolve", post(resolve_note))
+        .route("/v1/previews/{id}/mail", get(mails))
+        .route("/v1/previews/{id}/mail/{mail}", get(mail_raw))
         .route("/v1/previews/{id}/screenshot.png", get(screenshot_link))
         .route("/v1/previews/{id}/reset", post(reset))
         // These act on running services, which live on the preview's holder in a cluster.
@@ -113,6 +122,7 @@ impl IntoResponse for Error {
             Error::BadRequest(_) => StatusCode::BAD_REQUEST,
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::Conflict(_) => StatusCode::CONFLICT,
+            Error::Forbidden(_) => StatusCode::FORBIDDEN,
             Error::Db(_) | Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(json!({ "error": self.to_string() }))).into_response()
@@ -152,7 +162,7 @@ async fn list(AxState(e): S, axum::Extension(visible): axum::Extension<Visible>,
             e.workspace_project(p)?;
         }
         let rows = e.store.rows(q.project.as_deref())?;
-        rows.into_iter().filter(|r| visible.sees(&r.project_id) && state.is_none_or(|s| r.state == s)).map(|r| e.store.view(r)).collect::<crate::Result<Vec<_>>>()
+        rows.into_iter().filter(|r| visible.sees(&r.project_id) && state.is_none_or(|s| r.state == s)).map(|r| e.store.view(r).map(Preview::light)).collect::<crate::Result<Vec<_>>>()
     })
     .await
     .map(Json)
@@ -209,6 +219,64 @@ async fn keep(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Result<
     blocking(e, move |e| e.keep(&id, k.hours)).await.map(Json)
 }
 
+/// Accept how a change's pages look at its latest screenshot (the `roll/visual` status).
+/// A scoped or OAuth token (an agent's, an app's) isn't a person: it can't accept a required one.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct AcceptBody {
+    /// The head whose screenshots were looked at (`visual_review.head`); refused when it isn't
+    /// the latest. Left out: whatever is latest.
+    head: Option<String>,
+    /// One page only (`visual_review.pages[].path`: `""` the first page). Left out: every page.
+    path: Option<String>,
+}
+
+async fn accept_visual(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Json<Preview>> {
+    check_id(&id)?;
+    let AcceptBody { head: seen, path } = if b.is_empty() { AcceptBody::default() } else { body::<AcceptBody>(&b)? };
+    // The person behind a token too: their own token doesn't let an author accept their change.
+    let behind = who.as_ref().map(|u| u.handle.clone());
+    let (by, person) = match (who, grant) {
+        (Some(axum::Extension(u)), None) => (u.handle, true),
+        (_, Some(axum::Extension(g))) => (format!("token:{}", g.name), false),
+        (None, None) => ("operator".into(), true),
+    };
+    e.accept_visual(&id, &by, behind.as_deref(), person, seen.as_deref(), path.as_deref()).await.map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShareBody {
+    hours: u32,
+}
+
+async fn shares(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Vec<crate::Share>>> {
+    check_id(&id)?;
+    blocking(e, move |e| {
+        e.store.row(&id)?;
+        e.store.shares(&id)
+    })
+    .await
+    .map(Json)
+}
+
+/// The link is in this answer only (its token isn't kept).
+async fn share(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, b: Bytes) -> crate::Result<Response> {
+    check_id(&id)?;
+    let s: ShareBody = body(&b)?;
+    let by = who.map(|axum::Extension(u)| u.handle).unwrap_or_else(|| "operator".into());
+    let (share, url) = blocking(e, move |e| e.share(&id, s.hours, &by)).await?;
+    let mut v = serde_json::to_value(&share).unwrap_or_default();
+    v["url"] = json!(url);
+    Ok((StatusCode::CREATED, Json(v)).into_response())
+}
+
+async fn unshare(AxState(e): S, Path((id, share)): Path<(String, String)>) -> crate::Result<Response> {
+    check_id(&id)?;
+    blocking(e, move |e| e.unshare(&id, &share)).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VarsBody {
@@ -226,6 +294,63 @@ async fn vars(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serde
     Ok(Json(serde_json::json!({ "vars": vars })))
 }
 
+/// The notes left on the preview's pages that nobody has resolved (each with its id, to resolve).
+async fn notes(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serde_json::Value>> {
+    check_id(&id)?;
+    e.store.row(&id)?;
+    let notes = e.open_notes(&id).await.map_err(|err| Error::Internal(format!("{err:#}")))?;
+    Ok(Json(serde_json::json!({ "notes": notes })))
+}
+
+/// Resolve a note left on the preview's page (its review's id): the page stops listing it.
+async fn resolve_note(AxState(e): S, Path((id, note)): Path<(String, String)>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<Json<serde_json::Value>> {
+    check_id(&id)?;
+    let by = match (who, grant) {
+        (Some(axum::Extension(u)), None) => u.handle,
+        (_, Some(axum::Extension(g))) => format!("token:{}", g.name),
+        (None, None) => "operator".into(),
+    };
+    e.resolve_note(&id, &note, &by).await?;
+    Ok(Json(serde_json::json!({ "resolved": note })))
+}
+
+/// The mail the preview's services sent, caught (newest first; the last 50).
+async fn mails(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serde_json::Value>> {
+    check_id(&id)?;
+    let mail = blocking(e, move |e| {
+        e.store.row(&id)?;
+        e.store.mails(&id)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({ "mail": mail })))
+}
+
+/// One caught message as it was sent (`message/rfc822`, shown as text, never rendered).
+async fn mail_raw(AxState(e): S, Path((id, mail)): Path<(String, String)>) -> crate::Result<Response> {
+    check_id(&id)?;
+    let raw = blocking(e, move |e| {
+        e.store.row(&id)?;
+        e.store.mail_raw(&id, &mail)?.ok_or_else(|| Error::NotFound("no such mail".into()))
+    })
+    .await?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (axum::http::header::CONTENT_DISPOSITION, "inline"),
+            (axum::http::header::HeaderName::from_static("x-content-type-options"), "nosniff"),
+        ],
+        raw,
+    )
+        .into_response())
+}
+
+/// Each data branch's connection (its own credentials), to query what the preview sees.
+async fn connect(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serde_json::Value>> {
+    check_id(&id)?;
+    let branches = e.connections(&id).await?;
+    Ok(Json(serde_json::json!({ "branches": branches })))
+}
+
 async fn put_vars(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Result<Json<serde_json::Value>> {
     check_id(&id)?;
     let v: VarsBody = body(&b)?;
@@ -234,12 +359,77 @@ async fn put_vars(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Res
 }
 
 /// The preview's screenshot (a PNG), taken once per head when the project's rules ask.
-async fn screenshot(AxState(e): S, Path(id): Path<String>) -> crate::Result<Response> {
+/// `?previous=1`: the one before it, at an earlier head (to compare).
+/// The preview's link with its access (`share_url`; `service=` another service's) as a QR code,
+/// so a phone opens it by scanning (Vercel's toolbar): it carries the access token, so it's never
+/// cached.
+async fn qr(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::collections::HashMap<String, String>>) -> crate::Result<Response> {
     check_id(&id)?;
-    let shot = blocking(e, move |e| e.store.screenshot(&id)).await?;
-    match shot.filter(|(_, png)| !png.is_empty()) {
-        Some((_, png)) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, no-store")], png).into_response()),
-        None => Err(Error::NotFound("the preview has no screenshot".into())),
+    let service = q.get("service").cloned();
+    let png = blocking(e, move |e| {
+        let p = e.store.view(e.store.row(&id)?)?;
+        let url = match &service {
+            Some(name) => p.services.iter().find(|s| &s.name == name).and_then(|s| s.share_url.clone()),
+            None => p.share_url.clone(),
+        };
+        let url = url.ok_or_else(|| Error::NotFound("the preview has no link for that yet".into()))?;
+        roll_auth::totp::qr_png(&url).ok_or_else(|| Error::Internal("the link is too long for a QR code".into()))
+    })
+    .await?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "no-store")], png).into_response())
+}
+
+async fn screenshot(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::collections::HashMap<String, String>>) -> crate::Result<Response> {
+    check_id(&id)?;
+    let previous = q.get("previous").is_some_and(|v| v == "1" || v == "true");
+    let phone = match q.get("view").map(String::as_str) {
+        None | Some("desktop") => false,
+        Some("phone") => true,
+        Some(v) => return Err(Error::BadRequest(format!("view: desktop or phone, not {v:?}"))),
+    };
+    let base = q.get("base").is_some_and(|v| v == "1" || v == "true");
+    // `page=/pricing`: another of the project's pages (`github.pages`), at the desktop width.
+    let page = q.get("page").cloned();
+    if let Some(p) = &page
+        && ((crate::settings::page_entry(p).is_none() && crate::settings::width_entry(p).is_none()) || phone)
+    {
+        return Err(Error::BadRequest("page: a path from github.pages, or @<width> from github.widths (desktop only)".into()));
+    }
+    // `diff=base|previous`: where this one differs from the baseline's or the one before (the
+    // same view and page), as a picture.
+    let diff = match q.get("diff").map(String::as_str) {
+        None => None,
+        Some(d @ ("base" | "previous")) => Some(d == "base"),
+        Some(v) => return Err(Error::BadRequest(format!("diff: base or previous, not {v:?}"))),
+    };
+    let png = blocking(e, move |e| {
+        let shot = |base: bool, previous: bool| -> crate::Result<Option<Vec<u8>>> {
+            // `base=1`: the default branch's preview's, the one this was compared with (at the
+            // change's merge base when that was kept).
+            if base {
+                return e.store.base_screenshot(&id, phone, page.as_deref());
+            }
+            if let Some(path) = &page {
+                return e.store.page_screenshot(&id, path, previous);
+            }
+            match (phone, previous) {
+                (true, p) => e.store.phone_screenshot(&id, p),
+                (false, true) => e.store.previous_screenshot(&id),
+                (false, false) => Ok(e.store.screenshot(&id)?.map(|(_, png)| png)),
+            }
+        };
+        match diff {
+            Some(against_base) => {
+                let (Some(before), Some(after)) = (shot(against_base, !against_base)?, shot(false, false)?) else { return Ok(None) };
+                Ok(crate::visual::diff(&before, &after))
+            }
+            None => shot(base, previous),
+        }
+    })
+    .await?;
+    match png.filter(|png| !png.is_empty()) {
+        Some(png) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, no-store")], png).into_response()),
+        None => Err(Error::NotFound(if previous { "the preview has no earlier screenshot" } else { "the preview has no screenshot" }.into())),
     }
 }
 
@@ -250,9 +440,25 @@ async fn screenshot_link(AxState(e): S, Path(id): Path<String>, Query(q): Query<
     let (Some(exp), Some(sig)) = (q.get("exp").and_then(|x| x.parse::<i64>().ok()), q.get("sig").cloned()) else {
         return Ok((StatusCode::FORBIDDEN, "a signed link only").into_response());
     };
-    let shot = blocking(e, move |e| if e.store.screenshot_link_ok(&id, exp, &sig)? { e.store.screenshot(&id) } else { Ok(None) }).await?;
-    match shot.filter(|(_, png)| !png.is_empty()) {
-        Some((_, png)) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "public, max-age=86400, immutable")], png).into_response()),
+    // `diff=base`: where it differs from the baseline's, under its own signature.
+    let variant = match q.get("diff").map(String::as_str) {
+        None => None,
+        Some("base") => Some("diff=base"),
+        Some(_) => return Ok((StatusCode::FORBIDDEN, "not a valid link").into_response()),
+    };
+    let shot = blocking(e, move |e| {
+        if !e.store.screenshot_link_ok(&id, exp, &sig, variant)? {
+            return Ok(None);
+        }
+        if variant.is_none() {
+            return Ok(e.store.screenshot(&id)?.map(|(_, png)| png));
+        }
+        let (Some(before), Some((_, after))) = (e.store.base_screenshot(&id, false, None)?, e.store.screenshot(&id)?) else { return Ok(None) };
+        Ok(crate::visual::diff(&before, &after))
+    })
+    .await?;
+    match shot.filter(|png| !png.is_empty()) {
+        Some(png) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "public, max-age=86400, immutable")], png).into_response()),
         None => Ok((StatusCode::FORBIDDEN, "not a valid link").into_response()),
     }
 }
@@ -327,8 +533,16 @@ async fn settings(AxState(e): S, Path(project): Path<String>) -> crate::Result<J
 
 async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> crate::Result<Json<crate::Settings>> {
     let patch: Value = body(&b)?;
+    let (p, check) = (project.clone(), patch.clone());
+    let (old, new) = blocking(e.clone(), move |e| {
+        e.workspace_project(&p)?;
+        let old = e.store.settings(&p)?;
+        let new = old.patched(&check)?;
+        Ok((old, new))
+    })
+    .await?;
+    e.check_masks(&old, &new).await?;
     let s = blocking(e.clone(), move |e| {
-        e.workspace_project(&project)?;
         let s = e.store.settings(&project)?.patched(&patch)?;
         let s = e.store.put_settings(&project, &s)?;
         // Every preview of the project converges on the new rules (modes, masks, variables,

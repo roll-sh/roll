@@ -49,6 +49,17 @@ pub trait Brancher: Send + Sync {
     /// Make `branch` the parent's current state again. Its ref may be new.
     async fn reset(&self, parent: &str, branch: &str, kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched>;
 
+    /// [`Brancher::branch`] from the parent as it was at `at` (unix seconds), where the product
+    /// keeps history: `None` from one that doesn't (the caller branches as of now and says so).
+    async fn branch_at(&self, _parent: &str, _name: &str, _mode: Mode, _at: i64) -> anyhow::Result<Option<Branched>> {
+        Ok(None)
+    }
+
+    /// [`Brancher::reset`] to the parent as it was at `at`, the same way.
+    async fn reset_at(&self, _parent: &str, _branch: &str, _kept: Option<&str>, _name: &str, _mode: Mode, _at: i64) -> anyhow::Result<Option<Branched>> {
+        Ok(None)
+    }
+
     /// Delete `branch`, which must be the child of `parent` named `name` (anything else is
     /// refused). Ok when it's already gone. Never touches `parent`.
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()>;
@@ -66,9 +77,17 @@ pub trait Brancher: Send + Sync {
     }
 
     /// Mask columns of a branch (its parent stays as it is): NoSQL adds them to the branch's read
-    /// policy, Postgres rewrites them in the branch (`crate::mask`). Products that can't, refuse.
-    async fn mask(&self, _parent: &str, _branch: &str, _columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+    /// policy, Postgres rewrites them in the branch (`crate::mask`), search rewrites the fields in
+    /// the branch's documents. `kept` is what branching kept (a search branch's credentials).
+    /// Products that can't, refuse.
+    async fn mask(&self, _parent: &str, _branch: &str, _kept: Option<&str>, _columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
         anyhow::bail!("this product's branches can't mask columns")
+    }
+
+    /// What's wrong with masking `columns` of `parent` that only the product can tell (a NoSQL
+    /// mask on a key column, which makes its table unreadable): one line each, none when fine.
+    async fn mask_problems(&self, _parent: &str, _columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
     }
 
     /// The preview has been idle a while: drop what the branch keeps for a quick start (a
@@ -108,6 +127,8 @@ pub struct ChangeInfo {
     pub trusted: bool,
     /// A writer approved running the current head (roll code's `approve-run`).
     pub approved: bool,
+    /// Who opened it (roll code's `author`): not the one to accept its visual change.
+    pub author: String,
     pub github_pr: Option<i64>,
 }
 
@@ -132,6 +153,44 @@ pub struct ServiceSpec {
     pub health: Option<String>,
 }
 
+/// A screenshot of a service's page, and how fast it loaded when the backend could time it.
+#[derive(Clone, Debug)]
+pub struct Shot {
+    pub png: Vec<u8>,
+    pub speed: Option<crate::PageSpeed>,
+    pub health: Option<crate::PageHealth>,
+    pub a11y: Option<crate::PageA11y>,
+    /// The same page at a phone's width, when the backend took one.
+    pub phone: Option<Vec<u8>>,
+    /// The project's other pages (`github.pages`) the backend took, in the same session.
+    pub pages: Vec<PageShot>,
+    /// The first page's visible text, as the browser read it (`page_text`).
+    pub text: Option<String>,
+    /// Its own links that are broken (`PageLinks::parse`).
+    pub links: Option<crate::PageLinks>,
+    /// The service's API operations (`GET /users/{id}`, sorted), from its OpenAPI document.
+    pub api: Option<Vec<String>>,
+}
+
+/// What a screenshot run takes: the project's other pages, and what it blanks first.
+#[derive(Clone, Debug, Default)]
+pub struct ShotOptions {
+    pub pages: Vec<String>,
+    pub hide: Vec<String>,
+    /// The first service's OpenAPI document's path (`github.openapi`), read in the same session.
+    pub openapi: Option<String>,
+}
+
+/// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.
+#[derive(Clone, Debug)]
+pub struct PageShot {
+    pub path: String,
+    pub png: Vec<u8>,
+    pub errors: u32,
+    /// What its session found besides the picture.
+    pub report: crate::PageReport,
+}
+
 /// roll code, as previews read it and report to it.
 #[async_trait]
 pub trait Source: Send + Sync {
@@ -154,6 +213,19 @@ pub trait Source: Send + Sync {
     async fn paths_between(&self, _repo: &str, _from: &str, _to: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(None)
     }
+    /// Where `head` of `repo` left the default branch (`None`: not known).
+    async fn merge_base(&self, _repo: &str, _head: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+    /// `repo`'s default branch (`None`: not known).
+    async fn default_branch(&self, _repo: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+    /// The feedback left on the change's preview pages (its feedback reviews, not dismissed),
+    /// oldest first.
+    async fn feedback(&self, _change: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
+        Ok(Vec::new())
+    }
     /// The git commit of a changeset.
     async fn git_commit(&self, _repo: &str, _revision: &str) -> anyhow::Result<Option<String>> {
         Ok(None)
@@ -161,8 +233,8 @@ pub trait Source: Send + Sync {
     /// Tell the change (and its pull request) where its preview is. Called after every state
     /// change; must be cheap to repeat.
     async fn report(&self, preview: &Preview, settings: &crate::Settings);
-    /// The preview is gone.
-    async fn forget(&self, preview: &Preview);
+    /// The preview is gone; `teardown`: what the project's teardown said when it failed.
+    async fn forget(&self, preview: &Preview, teardown: Option<&str>);
     /// The project's previews passed `alert.percent` of their monthly budget: tell the people
     /// who follow its repos (roll code: each repo's `budget` event). `Err` when it couldn't be
     /// queued: the engine tries again on its next pass.
@@ -202,6 +274,9 @@ pub struct Target {
     /// With `access_token`: the project's bypass secret's SHA-256 (hex), which opens it for
     /// automation too (`x-roll-preview-bypass`).
     pub bypass_sha256: Option<String>,
+    /// The feedback button on its pages (the project's `feedback`, a change's preview, link
+    /// access): a backend that serves the pages itself (roll apps) adds it as the runtime does.
+    pub feedback: bool,
 }
 
 /// A deploy the backend accepted that hasn't finished (a build, a rollout): the converge leaves
@@ -290,13 +365,23 @@ pub trait Apps: Send + Sync {
         anyhow::bail!("this server can't run seed commands")
     }
     /// A PNG of the service's page as it first shows (`None`: this backend can't take one).
+    /// The memory the service's live deployment runs with in this preview (a backend's preview
+    /// settings and the environment's own over the service's). `None`: not known, the catalog's.
+    async fn memory_mb(&self, _preview: &str, _service: &str) -> Option<u32> {
+        None
+    }
     /// Ask the service for `path` (starting it if it sleeps): its status and the first line of
     /// what it said. `None`: this backend can't tell (a health check is then skipped).
     async fn probe(&self, _preview: &str, _service: &str, _path: &str) -> anyhow::Result<Option<(u16, String)>> {
         Ok(None)
     }
-    async fn screenshot(&self, _preview: &str, _service: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn screenshot(&self, _preview: &str, _service: &str, _opts: &ShotOptions) -> anyhow::Result<Option<Shot>> {
         Ok(None)
+    }
+    /// Whether services run by the project's app platform (a `catalog`) can be screenshotted too,
+    /// so a project there gets a baseline.
+    fn screenshots_apps(&self) -> bool {
+        false
     }
     /// What it's doing on this node (`None`: never started here).
     fn status(&self, preview: &str, service: &str) -> Option<ServiceState>;

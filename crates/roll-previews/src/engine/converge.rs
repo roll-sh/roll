@@ -14,9 +14,11 @@ impl Engine {
         }
         let deleting = r.desired == Desired::Deleted;
         let result = if deleting { self.teardown(&r).await } else { self.converge(&r).await };
+        Counters::add(&self.counters.converges);
         match result {
             Ok(()) => {}
             Err(e) => {
+                Counters::add(&self.counters.converge_failures);
                 let msg = format!("{e:#}");
                 warn!(preview = %id, error = %msg, "previews: converging");
                 let now = self.store.now_ms().unwrap_or_default();
@@ -41,6 +43,27 @@ impl Engine {
 
     pub(super) fn brancher(&self, kind: Kind) -> anyhow::Result<&Arc<dyn Brancher>> {
         self.branchers.get(&kind).ok_or_else(|| anyhow::anyhow!("roll {} isn't on this node, so it can't be branched", kind.as_str()))
+    }
+
+    /// Refuses masks `new` adds or changes over `old` that a product says can't work (a NoSQL
+    /// key column). A product that can't be asked (not on this node, unreachable) doesn't hold
+    /// the settings up: its own read policy still applies.
+    pub(crate) async fn check_masks(&self, old: &Settings, new: &Settings) -> crate::Result<()> {
+        let mut problems = Vec::new();
+        for (key, columns) in &new.masking {
+            let Some(parent) = key.strip_prefix("nosql:") else { continue };
+            let added: std::collections::BTreeMap<String, String> =
+                columns.iter().filter(|(c, f)| old.masking.get(key).and_then(|o| o.get(*c)) != Some(f)).map(|(c, f)| (c.clone(), f.clone())).collect();
+            if added.is_empty() {
+                continue;
+            }
+            let Ok(b) = self.brancher(Kind::Nosql) else { continue };
+            match b.mask_problems(parent, &added).await {
+                Ok(p) => problems.extend(p.into_iter().map(|p| format!("masking: {key}: {p}"))),
+                Err(e) => tracing::warn!(error = %e, "checking NoSQL masks against {parent}'s schema"),
+            }
+        }
+        if problems.is_empty() { Ok(()) } else { Err(crate::Error::BadRequest(problems.join("; "))) }
     }
 
     /// Bring one active preview to its desired state.
@@ -80,6 +103,10 @@ impl Engine {
         if r.state == State::AwaitingApproval {
             self.store.update(&r.id, |row| row.state = State::Creating)?;
             self.store.log(&r.id, "approved: starting")?;
+        }
+        // A head that may run: where the project's `teardown` runs when the preview goes.
+        if self.store.ran_head(&r.id)?.as_deref() != Some(r.build()) {
+            self.store.set_ran_head(&r.id, Some(r.build()))?;
         }
         let project = self.workspace.get(roll_workspace::Scope::All, &r.project_id)?;
         let name = branch_name(&r.id);
@@ -160,7 +187,19 @@ impl Engine {
             };
             match &res.r#ref {
                 None => {
-                    let made = b.branch(&res.parent, &name, res.mode).await.map_err(|e| anyhow::anyhow!("branching {key}: {e:#}"))?;
+                    // As of `data_at` where the product keeps history (structure-only needs none).
+                    let at = s.data_at.as_deref().filter(|_| res.mode == Mode::Branch).and_then(|a| crate::settings::data_at_secs(a, self.store.now_ms().unwrap_or(0) / 1000));
+                    let past = match at {
+                        Some(at) => b.branch_at(&res.parent, &name, res.mode, at).await.map_err(|e| anyhow::anyhow!("branching {key} as of {at}: {e:#}"))?,
+                        None => None,
+                    };
+                    if at.is_some() && past.is_none() {
+                        self.store.log(&r.id, &format!("{key} keeps no history: branched as of now, not data_at"))?;
+                    }
+                    let made = match past {
+                        Some(m) => m,
+                        None => b.branch(&res.parent, &name, res.mode).await.map_err(|e| anyhow::anyhow!("branching {key}: {e:#}"))?,
+                    };
                     // Recorded at once (a crash mustn't lose it), Ready only once it's masked.
                     self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
                         x.r#ref = Some(made.r#ref.clone());
@@ -175,7 +214,15 @@ impl Engine {
                 }
                 Some(branch) if reset_due || asked.iter().any(|a| a == "*" || *a == key) => {
                     self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Resetting)?;
-                    let fresh = b.reset(&res.parent, branch, res.kept.as_deref(), &name, res.mode).await.map_err(|e| anyhow::anyhow!("resetting {key}: {e:#}"))?;
+                    let at = s.data_at.as_deref().filter(|_| res.mode == Mode::Branch).and_then(|a| crate::settings::data_at_secs(a, self.store.now_ms().unwrap_or(0) / 1000));
+                    let past = match at {
+                        Some(at) => b.reset_at(&res.parent, branch, res.kept.as_deref(), &name, res.mode, at).await.map_err(|e| anyhow::anyhow!("resetting {key} as of {at}: {e:#}"))?,
+                        None => None,
+                    };
+                    let fresh = match past {
+                        Some(f) => f,
+                        None => b.reset(&res.parent, branch, res.kept.as_deref(), &name, res.mode).await.map_err(|e| anyhow::anyhow!("resetting {key}: {e:#}"))?,
+                    };
                     self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
                         x.r#ref = Some(fresh.r#ref.clone());
                         x.kept = fresh.kept.clone();
@@ -260,19 +307,12 @@ impl Engine {
             }
             anyhow::bail!("this preview may not inherit the production environment {:?}", s.secrets.base);
         }
-        let urls = self.resource_env(&r.id).await?;
+        let vars = self.preview_vars(r, &s).await?;
         let branches = self.branch_vars(&r.id).await?;
         let (access_token, bypass) = match self.store.access(&r.id)? {
             Some(crate::store::Access { token: t, required: true, bypass }) if !t.is_empty() => (Some(t), bypass),
             _ => (None, None),
         };
-        let mut vars: Vec<(String, String)> = s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        for (k, v) in self.store.vars(&r.id)? {
-            set(&mut vars, &k, v);
-        }
-        for (k, v) in urls {
-            set(&mut vars, &k, v);
-        }
         // Every converge (at least every few minutes, for usage) pushes its expiry out: only a
         // preview nobody converges any more lets it lapse.
         let trusted = s.secrets.allow_production && r.trusted;
@@ -291,9 +331,11 @@ impl Engine {
         if let Some(release) = &s.release
             && self.store.released(&r.id)?.as_deref() != Some(r.build())
         {
+            let started = std::time::Instant::now();
             self.run_job(r, &s, &vars, "release", release).await?;
-            self.store.set_released(&r.id, r.build())?;
-            self.store.log(&r.id, "released")?;
+            let ms = started.elapsed().as_millis() as i64;
+            self.store.set_released(&r.id, r.build(), ms)?;
+            self.store.log(&r.id, &format!("released in {:.1} s", ms as f64 / 1000.0))?;
         }
         // 3d. What that did to the schema, once per head (best effort: a reviewer's aid). Only
         // after a seed or release could have changed it: reading the parent's starts its compute.
@@ -344,13 +386,18 @@ impl Engine {
             if let Some(path) = &spec.health {
                 checks.push((spec.name.clone(), rev.clone(), path.clone()));
             }
-            let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, spec.memory_mb, &|h| self.cfg.url(h))?;
+            // What it costs is what it runs with: a backend's preview size when it has one.
+            let memory_mb = if on_apps { self.apps.memory_mb(&r.id, &spec.name).await.unwrap_or(spec.memory_mb) } else { spec.memory_mb };
+            let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, memory_mb, &|h| self.cfg.url(h))?;
             // A redeploy when the revision moved, or what it's deployed with did (its variables:
-            // a reset's new URLs, changed overrides; its access): the runtime restarts it on its
-            // next request, roll apps redeploys it.
-            // The bypass only matters to a backend that checks access itself (roll apps): the
-            // runtime's gate reads it on each request, so a rotation restarts nothing there.
-            let fingerprint = config_fingerprint(&vars, access_token.is_some(), bypass.as_deref().filter(|_| on_apps), trusted);
+            // a reset's new URLs, changed overrides; on roll apps its access): the runtime
+            // restarts it on its next request, roll apps redeploys it.
+            // Access and the bypass only matter to a backend that checks access itself (roll
+            // apps): the runtime's gate reads them on each request, so turning a project public or
+            // private, or a rotation, restarts nothing there (nor cuts a screenshot short).
+            // The feedback button: the runtime's proxy adds it per request; roll apps at deploy.
+            let feedback = s.feedback && r.change_id.is_some() && access_token.is_some();
+            let fingerprint = config_fingerprint(&vars, access_token.is_some() && on_apps, bypass.as_deref().filter(|_| on_apps), trusted, feedback && on_apps);
             let config_moved = self.store.service_config(&r.id, &spec.name)?.as_deref() != Some(fingerprint.as_str());
             // The head it ran stays reachable at a URL of its own (Vercel's per-push URLs): the
             // change's own services on the runtime, a trusted change's.
@@ -382,6 +429,7 @@ impl Engine {
                     branches: branches.clone(),
                     access_token: access_token.clone(),
                     bypass_sha256: bypass.clone(),
+                    feedback,
                 };
                 self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
                 match self.apps.deploy(&t).await {
@@ -504,10 +552,62 @@ impl Engine {
     /// backend that can't, a failure) is remembered for the head, and the last one taken stays.
     pub(super) async fn take_screenshot(&self, r: &Row) -> bool {
         let Ok(Some(first)) = self.store.services(&r.id).map(|v| v.into_iter().next()) else { return false };
-        match self.apps.screenshot(&r.id, &first.name).await {
-            Ok(Some(png)) => {
-                let kept = self.store.set_screenshot(&r.id, r.build(), &png).is_ok();
+        let (entries, hide, widths, openapi) = self.store.settings(&r.project_id).map(|s| (s.github.pages, s.github.hide, s.github.widths, s.github.openapi)).unwrap_or_default();
+        // The first page at the project's other widths: entries of their own (`@768`).
+        let width_keys: Vec<String> = widths.iter().map(|w| format!("@{w}")).collect();
+        // The first service's own pages go in its run; another service's in a run of its own.
+        let mine = |svc: Option<&str>| svc.is_none_or(|s| s == first.name);
+        let mut first_paths: Vec<String> = width_keys.clone();
+        first_paths.extend(entries.iter().filter_map(|e| crate::settings::page_entry(e)).filter(|(s, p)| mine(*s) && *p != "/").map(|(_, p)| p.to_string()));
+        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi };
+        match self.apps.screenshot(&r.id, &first.name, &opts).await {
+            Ok(Some(shot)) => {
+                // Kept under the entry that asked for each (`/pricing`, or `web:/pricing`).
+                let mut pages: Vec<crate::ports::PageShot> = shot
+                    .pages
+                    .iter()
+                    .filter_map(|p| {
+                        if width_keys.contains(&p.path) {
+                            return Some(p.clone());
+                        }
+                        let entry = entries.iter().find(|e| crate::settings::page_entry(e).is_some_and(|(s, path)| mine(s) && path == p.path))?;
+                        Some(crate::ports::PageShot { path: entry.clone(), ..p.clone() })
+                    })
+                    .collect();
+                // `<first>:/` is the screenshot itself (which service is first isn't the person's to know).
+                if let Some(e) = entries.iter().find(|e| crate::settings::page_entry(e) == Some((Some(first.name.as_str()), "/"))) {
+                    let errors = shot.health.as_ref().map_or(0, |h| h.errors + h.failed);
+                    let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable) };
+                    pages.push(crate::ports::PageShot { path: e.clone(), png: shot.png.clone(), errors, report });
+                }
+                pages.extend(self.other_services_pages(r, &first.name, &entries, &hide).await);
+                // Keeping it compares PNGs (with the push before, every page): CPU work, off the
+                // runtime's workers.
+                let wanted: Vec<String> = entries.iter().cloned().chain(width_keys.iter().cloned()).collect();
+                let (store, id, head) = (self.store.clone(), r.id.clone(), r.build().to_string());
+                let kept = tokio::task::spawn_blocking(move || {
+                    store.set_screenshot(&id, &head, &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok()
+                        && store.set_page_report(&id, shot.health.as_ref(), shot.a11y.as_ref(), shot.text.as_deref(), shot.links.as_ref(), shot.api.as_deref()).is_ok()
+                        && store.set_page_shots(&id, &head, &pages, &wanted).is_ok()
+                })
+                .await
+                .unwrap_or(false);
+                if kept && r.change_id.is_some() {
+                    self.compare_with_default_branch(r).await;
+                    let threshold = self.store.settings(&r.project_id).map_or(0.0, |s| s.github.visual_threshold);
+                    if self.store.carry_acceptance(&r.id, threshold).unwrap_or(false) {
+                        let _ = self.store.log(&r.id, "its pages look exactly as when they were accepted: the acceptance carries over");
+                    }
+                } else if kept {
+                    // A branch's preview may be a baseline: its screenshots are kept by head.
+                    if let Err(e) = self.store.keep_base_history(&r.id, r.build()) {
+                        warn!(preview = %r.id, error = %e, "previews: keeping the screenshot's history");
+                    }
+                    self.compare_waiting(r).await;
+                }
                 if kept {
+                    Counters::add(&self.counters.screenshots);
+                    self.shots_failed.lock().retain(|(p, _)| *p != r.id);
                     let _ = self.store.log(&r.id, &format!("took a screenshot of {}", first.name));
                 }
                 kept
@@ -517,9 +617,87 @@ impl Engine {
                 false
             }
             Err(e) => {
-                let _ = self.store.log(&r.id, &format!("couldn't take a screenshot of {}: {e:#}", first.name));
-                let _ = self.store.set_screenshot_tried(&r.id, r.build());
+                Counters::add(&self.counters.screenshot_failures);
+                let first_try = self.shots_failed.lock().insert((r.id.clone(), r.build().to_string()));
+                let again = if first_try { " (trying again)" } else { "" };
+                let _ = self.store.log(&r.id, &format!("couldn't take a screenshot of {}{again}: {e:#}", first.name));
+                if first_try {
+                    self.shots_wanted.lock().insert(r.id.clone());
+                } else {
+                    let _ = self.store.set_screenshot_tried(&r.id, r.build());
+                }
                 false
+            }
+        }
+    }
+
+    /// The pages `github.pages` names on the preview's other services (`admin:/`, `admin:/users`),
+    /// a screenshot run per service in that service's own network. Best effort: a service that
+    /// can't be taken is logged and its pages wait for the next head.
+    async fn other_services_pages(&self, r: &Row, first: &str, entries: &[String], hide: &[String]) -> Vec<crate::ports::PageShot> {
+        let mut by_service: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (svc, path) in entries.iter().filter_map(|e| crate::settings::page_entry(e)) {
+            if let Some(svc) = svc.filter(|s| *s != first) {
+                by_service.entry(svc).or_default().push(path);
+            }
+        }
+        let services = self.store.services(&r.id).unwrap_or_default();
+        let mut out = Vec::new();
+        for (svc, paths) in by_service {
+            if !services.iter().any(|s| s.name == svc) {
+                continue;
+            }
+            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), openapi: None };
+            match self.apps.screenshot(&r.id, svc, &opts).await {
+                Ok(Some(shot)) => {
+                    if paths.contains(&"/") {
+                        let errors = shot.health.as_ref().map_or(0, |h| h.errors + h.failed);
+                        let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable) };
+                        out.push(crate::ports::PageShot { path: format!("{svc}:/"), png: shot.png.clone(), errors, report });
+                    }
+                    out.extend(shot.pages.into_iter().map(|p| crate::ports::PageShot { path: format!("{svc}:{}", p.path), ..p }));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = self.store.log(&r.id, &format!("couldn't take {svc}'s pages: {e:#}"));
+                }
+            }
+        }
+        out
+    }
+
+    /// A change's screenshot against the project's preview of its repo's default branch, when it
+    /// has one with a screenshot (best effort).
+    async fn compare_with_default_branch(&self, r: &Row) {
+        let Ok(Some(default)) = self.source.default_branch(&r.repo).await else { return };
+        let Ok(rows) = self.store.rows(Some(&r.project_id)) else { return };
+        let rows: Vec<Row> = rows.into_iter().filter(|x| x.change_id.is_none() && x.desired == Desired::Active).collect();
+        // The repo's own default branch, else the project's baseline (of another of its repos).
+        let own = rows.iter().find(|x| x.repo == r.repo && x.branch.as_deref() == Some(default.as_str()));
+        let Some(base) = own.or_else(|| rows.iter().find(|x| x.is_baseline())) else { return };
+        let Some(branch) = base.branch.as_deref() else { return };
+        // Where the change left the branch (Chromatic's ancestor build), when roll code knows.
+        let at = self.source.merge_base(&r.repo, r.build()).await.ok().flatten();
+        // Decoding and comparing PNGs: off the runtime's workers.
+        let (store, id, base_id, branch) = (self.store.clone(), r.id.clone(), base.id.clone(), branch.to_string());
+        match tokio::task::spawn_blocking(move || store.compare_with_base(&id, &base_id, &branch, at.as_deref())).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!(preview = %r.id, error = %e, "previews: comparing with the default branch's"),
+            Err(e) => warn!(preview = %r.id, error = %e, "previews: comparing with the default branch's"),
+        }
+    }
+
+    /// After branch preview `b`'s screenshot: the project's changes not compared with the default
+    /// branch yet (their screenshots came first, as a new baseline's does) are now, and say so.
+    async fn compare_waiting(&self, b: &Row) {
+        let Ok(rows) = self.store.rows(Some(&b.project_id)) else { return };
+        for r in rows.into_iter().filter(|x| x.change_id.is_some() && x.desired == Desired::Active) {
+            if !matches!(self.store.base_change(&r.id), Ok(None)) {
+                continue;
+            }
+            self.compare_with_default_branch(&r).await;
+            if matches!(self.store.base_change(&r.id), Ok(Some(_))) {
+                self.report(r).await;
             }
         }
     }
@@ -527,6 +705,24 @@ impl Engine {
     /// Run the project's seed or release to its end on the preview's tree: its secrets
     /// environment (as services get it: untrusted unless the project allows production and the
     /// change is trusted), the branches and overrides on top.
+    /// What the preview's secrets environment and jobs get: the project's `env`, the preview's own
+    /// variables, the mail catcher's settings, and the branches' URLs over them all.
+    async fn preview_vars(&self, r: &Row, s: &Settings) -> anyhow::Result<Vec<(String, String)>> {
+        let urls = self.resource_env(&r.id).await?;
+        let mut vars: Vec<(String, String)> = project_env(s, r.branch.as_deref());
+        for (k, v) in self.store.vars(&r.id)? {
+            set(&mut vars, &k, v);
+        }
+        // A deploy elsewhere (roll apps) never emails real people either.
+        if s.mail == crate::settings::MailRule::Catch {
+            self.catch_mail_vars(&r.id, &mut vars)?;
+        }
+        for (k, v) in urls {
+            set(&mut vars, &k, v);
+        }
+        Ok(vars)
+    }
+
     async fn run_job(&self, r: &Row, s: &Settings, vars: &[(String, String)], what: &str, job: &crate::settings::Seed) -> anyhow::Result<()> {
         let untrusted = !(s.secrets.allow_production && r.trusted);
         let mut env = self.resolve_secrets(r, untrusted).await?;
@@ -545,20 +741,21 @@ impl Engine {
         Ok(())
     }
 
-    /// The Postgres branches' schema against their parents' (`schema::diff`), kept for `head`.
-    /// A failure is logged and read again on the next converge.
+    /// The Postgres branches' schema, and the search branches' mappings, against their parents'
+    /// (`schema::diff`), kept for `head`. A failure is logged and read again on the next converge.
     async fn read_schema(&self, r: &Row) {
         let read = async {
             let mut all: Option<Vec<String>> = None;
             let resources = self.store.resources(&r.id)?;
-            let several = resources.iter().filter(|x| x.kind == Kind::Postgres).count() > 1;
-            for res in resources.iter().filter(|x| x.kind == Kind::Postgres) {
+            let has_schema = |k: Kind| matches!(k, Kind::Postgres | Kind::Search);
+            let several = resources.iter().filter(|x| has_schema(x.kind)).count() > 1;
+            for res in resources.iter().filter(|x| has_schema(x.kind)) {
                 let Some(branch) = &res.r#ref else { continue };
                 let Some((parent, mine)) = self.brancher(res.kind)?.schema(&res.parent, branch).await? else { continue };
                 let lines = crate::schema::diff(&parent, &mine);
                 let out = all.get_or_insert_with(Vec::new);
                 if several && !lines.is_empty() {
-                    out.push(format!("# {}", res.parent));
+                    out.push(format!("# {}:{}", res.kind.as_str(), res.parent));
                 }
                 out.extend(lines);
             }
@@ -583,7 +780,8 @@ impl Engine {
         let kind = Kind::parse(kind)?;
         let digest = mask_digest_of(s.masking.get(key));
         if let Some(cols) = s.masking.get(key).filter(|c| !c.is_empty()) {
-            b.mask(parent, branch, cols).await.map_err(|e| anyhow::anyhow!("masking {key}: {e:#}"))?;
+            let kept = self.store.resources(id)?.into_iter().find(|x| x.kind == kind && x.parent == parent).and_then(|x| x.kept);
+            b.mask(parent, branch, kept.as_deref(), cols).await.map_err(|e| anyhow::anyhow!("masking {key}: {e:#}"))?;
             self.store.log(id, &format!("masked {} column(s) of {key}", cols.len()))?;
         }
         self.store.set_mask_digest(id, kind, parent, &digest)?;
@@ -649,6 +847,25 @@ impl Engine {
             let row = self.store.update(&r.id, |row| row.state = State::Deleting)?;
             self.report(row).await;
         }
+        // The project's teardown, once, at a head the preview ran, while what it made is still
+        // there. A failure is logged and the preview goes regardless (Heroku's `pr-predestroy`).
+        if let Some(head) = self.store.ran_head(&r.id)? {
+            let s = self.store.settings(&r.project_id)?;
+            if let Some(job) = &s.teardown {
+                let at = Row { runs: Some(head), ..r.clone() };
+                let ran = async {
+                    let vars = self.preview_vars(&at, &s).await?;
+                    self.run_job(&at, &s, &vars, "teardown", job).await
+                };
+                if let Err(e) = ran.await {
+                    let e = format!("{e:#}");
+                    warn!(preview = %r.id, error = %e, "previews: the teardown failed");
+                    self.store.log(&r.id, &e)?;
+                    self.store.set_teardown_error(&r.id, &e)?;
+                }
+            }
+            self.store.set_ran_head(&r.id, None)?;
+        }
         for p in self.store.pinned(&r.id)? {
             let name = format!("{}@{}", p.service, p.revision);
             self.apps.remove(&r.id, &name).await.map_err(|e| anyhow::anyhow!("removing {name}: {e:#}"))?;
@@ -664,7 +881,8 @@ impl Engine {
             self.store.drop_resource(&r.id, res.kind, &res.parent)?;
         }
         let view = self.store.preview(&r.id)?;
-        self.source.forget(&view).await;
+        // The change hears it went, and how its teardown failed if it did.
+        self.source.forget(&view, self.store.teardown_error(&r.id)?.as_deref()).await;
         // What it cost this month stays counted against the project's budget.
         self.store.add_spend(&r.project_id, crate::store::month_start(self.store.now_ms()?), view.cost.month_to_date_usd)?;
         self.store.remove(&r.id)?;

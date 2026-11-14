@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { parseSse, previewsApi } from "./previews-api";
+import { a11yWords, checkSummary, parseSse, previewsApi, unmaskedNote } from "./previews-api";
 import { ROLL_API } from "./roll-api";
 
 /** A fetch that answers from a table (`METHOD /path?query`) and records what it was asked. */
@@ -85,5 +85,39 @@ describe("following logs", () => {
     // A \r\n split between two chunks is one line end, not an event's end.
     const c = parseSse("", "event: service\r");
     expect(parseSse(c.rest, "\ndata: web\r\n\r\n").events).toEqual([{ event: "service", data: "web" }]);
+  });
+});
+
+describe("unmaskedNote", () => {
+  it("says when previews would get production data as it is, and the way out", () => {
+    expect(unmaskedNote("postgres", "branch", 0)).toMatch(/as it is: mask/);
+    expect(unmaskedNote("postgres", "branch", 2)).toBeNull();
+    expect(unmaskedNote("redis", "branch", 0)).toMatch(/can't be masked.*seed/);
+    expect(unmaskedNote("stream", "branch", 0)).toMatch(/Schema only/);
+    for (const [kind, mode] of [["stream", "schema"], ["bucket", "skip"], ["queue", "branch"], ["repo", "branch"]] as const) expect(unmaskedNote(kind, mode, 0)).toBeNull();
+  });
+});
+
+describe("a11yWords", () => {
+  it("says the session's own kinds and axe-core's rules in words", () => {
+    const words = a11yWords({
+      issues: [
+        { kind: "images", count: 2, first: null },
+        { kind: "color-contrast", count: 1, first: "<p>", impact: "serious", help: "Elements must meet minimum color contrast ratio thresholds" },
+        { kind: "region", count: 3, first: null },
+      ],
+      lang: false,
+      title: true,
+    });
+    expect(words).toEqual(["2 images without alt text", "1 element failing “Elements must meet minimum color contrast ratio thresholds” (serious)", "3 elements failing region", "no page language"]);
+  });
+});
+
+describe("checkSummary", () => {
+  it("counts the first page's problems and what's new against main", () => {
+    const page_a11y = { issues: [{ kind: "images", count: 2, first: null }], lang: true, title: false, seo: { description: false, viewport: true, h1: 1, noindex: false } };
+    const base_change = { branch: "main", percent: 0, phone_percent: null, errors_added: 1, links_added: 0, a11y_added: 1, seo_added: null };
+    expect(checkSummary({ page_health: { errors: 1, first_error: null, failed: 0, first_failed: null }, page_links: { checked: 3, broken: [{ path: "/x", status: 404 }] }, page_a11y, base_change })).toEqual({ problems: 5, added: 2 });
+    expect(checkSummary({ page_health: null, page_links: null, page_a11y: null, base_change: null })).toEqual({ problems: 0, added: null });
   });
 });

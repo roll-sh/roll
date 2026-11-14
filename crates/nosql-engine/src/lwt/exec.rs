@@ -215,8 +215,11 @@ async fn run(lwt: &Lwt, db: &Arc<Database>, req: ConditionalRequest<'_>) -> Resu
     let Some(key) = key else {
         return Err(Error::server("empty conditional request"));
     };
+    // A conditional write answers with what it read: the platform policy's keys and conditions.
+    crate::masking::check_platform_keys(db, &t)?;
     for m in &mut members {
         if let Conditions::List(cs) = &m.plan.conditions {
+            crate::masking::check_platform_conditions(db, &t, cs.iter().map(|c| c.column))?;
             for c in cs {
                 let b = eval::bind(c, &m.cx)?;
                 m.conds.push(b);

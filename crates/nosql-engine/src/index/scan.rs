@@ -566,8 +566,11 @@ impl Analyzed {
 
 impl IndexScan for Analyzed {
     fn adjust_filter(&self, filter: &mut crate::prepare::restrictions::RowFilter) -> Result<()> {
+        // The index finds rows by the real value: a platform-masked column's restriction stays
+        // in the filter, compared masked, so the lookup tells nothing about the real value.
+        let masked = filter.masks.as_ref().is_some_and(|(m, _)| m.platform.contains(&self.column));
         filter.preds.retain(|(t, _)| {
-            !matches!(t, crate::prepare::restrictions::Target::Column(c) if *c == self.column)
+            masked || !matches!(t, crate::prepare::restrictions::Target::Column(c) if *c == self.column)
         });
         Ok(())
     }

@@ -100,11 +100,22 @@ impl Engine {
                 info!(preview = %r.id, change = %c.id, "previews: new preview");
             }
         }
+        self.keep_baseline(&project, &repos, s).await?;
         // What changed for the previews this project has.
-        for r in self.store.rows(Some(project_id))? {
+        let rows = self.store.rows(Some(project_id))?;
+        let has_changes = rows.iter().any(|x| x.change_id.is_some() && x.desired == Desired::Active);
+        for r in rows {
             if r.desired == Desired::Deleted {
                 continue;
             }
+            // Only of a repo the project still stands for (`repos`): one taken off its canvas, or
+            // no longer trusted, has its previews go rather than keep its secrets and data.
+            if !repos.contains(&r.repo) {
+                self.mark_deleted(&r.id, "its repo is no longer in the project")?;
+                continue;
+            }
+            // A baseline lasts while there are changes to compare with it.
+            let held = r.is_baseline() && has_changes;
             let ttl_ms = s.ttl_hours as i64 * 3_600_000;
             if let Some(change) = &r.change_id {
                 // One made by hand (`roll preview create --change`) isn't the rules' to delete.
@@ -203,7 +214,7 @@ impl Engine {
             }
             let kept_until = self.store.kept_until(&r.id)?.filter(|t| *t > now);
             let kept = kept_until.is_some();
-            if !kept && (r.expires_at.is_some_and(|t| t <= now) || r.last_active_at + ttl_ms <= now) {
+            if !kept && !held && (r.expires_at.is_some_and(|t| t <= now) || r.last_active_at + ttl_ms <= now) {
                 // An open change gets a preview again on its next push, not before.
                 if let Some(change) = &r.change_id {
                     self.store.dismiss(change, &r.head)?;
@@ -213,7 +224,7 @@ impl Engine {
             }
             // Close to going: say when, once (the change, its pull request, the sheet); used or
             // kept again, take it back.
-            let goes = goes_soon(r.last_active_at, r.expires_at, kept_until, s.ttl_hours, now);
+            let goes = if held { None } else { goes_soon(r.last_active_at, r.expires_at, kept_until, s.ttl_hours, now) };
             if goes != self.store.goes_at(&r.id)? {
                 self.store.set_goes_at(&r.id, goes)?;
                 if let Some(at) = goes {
@@ -259,11 +270,12 @@ impl Engine {
         // Slots: the oldest queued previews start as others go.
         let rows = self.store.rows(Some(project_id))?;
         // A fork waiting for approval holds no slot: spam PRs can't block the project's previews.
-        let busy = rows.iter().filter(|r| r.desired == Desired::Active && !matches!(r.state, State::Queued | State::AwaitingApproval)).count();
+        // Nor does the baseline: it's there for the changes.
+        let busy = rows.iter().filter(|r| r.desired == Desired::Active && !r.is_baseline() && !matches!(r.state, State::Queued | State::AwaitingApproval)).count();
         let mut free = (s.max_previews as usize).saturating_sub(busy);
         // The month's budget: once spent, no new preview starts this month.
         let month = crate::store::month_start(self.store.now_ms()?);
-        let spent: f64 = self.store.spent(project_id, month)? + rows.iter().filter_map(|r| self.store.view(r.clone()).ok()).map(|p| p.cost.month_to_date_usd).sum::<f64>();
+        let spent: f64 = self.store.spent(project_id, month)? + rows.iter().filter_map(|r| self.store.cost(r).ok()).map(|c| c.month_to_date_usd).sum::<f64>();
         let over_budget = s.max_usd_month > 0.0 && spent >= s.max_usd_month;
         self.budget_alert(&project, &repos, s, spent, month).await;
         if over_budget {
@@ -272,10 +284,15 @@ impl Engine {
         let mut queued: Vec<&Row> = rows.iter().filter(|r| r.desired == Desired::Active && r.state == State::Queued).collect();
         queued.sort_by_key(|r| r.created_at);
         for r in queued {
-            if free == 0 {
-                break;
+            if r.is_baseline() {
+                if over_budget {
+                    continue;
+                }
+            } else if free == 0 {
+                continue;
+            } else {
+                free -= 1;
             }
-            free -= 1;
             self.store.update(&r.id, |row| {
                 row.state = State::Creating;
                 row.next_at = 0;
@@ -283,10 +300,12 @@ impl Engine {
         }
         // New previews beyond the limit wait.
         let rows = self.store.rows(Some(project_id))?;
-        let mut active: Vec<&Row> = rows.iter().filter(|r| r.desired == Desired::Active && !matches!(r.state, State::Queued | State::AwaitingApproval)).collect();
+        let (baselines, mut active): (Vec<&Row>, Vec<&Row>) =
+            rows.iter().filter(|r| r.desired == Desired::Active && !matches!(r.state, State::Queued | State::AwaitingApproval)).partition(|r| r.is_baseline());
         active.sort_by_key(|r| r.created_at);
         let limit = if over_budget { 0 } else { s.max_previews as usize };
-        for r in active.iter().skip(limit) {
+        let unstarted_baselines = baselines.into_iter().filter(|_| over_budget);
+        for r in active.iter().skip(limit).copied().chain(unstarted_baselines) {
             if r.state == State::Creating && self.store.resources(&r.id)?.iter().all(|x| x.r#ref.is_none()) {
                 self.store.update(&r.id, |row| row.state = State::Queued)?;
                 let why = if over_budget {
@@ -296,6 +315,58 @@ impl Engine {
                 };
                 self.store.log(&r.id, &why)?;
             }
+        }
+        Ok(())
+    }
+
+    /// The project's baseline (`github.baseline`): with screenshots on, a preview of a repo's
+    /// default branch, made once the project has a change preview to compare with it, and deleted
+    /// when the rule is off. One per project, of the first repo (of `repos`, the ones it stands
+    /// for) with a change preview: every preview runs all the project's services, so one default
+    /// branch stands for them all. A preview of that branch someone made serves too.
+    async fn keep_baseline(&self, project: &roll_workspace::Project, repos: &[String], s: &Settings) -> anyhow::Result<()> {
+        let rows: Vec<Row> = self.store.rows(Some(&project.id))?.into_iter().filter(|r| r.desired == Desired::Active).collect();
+        // roll apps' services can't be screenshotted yet: a baseline there would cost and never compare.
+        let on_apps = !self.apps.screenshots_apps() && matches!(self.apps.catalog(&project.id).await, Ok(Some(c)) if !c.is_empty());
+        let why = if !(s.github.screenshot && s.github.baseline) {
+            Some("the project's baseline rule is off")
+        } else if on_apps {
+            Some("its services run on roll apps, whose pages roll can't screenshot yet")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            for r in rows.iter().filter(|r| r.is_baseline()) {
+                self.mark_deleted(&r.id, why)?;
+            }
+            return Ok(());
+        }
+        let changed = |repo: &String| rows.iter().any(|r| r.change_id.is_some() && &r.repo == repo && r.state != State::AwaitingApproval);
+        let Some(repo) = repos.iter().find(|repo| changed(repo)) else { return Ok(()) };
+        let Some(default) = self.source.default_branch(repo).await? else { return Ok(()) };
+        if rows.iter().any(|r| r.is_baseline() || (r.change_id.is_none() && &r.repo == repo && r.branch.as_deref() == Some(default.as_str()))) {
+            return Ok(());
+        }
+        let Some(head) = self.source.head(repo, Some(&default)).await? else { return Ok(()) };
+        let (r, made) = self.store.create(&New {
+            project_id: project.id.clone(),
+            key: default.clone(),
+            project_name: project.name.clone(),
+            repo: repo.clone(),
+            change_id: None,
+            branch: Some(default.clone()),
+            number: None,
+            title: format!("{repo}@{default}"),
+            github_pr: None,
+            head,
+            trusted: true,
+            state: State::Creating,
+            expires_at: None,
+            created_by: crate::store::BASELINE_BY.into(),
+        })?;
+        if made {
+            info!(preview = %r.id, repo = %repo, "previews: the project's baseline");
+            self.store.log(&r.id, &format!("the project's baseline: its changes' screenshots are compared with {default}'s (github.baseline)"))?;
         }
         Ok(())
     }

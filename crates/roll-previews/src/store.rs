@@ -78,6 +78,15 @@ CREATE TABLE IF NOT EXISTS spend (
     usd REAL NOT NULL,
     PRIMARY KEY (project_id, month)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS shares (
+    id TEXT PRIMARY KEY,
+    preview_id TEXT NOT NULL,
+    hash TEXT NOT NULL UNIQUE,
+    expires_at INTEGER NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    revoked INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS pinned (
     preview_id TEXT NOT NULL,
     service TEXT NOT NULL,
@@ -110,6 +119,53 @@ CREATE TABLE IF NOT EXISTS screenshots (
     at INTEGER NOT NULL,
     tried TEXT
 );
+CREATE TABLE IF NOT EXISTS page_shots (
+    preview_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    head TEXT NOT NULL,
+    png TEXT NOT NULL,
+    prev_head TEXT,
+    prev_png TEXT,
+    change_bp INTEGER,
+    errors INTEGER NOT NULL DEFAULT 0,
+    base_bp INTEGER,
+    PRIMARY KEY (preview_id, path)
+);
+CREATE TABLE IF NOT EXISTS base_history (
+    preview_id TEXT NOT NULL,
+    head TEXT NOT NULL,
+    png TEXT NOT NULL,
+    phone_png TEXT,
+    pages TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, head)
+);
+CREATE TABLE IF NOT EXISTS visual_page_accepts (
+    preview_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    head TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, path)
+);
+CREATE TABLE IF NOT EXISTS resolved_notes (
+    preview_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, review_id)
+);
+CREATE TABLE IF NOT EXISTS mail (
+    id TEXT PRIMARY KEY,
+    preview_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    sender TEXT NOT NULL,
+    recipients TEXT NOT NULL,
+    subject TEXT,
+    size INTEGER NOT NULL,
+    raw TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS mail_by_preview ON mail (preview_id, at);
 CREATE TABLE IF NOT EXISTS budget_alerts (
     project_id TEXT NOT NULL,
     month INTEGER NOT NULL,
@@ -199,7 +255,59 @@ impl Row {
     pub fn build(&self) -> &str {
         self.runs.as_deref().unwrap_or(&self.head)
     }
+
+    /// The default branch's preview roll keeps to compare changes with (`github.baseline`).
+    pub fn is_baseline(&self) -> bool {
+        self.change_id.is_none() && self.created_by == BASELINE_BY
+    }
 }
+
+/// A preview's screenshot row without its PNGs ([`Store::shot_facts`]).
+#[derive(Default)]
+struct ShotFacts {
+    /// When it was taken (none: no screenshot).
+    at: Option<i64>,
+    head: Option<String>,
+    prev_head: Option<String>,
+    change_bp: Option<i64>,
+    phone_change_bp: Option<i64>,
+    has_phone: bool,
+    speed: Option<crate::PageSpeed>,
+    prev_speed: Option<crate::PageSpeed>,
+    health: Option<crate::PageHealth>,
+    a11y: Option<crate::PageA11y>,
+    links: Option<crate::PageLinks>,
+    base: Option<BaseRow>,
+}
+
+/// The most caught mail a preview keeps, in bytes (its messages as sent).
+pub const MAIL_BYTES: i64 = 10 << 20;
+
+/// How many of a baseline's heads keep their screenshots (to compare changes at their merge base).
+pub const BASE_HISTORY: usize = 10;
+
+/// A preview's screenshots, base64 as stored: desktop, phone, and its other pages by path.
+struct Shots {
+    head: String,
+    png: String,
+    phone: Option<String>,
+    pages: std::collections::BTreeMap<String, String>,
+    /// How the page loaded and what it missed, as stored (`PageSpeed`, `PageA11y` JSON).
+    speed: Option<String>,
+    a11y: Option<String>,
+    health: Option<String>,
+    /// The first page's visible text.
+    text: Option<String>,
+    /// Its broken links (`PageLinks` JSON).
+    links: Option<String>,
+    /// The first service's API operations, a line each.
+    api: Option<String>,
+    /// The other pages' reports by path (`PageReport` JSON).
+    page_reports: std::collections::BTreeMap<String, String>,
+}
+
+/// Who made a baseline (`created_by`).
+pub const BASELINE_BY: &str = "roll";
 
 /// What a new preview is made from.
 #[derive(Clone, Debug)]
@@ -368,11 +476,28 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
-        if !db.has_column("screenshots", "tried")? {
-            db.add_column("screenshots", "tried", "TEXT")?;
+        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT"), ("base_preview", "TEXT"), ("base_branch", "TEXT"), ("base_change_bp", "INTEGER"), ("base_phone_bp", "INTEGER"), ("base_head", "TEXT"), ("base_speed", "TEXT"), ("base_a11y", "TEXT"), ("base_health", "TEXT"), ("text", "TEXT"), ("base_text", "TEXT"), ("links", "TEXT"), ("base_links", "TEXT"), ("api", "TEXT"), ("base_api", "TEXT"), ("base_api_breaking", "TEXT")] {
+            if !db.has_column("screenshots", col)? {
+                db.add_column("screenshots", col, ty)?;
+            }
+        }
+        for col in ["speed", "a11y", "health"] {
+            if !db.has_column("base_history", col)? {
+                db.add_column("base_history", col, "TEXT")?;
+            }
         }
         if !db.has_column("resources", "mask_digest")? {
             db.add_column("resources", "mask_digest", "TEXT")?;
+        }
+        for col in ["text", "links", "page_reports", "api"] {
+            if !db.has_column("base_history", col)? {
+                db.add_column("base_history", col, "TEXT")?;
+            }
+        }
+        for col in ["report", "against"] {
+            if !db.has_column("page_shots", col)? {
+                db.add_column("page_shots", col, "TEXT")?;
+            }
         }
         if !db.has_column("previews", "vars")? {
             db.add_column("previews", "vars", "TEXT")?;
@@ -382,7 +507,12 @@ impl Store {
                 db.add_column("previews", col, "INTEGER")?;
             }
         }
-        for col in ["released", "schema_head", "schema_changes", "runs"] {
+        for col in ["release_ms", "prev_release_ms"] {
+            if !db.has_column("previews", col)? {
+                db.add_column("previews", col, "INTEGER")?;
+            }
+        }
+        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head", "teardown_error"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "TEXT")?;
             }
@@ -624,7 +754,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "activity", "screenshots", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -905,9 +1035,36 @@ impl Store {
         Ok(self.db.read(|c| c.query_row("SELECT released FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
     }
 
-    pub fn set_released(&self, id: &str, head: &str) -> Result<()> {
+    /// The release ran at `head` in `ms`; the run before's time is kept to compare.
+    pub fn set_released(&self, id: &str, head: &str, ms: i64) -> Result<()> {
         self.db.write(|c| {
-            c.execute("UPDATE previews SET released = ? WHERE id = ?", [head, id])?;
+            c.execute("UPDATE previews SET released = ?, prev_release_ms = release_ms, release_ms = ? WHERE id = ?", params![head, ms, id])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The last head a converge ran (its gate passed: trusted, or approved), where the project's
+    /// `teardown` runs; `None` once it has, or when nothing of the preview ever ran.
+    pub fn ran_head(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT ran_head FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    pub fn set_ran_head(&self, id: &str, head: Option<&str>) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE previews SET ran_head = ? WHERE id = ?", params![head, id])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// What the preview's `teardown` said when it failed, kept until the change is told it went.
+    pub fn teardown_error(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT teardown_error FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    pub fn set_teardown_error(&self, id: &str, error: &str) -> Result<()> {
+        let error: String = error.chars().take(4000).collect();
+        self.db.write(|c| {
+            c.execute("UPDATE previews SET teardown_error = ? WHERE id = ?", params![error, id])?;
             Ok::<_, Error>(())
         })
     }
@@ -930,17 +1087,463 @@ impl Store {
         Ok(self.db.read(|c| c.query_row("SELECT tried FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional())?.flatten())
     }
 
-    pub fn set_screenshot(&self, id: &str, head: &str, png: &[u8]) -> Result<()> {
+    pub fn set_screenshot(&self, id: &str, head: &str, png: &[u8], speed: Option<&crate::PageSpeed>, phone: Option<&[u8]>) -> Result<()> {
         use base64::Engine as _;
-        let (b64, now) = (base64::engine::general_purpose::STANDARD.encode(png), self.now_ms()?);
+        let b64e = base64::engine::general_purpose::STANDARD;
+        let (b64, now) = (b64e.encode(png), self.now_ms()?);
+        let phone_b64 = phone.map(|p| b64e.encode(p));
+        let speed = speed.and_then(|s| serde_json::to_string(s).ok());
+        // The one it replaces, at another head, is kept as "before", with how much changed (at
+        // both widths).
+        type Before = (String, String, Option<String>, Option<String>);
+        let before: Option<Before> = self
+            .db
+            .read(|c| c.query_row("SELECT head, png, speed, phone_png FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional())?;
+        let before = before.filter(|(h, p, _, _)| h != head && !p.is_empty());
+        let changed = |old: Option<&String>, new: Option<&[u8]>| -> Option<i64> {
+            let old = b64e.decode(old?).ok()?;
+            crate::visual::changed(&old, new?).map(|f| (f * 10_000.0).round() as i64)
+        };
+        let change_bp = before.as_ref().and_then(|(_, p, _, _)| changed(Some(p), Some(png)));
+        let phone_change_bp = before.as_ref().and_then(|(_, _, _, pp)| changed(pp.as_ref(), phone));
         self.db.write(|c| {
-            c.execute(
-                "INSERT INTO screenshots (preview_id, head, png, at, tried) VALUES (?, ?, ?, ?, ?) \
-                 ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried",
-                params![id, head, b64, now, head],
-            )?;
+            match &before {
+                Some((prev_head, prev_png, prev_speed, prev_phone)) => c.execute(
+                    "INSERT INTO screenshots (preview_id, head, png, at, tried, prev_head, prev_png, change_bp, speed, prev_speed, phone_png, prev_phone_png, phone_change_bp) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                     ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried, \
+                     prev_head = excluded.prev_head, prev_png = excluded.prev_png, change_bp = excluded.change_bp, speed = excluded.speed, prev_speed = excluded.prev_speed, \
+                     phone_png = excluded.phone_png, prev_phone_png = excluded.prev_phone_png, phone_change_bp = excluded.phone_change_bp",
+                    params![id, head, b64, now, head, prev_head, prev_png, change_bp, speed, prev_speed, phone_b64, prev_phone, phone_change_bp],
+                )?,
+                // A first one, or the same head again: what came before stays.
+                None => c.execute(
+                    "INSERT INTO screenshots (preview_id, head, png, at, tried, speed, phone_png) VALUES (?, ?, ?, ?, ?, ?, ?) \
+                     ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried, speed = excluded.speed, \
+                     phone_png = excluded.phone_png",
+                    params![id, head, b64, now, head, speed, phone_b64],
+                )?,
+            };
             Ok::<_, Error>(())
         })
+    }
+
+    /// What went wrong while the latest screenshot's page loaded (after `set_screenshot`).
+    pub fn set_page_report(&self, id: &str, health: Option<&crate::PageHealth>, a11y: Option<&crate::PageA11y>, text: Option<&str>, links: Option<&crate::PageLinks>, api: Option<&[String]>) -> Result<()> {
+        let health = health.and_then(|h| serde_json::to_string(h).ok());
+        let a11y = a11y.and_then(|a| serde_json::to_string(a).ok());
+        let links = links.and_then(|l| serde_json::to_string(l).ok());
+        let api = api.map(|ops| ops.join("\n"));
+        self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE screenshots SET health = ?, a11y = ?, text = ?, links = ?, api = ? WHERE preview_id = ?", params![health, a11y, text, links, api, id])?))?;
+        Ok(())
+    }
+
+    pub fn page_a11y(&self, id: &str) -> Result<Option<crate::PageA11y>> {
+        let row: Option<Option<String>> = self.db.read(|c| c.query_row("SELECT a11y FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional())?;
+        Ok(row.flatten().and_then(|s| serde_json::from_str(&s).ok()))
+    }
+
+    pub fn page_health(&self, id: &str) -> Result<Option<crate::PageHealth>> {
+        let row: Option<Option<String>> = self.db.read(|c| c.query_row("SELECT health FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional())?;
+        Ok(row.flatten().and_then(|s| serde_json::from_str(&s).ok()))
+    }
+
+    /// How fast the page loaded at the latest screenshot, and at the one before.
+    pub fn page_speed(&self, id: &str) -> Result<Option<crate::PageSpeedView>> {
+        let row: Option<(Option<String>, Option<String>)> = self.db.read(|c| c.query_row("SELECT speed, prev_speed FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+        let Some((now, before)) = row else { return Ok(None) };
+        let parse = |s: Option<String>| s.and_then(|s| serde_json::from_str::<crate::PageSpeed>(&s).ok());
+        Ok(parse(now).map(|now| crate::PageSpeedView { now, before: parse(before) }))
+    }
+
+    /// How much the page changed since the screenshot before (its head, in basis points).
+    pub fn visual_change(&self, id: &str) -> Result<Option<(String, i64)>> {
+        let row: Option<(Option<String>, Option<i64>)> = self.db.read(|c| c.query_row("SELECT prev_head, change_bp FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+        Ok(row.and_then(|(h, bp)| Some((h?, bp?))))
+    }
+
+    /// Keep baseline `id`'s latest screenshots (desktop, phone, other pages) as its history at
+    /// `head`, so changes that left the default branch there are compared with them; the last
+    /// [`BASE_HISTORY`] heads stay.
+    pub fn keep_base_history(&self, id: &str, head: &str) -> Result<()> {
+        let Some(shots) = self.latest_shots(id)? else { return Ok(()) };
+        let pages = serde_json::to_string(&shots.pages).map_err(|e| Error::Internal(e.to_string()))?;
+        let page_reports = serde_json::to_string(&shots.page_reports).map_err(|e| Error::Internal(e.to_string()))?;
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO base_history (preview_id, head, png, phone_png, pages, at, speed, a11y, health, text, links, page_reports, api) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (preview_id, head) DO UPDATE SET png = excluded.png, phone_png = excluded.phone_png, pages = excluded.pages, at = excluded.at, speed = excluded.speed, \
+                 a11y = excluded.a11y, health = excluded.health, text = excluded.text, links = excluded.links, page_reports = excluded.page_reports, api = excluded.api",
+                params![id, head, shots.png, shots.phone, pages, now, shots.speed, shots.a11y, shots.health, shots.text, shots.links, page_reports, shots.api],
+            )?;
+            let old: Vec<String> = c.query(&format!("SELECT head FROM base_history WHERE preview_id = ? ORDER BY at DESC LIMIT -1 OFFSET {BASE_HISTORY}"), [id], |r| r.get(0))?;
+            for h in &old {
+                c.execute("DELETE FROM base_history WHERE preview_id = ? AND head = ?", [id, h.as_str()])?;
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// A preview's latest screenshots, base64: desktop, phone, and its other pages by path.
+    fn latest_shots(&self, id: &str) -> Result<Option<Shots>> {
+        type Raw = (String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
+        let row: Option<Raw> = self.db.read(|c| {
+            c.query_row("SELECT head, png, phone_png, speed, a11y, health, text, links, api FROM screenshots WHERE preview_id = ?", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
+            })
+            .optional()
+        })?;
+        let Some((head, png, phone, speed, a11y, health, text, links, api)) = row else { return Ok(None) };
+        let pages: Vec<(String, String, Option<String>)> = self.db.read(|c| c.query("SELECT path, png, report FROM page_shots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
+        let page_reports = pages.iter().filter_map(|(p, _, r)| Some((p.clone(), r.clone()?))).collect();
+        Ok(Some(Shots { head, png, phone, pages: pages.into_iter().map(|(p, png, _)| (p, png)).collect(), speed, a11y, health, text, links, api, page_reports }))
+    }
+
+    /// Baseline `id`'s screenshots at `head`, from its history.
+    fn shots_at(&self, id: &str, head: &str) -> Result<Option<Shots>> {
+        type Raw = (String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
+        let row: Option<Raw> = self.db.read(|c| {
+            c.query_row("SELECT png, phone_png, pages, speed, a11y, health, text, links, page_reports, api FROM base_history WHERE preview_id = ? AND head = ?", [id, head], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?))
+            })
+            .optional()
+        })?;
+        Ok(row.map(|(png, phone, pages, speed, a11y, health, text, links, page_reports, api)| Shots {
+            head: head.to_string(),
+            png,
+            phone,
+            pages: serde_json::from_str(&pages).unwrap_or_default(),
+            speed,
+            a11y,
+            health,
+            text,
+            links,
+            api,
+            page_reports: page_reports.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default(),
+        }))
+    }
+
+    /// Compare preview `id`'s latest screenshots (desktop, phone, other pages) with preview
+    /// `base`'s, the project's preview of `branch` (the default branch: Chromatic's baseline), and
+    /// keep how much differs. With `at` (where the change left the branch) and the baseline's
+    /// screenshots there still kept, with those (Chromatic's ancestor build): main's own changes
+    /// since aren't the change's. Nothing kept when either has none.
+    pub fn compare_with_base(&self, id: &str, base: &str, branch: &str, at: Option<&str>) -> Result<()> {
+        use base64::Engine as _;
+        let b64e = base64::engine::general_purpose::STANDARD;
+        let theirs = match at {
+            Some(h) => match self.shots_at(base, h)? {
+                Some(s) => Some(s),
+                None => self.latest_shots(base)?,
+            },
+            None => self.latest_shots(base)?,
+        };
+        let (Some(ours), Some(theirs)) = (self.latest_shots(id)?, theirs) else { return Ok(()) };
+        let bp = |a: Option<&String>, b: Option<&String>| -> Option<i64> {
+            let (a, b) = (b64e.decode(a?).ok()?, b64e.decode(b?).ok()?);
+            crate::visual::changed(&b, &a).map(|f| (f * 10_000.0).round() as i64)
+        };
+        let (change, phone) = (bp(Some(&ours.png), Some(&theirs.png)), bp(ours.phone.as_ref(), theirs.phone.as_ref()));
+        // The other pages, each against the baseline's page at the same path.
+        let page_bps: Vec<(String, Option<i64>)> = ours.pages.iter().map(|(path, png)| (path.clone(), bp(Some(png), theirs.pages.get(path)))).collect();
+        // Each other page's checks against main's page at the same path.
+        let report = |m: &std::collections::BTreeMap<String, String>, p: &str| m.get(p).and_then(|r| serde_json::from_str::<crate::PageReport>(r).ok());
+        let page_against: Vec<(String, Option<String>)> = ours
+            .pages
+            .keys()
+            .map(|path| {
+                let against = report(&ours.page_reports, path).zip(report(&theirs.page_reports, path)).map(|(a, b)| a.against(&b));
+                (path.clone(), against.and_then(|a| serde_json::to_string(&a).ok()))
+            })
+            .collect();
+        // The first page's words against the baseline's (Chromatic's DOM snapshots), when both were read.
+        let text = ours.text.as_deref().zip(theirs.text.as_deref()).and_then(|(now, then)| serde_json::to_string(&crate::visual::text_diff(then, now)).ok());
+        // Its API against the baseline's (`github.openapi`), when both were read: the operations
+        // added and removed, and what breaks inside the ones both keep.
+        let both = ours.api.as_deref().zip(theirs.api.as_deref());
+        let api = both.and_then(|(now, then)| serde_json::to_string(&crate::visual::text_diff(&crate::openapi::operations(then), &crate::openapi::operations(now))).ok());
+        let api_breaking = both.and_then(|(now, then)| serde_json::to_string(&crate::openapi::breaking(then, now)).ok());
+        self.db.write(|c| {
+            c.execute(
+                "UPDATE screenshots SET base_preview = ?, base_branch = ?, base_change_bp = ?, base_phone_bp = ?, base_head = ?, base_speed = ?, base_a11y = ?, base_health = ?, base_text = ?, \
+                 base_links = ?, base_api = ?, base_api_breaking = ? WHERE preview_id = ?",
+                params![base, branch, change, phone, theirs.head, theirs.speed, theirs.a11y, theirs.health, text, theirs.links, api, api_breaking, id],
+            )?;
+            for (path, bp) in &page_bps {
+                c.execute("UPDATE page_shots SET base_bp = ? WHERE preview_id = ? AND path = ?", params![bp, id, path])?;
+            }
+            for (path, against) in &page_against {
+                c.execute("UPDATE page_shots SET against = ? WHERE preview_id = ? AND path = ?", params![against, id, path])?;
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The baseline's screenshot a change was compared with (`page`: another page; `phone`: at a
+    /// phone's width): from its history when it was compared at an older head.
+    pub fn base_screenshot(&self, id: &str, phone: bool, page: Option<&str>) -> Result<Option<Vec<u8>>> {
+        use base64::Engine as _;
+        let Some(b) = self.base_change(id)? else { return Ok(None) };
+        let shots = match &b.head {
+            Some(h) => match self.shots_at(&b.preview, h)? {
+                Some(s) => Some(s),
+                None => self.latest_shots(&b.preview)?,
+            },
+            None => self.latest_shots(&b.preview)?,
+        };
+        let Some(s) = shots else { return Ok(None) };
+        let b64 = match (page, phone) {
+            (Some(p), _) => s.pages.get(p).cloned(),
+            (None, true) => s.phone,
+            (None, false) => Some(s.png),
+        };
+        Ok(b64.and_then(|v| base64::engine::general_purpose::STANDARD.decode(v).ok()))
+    }
+
+    /// How much the page differs from the default branch's preview (its branch, basis points
+    /// at both widths), that preview, and the head of it compared with.
+    pub fn base_change(&self, id: &str) -> Result<Option<BaseRow>> {
+        Ok(self.shot_facts(id)?.base)
+    }
+
+    /// What a preview's screenshot row says, without its PNGs: one read for the view (a list of
+    /// previews is one of these each, not twenty, and never the images).
+    fn shot_facts(&self, id: &str) -> Result<ShotFacts> {
+        fn json<T: serde::de::DeserializeOwned>(s: Option<String>) -> Option<T> {
+            s.and_then(|s| serde_json::from_str(&s).ok())
+        }
+        let row = self.db.read(|c| {
+            c.query_row(
+                "SELECT CASE WHEN png <> '' THEN at END, head, prev_head, change_bp, phone_change_bp, phone_png IS NOT NULL, speed, prev_speed, health, a11y, \
+                 base_preview, base_branch, base_change_bp, base_phone_bp, base_head, base_speed, base_a11y, base_health, base_text, links, base_links, base_api, base_api_breaking FROM screenshots WHERE preview_id = ?",
+                [id],
+                |r| {
+                    let base = match (r.get::<_, Option<String>>(10)?, r.get::<_, Option<String>>(11)?, r.get::<_, Option<i64>>(12)?) {
+                        (Some(preview), Some(branch), Some(change_bp)) => Some(BaseRow {
+                            preview,
+                            branch,
+                            change_bp,
+                            phone_bp: r.get(13)?,
+                            head: r.get(14)?,
+                            speed: json(r.get(15)?),
+                            a11y: json(r.get(16)?),
+                            health: json(r.get(17)?),
+                            text: json(r.get(18)?),
+                            links: json(r.get(20)?),
+                            api: json(r.get(21)?),
+                            api_breaking: json(r.get(22)?).unwrap_or_default(),
+                        }),
+                        _ => None,
+                    };
+                    Ok(ShotFacts {
+                        at: r.get(0)?,
+                        head: r.get(1)?,
+                        prev_head: r.get(2)?,
+                        change_bp: r.get(3)?,
+                        phone_change_bp: r.get(4)?,
+                        has_phone: r.get(5)?,
+                        speed: json(r.get(6)?),
+                        prev_speed: json(r.get(7)?),
+                        health: json(r.get(8)?),
+                        a11y: json(r.get(9)?),
+                        links: json(r.get(19)?),
+                        base,
+                    })
+                },
+            )
+            .optional()
+        })?;
+        Ok(row.unwrap_or_default())
+    }
+
+    /// Keep the other pages a screenshot at `head` took (`github.pages`), each with the one it
+    /// replaces at another head and how much changed; pages no longer in `wanted` go.
+    pub fn set_page_shots(&self, id: &str, head: &str, pages: &[crate::ports::PageShot], wanted: &[String]) -> Result<()> {
+        use base64::Engine as _;
+        let b64e = base64::engine::general_purpose::STANDARD;
+        let mut rows = Vec::new();
+        for p in pages {
+            let before: Option<(String, String)> = self.db.read(|c| c.query_row("SELECT head, png FROM page_shots WHERE preview_id = ? AND path = ?", [id, &p.path], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+            let before = before.filter(|(h, _)| h != head);
+            let change_bp = before.as_ref().and_then(|(_, old)| crate::visual::changed(&b64e.decode(old).ok()?, &p.png)).map(|f| (f * 10_000.0).round() as i64);
+            let report = serde_json::to_string(&p.report).ok();
+            rows.push((p.path.clone(), b64e.encode(&p.png), p.errors as i64, before, change_bp, report));
+        }
+        self.db.write(|c| {
+            for (path, png, errors, before, change_bp, report) in &rows {
+                match before {
+                    Some((prev_head, prev_png)) => c.execute(
+                        "INSERT INTO page_shots (preview_id, path, head, png, prev_head, prev_png, change_bp, errors, report) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                         ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, prev_head = excluded.prev_head, prev_png = excluded.prev_png, \
+                         change_bp = excluded.change_bp, errors = excluded.errors, base_bp = NULL, report = excluded.report, against = NULL",
+                        params![id, path, head, png, prev_head, prev_png, change_bp, errors, report],
+                    )?,
+                    None => c.execute(
+                        "INSERT INTO page_shots (preview_id, path, head, png, errors, report) VALUES (?, ?, ?, ?, ?, ?) \
+                         ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, errors = excluded.errors, base_bp = NULL, report = excluded.report, against = NULL",
+                        params![id, path, head, png, errors, report],
+                    )?,
+                };
+            }
+            let paths: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
+            for gone in paths.iter().filter(|p| !wanted.contains(p)) {
+                c.execute("DELETE FROM page_shots WHERE preview_id = ? AND path = ?", [id, gone.as_str()])?;
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The other pages' screenshots, by path: how each changed and compares with the baseline's.
+    pub fn page_checks(&self, id: &str) -> Result<Vec<crate::PageCheck>> {
+        type Raw = (String, i64, Option<String>, Option<i64>, Option<i64>, Option<String>, Option<String>);
+        let rows: Vec<Raw> = self.db.read(|c| {
+            c.query("SELECT path, errors, prev_head, change_bp, base_bp, report, against FROM page_shots WHERE preview_id = ? ORDER BY path", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+            })
+        })?;
+        Ok(rows
+            .into_iter()
+            .map(|(path, errors, since, change, base, report, against)| {
+                let report: crate::PageReport = report.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default();
+                (path, errors, since, change, base, report, against.and_then(|a| serde_json::from_str(&a).ok()))
+            })
+            .map(|(path, errors, since, change, base, report, against)| crate::PageCheck {
+                path,
+                errors: errors as u32,
+                since: since.filter(|_| change.is_some()),
+                percent: change.map(|bp| bp as f64 / 100.0),
+                base_percent: base.map(|bp| bp as f64 / 100.0),
+                a11y: report.a11y,
+                links: report.links,
+                against,
+                unstable: report.unstable,
+            })
+            .collect())
+    }
+
+    /// `by` accepted how the preview's pages look at the latest screenshot's head (`None`: no
+    /// screenshot to accept): `page` only (`""` the first page, else another page's path), or
+    /// every page taken there.
+    /// `seen`: the head whose screenshots were looked at; refused (`Conflict`) when a newer one
+    /// came in meanwhile, so nobody accepts pages they didn't see.
+    pub fn accept_visual(&self, id: &str, by: &str, seen: Option<&str>, page: Option<&str>) -> Result<Option<String>> {
+        let now = self.now_ms()?;
+        // Read and written in one transaction: a screenshot landing in between can't be accepted.
+        self.db.write(|c| {
+            let head: Option<String> = c.query_row("SELECT head FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional()?;
+            let Some(head) = head.filter(|h| !h.is_empty()) else { return Ok(None) };
+            if seen.is_some_and(|s| s != head) {
+                return Err(Error::Conflict(format!("a newer screenshot came in (at {}): look at it first", head.chars().take(12).collect::<String>())));
+            }
+            let others: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
+            let pages: Vec<String> = match page {
+                None => std::iter::once(String::new()).chain(others).collect(),
+                Some(p) if p.is_empty() || others.iter().any(|o| o == p) => vec![p.to_string()],
+                Some(p) => return Err(Error::NotFound(format!("the preview has no screenshot of {p:?}"))),
+            };
+            for path in pages {
+                c.execute(
+                    "INSERT INTO visual_page_accepts (preview_id, path, head, by, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, by = excluded.by, at = excluded.at",
+                    params![id, path, head, by, now],
+                )?;
+            }
+            Ok::<_, Error>(Some(head))
+        })
+    }
+
+    /// After a screenshot: each page accepted at the head just before is accepted at this one when
+    /// it looks exactly as it did there (Chromatic carries accepted baselines forward), so a push
+    /// that changes nothing visible isn't reviewed again, and one that changes a page asks only
+    /// about that page. `true` when an acceptance moved.
+    /// `threshold`: the project's `github.visual_threshold`; a page that changed less is as it was.
+    pub fn carry_acceptance(&self, id: &str, threshold: f64) -> Result<bool> {
+        let as_was = move |bp: Option<i64>| bp.is_some_and(|bp| bp as f64 / 100.0 <= threshold);
+        self.db.write(|c| {
+            // (head, the head before, desktop change, phone change)
+            type Shot = (String, Option<String>, Option<i64>, Option<i64>);
+            let shot: Option<Shot> =
+                c.query_row("SELECT head, prev_head, change_bp, phone_change_bp FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+            let Some((head, Some(prev), desktop, phone)) = shot else { return Ok(false) };
+            // Each page's (path, the head before, change): the first page's at both widths.
+            let mut same: Vec<String> = Vec::new();
+            if as_was(desktop) && (phone.is_none() || as_was(phone)) {
+                same.push(String::new());
+            }
+            let pages: Vec<(String, Option<String>, Option<i64>)> = c.query("SELECT path, prev_head, change_bp FROM page_shots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            same.extend(pages.into_iter().filter(|(_, h, bp)| h.as_deref() == Some(prev.as_str()) && as_was(*bp)).map(|(p, _, _)| p));
+            let mut moved = false;
+            for path in same {
+                moved |= c.execute("UPDATE visual_page_accepts SET head = ? WHERE preview_id = ? AND path = ? AND head = ?", [head.as_str(), id, path.as_str(), prev.as_str()])? > 0;
+            }
+            Ok::<_, Error>(moved)
+        })
+    }
+
+    /// The visual review of a change's preview (`github.visual_review`), once its pages were
+    /// compared with the baseline's: each page that differs, who accepted it at this head, and
+    /// the change accepted once every one of them is.
+    /// `first_unstable`: the first page moves by itself (its review says so).
+    #[allow(clippy::too_many_arguments)]
+    fn visual_review(&self, r: &Row, rule: crate::settings::VisualReviewRule, threshold: f64, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck], first_unstable: bool, shot: Option<String>) -> Result<Option<crate::VisualReview>> {
+        if r.change_id.is_none() || rule == crate::settings::VisualReviewRule::Off {
+            return Ok(None);
+        }
+        let Some(base) = base else { return Ok(None) };
+        let accepts: Vec<(String, String, String, i64)> = self.db.read(|c| c.query("SELECT path, head, by, at FROM visual_page_accepts WHERE preview_id = ?", [&r.id], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?, x.get(3)?))))?;
+        let accepted = |path: &str| accepts.iter().find(|(p, h, _, _)| p == path && shot.as_deref() == Some(h.as_str())).map(|(_, _, by, at)| (by.clone(), *at));
+        let first = base.percent.max(base.phone_percent.unwrap_or(0.0));
+        let changed: Vec<(String, f64)> =
+            std::iter::once((String::new(), first)).chain(pages.iter().filter_map(|p| Some((p.path.clone(), p.base_percent?)))).filter(|(_, pct)| *pct > threshold).collect();
+        let reviews: Vec<crate::PageReview> = changed
+            .iter()
+            .map(|(path, percent)| {
+                let a = accepted(path);
+                let unstable = if path.is_empty() { first_unstable } else { pages.iter().any(|p| p.path == *path && p.unstable) };
+                crate::PageReview { path: path.clone(), percent: *percent, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at), unstable }
+            })
+            .collect();
+        let percent = changed.iter().map(|(_, p)| *p).fold(0.0_f64, f64::max);
+        let state = if reviews.is_empty() {
+            crate::VisualState::Unchanged
+        } else if reviews.iter().all(|p| p.by.is_some()) {
+            crate::VisualState::Accepted
+        } else {
+            crate::VisualState::Changed
+        };
+        // Who accepted it: whoever accepted its last page.
+        let last = reviews.iter().filter(|_| state == crate::VisualState::Accepted).max_by_key(|p| p.at);
+        let (by, at) = (last.and_then(|p| p.by.clone()), last.and_then(|p| p.at));
+        Ok(Some(crate::VisualReview { state, branch: base.branch.clone(), percent, by, at, required: rule == crate::settings::VisualReviewRule::Required, head: shot.unwrap_or_default(), pages: reviews }))
+    }
+
+    /// Another page's screenshot (`previous`: the one before it).
+    pub fn page_screenshot(&self, id: &str, path: &str, previous: bool) -> Result<Option<Vec<u8>>> {
+        use base64::Engine as _;
+        let col = if previous { "prev_png" } else { "png" };
+        let row: Option<Option<String>> = self.db.read(|c| c.query_row(&format!("SELECT {col} FROM page_shots WHERE preview_id = ? AND path = ?"), [id, path], |r| r.get(0)).optional())?;
+        Ok(row.flatten().and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok()))
+    }
+
+    /// The phone-width screenshot (`previous`: the one before it), if one was taken.
+    pub fn phone_screenshot(&self, id: &str, previous: bool) -> Result<Option<Vec<u8>>> {
+        use base64::Engine as _;
+        let col = if previous { "prev_phone_png" } else { "phone_png" };
+        let row: Option<Option<String>> = self.db.read(|c| c.query_row(&format!("SELECT {col} FROM screenshots WHERE preview_id = ?"), [id], |r| r.get(0)).optional())?;
+        Ok(row.flatten().and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok()))
+    }
+
+    /// How much the phone-width page changed since the one before (basis points).
+    pub fn phone_change(&self, id: &str) -> Result<Option<i64>> {
+        let row: Option<Option<i64>> = self.db.read(|c| c.query_row("SELECT phone_change_bp FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional())?;
+        Ok(row.flatten())
+    }
+
+    /// The screenshot before the latest (another head's), for comparing.
+    pub fn previous_screenshot(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        use base64::Engine as _;
+        let row: Option<Option<String>> = self.db.read(|c| c.query_row("SELECT prev_png FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional())?;
+        Ok(row.flatten().and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok()))
     }
 
     /// A screenshot was tried at `head` and not taken: not tried again there, and the last one
@@ -963,6 +1566,91 @@ impl Store {
     }
 
     /// The key screenshot links are signed with: made once, the same on every node.
+    /// The password of the preview's SMTP sign-in (`SMTP_PASSWORD`, its id the user): a keyed
+    /// hash only roll makes, so nothing needs storing and nobody else's code can send as it.
+    pub fn mail_password(&self, id: &str) -> Result<String> {
+        use hmac::Mac;
+        let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.signing_key()?).map_err(|e| Error::Internal(e.to_string()))?;
+        m.update(b"smtp:");
+        m.update(id.as_bytes());
+        Ok(hex::encode(&m.finalize().into_bytes()[..16]))
+    }
+
+    /// Whether `user`/`password` are a live preview's SMTP sign-in (compared in constant time).
+    pub fn mail_signs_in(&self, user: &str, password: &str) -> Result<bool> {
+        let Ok(r) = self.row(user) else { return Ok(false) };
+        if r.desired == crate::Desired::Deleted {
+            return Ok(false);
+        }
+        Ok(crate::runtime::same(&self.mail_password(&r.id)?, password))
+    }
+
+    /// `by` resolved a note left on the preview's page (its review's id): the page stops listing
+    /// it. Resolving one already resolved changes nothing.
+    pub fn resolve_note(&self, preview: &str, review: &str, by: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            c.execute("INSERT INTO resolved_notes (preview_id, review_id, by, at) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id, review_id) DO NOTHING", params![preview, review, by, now])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The notes resolved on a preview's page (their reviews' ids).
+    pub fn resolved_notes(&self, preview: &str) -> Result<std::collections::HashSet<String>> {
+        let ids: Vec<String> = self.db.read(|c| c.query("SELECT review_id FROM resolved_notes WHERE preview_id = ?", [preview], |r| r.get(0)))?;
+        Ok(ids.into_iter().collect())
+    }
+
+    /// A caught message, kept with its preview: its last 50, at most [`MAIL_BYTES`] of them in
+    /// all (the oldest go first), so a preview's code can't fill the store.
+    pub fn keep_mail(&self, preview: &str, mail: &crate::mail::Mail) -> Result<()> {
+        use base64::Engine as _;
+        let now = self.now_ms()?;
+        let id = format!("ml_{}", &new_token()[..16]);
+        let to = serde_json::to_string(&mail.to).unwrap_or_else(|_| "[]".into());
+        let raw = base64::engine::general_purpose::STANDARD.encode(&mail.raw);
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO mail (id, preview_id, at, sender, recipients, subject, size, raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, preview, now, mail.from, to, mail.subject(), mail.raw.len() as i64, raw],
+            )?;
+            c.execute(
+                "DELETE FROM mail WHERE preview_id = ? AND id NOT IN (SELECT id FROM mail WHERE preview_id = ? ORDER BY at DESC, id DESC LIMIT 50)",
+                params![preview, preview],
+            )?;
+            let kept: Vec<(String, i64)> = c.query("SELECT id, size FROM mail WHERE preview_id = ? ORDER BY at DESC, id DESC", [preview], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let mut total = 0i64;
+            for (mid, size) in kept {
+                total += size;
+                if total > MAIL_BYTES {
+                    c.execute("DELETE FROM mail WHERE id = ?", [mid.as_str()])?;
+                }
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The preview's caught mail, newest first (without the messages).
+    pub fn mails(&self, preview: &str) -> Result<Vec<crate::CaughtMail>> {
+        type Raw = (String, i64, String, String, Option<String>, i64);
+        let rows: Vec<Raw> = self.db.read(|c| {
+            c.query("SELECT id, at, sender, recipients, subject, size FROM mail WHERE preview_id = ? ORDER BY at DESC, id DESC", [preview], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            })
+        })?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, at, from, to, subject, size)| crate::CaughtMail { id, at, from, to: serde_json::from_str(&to).unwrap_or_default(), subject, size })
+            .collect())
+    }
+
+    /// One caught message as it was sent.
+    pub fn mail_raw(&self, preview: &str, id: &str) -> Result<Option<Vec<u8>>> {
+        use base64::Engine as _;
+        let raw: Option<String> = self.db.read(|c| c.query_row("SELECT raw FROM mail WHERE preview_id = ? AND id = ?", [preview, id], |r| r.get(0)).optional())?;
+        Ok(raw.and_then(|r| base64::engine::general_purpose::STANDARD.decode(r).ok()))
+    }
+
     fn signing_key(&self) -> Result<Vec<u8>> {
         if let Some(k) = self.signing.get() {
             return Ok(k.clone());
@@ -982,19 +1670,36 @@ impl Store {
     /// A link to the preview's screenshot anyone can open until it expires (30 days after it was
     /// taken): `(expiry in ms, signature)`. `None` when there's no screenshot.
     pub fn screenshot_link(&self, id: &str) -> Result<Option<(i64, String)>> {
+        self.link(id, None)
+    }
+
+    /// The same for where its page differs from the baseline's (`diff=base`): its own signature,
+    /// so a screenshot's link can't be turned into the diff's or back.
+    pub fn diff_link(&self, id: &str) -> Result<Option<(i64, String)>> {
+        self.link(id, Some("diff=base"))
+    }
+
+    fn link(&self, id: &str, variant: Option<&str>) -> Result<Option<(i64, String)>> {
+        match self.screenshot_at(id)? {
+            Some(at) => self.link_at(id, at, variant).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The link to the screenshot taken at `at`.
+    fn link_at(&self, id: &str, at: i64, variant: Option<&str>) -> Result<(i64, String)> {
         use hmac::Mac;
-        let Some(at) = self.screenshot_at(id)? else { return Ok(None) };
         let exp = at + SCREENSHOT_LINK_MS;
-        Ok(Some((exp, hex::encode(self.link_mac(id, exp)?.finalize().into_bytes()))))
+        Ok((exp, hex::encode(self.link_mac(id, exp, variant)?.finalize().into_bytes())))
     }
 
     /// Whether `sig` is the screenshot link's signature for `exp`, it hasn't expired, it's for the
     /// screenshot there is now (a link names one screenshot: `exp` is 30 days after it was taken),
     /// and the preview is still public and live.
-    pub fn screenshot_link_ok(&self, id: &str, exp: i64, sig: &str) -> Result<bool> {
+    pub fn screenshot_link_ok(&self, id: &str, exp: i64, sig: &str, variant: Option<&str>) -> Result<bool> {
         use hmac::Mac;
         let Ok(sig) = hex::decode(sig) else { return Ok(false) };
-        if exp <= self.now_ms()? || self.link_mac(id, exp)?.verify_slice(&sig).is_err() {
+        if exp <= self.now_ms()? || self.link_mac(id, exp, variant)?.verify_slice(&sig).is_err() {
             return Ok(false);
         }
         if self.screenshot_at(id)? != Some(exp - SCREENSHOT_LINK_MS) {
@@ -1004,10 +1709,14 @@ impl Store {
         Ok(row.desired == Desired::Active && self.settings(&row.project_id)?.access == crate::settings::Access::Public)
     }
 
-    fn link_mac(&self, id: &str, exp: i64) -> Result<hmac::Hmac<sha2::Sha256>> {
+    fn link_mac(&self, id: &str, exp: i64, variant: Option<&str>) -> Result<hmac::Hmac<sha2::Sha256>> {
         use hmac::Mac;
         let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.signing_key()?).map_err(|e| Error::Internal(e.to_string()))?;
-        m.update(format!("screenshot\n{id}\n{exp}").as_bytes());
+        // A plain screenshot's message is what it always was, so links already posted still work.
+        match variant {
+            None => m.update(format!("screenshot\n{id}\n{exp}").as_bytes()),
+            Some(v) => m.update(format!("screenshot\n{id}\n{exp}\n{v}").as_bytes()),
+        }
         Ok(m)
     }
 
@@ -1023,9 +1732,15 @@ impl Store {
         })
     }
 
-    fn schema_changes(&self, id: &str) -> Result<Option<Vec<String>>> {
-        let raw: Option<String> = self.db.read(|c| c.query_row("SELECT schema_changes FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten();
-        Ok(raw.and_then(|j| serde_json::from_str(&j).ok()))
+    /// What the release last did, in one read: the schema's changes and how long it took.
+    fn release_facts(&self, id: &str) -> Result<(Option<Vec<String>>, Option<crate::ReleaseRun>)> {
+        type Raw = (Option<String>, Option<String>, Option<i64>, Option<i64>);
+        let raw: Option<Raw> = self.db.read(|c| {
+            c.query_row("SELECT schema_changes, released, release_ms, prev_release_ms FROM previews WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()
+        })?;
+        let Some((changes, head, ms, before)) = raw else { return Ok((None, None)) };
+        let run = head.zip(ms).map(|(head, ms)| crate::ReleaseRun { head, ms, before_ms: before });
+        Ok((changes.and_then(|j| serde_json::from_str(&j).ok()), run))
     }
 
     /// A preview's access token, and whether its project requires it.
@@ -1128,6 +1843,50 @@ impl Store {
         })
     }
 
+    /// A link that opens the preview until `expires_at` (Vercel's shareable links), on a token of
+    /// its own: only its SHA-256 is kept, so the token is in the answer once. At most
+    /// [`SHARES_MAX`] live ones.
+    pub fn create_share(&self, id: &str, expires_at: i64, by: &str) -> Result<(crate::Share, String)> {
+        let now = self.now_ms()?;
+        let token = format!("rps_{}", new_token());
+        let sid = format!("shr_{}", &new_token()[..12]);
+        let hash = bypass_hash(&token);
+        self.db.write(|c| {
+            let live: i64 = c.query_row("SELECT COUNT(*) FROM shares WHERE preview_id = ? AND revoked = 0 AND expires_at > ?", params![id, now], |r| r.get(0))?;
+            if live as usize >= SHARES_MAX {
+                return Err(Error::Conflict(format!("the preview has {SHARES_MAX} live share links: revoke one first")));
+            }
+            c.execute("INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![sid, id, hash, expires_at, by, now])?;
+            Ok::<_, Error>(())
+        })?;
+        Ok((crate::Share { id: sid, expires_at, created_by: by.to_string(), created_at: now, revoked: false }, token))
+    }
+
+    /// The preview's share links, newest first (never their tokens).
+    pub fn shares(&self, id: &str) -> Result<Vec<crate::Share>> {
+        Ok(self.db.read(|c| {
+            c.query("SELECT id, expires_at, created_by, created_at, revoked FROM shares WHERE preview_id = ? ORDER BY created_at DESC", [id], |r| {
+                Ok(crate::Share { id: r.get(0)?, expires_at: r.get(1)?, created_by: r.get(2)?, created_at: r.get(3)?, revoked: r.get::<_, i64>(4)? != 0 })
+            })
+        })?)
+    }
+
+    pub fn revoke_share(&self, id: &str, share: &str) -> Result<()> {
+        let n = self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE shares SET revoked = 1 WHERE preview_id = ? AND id = ?", params![id, share])?))?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("no share link {share}")));
+        }
+        Ok(())
+    }
+
+    /// When the share link `token` of preview `id` ends, if it's live (not revoked, not past).
+    pub fn share_ends(&self, id: &str, token: &str) -> Result<Option<i64>> {
+        let now = self.now_ms()?;
+        Ok(self.db.read(|c| {
+            c.query_row("SELECT expires_at FROM shares WHERE preview_id = ? AND hash = ? AND revoked = 0 AND expires_at > ?", params![id, bypass_hash(token), now], |r| r.get(0)).optional()
+        })?)
+    }
+
     /// The earlier pushes a preview keeps reachable, newest first.
     pub fn pinned(&self, id: &str) -> Result<Vec<crate::Pinned>> {
         Ok(self.db.read(|c| {
@@ -1145,14 +1904,18 @@ impl Store {
         self.view(r)
     }
 
-    pub fn view(&self, r: Row) -> Result<Preview> {
-        let resources = self.resources(&r.id)?;
-        let services = self.services_with_time(&r.id)?;
+    /// What a preview costs (asleep a month, active an hour, this month so far), without the rest
+    /// of its view: what the budget adds up each pass.
+    pub fn cost(&self, r: &Row) -> Result<Cost> {
+        self.cost_of(r, &self.resources(&r.id)?, &self.services_with_time(&r.id)?)
+    }
+
+    fn cost_of(&self, r: &Row, resources: &[ResourceRow], services: &[(Service, i64)]) -> Result<Cost> {
         let mut cost = Cost::default();
         let now = self.now_ms()?;
         let month_start = month_start(now);
         let held_hours = (now - r.created_at.max(month_start)).max(0) as f64 / HOUR_MS;
-        for res in &resources {
+        for res in resources {
             cost.bytes += res.bytes;
             cost.sleeping_usd_month += res.usd_month;
             cost.active_usd_hour += res.usd_hour;
@@ -1160,11 +1923,19 @@ impl Store {
             // metered for compute.
             cost.month_to_date_usd += res.usd_month * held_hours / MONTH_HOURS + res.spent_usd;
         }
-        for (s, active_ms) in &services {
+        for (s, active_ms) in services {
             let gib = s.memory_mb as f64 / 1024.0;
             cost.active_usd_hour += gib * self.rates.usd_per_container_gib_hour;
             cost.month_to_date_usd += gib * self.rates.usd_per_container_gib_hour * (*active_ms as f64 / HOUR_MS);
         }
+        Ok(cost)
+    }
+
+    pub fn view(&self, r: Row) -> Result<Preview> {
+        let settings = self.settings(&r.project_id)?;
+        let resources = self.resources(&r.id)?;
+        let services = self.services_with_time(&r.id)?;
+        let cost = self.cost_of(&r, &resources, &services)?;
         // With link access, the links roll hands out carry the token (once; then a cookie).
         let token = match self.access(&r.id)? {
             Some(Access { token: t, required: true, .. }) if !t.is_empty() => Some(t),
@@ -1176,11 +1947,43 @@ impl Store {
         };
         let url = services.first().map(|(s, _)| s.url.clone());
         let share_url = url.as_deref().map(share);
-        let schema_changes = self.schema_changes(&r.id)?;
+        let (schema_changes, release) = self.release_facts(&r.id)?;
         let kept_until = self.kept_until(&r.id)?;
         let goes_at = self.goes_at(&r.id)?;
-        let screenshot_at = self.screenshot_at(&r.id)?;
-        let screenshot_link = self.screenshot_link(&r.id)?;
+        // The screenshot row in one read, without its images.
+        let f = self.shot_facts(&r.id)?;
+        let screenshot_at = f.at;
+        let phone_percent = f.phone_change_bp.map(|bp| bp as f64 / 100.0);
+        let visual_change = f.prev_head.clone().zip(f.change_bp).map(|(since, bp)| crate::VisualChange { since, percent: bp as f64 / 100.0, phone_percent });
+        let phone_screenshot = f.has_phone;
+        let pages = self.page_checks(&r.id)?;
+        let baseline = r.is_baseline();
+        let (page_a11y, page_health, page_links) = (f.a11y, f.health, f.links);
+        let base_row = f.base;
+        let base_differs = base_row.as_ref().is_some_and(|b| b.change_bp > 0);
+        let base_change = base_row.map(|b| crate::BaseChange {
+            branch: b.branch,
+            percent: b.change_bp as f64 / 100.0,
+            phone_percent: b.phone_bp.map(|p| p as f64 / 100.0),
+            head: b.head,
+            load_ms: b.speed.as_ref().map(|s| s.load_ms),
+            lcp_ms: b.speed.and_then(|s| s.lcp_ms),
+            a11y_added: page_a11y.as_ref().zip(b.a11y.as_ref()).map(|(ours, main)| ours.added_since(main)),
+            errors_added: page_health.as_ref().zip(b.health.as_ref()).map(|(ours, main)| ours.added_since(main)),
+            text: b.text,
+            seo_added: page_a11y.as_ref().and_then(|a| a.seo.as_ref()).zip(b.a11y.as_ref().and_then(|a| a.seo.as_ref())).map(|(ours, main)| ours.added_since(main)),
+            links_added: page_links.as_ref().zip(b.links.as_ref()).map(|(ours, main)| ours.added_since(main)),
+            api: b.api,
+            api_breaking: b.api_breaking,
+        });
+        let first_unstable = page_health.as_ref().is_some_and(|h| h.unstable);
+        let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, first_unstable, f.head)?;
+        let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
+        let screenshot_link = screenshot_at.map(|at| self.link_at(&r.id, at, None)).transpose()?;
+        let diff_link = match screenshot_at.filter(|_| base_differs) {
+            Some(at) => Some(self.link_at(&r.id, at, Some("diff=base"))?),
+            None => None,
+        };
         let earlier = self.pinned(&r.id)?.into_iter().map(|mut p| {
             p.share_url = Some(share(&p.url));
             p
@@ -1213,18 +2016,34 @@ impl Store {
                 .collect(),
             resources: resources
                 .into_iter()
-                .map(|x| Resource { kind: x.kind, parent: x.parent, r#ref: x.r#ref, mode: x.mode, state: x.state, error: x.error, bytes: x.bytes })
+                .map(|x| {
+                    let masks = settings.masking.get(&format!("{}:{}", x.kind.as_str(), x.parent)).map_or(0, |m| m.len());
+                    Resource { data: crate::Data::of(x.kind, x.mode, masks), kind: x.kind, parent: x.parent, r#ref: x.r#ref, mode: x.mode, state: x.state, error: x.error, bytes: x.bytes }
+                })
                 .collect(),
             cost: cost.rounded(),
+            schema_risks: schema_changes.as_deref().map(crate::schema::risks).unwrap_or_default(),
             schema_changes,
+            release,
             kept_until,
             goes_at,
             earlier,
             screenshot_at,
+            visual_change,
+            phone_screenshot,
+            base_change,
+            pages,
+            visual_review,
+            page_links,
+            page_speed,
+            page_health,
+            page_a11y,
             screenshot_link,
+            diff_link,
             last_reset_at: r.last_reset_at,
             last_active_at: r.last_active_at,
             expires_at: r.expires_at,
+            baseline,
             created_by: r.created_by,
             created_at: r.created_at,
             updated_at: r.updated_at,
@@ -1247,6 +2066,33 @@ fn slug_taken(c: &Conn<'_>, slug: &str) -> code_sql::Result<bool> {
 fn host_taken(c: &Conn<'_>, host: &str) -> code_sql::Result<bool> {
     Ok(c.query_row("SELECT 1 FROM services WHERE host = ? UNION ALL SELECT 1 FROM pinned WHERE host = ? LIMIT 1", [host, host], |_| Ok(())).optional()?.is_some())
 }
+
+/// How much a preview's page differs from its project's preview of the default branch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BaseRow {
+    /// The default branch's preview.
+    pub preview: String,
+    pub branch: String,
+    /// The head of it compared with (`None`: compared before roll kept it).
+    pub head: Option<String>,
+    /// How its first page loaded there, and what it missed (to say what the change added).
+    pub speed: Option<crate::PageSpeed>,
+    pub a11y: Option<crate::PageA11y>,
+    pub health: Option<crate::PageHealth>,
+    pub change_bp: i64,
+    pub phone_bp: Option<i64>,
+    /// The first page's words against its (`visual::text_diff`).
+    pub text: Option<crate::TextDiff>,
+    /// Its first page's broken links there.
+    pub links: Option<crate::PageLinks>,
+    /// Its API's operations against the change's (`visual::text_diff`).
+    pub api: Option<crate::TextDiff>,
+    /// What the change breaks inside the operations both keep.
+    pub api_breaking: Vec<String>,
+}
+
+/// Live share links a preview may have at once.
+pub const SHARES_MAX: usize = 20;
 
 /// Earlier pushes kept reachable per service.
 pub const PINNED_KEEP: usize = 3;
@@ -1279,29 +2125,100 @@ mod tests {
     /// until it expires; a link anyone changed (another preview, a later expiry, a guessed
     /// signature), an older screenshot's link, or a preview gone private doesn't.
     #[test]
+    fn a_new_heads_screenshot_keeps_the_one_before_and_how_much_changed() {
+        let png = |dark: u32| {
+            let img = image::RgbaImage::from_fn(10, 10, |x, _| if x < dark { image::Rgba([0, 0, 0, 255]) } else { image::Rgba([255, 255, 255, 255]) });
+            let mut out = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        let (_dir, store) = store();
+        let (row, _) = store.create(&new("chg_visual")).unwrap();
+        let id = row.id.as_str();
+        let speed = |load_ms| crate::PageSpeed { ttfb_ms: 20, fcp_ms: Some(100), load_ms, bytes: 1000, lcp_ms: None, cls: None };
+        store.set_screenshot(id, "cs_1", &png(0), Some(&speed(900)), Some(&png(0))).unwrap();
+        assert_eq!(store.visual_change(id).unwrap(), None, "a first one: nothing to compare");
+        assert_eq!(store.page_speed(id).unwrap(), Some(crate::PageSpeedView { now: speed(900), before: None }));
+        store.set_screenshot(id, "cs_2", &png(3), Some(&speed(1200)), Some(&png(5))).unwrap();
+        assert_eq!(store.visual_change(id).unwrap(), Some(("cs_1".to_string(), 3000)), "30% of pixels");
+        assert_eq!(store.previous_screenshot(id).unwrap(), Some(png(0)));
+        assert_eq!(store.page_speed(id).unwrap(), Some(crate::PageSpeedView { now: speed(1200), before: Some(speed(900)) }));
+        // The phone-width one too, with its own change.
+        assert_eq!(store.phone_change(id).unwrap(), Some(5000));
+        assert_eq!(store.phone_screenshot(id, true).unwrap(), Some(png(0)));
+        // Against the default branch's preview: its own share, at both widths.
+        let (main, _) = store.create(&New { change_id: None, branch: Some("main".into()), key: "main".into(), ..new("chg_main") }).unwrap();
+        assert!(store.compare_with_base(id, &main.id, "main", None).is_ok() && store.base_change(id).unwrap().is_none(), "no screenshot there yet");
+        store.set_screenshot(&main.id, "cs_m", &png(1), None, Some(&png(0))).unwrap();
+        store.keep_base_history(&main.id, "cs_m").unwrap();
+        store.compare_with_base(id, &main.id, "main", None).unwrap();
+        assert_eq!(store.base_change(id).unwrap(), Some(BaseRow { preview: main.id.clone(), branch: "main".into(), change_bp: 2000, phone_bp: Some(5000), head: Some("cs_m".into()), speed: None, a11y: None, health: None, text: None, links: None, api: None, api_breaking: Vec::new() }));
+        // Main moves on (to what the change's page looks like): a change that left it at cs_m is
+        // still compared with cs_m's, and shown that one.
+        store.set_screenshot(&main.id, "cs_m2", &png(3), Some(&speed(700)), Some(&png(5))).unwrap();
+        store.keep_base_history(&main.id, "cs_m2").unwrap();
+        store.compare_with_base(id, &main.id, "main", Some("cs_m")).unwrap();
+        assert_eq!(store.base_change(id).unwrap().map(|b| (b.change_bp, b.head)), Some((2000, Some("cs_m".into()))));
+        assert_eq!(store.base_screenshot(id, false, None).unwrap(), Some(png(1)));
+        store.compare_with_base(id, &main.id, "main", Some("cs_gone")).unwrap();
+        assert_eq!(store.base_change(id).unwrap().map(|b| (b.change_bp, b.head)), Some((0, Some("cs_m2".into()))), "not kept: the latest");
+        // Its load there comes along (to say "slower than main"), from the history too.
+        store.compare_with_base(id, &main.id, "main", Some("cs_m2")).unwrap();
+        assert_eq!(store.base_change(id).unwrap().and_then(|b| b.speed).map(|s| s.load_ms), Some(700));
+        // Taken again at the same head: what came before stays.
+        store.set_screenshot(id, "cs_2", &png(3), Some(&speed(1100)), Some(&png(5))).unwrap();
+        assert_eq!(store.visual_change(id).unwrap(), Some(("cs_1".to_string(), 3000)));
+        assert_eq!(store.page_speed(id).unwrap().unwrap().before, Some(speed(900)));
+    }
+
+    #[test]
+    fn a_share_link_opens_its_preview_until_it_ends_or_is_revoked() {
+        let (_dir, store) = store();
+        let (row, _) = store.create(&new("chg_share")).unwrap();
+        let id = row.id.as_str();
+        let now = store.now_ms().unwrap();
+        let (share, token) = store.create_share(id, now + 3_600_000, "ada").unwrap();
+        assert!(token.starts_with("rps_") && share.id.starts_with("shr_"));
+        assert_eq!(store.share_ends(id, &token).unwrap(), Some(now + 3_600_000));
+        assert_eq!(store.share_ends("pv_other", &token).unwrap(), None, "another preview");
+        assert_eq!(store.share_ends(id, "rps_guess").unwrap(), None);
+        let (_, ended) = store.create_share(id, now - 1, "ada").unwrap();
+        assert_eq!(store.share_ends(id, &ended).unwrap(), None, "past its end");
+        store.revoke_share(id, &share.id).unwrap();
+        assert_eq!(store.share_ends(id, &token).unwrap(), None, "revoked");
+        // Only its hash is kept: the list never has a token.
+        let listed = serde_json::to_string(&store.shares(id).unwrap()).unwrap();
+        assert!(!listed.contains(&token) && listed.contains("\"revoked\":true"));
+    }
+
+    #[test]
     fn a_screenshot_link_is_signed_and_expires() {
         let (_dir, store) = store();
         store.put_settings("prj_1", &crate::Settings { access: crate::settings::Access::Public, ..Default::default() }).unwrap();
         let (row, _) = store.create(&new("chg_shot")).unwrap();
         let id = row.id.as_str();
         assert_eq!(store.screenshot_link(id).unwrap(), None, "no screenshot, no link");
-        store.set_screenshot(id, "cs_1", b"\x89PNG...").unwrap();
+        store.set_screenshot(id, "cs_1", b"\x89PNG...", None, None).unwrap();
         let (exp, sig) = store.screenshot_link(id).unwrap().unwrap();
-        assert!(store.screenshot_link_ok(id, exp, &sig).unwrap());
-        assert!(!store.screenshot_link_ok("pv_other", exp, &sig).unwrap(), "another preview");
-        assert!(!store.screenshot_link_ok(id, exp + 1, &sig).unwrap(), "a moved expiry");
-        assert!(!store.screenshot_link_ok(id, exp, &"0".repeat(64)).unwrap(), "a guess");
+        assert!(store.screenshot_link_ok(id, exp, &sig, None).unwrap());
+        assert!(!store.screenshot_link_ok("pv_other", exp, &sig, None).unwrap(), "another preview");
+        assert!(!store.screenshot_link_ok(id, exp + 1, &sig, None).unwrap(), "a moved expiry");
+        assert!(!store.screenshot_link_ok(id, exp, &"0".repeat(64), None).unwrap(), "a guess");
+        // The diff's link is its own: neither opens the other.
+        let (_, diff) = store.diff_link(id).unwrap().unwrap();
+        assert!(store.screenshot_link_ok(id, exp, &diff, Some("diff=base")).unwrap());
+        assert!(!store.screenshot_link_ok(id, exp, &diff, None).unwrap() && !store.screenshot_link_ok(id, exp, &sig, Some("diff=base")).unwrap());
         let past = store.now_ms().unwrap() - 1;
         let stale = hex::encode({
             use hmac::Mac;
-            store.link_mac(id, past).unwrap().finalize().into_bytes()
+            store.link_mac(id, past, None).unwrap().finalize().into_bytes()
         });
-        assert!(!store.screenshot_link_ok(id, past, &stale).unwrap(), "expired");
+        assert!(!store.screenshot_link_ok(id, past, &stale, None).unwrap(), "expired");
         // A failed try keeps the screenshot (and its link); a private preview's link is dead.
         store.set_screenshot_tried(id, "cs_2").unwrap();
-        assert!(store.screenshot_link_ok(id, exp, &sig).unwrap(), "a failed try keeps the last one");
+        assert!(store.screenshot_link_ok(id, exp, &sig, None).unwrap(), "a failed try keeps the last one");
         store.put_settings("prj_1", &crate::Settings { access: crate::settings::Access::Link, ..Default::default() }).unwrap();
-        assert!(!store.screenshot_link_ok(id, exp, &sig).unwrap(), "gone private");
+        assert!(!store.screenshot_link_ok(id, exp, &sig, None).unwrap(), "gone private");
     }
 
     use super::*;

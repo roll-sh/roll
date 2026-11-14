@@ -70,7 +70,10 @@ roll nosql branch app-prod --name pr-482 --schema-only             # schema and 
 - **Masking.** A branch can carry a masking policy, as column → mask function using Cassandra
   5's masking functions (`mask_default`, `mask_null`, `mask_inner`, `mask_outer`, `mask_hash`,
   `mask_replace`). It is applied at read time for every role, in both dialects. The stored data
-  is the parent's untouched objects. Policies are set once on the parent and inherited by its
+  is the parent's untouched objects. It holds against the branch's own code too, as a copy with
+  those columns rewritten would: filters and indexes compare the masked values (looking up a
+  real address finds nothing), a table or view whose primary key has a masked column can't be
+  read, and a masked column can't be in an `IF`. Mask a table's other columns, not its keys. Policies are set once on the parent and inherited by its
   branches, so nobody forgets them.
 - **Read-only branches.** A branch can be marked read-only for safe production debugging.
   Writes return `Unauthorized` with a clear message.

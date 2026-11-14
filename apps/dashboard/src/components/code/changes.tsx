@@ -18,7 +18,7 @@ import { checkRows } from "@/lib/ci";
 import { canWrite, isAdmin, landSummary, landVerb } from "@/lib/queue";
 import { addDraft, draftFor, emptyPending, removeDraft, reviewHeadline, reviewPayload, updateDraft, type LineSelection } from "@/lib/review";
 import { CodeShell } from "./shell";
-import { PreviewEnvironmentView } from "./preview-environment";
+import { AcceptVisual, PreviewEnvironmentView } from "./preview-environment";
 import { ChangeAgent } from "./change-agent";
 import { ago, btn, Confirm, EmptyPanel, ErrorNote, Panel, panel, primary } from "../ui";
 import { DiffViewer, type DiffReview } from "./diff";
@@ -544,6 +544,8 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
                                 Review it
                               </button>
                             ) : null
+                          ) : kind === "visual" && c.preview?.environment?.visual_review ? (
+                            <AcceptVisual previewId={c.preview.environment.id} review={c.preview.environment.visual_review} onAccepted={() => void load()} />
                           ) : kind === "approve" ? (
                             <button onClick={() => run("approve", () => codeApi.approveRun(c.id))} disabled={busy !== null} className={btn}>
                               {busy === "approve" ? <span className="shimmer">Approving…</span> : `Approve running rev ${c.revision}`}

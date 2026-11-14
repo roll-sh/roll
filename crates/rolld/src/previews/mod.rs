@@ -98,12 +98,14 @@ pub fn start(
         Box::new(move || !clustered || c.singleton("previews")) as Box<dyn Fn() -> bool + Send + Sync>
     };
     let engine = roll_previews::Engine::new(
-        roll_previews::engine::Config { domain, port: Some(args.api.port()), ..Default::default() },
-        store,
+        roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), ..Default::default() },
+        store.clone(),
         workspace.clone(),
         source.clone(),
         branchers,
-        Arc::new(Services { apps: RollApps::new(api.clone()), runtime: runtime.clone() }),
+        // roll apps' instances are screenshotted once roll apps can say where they run
+        // (`Apps::reachable`, roll apps' #26): `reach` is that, wired where rolld has both.
+        Arc::new(Services { apps: RollApps::new(api.clone()), runtime: runtime.clone(), reach: None }),
         Arc::new(Secrets(api.clone())),
         leader,
     );
@@ -114,7 +116,20 @@ pub fn start(
     let backend = roll_previews::code::Backend::new(code.previews.clone(), workspace, source);
     backend.attach(&engine);
     code.code.set_preview_backend(backend);
+    // The mail catcher: previews' mail is kept with them, never sent on.
+    let bound = std::net::TcpListener::bind(args.previews_smtp).and_then(|l| {
+        l.set_nonblocking(true)?;
+        tokio::net::TcpListener::from_std(l)
+    });
+    match bound {
+        Ok(l) => {
+            tracing::info!(addr = %args.previews_smtp, "roll previews: catching previews' mail");
+            tokio::spawn(roll_previews::mail::serve(l, Arc::new(roll_previews::mail::Store(store))));
+        }
+        Err(e) => tracing::warn!(addr = %args.previews_smtp, error = %e, "roll previews: no mail catcher (previews' mail fails)"),
+    }
     drop(engine.start());
+    crate::logs::PreviewMetrics::start(&engine);
     tracing::info!("roll previews: on");
     Ok(Running { engine, runtime })
 }

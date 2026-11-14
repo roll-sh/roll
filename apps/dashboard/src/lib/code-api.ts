@@ -278,6 +278,7 @@ export interface Blocker {
     | "unresolved_threads"
     | "review_pending"
     | "review_required"
+    | "visual"
     | (string & {});
   message: string;
 }
@@ -334,7 +335,8 @@ export interface PreviewEnvironment {
   slug: string;
   state: "queued" | "awaiting_approval" | "creating" | "ready" | "sleeping" | "updating" | "failed" | "deleting";
   services: { name: string; url: string; state: string }[];
-  resources: { kind: string; parent: string; ref: string | null }[];
+  /** `data`: what of the parent's data the preview gets (`real`: as it is, unmasked). */
+  resources: { kind: string; parent: string; ref: string | null; data?: "none" | "masked" | "real" }[];
   sleeping_usd_month: number;
   active_usd_hour: number;
   /** The preview on the dashboard (its project's Previews tab). */
@@ -344,12 +346,52 @@ export interface PreviewEnvironment {
   head?: string;
   /** What the change did to the Postgres schema (`+ …`, `- …`). */
   schema_changes?: string[];
+  /** What in `schema_changes` would hurt production when it lands (roll previews' `schema::risks`). */
+  schema_risks?: string[];
+  /** How long the release (migrations) took on the preview's data, and at the run before. */
+  release_ms?: number;
+  release_before_ms?: number;
   /** A public preview's screenshot behind a signed, expiring link. */
   screenshot_url?: string;
   /** When it goes (ms: its TTL, or a keep, running out), once that's a day away. */
   expires_at?: number;
   /** Earlier pushes still reachable (newest first). */
   earlier?: { service: string; head: string; url: string }[];
+  /** How much the first service's page changed since the screenshot at an earlier head. */
+  visual_change?: { since: string; percent: number };
+  /** How fast that page loaded (timed with its screenshot), and its load at the head before. */
+  page_speed?: { ttfb_ms: number; fcp_ms: number | null; load_ms: number; bytes: number; before_load_ms: number | null; lcp_ms?: number | null; cls?: number | null };
+  /** What went wrong while that page loaded (the page's own words). */
+  page_health?: { errors: number; first_error: string | null; failed: number; first_failed: string | null };
+  /** How much its page differs from the project's preview of the default branch. */
+  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: { added: string[]; removed: string[]; added_n: number; removed_n: number } | null; links_added?: number | null; seo_added?: number | null; api?: { added: string[]; removed: string[]; added_n: number; removed_n: number } | null; api_breaking?: string[] };
+  /** The project's other pages (`github.pages`): errors while each loaded, change since the push before, against the default branch. */
+  /** The project's other pages: each one's checks too, and what of them is new against main's same page. */
+  pages?: {
+    path: string;
+    errors: number;
+    percent: number | null;
+    base_percent: number | null;
+    a11y_problems?: number | null;
+    seo?: string[];
+    broken_links?: { path: string; status: number }[];
+    a11y_added?: number | null;
+    links_added?: number | null;
+  }[];
+  /** The `roll/visual` review (the project's `visual_review`); `required`: it keeps the change from landing too. */
+  visual_review?: {
+    state: "unchanged" | "changed" | "accepted";
+    branch: string;
+    percent: number;
+    by: string | null;
+    required: boolean;
+    head?: string;
+    /** Each page that differs (`path` `""`: the first page) and who accepted it at this head. */
+    pages?: { path: string; percent: number; by: string | null; unstable?: boolean }[];
+  };
+  /** What a screen reader can't name on that page. */
+  page_links?: { checked: number; broken: { path: string; status: number }[] };
+  page_a11y?: { issues: { kind: string; count: number; first: string | null; impact?: "minor" | "moderate" | "serious" | "critical" | null; help?: string | null }[]; lang: boolean; title: boolean; seo?: string[] };
 }
 
 export interface Change {

@@ -75,6 +75,9 @@ pub struct Config {
     pub interval: Duration,
     /// How often branches' sizes and costs are read again.
     pub usage_every: Duration,
+    /// Where services reach roll's mail catcher (`host:port` as a client on this node writes it;
+    /// containers get it rewritten). `None`: no catcher, and previews' mail fails.
+    pub mail: Option<String>,
 }
 
 impl Default for Config {
@@ -85,6 +88,7 @@ impl Default for Config {
             port: None,
             interval: Duration::from_secs(15),
             usage_every: Duration::from_secs(300),
+            mail: None,
         }
     }
 }
@@ -96,6 +100,29 @@ impl Config {
             (_, Some(p)) => format!(":{p}"),
         };
         format!("{}://{host}.{}{port}", self.scheme, self.domain)
+    }
+}
+
+/// What an engine did since it started: converges and screenshots, and how many failed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    pub converges: u64,
+    pub converge_failures: u64,
+    pub screenshots: u64,
+    pub screenshot_failures: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct Counters {
+    converges: std::sync::atomic::AtomicU64,
+    converge_failures: std::sync::atomic::AtomicU64,
+    screenshots: std::sync::atomic::AtomicU64,
+    screenshot_failures: std::sync::atomic::AtomicU64,
+}
+
+impl Counters {
+    pub(crate) fn add(c: &std::sync::atomic::AtomicU64) {
+        c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -115,6 +142,11 @@ pub struct Engine {
     usage_read: Mutex<HashMap<String, i64>>,
     /// Previews whose screenshot a converge asked for; taken after the pass (`pass`).
     shots_wanted: Mutex<std::collections::HashSet<String>>,
+    /// Screenshots that failed once at a head (preview, head): tried again once, since the service
+    /// may have been stopped or redeployed underneath, before the head is given up on.
+    shots_failed: Mutex<std::collections::HashSet<(String, String)>>,
+    /// What this node did, for rolld's metrics (`Engine::stats`).
+    counters: Counters,
     /// One screenshot at a time.
     shooting: Arc<tokio::sync::Semaphore>,
     /// Services a converge just deployed at a change's new head, woken after the pass (`warm`).
@@ -177,6 +209,8 @@ impl Engine {
             secrets_told: Mutex::new(HashMap::new()),
             paths_seen: Mutex::new(HashMap::new()),
             shots_wanted: Mutex::new(std::collections::HashSet::new()),
+            shots_failed: Mutex::new(std::collections::HashSet::new()),
+            counters: Counters::default(),
             shooting: Arc::new(tokio::sync::Semaphore::new(1)),
             warm_wanted: Mutex::new(Vec::new()),
             deploying_since: Mutex::new(HashMap::new()),
@@ -213,6 +247,13 @@ impl Engine {
                 drop(e);
             }
         })
+    }
+
+    /// What this node's engine did since it started (rolld publishes the change each minute).
+    pub fn stats(&self) -> Stats {
+        let get = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed);
+        let c = &self.counters;
+        Stats { converges: get(&c.converges), converge_failures: get(&c.converge_failures), screenshots: get(&c.screenshots), screenshot_failures: get(&c.screenshot_failures) }
     }
 
     /// Converge soon.
@@ -447,7 +488,7 @@ const BUDGET_LEVELS: [u32; 2] = [80, 100];
 /// What a service is deployed with (its variables, its access, whether it may read protected
 /// secrets), as a digest (FNV-1a: change detection, not a secret): a change to any redeploys it,
 /// so a service that lost trust drops what it read.
-fn config_fingerprint(vars: &[(String, String)], private: bool, bypass: Option<&str>, trusted: bool) -> String {
+fn config_fingerprint(vars: &[(String, String)], private: bool, bypass: Option<&str>, trusted: bool, feedback: bool) -> String {
     let mut sorted: Vec<&(String, String)> = vars.iter().collect();
     sorted.sort();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -457,7 +498,7 @@ fn config_fingerprint(vars: &[(String, String)], private: bool, bypass: Option<&
             h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
         }
     }
-    format!("{h:016x}{}{}", if private { "p" } else { "" }, if trusted { "t" } else { "" })
+    format!("{h:016x}{}{}{}", if private { "p" } else { "" }, if trusted { "t" } else { "" }, if feedback { "f" } else { "" })
 }
 
 /// Whether a change gets a preview under the project's rules (approval aside).
@@ -473,6 +514,21 @@ fn wants(s: &Settings, c: &ChangeInfo) -> bool {
 
 /// The paths a head changes (`None`: not known).
 type HeadPaths = Option<Arc<Vec<String>>>;
+
+/// The project's variables for a preview of `branch`: `env`, then every `env_for` glob that
+/// matches the branch (a preview with none counts as `*`), in the globs' order.
+pub(super) fn project_env(s: &Settings, branch: Option<&str>) -> Vec<(String, String)> {
+    let branch = branch.unwrap_or("*");
+    let mut env: Vec<(String, String)> = s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (glob, vars) in &s.env_for {
+        if crate::glob::matches(glob, branch) {
+            for (k, v) in vars {
+                set(&mut env, k, v.clone());
+            }
+        }
+    }
+    env
+}
 
 /// Heads whose paths [`Engine::wanted`] keeps.
 const PATHS_KEPT: usize = 4096;
@@ -558,6 +614,7 @@ mod tests {
             labels: Vec::new(),
             trusted: true,
             approved: false,
+            author: String::new(),
             github_pr: None,
         };
         assert!(wants(&s, &ch));

@@ -20,10 +20,14 @@ pub struct FakeCode {
     pub paths: Mutex<HashMap<String, Vec<String>>>,
     /// The paths between two heads, by `"<from>..<to>"` (unlisted: not known).
     pub between: Mutex<HashMap<String, Vec<String>>>,
+    /// The feedback left on changes' preview pages, by change.
+    pub feedback: Mutex<HashMap<String, Vec<roll_previews::notes::Note>>>,
     /// The `health` path every service says it has.
     pub health: Mutex<Option<String>>,
     pub reports: Mutex<Vec<Preview>>,
     pub forgotten: Mutex<Vec<String>>,
+    /// Previews that went with their teardown failing: (preview, what it said).
+    pub teardowns: Mutex<Vec<(String, String)>>,
     /// Budget alerts sent: (the repos told, the alert).
     pub budgets: Mutex<Vec<(Vec<String>, roll_previews::ports::BudgetAlert)>>,
 }
@@ -53,8 +57,18 @@ impl Source for FakeCode {
     async fn head(&self, repo: &str, branch: Option<&str>) -> anyhow::Result<Option<String>> {
         Ok(self.heads.lock().get(&format!("{repo}@{}", branch.unwrap_or("main"))).cloned())
     }
+    async fn merge_base(&self, _repo: &str, _head: &str) -> anyhow::Result<Option<String>> {
+        // Every change leaves main where the fake's main is.
+        Ok(self.heads.lock().get("acme/web@main").cloned())
+    }
+    async fn default_branch(&self, _repo: &str) -> anyhow::Result<Option<String>> {
+        Ok(Some("main".into()))
+    }
     async fn paths(&self, _repo: &str, head: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(self.paths.lock().get(head).cloned())
+    }
+    async fn feedback(&self, change: &str) -> anyhow::Result<Vec<roll_previews::notes::Note>> {
+        Ok(self.feedback.lock().get(change).cloned().unwrap_or_default())
     }
     async fn paths_between(&self, _repo: &str, from: &str, to: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(self.between.lock().get(&format!("{from}..{to}")).cloned())
@@ -66,8 +80,11 @@ impl Source for FakeCode {
     async fn report(&self, p: &Preview, _s: &Settings) {
         self.reports.lock().push(p.clone());
     }
-    async fn forget(&self, p: &Preview) {
+    async fn forget(&self, p: &Preview, teardown: Option<&str>) {
         self.forgotten.lock().push(p.id.clone());
+        if let Some(t) = teardown {
+            self.teardowns.lock().push((p.id.clone(), t.to_string()));
+        }
     }
     async fn budget(&self, repos: &[String], alert: &roll_previews::ports::BudgetAlert) -> anyhow::Result<()> {
         self.budgets.lock().push((repos.to_vec(), alert.clone()));
@@ -89,6 +106,8 @@ pub struct FakeData {
     pub schema: Mutex<Option<(Vec<String>, Vec<String>)>>,
     /// Masks applied: (branch, columns).
     pub masks: Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>,
+    /// Branched from history at (Postgres's fake keeps history; the others don't).
+    pub at: Mutex<Vec<i64>>,
 }
 
 impl FakeData {
@@ -101,6 +120,7 @@ impl FakeData {
             fail_next: AtomicUsize::new(0),
             schema: Mutex::new(None),
             masks: Mutex::new(Vec::new()),
+            at: Mutex::new(Vec::new()),
         })
     }
 }
@@ -122,7 +142,14 @@ impl Brancher for FakeData {
         }
         Ok(Branched::plain(id))
     }
-    async fn mask(&self, _parent: &str, branch: &str, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+    async fn branch_at(&self, parent: &str, name: &str, mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
+        if self.kind != Kind::Postgres {
+            return Ok(None);
+        }
+        self.at.lock().push(at);
+        self.branch(parent, name, mode).await.map(Some)
+    }
+    async fn mask(&self, _parent: &str, branch: &str, _kept: Option<&str>, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
         self.masks.lock().push((branch.to_string(), columns.clone()));
         Ok(())
     }
@@ -160,6 +187,10 @@ pub type Vars = Vec<(String, String)>;
 #[derive(Default)]
 pub struct FakeApps {
     pub deployed: Mutex<HashMap<(String, String), String>>,
+    /// roll apps' catalog for the project (unset: none, so roll.toml's services), and the memory
+    /// its preview environments run with.
+    pub catalog: Mutex<Option<Vec<roll_previews::ports::CatalogService>>>,
+    pub memory: Mutex<Option<u32>>,
     /// Services woken (warmed after a push, or asked to wake).
     pub woken: Mutex<Vec<(String, String)>>,
     /// What a service answers on its health path (unset: the backend can't tell).
@@ -176,8 +207,18 @@ pub struct FakeApps {
     /// The next deploys that answer "still deploying", then the next that fail.
     pub still: AtomicUsize,
     pub fail_deploy: AtomicUsize,
+    /// The next removals that fail.
+    pub fail_remove: AtomicUsize,
     /// Runs inside a deploy (an API call landing while the reconciler works).
     pub on_deploy: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// The PNG every screenshot is (unset: the backend can't take one), and the previews taken.
+    pub shot: Mutex<Option<Vec<u8>>>,
+    /// The API operations a screenshot reads when it's asked to (`github.openapi`), by a
+    /// revision the preview runs.
+    pub api: Mutex<HashMap<String, Vec<String>>>,
+    /// Each service's last deploy asked for the feedback button.
+    pub feedback: Mutex<HashMap<(String, String), bool>>,
+    pub shots: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -198,7 +239,14 @@ impl Apps for FakeApps {
         }
         self.deployed.lock().insert((t.preview.clone(), t.service.clone()), t.revision.clone());
         self.vars.lock().insert((t.preview.clone(), t.service.clone()), t.vars.clone());
+        self.feedback.lock().insert((t.preview.clone(), t.service.clone()), t.feedback);
         Ok(None)
+    }
+    async fn catalog(&self, _project: &str) -> anyhow::Result<Option<Vec<roll_previews::ports::CatalogService>>> {
+        Ok(self.catalog.lock().clone())
+    }
+    async fn memory_mb(&self, _: &str, _: &str) -> Option<u32> {
+        *self.memory.lock()
     }
     async fn probe(&self, _: &str, _: &str, _path: &str) -> anyhow::Result<Option<(u16, String)>> {
         Ok(self.answers.lock().clone())
@@ -209,6 +257,10 @@ impl Apps for FakeApps {
     }
     async fn sleep(&self, _: &str, _: &str) {}
     async fn remove(&self, p: &str, s: &str) -> anyhow::Result<()> {
+        if self.fail_remove.load(Ordering::SeqCst) > 0 {
+            self.fail_remove.fetch_sub(1, Ordering::SeqCst);
+            anyhow::bail!("the runtime is busy");
+        }
         self.deployed.lock().remove(&(p.to_string(), s.to_string()));
         self.removed.lock().push((p.to_string(), s.to_string()));
         Ok(())
@@ -222,6 +274,15 @@ impl Apps for FakeApps {
         let at_rev = self.deployed.lock().values().filter(|r| **r == job.revision).count();
         self.runs.lock().push((job.seed.run.clone(), job.revision.clone(), at_rev));
         Ok((self.seed_exit.load(Ordering::SeqCst), "seed output".into()))
+    }
+    async fn screenshot(&self, preview: &str, _service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
+        let Some(png) = self.shot.lock().clone() else { return Ok(None) };
+        // The API the preview serves: by any revision it runs (whichever service is first).
+        let revs: Vec<String> = self.deployed.lock().iter().filter(|((p, _), _)| p == preview).map(|(_, r)| r.clone()).collect();
+        let api = opts.openapi.as_ref().and_then(|_| revs.iter().find_map(|r| self.api.lock().get(r).cloned()));
+        self.shots.lock().push(preview.to_string());
+        let pages = opts.pages.iter().map(|p| roll_previews::ports::PageShot { path: p.clone(), png: png.clone(), errors: 0, report: Default::default() }).collect();
+        Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None, pages, text: None, links: None, api }))
     }
     fn status(&self, _: &str, _: &str) -> Option<ServiceState> {
         None
@@ -273,6 +334,7 @@ pub fn change(id: &str, n: i64) -> ChangeInfo {
         labels: Vec::new(),
         trusted: true,
         approved: false,
+        author: "carol".into(),
         github_pr: Some(100 + n),
     }
 }

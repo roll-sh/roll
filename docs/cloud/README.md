@@ -550,6 +550,8 @@ turns them into metrics without an API call from the node. Namespace `RollCloud`
 | `HandoffFailures` | Count | `service` | handoffs that timed out with requests in flight, whose release didn't reach the backend, or that a drain left behind |
 | `LeaseTakeovers` | Count | `service` | leases taken from a holder that never released them (it died or was cut off) |
 | `LeasesFenced` | Count | `service` | leases this node stopped using because it couldn't renew them in time |
+| `PreviewConverges`, `PreviewConvergeFailures` | Count | `service` | roll previews' converges on this node, and those that failed (retried with backoff) |
+| `PreviewScreenshots`, `PreviewScreenshotFailures` | Count | `service` | previews' screenshot runs kept, and those that failed (`roll_previews::Engine::stats`) |
 
 Forwarded requests carry no metrics: the node that received them counted them. The lease
 counters come from `roll_cluster::Cluster::stats` (roll-cluster has no AWS code).

@@ -164,6 +164,17 @@ impl Code {
         if !c.trusted && !c.run_approved {
             out.push(Blocker::new("untrusted", "from someone without write access: a writer must approve running it"));
         }
+        // The project's previews ask for a visual review (`visual_review = "required"`, the
+        // project's rule, not the change's): pages that differ from main wait for someone.
+        // Accepted by its own author doesn't count (as with approvals).
+        if let Some(v) = c.preview.as_ref().and_then(|p| p.environment.as_ref()).and_then(|e| e.visual_review.as_ref()).filter(|v| v.required) {
+            let own = v.by.as_deref().is_some_and(|by| by.eq_ignore_ascii_case(&c.author) || by.eq_ignore_ascii_case(c.author.trim_start_matches('@')));
+            match v.state.as_str() {
+                "changed" => out.push(Blocker::new("visual", format!("its pages differ from {} by {:.1}%: someone must accept them on its preview", v.branch, v.percent.max(0.1)))),
+                "accepted" if own => out.push(Blocker::new("visual", "its visual change was accepted by its own author: someone else must accept it")),
+                _ => {}
+            }
+        }
         if r.land_policy == LandPolicy::Queue {
             let pending: Vec<String> = settings
                 .change_checks(&r.required_checks)

@@ -293,6 +293,16 @@ pub struct PreviewEnvironment {
     /// read; untrusted text (a fork's migrations name the objects).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_changes: Option<Vec<String>>,
+    /// What in `schema_changes` would hurt production when it lands (roll previews'
+    /// `schema::risks`); untrusted text too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_risks: Vec<String>,
+    /// How long the project's release (migrations) took on the preview's data at `head`, and at
+    /// the run before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_before_ms: Option<i64>,
     /// A signed, expiring link to the first service's screenshot (public previews only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot_url: Option<String>,
@@ -302,6 +312,225 @@ pub struct PreviewEnvironment {
     /// Earlier pushes still reachable (newest first): the service, the changeset it runs, its URL.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub earlier: Vec<PreviewEarlier>,
+    /// How much the first service's page changed since the screenshot at an earlier head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_change: Option<PreviewVisualChange>,
+    /// How fast the first service's page loaded at this head (and its load at the head before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_speed: Option<PreviewPageSpeed>,
+    /// What went wrong while that page loaded (the page's own words: untrusted, one line each).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_health: Option<PreviewPageHealth>,
+    /// What a screen reader can't name on that page, and what the document misses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_a11y: Option<PreviewPageA11y>,
+    /// Its first page's own links that are broken, of those checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_links: Option<PreviewPageLinks>,
+    /// How much its page differs from the project's preview of the default branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_change: Option<PreviewBaseChange>,
+    /// A public preview's picture of where that is, signed and expiring (as `screenshot_url`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_url: Option<String>,
+    /// The project's other pages (`github.pages`): errors, change since the push before, and
+    /// against the default branch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<PreviewPageCheck>,
+    /// How slow and heavy its first page may get (`roll/speed`), when the project set a budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_budget: Option<PreviewSpeedBudget>,
+    /// The `roll/visual` status (the project's `github.visual_review`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_review: Option<PreviewVisualReview>,
+}
+
+/// 0 is no limit.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewSpeedBudget {
+    pub load_ms: u32,
+    pub bytes: u64,
+    /// Largest contentful paint; 0 is no limit.
+    #[serde(default)]
+    pub lcp_ms: u32,
+    /// Cumulative layout shift; 0 is no limit.
+    #[serde(default)]
+    pub cls: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewVisualReview {
+    /// `unchanged`, `changed` (waiting for someone to accept it) or `accepted`.
+    pub state: String,
+    pub branch: String,
+    pub percent: f64,
+    pub by: Option<String>,
+    /// Required to land in roll (`Code::blockers`), not only a status.
+    #[serde(default)]
+    pub required: bool,
+    /// The head whose screenshots it's about (what an acceptance names).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    /// Each page that differs, and who accepted it at this head.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<PreviewPageReview>,
+}
+
+/// One page of a visual review (`path` `""`: the first page).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewPageReview {
+    pub path: String,
+    pub percent: f64,
+    pub by: Option<String>,
+    /// It moves by itself (two captures a second apart differ): the difference may be only that.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unstable: bool,
+}
+
+impl PreviewVisualReview {
+    /// `(accepted, changed)` pages, when some but not all are accepted.
+    pub fn partly(&self) -> Option<(usize, usize)> {
+        let done = self.pages.iter().filter(|p| p.by.is_some()).count();
+        (done > 0 && done < self.pages.len()).then_some((done, self.pages.len()))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewPageCheck {
+    pub path: String,
+    pub errors: u32,
+    pub percent: Option<f64>,
+    pub base_percent: Option<f64>,
+    /// Its accessibility problems, SEO problems (roll's words) and broken links, as the first
+    /// page's are read, and what of each is new against the branch's page at the same path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a11y_problems: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seo: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub broken_links: Vec<PreviewBrokenLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a11y_added: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links_added: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewBaseChange {
+    pub branch: String,
+    pub percent: f64,
+    pub phone_percent: Option<f64>,
+    /// How long the branch's first page took to load where it was compared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_ms: Option<u32>,
+    /// Its largest contentful paint there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lcp_ms: Option<u32>,
+    /// Accessibility problems its first page has that the branch's didn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a11y_added: Option<u32>,
+    /// Errors and failed requests past the branch's while its first page loaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub errors_added: Option<u32>,
+    /// Its first page's words against the branch's, by line (untrusted: the page's own text).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<PreviewTextDiff>,
+    /// Broken links its first page has that the branch's didn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links_added: Option<u32>,
+    /// SEO problems its first page has that the branch's didn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seo_added: Option<u32>,
+    /// Its API's operations (`GET /users/{id}`) against the branch's, from the OpenAPI document
+    /// roll previews reads (`github.openapi`): `removed` is what callers of the branch's find
+    /// gone. Untrusted: the change's own document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<PreviewTextDiff>,
+    /// What it breaks inside the operations both keep (a parameter that becomes required, a
+    /// response field that goes, …): a sentence each, by operation. Untrusted text too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_breaking: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewPageLinks {
+    pub checked: u32,
+    /// `{path, status}` (status 0: no answer); paths are the page's own.
+    pub broken: Vec<PreviewBrokenLink>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewBrokenLink {
+    pub path: String,
+    pub status: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewTextDiff {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub added_n: usize,
+    pub removed_n: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewPageA11y {
+    /// `images`, `fields`, `buttons`, `links`: a count and the first one's markup (untrusted).
+    pub issues: Vec<PreviewA11yIssue>,
+    pub lang: bool,
+    pub title: bool,
+    /// Its SEO problems, in roll's words ("no meta description").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seo: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewA11yIssue {
+    /// `images`, `fields`, `buttons`, `links`, or an axe-core rule id (`color-contrast`).
+    pub kind: String,
+    pub count: u32,
+    pub first: Option<String>,
+    /// axe-core's impact: `minor`, `moderate`, `serious` or `critical`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impact: Option<String>,
+    /// axe-core's words for the rule: untrusted (the page's session), shown as text, never in a
+    /// comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewPageHealth {
+    pub errors: u32,
+    pub first_error: Option<String>,
+    pub failed: u32,
+    pub first_failed: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewPageSpeed {
+    pub ttfb_ms: u32,
+    pub fcp_ms: Option<u32>,
+    pub load_ms: u32,
+    pub bytes: u64,
+    /// The load at the head before, to compare.
+    pub before_load_ms: Option<u32>,
+    /// Core Web Vitals: largest contentful paint and cumulative layout shift.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lcp_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cls: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewVisualChange {
+    /// The head of the screenshot before.
+    pub since: String,
+    /// The share of pixels that changed, in percent.
+    pub percent: f64,
+    /// The same at a phone's width, when both screenshots had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone_percent: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -336,6 +565,9 @@ pub struct PreviewResourceLink {
     pub kind: String,
     pub parent: String,
     pub r#ref: Option<String>,
+    /// What of the parent's data the preview gets: `none`, `masked` or `real` (as it is).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
 }
 
 /// Why a change can't land (or be queued) right now.

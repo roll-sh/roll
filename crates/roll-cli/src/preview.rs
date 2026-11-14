@@ -70,6 +70,45 @@ pub enum Preview {
         #[arg(long)]
         release: bool,
     },
+    /// Accept how a change's pages look at its latest screenshot (the `roll/visual` status,
+    /// `github.visual_review`): every page, --page one of `github.pages`, or --first the first
+    /// page only. A push asks again about the pages it changes.
+    Accept {
+        preview: String,
+        #[arg(long, conflicts_with = "first")]
+        page: Option<String>,
+        #[arg(long)]
+        first: bool,
+    },
+    /// Save its screenshot (a PNG) to --out: the first page, --page another of `github.pages`,
+    /// --phone at a phone's width, --base the default branch's it was compared with, --previous
+    /// the one before, or --diff base|previous where it differs from those.
+    Screenshot {
+        preview: String,
+        #[arg(long, short)]
+        out: std::path::PathBuf,
+        #[arg(long)]
+        page: Option<String>,
+        #[arg(long)]
+        phone: bool,
+        #[arg(long, conflicts_with_all = ["previous", "diff"])]
+        base: bool,
+        #[arg(long, conflicts_with = "diff")]
+        previous: bool,
+        #[arg(long, value_parser = ["base", "previous"])]
+        diff: Option<String>,
+    },
+    /// A link for someone outside the team, open for --hours (24 unless said; at most 720); the
+    /// link is printed once. --list shows them, --revoke ends one.
+    Share {
+        preview: String,
+        #[arg(long, default_value_t = 24, conflicts_with_all = ["list", "revoke"])]
+        hours: u32,
+        #[arg(long)]
+        list: bool,
+        #[arg(long)]
+        revoke: Option<String>,
+    },
     /// Its own variables, over the project's `env`: list them, set `NAME=value`, or --unset NAME.
     /// Its services redeploy with them.
     Env {
@@ -78,6 +117,28 @@ pub enum Preview {
         set: Vec<String>,
         #[arg(long)]
         unset: Vec<String>,
+    },
+    /// Each data branch's connection, as its services get it (its own credentials, never the
+    /// parent's): `NAME=value` lines per branch, or --kind postgres for that kind's only, e.g.
+    /// `psql "$(roll preview connect pv_… --kind postgres | sed -n 's/^DATABASE_URL=//p')"`.
+    Connect {
+        preview: String,
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// The mail its services sent, caught by roll and never delivered: who it was for and its
+    /// subject, or --read <mail> one message as it was sent.
+    Mail {
+        preview: String,
+        #[arg(long)]
+        read: Option<String>,
+    },
+    /// The notes left on its pages that nobody has resolved, or --resolve <note> one of them
+    /// (the page's button stops listing it).
+    Notes {
+        preview: String,
+        #[arg(long)]
+        resolve: Option<String>,
     },
     /// Re-branch its data from the parents (every resource, or the ones named).
     Reset {
@@ -145,6 +206,11 @@ async fn project_id(api: &Api, p: &str) -> anyhow::Result<String> {
 fn usd(v: &Value) -> String {
     let x = v.as_f64().unwrap_or(0.0);
     if x > 0.0 && x < 0.01 { format!("${x:.4}") } else { format!("${x:.2}") }
+}
+
+/// A time to come (ms) as UTC, minute precision: "2026-11-14 09:30 UTC".
+fn until_utc(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_else(|| "?".into())
 }
 
 fn print_row(p: &Value) {
@@ -364,7 +430,63 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
         Preview::Sleep { preview } => api.post(&format!("/v1/previews/{preview}/sleep"), json!({})).await?,
         Preview::Wake { preview } => api.post(&format!("/v1/previews/{preview}/wake"), json!({})).await?,
         Preview::Refresh { preview } => api.post(&format!("/v1/previews/{preview}/refresh"), json!({})).await?,
+        Preview::Screenshot { preview, out, page, phone, base, previous, diff } => {
+            let mut q: Vec<String> = Vec::new();
+            if let Some(p) = &page {
+                let enc: String = p.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+                q.push(format!("page={enc}"));
+            }
+            for (on, kv) in [(phone, "view=phone"), (base, "base=1"), (previous, "previous=1")] {
+                if on {
+                    q.push(kv.into());
+                }
+            }
+            if let Some(d) = &diff {
+                q.push(format!("diff={d}"));
+            }
+            let path = format!("/v1/previews/{preview}/screenshot{}{}", if q.is_empty() { "" } else { "?" }, q.join("&"));
+            let png = api.open_stream(&path).await?.bytes().await?;
+            std::fs::write(&out, &png).map_err(|e| anyhow::anyhow!("writing {}: {e}", out.display()))?;
+            json!({ "saved": out.display().to_string(), "bytes": png.len() })
+        }
+        Preview::Accept { preview, page, first } => {
+            let body = match (page, first) {
+                (Some(p), _) => json!({ "path": p }),
+                (None, true) => json!({ "path": "" }),
+                (None, false) => json!({}),
+            };
+            api.post(&format!("/v1/previews/{preview}/visual/accept"), body).await?
+        }
         Preview::Keep { preview, hours, release } => api.post(&format!("/v1/previews/{preview}/keep"), json!({ "hours": if release { 0 } else { hours } })).await?,
+        Preview::Share { preview, hours, list, revoke } => {
+            let path = format!("/v1/previews/{preview}/shares");
+            let v = match (list, revoke) {
+                (_, Some(sid)) => {
+                    api.call(reqwest::Method::DELETE, &format!("{path}/{sid}"), None).await?;
+                    json!({ "revoked": sid })
+                }
+                (true, None) => api.get(&path).await?,
+                (false, None) => api.post(&path, json!({ "hours": hours })).await?,
+            };
+            if !as_json {
+                match (&v["url"], v.as_array()) {
+                    (Value::String(url), _) => {
+                        println!("{url}");
+                        eprintln!("open until {} ({}); it's shown only now. roll preview share {preview} --revoke {} ends it", until_utc(v["expires_at"].as_i64().unwrap_or(0)), s(&v["id"]), s(&v["id"]));
+                    }
+                    (_, Some(list)) if !list.is_empty() => {
+                        for x in list {
+                            let state = if x["revoked"] == true { "revoked" } else { "open" };
+                            println!("{}  {state}  until {}  by {}", s(&x["id"]), until_utc(x["expires_at"].as_i64().unwrap_or(0)), s(&x["created_by"]));
+                        }
+                    }
+                    (_, Some(_)) => println!("no share links"),
+                    _ => println!("revoked {}", s(&v["revoked"])),
+                }
+                return Ok(());
+            }
+            v
+        }
         Preview::Env { preview, set, unset } => {
             let path = format!("/v1/previews/{preview}/env");
             let v = if set.is_empty() && unset.is_empty() {
@@ -384,6 +506,70 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 match v["vars"].as_object().filter(|m| !m.is_empty()) {
                     Some(m) => m.iter().for_each(|(k, v)| println!("{k}={}", v.as_str().unwrap_or_default())),
                     None => println!("no variables of its own (the project's `env` applies)"),
+                }
+                return Ok(());
+            }
+            v
+        }
+        Preview::Mail { preview, read } => {
+            if let Some(mail) = read {
+                let text = api.open_stream(&format!("/v1/previews/{preview}/mail/{mail}")).await?.text().await?;
+                // The preview's code wrote it: no escape sequence of its reaches the terminal.
+                let text: String = text.replace("\r\n", "\n").chars().map(|c| if c.is_control() && c != '\n' && c != '\t' { '\u{fffd}' } else { c }).collect();
+                print!("{text}");
+                return Ok(());
+            }
+            let v = api.get(&format!("/v1/previews/{preview}/mail")).await?;
+            if !as_json {
+                match v["mail"].as_array().filter(|m| !m.is_empty()) {
+                    Some(list) => list.iter().for_each(|m| {
+                        let to: Vec<&str> = m["to"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                        println!("{}  {}  to {}  {}", s(&m["id"]), until_utc(m["at"].as_i64().unwrap_or(0)), to.join(", "), m["subject"].as_str().unwrap_or("(no subject)"));
+                    }),
+                    None => println!("no mail caught"),
+                }
+                return Ok(());
+            }
+            v
+        }
+        Preview::Notes { preview, resolve } => {
+            let v = match &resolve {
+                Some(note) => api.post(&format!("/v1/previews/{preview}/notes/{note}/resolve"), json!({})).await?,
+                None => api.get(&format!("/v1/previews/{preview}/notes")).await?,
+            };
+            if !as_json {
+                match (&resolve, v["notes"].as_array()) {
+                    (Some(note), _) => println!("resolved {note}"),
+                    (None, Some(list)) if !list.is_empty() => list.iter().for_each(|n| {
+                        let on = match n["selector"].as_str().filter(|x| !x.is_empty()) {
+                            Some(sel) => format!("{} {sel}", s(&n["path"])),
+                            None => s(&n["path"]),
+                        };
+                        println!("{}  {}  by {}: {}", s(&n["id"]), on, s(&n["by"]), s(&n["note"]));
+                        for r in n["replies"].as_array().into_iter().flatten() {
+                            println!("    ↳ {}: {}", s(&r["by"]), s(&r["note"]));
+                        }
+                    }),
+                    _ => println!("no open notes"),
+                }
+                return Ok(());
+            }
+            v
+        }
+        Preview::Connect { preview, kind } => {
+            let v = api.get(&format!("/v1/previews/{preview}/connect")).await?;
+            if !as_json {
+                let branches: Vec<&Value> = v["branches"].as_array().into_iter().flatten().filter(|b| kind.as_deref().is_none_or(|k| b["kind"] == k)).collect();
+                if branches.is_empty() {
+                    anyhow::bail!("no {}branch in this preview", kind.as_deref().map(|k| format!("{k} ")).unwrap_or_default());
+                }
+                for b in &branches {
+                    if kind.is_none() {
+                        println!("# {} {}", s(&b["kind"]), s(&b["parent"]));
+                    }
+                    for (k, val) in b["vars"].as_object().into_iter().flatten() {
+                        println!("{k}={}", val.as_str().unwrap_or_default());
+                    }
                 }
                 return Ok(());
             }
