@@ -416,7 +416,7 @@ pub(crate) fn tokenizer_provider(ty: &str) -> Option<Provider<TokenizerBuilder>>
         }),
         "simple_pattern" => p(|_, _, s| simple_pattern(s, false)),
         "simple_pattern_split" => p(|_, _, s| simple_pattern(s, true)),
-        _ => None,
+        _ => crate::cjk::tokenizer_provider(ty),
     }
 }
 
@@ -744,7 +744,7 @@ pub(crate) fn filter_provider(ty: &str) -> Option<Provider<FilterBuilder>> {
         }),
         "phonetic" => crate::phonetic::provider(),
         "polish_stem" | "polish_stop" => crate::stempel::filter_provider(ty),
-        _ => crate::filter::extra_provider(ty),
+        _ => crate::cjk::filter_provider(ty).or_else(|| crate::filter::extra_provider(ty)),
     }
 }
 

@@ -495,7 +495,7 @@ pub(crate) fn char_filter_provider(ty: &str) -> Option<Provider<CharFilterBuilde
             },
             true,
         ),
-        _ => None,
+        _ => crate::cjk::char_filter_provider(ty),
     }
 }
 

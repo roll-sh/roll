@@ -893,6 +893,7 @@ fn explain_token(t: &Tok, cur: &mut Cursor, attrs: u32, include: &[String]) -> E
     if attrs & attr::FLAGS != 0 && want("flags") {
         a.insert("flags".to_string(), json!(t.flags));
     }
+    crate::morph::explain(t, attrs, &want, &mut a);
     ExplainToken {
         token: t.term.clone(),
         start_offset: start,
