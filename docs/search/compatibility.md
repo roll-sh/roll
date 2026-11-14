@@ -309,13 +309,13 @@ the discovery/store plugins.
 <!-- test-search: watcher >= 89 -->
 <!-- test-search: watcher-security >= 9 -->
 <!-- test-search: wildcard >= 9 -->
-<!-- test-search: platinum >= 1040 -->
-<!-- test-search: inference >= 14 -->
+<!-- test-search: platinum >= 1053 -->
+<!-- test-search: inference >= 117 -->
 <!-- test-search: esql >= 544 -->
 
 `platinum` by directory (roll / Elasticsearch passes): `ml` 340/618, `analytics` 113/114, `spatial`
 92/105, `security` 97/101, `rollup` 52/52, `exponential_histogram` 44/44, `vector-tile` 34/34,
-`api_key` 32/32, `aggregate-metrics` 26/28, `inference` 12/23, `search.vectors` 22/23, `wildcard`
+`api_key` 32/32, `aggregate-metrics` 26/28, `inference` 22/23, `search.vectors` 22/23, `wildcard`
 22/22, `terms_enum` 20/20, `rank_vectors` 0/15, `users` 15/15, `constant_keyword` 13/13,
 `counted_keyword` 8/11, `data_streams` 11/11, `migrate` 0/11, `change_password` 8/8, `roles` 8/8,
 `text_structure` 5/8, `enrich` 6/7, `privileges` 7/7, `profiling` 0/7, `token` 6/6, `versionfield`
@@ -907,14 +907,60 @@ service's own 429s are retried at most twice); `max_input_tokens` doesn't trunca
 Cohere's settings are read with roll's settings reader, so a malformed one fails with
 `validation_exception` instead of Cohere's object parser's `x_content_parse_exception`.
 
-YAML: `platinum/inference` 12 of the 23 tests that pass on Elasticsearch (the rest need
-`semantic_text`, and one the `random_reranker` retriever). The `inference` extended suite runs the
+YAML: `platinum/inference` 22 of the 23 tests that pass on Elasticsearch (the last needs the
+`random_reranker` retriever). The `inference` extended suite runs the
 same directory on a cluster with the `inference-service-test` plugin's services, which
 `search-dev --yaml-test-cluster` provides (`services/test.rs`: `test_service`,
 `text_embedding_test_service`, `test_reranking_service`, `completion_test_service`,
 `streaming_completion_test_service`, reproduced exactly) and real clusters never have; the plugin
-isn't in Elasticsearch's release, so there is no Elasticsearch baseline (roll 14 of 305).
+isn't in Elasticsearch's release, so there is no Elasticsearch baseline (roll 117 of 305).
 Tests: `crates/search-es/tests/inference.rs` runs every service against a mock server.
+
+### `semantic_text`
+
+`semantic_text` fields (`xpack/inference/semantic.rs`, `query.rs`, `chunking.rs`) as Elasticsearch
+9.5.5 has them with `index.mapping.semantic_text.use_legacy_format: false` (its default):
+
+- Mapping: `inference_id` (default `.elser-2-elasticsearch`, which answers as a cluster without
+  ML nodes), `search_inference_id`, `chunking_settings`, `index_options`, `meta`; the first
+  embedded document records `model_settings` (service, task type, dimensions, similarity, element
+  type), and settings that differ later fail the document (`Incompatible model settings`). Field
+  caps report the field as an inference `text` field. `_xpack/usage` counts the fields per
+  endpoint, service and preconfigured model.
+- Indexing: a bulk request embeds the values of all its documents together, one call per endpoint
+  per batch (2,048 inputs for OpenAI, 96 for Cohere, 512 otherwise); single writes, documents an
+  ingest pipeline produced and updates are embedded one by one after their pipeline. An update
+  re-embeds only fields whose text changed. A failed endpoint fails the item with
+  `inference_exception` (`Exception when running inference id [x] on field [f]`, the cause's
+  status). Values are chunked by the field's chunking settings, else the endpoint's: word and
+  sentence chunking follow Elasticsearch's chunkers with Unicode segmentation in place of ICU's
+  break iterators, recursive chunking takes the separators as regular expressions without
+  lookarounds; offsets count UTF-16 units over the values joined by one separator, as there.
+- Storage: the chunks' embeddings are hidden nested documents (`<field>.inference.chunks`, a
+  `sparse_vector` or `dense_vector` shaped by the model settings), and the results are kept in the
+  stored source under `_inference_fields` (Elasticsearch rebuilds that object from the index;
+  roll stores it), left out of `_source` unless the request sets `exclude_vectors: false` or
+  names it in its includes. Branches, snapshots and reindexing carry them: nothing is embedded
+  again unless its text changed.
+- Queries: `semantic`, and `match`, `knn` (a `text_embedding` `query_vector_builder`, or a
+  `query_vector`) and `sparse_vector` (a `query` text) on `semantic_text` fields are embedded on
+  the coordinator, each endpoint and text once, and run as Elasticsearch runs them: `nested`
+  (`score_mode: max`) over the chunks with `sparse_vector` or `knn` (`k` at least 10). Targets that
+  map the field differently each get their clause, limited by `_index`. `sparse_vector` queries
+  with `inference_id` and `query`, and `knn` builders naming an endpoint, work on any field too.
+  `sparse_vector` queries themselves are new in roll (linear feature queries boosted by the
+  tokens' weights; query-time token pruning isn't applied).
+- Authority: embedding documents and queries runs with the cluster's authority, as Elasticsearch
+  runs its inference filter and the semantic query's inference under its own origin: a writer
+  needs only its index privileges, a reader its read privileges, and neither gets the inference
+  API (`crates/search-es/tests/inference.rs` runs this as a user with `read` and `write` on one
+  index).
+
+Not yet: highlighting chunks (the `semantic` highlighter), the retrievers' simplified
+`query`/`fields` form, `copy_to` into `semantic_text` fields and multi-fields under them,
+validation of `index_options` (kept as given), the multimodal `embedding` task type and the new
+`semantic` field type, the `random_reranker` and `text_similarity_reranker` retrievers, and the
+rewrite outside `_search` (`_msearch`, search templates and async search don't embed queries).
 
 ## Per area
 
