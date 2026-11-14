@@ -1441,3 +1441,16 @@ async fn a_persons_canvas_doesnt_widen_a_project_rule() {
     let (_, list) = d.call(&token, Method::GET, "/v1/projects", None).await;
     assert_eq!(ids(&list), vec!["pa"], "only what's hers");
 }
+
+/// Open registration (RFC 7591) can't be flooded: a network registers at most 20 clients a minute
+/// on a node, then 429 with Retry-After.
+#[tokio::test]
+async fn registration_from_one_network_is_limited() {
+    let d = Daemon::new(50);
+    let register = || d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "client_name": "flood", "redirect_uris": ["http://127.0.0.1:9/cb"] })));
+    for _ in 0..20 {
+        assert_eq!(register().await.0, StatusCode::CREATED);
+    }
+    let (s, e) = register().await;
+    assert_eq!((s, e["error"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("too_many_requests")), "{e}");
+}

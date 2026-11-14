@@ -114,8 +114,29 @@ fn reg_error(code: &'static str, desc: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": code, "error_description": desc }))).into_response()
 }
 
+/// Registrations from one network (/24, /48) a minute at most, on a node: registration is open.
+const REGISTER_PER_MINUTE: u32 = 20;
+
 /// RFC 7591: open registration of public clients (PKCE, no secret).
-async fn register(State(a): S, body: axum::body::Bytes) -> Response {
+async fn register(State(a): S, req: axum::extract::Request) -> Response {
+    let ip = crate::evaluate::client_ip(&req, a.config.trust_forwarded_for);
+    let network = ip.and_then(|i| crate::store::network_of(&i.to_string())).unwrap_or_else(|| "unknown".into());
+    {
+        let now = code_sql::now_ms() / 60_000;
+        let mut seen = a.registrations.lock().unwrap_or_else(|e| e.into_inner());
+        if seen.len() > 10_000 {
+            seen.retain(|_, (minute, _)| *minute == now);
+        }
+        let (minute, n) = seen.entry(network).or_insert((now, 0));
+        if *minute != now {
+            (*minute, *n) = (now, 0);
+        }
+        if *n >= REGISTER_PER_MINUTE {
+            return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "60")], Json(json!({ "error": "too_many_requests", "error_description": "too many registrations from this network: try again in a minute" }))).into_response();
+        }
+        *n += 1;
+    }
+    let Ok(body) = axum::body::to_bytes(req.into_body(), (16 << 10) + 1).await else { return reg_error("invalid_client_metadata", "the registration is too large") };
     if body.len() > 16 << 10 {
         return reg_error("invalid_client_metadata", "the registration is too large");
     }
