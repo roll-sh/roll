@@ -282,6 +282,9 @@ pub enum Secrets {
     Tokens(Tokens),
     /// Where a key is set, in every project you can read (`STRIPE_*` for a prefix). Never values.
     Find { key: String },
+    /// Encryption keys (encryption as a service): encrypt stdin, decrypt stdin, rotate, list.
+    #[command(subcommand)]
+    Transit(TransitCmd),
     /// A key pair for backups: the secret key written to a file only you can read, the public key
     /// printed (give it to `backup --to`).
     Keygen {
@@ -494,6 +497,49 @@ pub enum Requests {
         bypass: bool,
     },
     Close { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum TransitCmd {
+    #[command(alias = "list")]
+    Ls,
+    Add { name: String },
+    /// A new version that encryptions use from now on.
+    Rotate { name: String },
+    /// Encrypt stdin (any bytes); prints the ciphertext.
+    Encrypt {
+        name: String,
+        #[arg(long)]
+        context: Option<String>,
+    },
+    /// Decrypt the ciphertext on stdin; writes the plaintext's bytes to stdout.
+    Decrypt {
+        name: String,
+        #[arg(long)]
+        context: Option<String>,
+    },
+    /// Bring a key from outside: 32 bytes, base64, on stdin (from Vault: `vault read
+    /// transit/export/encryption-key/NAME/<n>`, with --vault-version <n>, so Vault's own
+    /// ciphertexts decrypt and rewrap). Makes the key, or adds it as its newest version.
+    Import {
+        name: String,
+        #[arg(long)]
+        vault_version: Option<u32>,
+    },
+    /// Sign stdin (any bytes) with the key's newest version (Ed25519); prints the signature.
+    Sign { name: String },
+    /// Check a signature of stdin; fails when it doesn't match.
+    Verify { name: String, signature: String },
+    /// HMAC-SHA256 of stdin; the same input always gives the same HMAC (a blind index).
+    Hmac { name: String },
+    /// The key's public signing keys, one per version (PEM; --json: raw, PEM and JWK).
+    Public { name: String },
+    /// Delete a key for good (what it encrypted can't be decrypted again).
+    Rm {
+        name: String,
+        #[arg(long)]
+        confirm: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1165,6 +1211,83 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             println!("{} is {}", s(&v["id"]), s(&v["state"]));
         }
+        Secrets::Transit(t) => match t {
+            TransitCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/transit", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for k in v.as_array().into_iter().flatten() {
+                    println!("{:<20} v{}  decrypts from v{}", s(&k["name"]), k["latest_version"], k["min_decrypt_version"]);
+                }
+            }
+            TransitCmd::Add { name } => {
+                let v = c.call(Method::POST, &format!("{}/transit", c.base()), Some(json!({ "name": name }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Made encryption key {}: `roll secrets transit encrypt {}` encrypts stdin.", s(&v["name"]), s(&v["name"]));
+            }
+            TransitCmd::Rotate { name } => {
+                let v = c.call(Method::POST, &format!("{}/transit/{}/rotate", c.base(), enc(&name)), None).await?;
+                println!("{} is at version {}", s(&v["name"]), v["latest_version"]);
+            }
+            TransitCmd::Encrypt { name, context } => {
+                use base64::Engine;
+                let mut plain = Vec::new();
+                std::io::stdin().read_to_end(&mut plain).context("reading stdin")?;
+                let v = c.call(Method::POST, &format!("{}/transit/{}/encrypt", c.base(), enc(&name)), Some(json!({ "plaintext": base64::engine::general_purpose::STANDARD.encode(&plain), "context": context }))).await?;
+                println!("{}", s(&v["ciphertext"]));
+            }
+            TransitCmd::Decrypt { name, context } => {
+                use base64::Engine;
+                use std::io::Write;
+                let mut ct = String::new();
+                std::io::stdin().read_to_string(&mut ct).context("reading stdin")?;
+                let v = c.call(Method::POST, &format!("{}/transit/{}/decrypt", c.base(), enc(&name)), Some(json!({ "ciphertext": ct.trim(), "context": context }))).await?;
+                let plain = base64::engine::general_purpose::STANDARD.decode(s(&v["plaintext"])).context("the plaintext isn't base64")?;
+                std::io::stdout().write_all(&plain)?;
+            }
+            TransitCmd::Import { name, vault_version } => {
+                let mut key = String::new();
+                std::io::stdin().read_to_string(&mut key).context("reading the key from stdin")?;
+                let body = json!({ "key": key.trim(), "vault_version": vault_version });
+                let list = c.call(Method::GET, &format!("{}/transit", c.base()), None).await?;
+                let v = if list.as_array().into_iter().flatten().any(|k| k["name"] == name.as_str()) {
+                    c.call(Method::POST, &format!("{}/transit/{}/rotate", c.base(), enc(&name)), Some(body)).await?
+                } else {
+                    let mut body = body;
+                    body["name"] = json!(name);
+                    c.call(Method::POST, &format!("{}/transit", c.base()), Some(body)).await?
+                };
+                println!("{} is at version {} (brought{})", s(&v["name"]), v["latest_version"], vault_version.map(|n| format!(", Vault's version {n}")).unwrap_or_default());
+            }
+            TransitCmd::Sign { name } => println!("{}", transit_stdin(&c, &name, "sign", "signature").await?),
+            TransitCmd::Hmac { name } => println!("{}", transit_stdin(&c, &name, "hmac", "hmac").await?),
+            TransitCmd::Verify { name, signature } => {
+                use base64::Engine;
+                let mut input = Vec::new();
+                std::io::stdin().read_to_end(&mut input).context("reading stdin")?;
+                let v = c.call(Method::POST, &format!("{}/transit/{}/verify", c.base(), enc(&name)), Some(json!({ "input": base64::engine::general_purpose::STANDARD.encode(&input), "signature": signature }))).await?;
+                if v["valid"] != true {
+                    bail!("the signature doesn't match");
+                }
+                eprintln!("the signature matches");
+            }
+            TransitCmd::Public { name } => {
+                let v = c.call(Method::GET, &format!("{}/transit/{}/public", c.base(), enc(&name)), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for k in v.as_array().into_iter().flatten() {
+                    println!("# {name} v{}\n{}", k["version"], s(&k["pem"]).trim_end());
+                }
+            }
+            TransitCmd::Rm { name, confirm } => {
+                c.call(Method::DELETE, &format!("{}/transit/{}?confirm={}", c.base(), enc(&name), enc(&confirm)), None).await?;
+                println!("Deleted {name}");
+            }
+        },
         Secrets::Tokens(t) => match t {
             Tokens::Ls => {
                 let v = c.call(Method::GET, &format!("{}/tokens", c.base()), None).await?;
@@ -2464,4 +2587,14 @@ async fn stop(child: &mut tokio::process::Child) {
         }
     }
     let _ = child.kill().await;
+}
+
+/// Sign or HMAC stdin's bytes with a transit key; the answer's `field`.
+async fn transit_stdin(c: &Client<'_>, name: &str, route: &str, field: &str) -> anyhow::Result<String> {
+    use base64::Engine;
+    use std::io::Read;
+    let mut input = Vec::new();
+    std::io::stdin().read_to_end(&mut input).context("reading stdin")?;
+    let v = c.call(Method::POST, &format!("{}/transit/{}/{route}", c.base(), enc(name)), Some(json!({ "input": base64::engine::general_purpose::STANDARD.encode(&input) }))).await?;
+    Ok(s(&v[field]).to_string())
 }

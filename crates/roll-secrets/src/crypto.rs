@@ -74,6 +74,15 @@ fn open_raw(c: &Aes256Gcm, aad: &str, raw: &[u8]) -> Result<Zeroizing<Vec<u8>>, 
     c.decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad: aad.as_bytes() }).map(Zeroizing::new).map_err(|_| CryptoError::Open)
 }
 
+/// AES-256-GCM with a key of the caller's (transit.rs): a random nonce first, `aad` bound in.
+pub(crate) fn seal_with(key: &[u8; 32], aad: &str, msg: &[u8]) -> Vec<u8> {
+    seal_raw(&cipher(key), aad, msg)
+}
+
+pub(crate) fn open_with(key: &[u8; 32], aad: &str, raw: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    open_raw(&cipher(key), aad, raw)
+}
+
 /// The key-encryption keys: the current one, and the previous one while data keys are resealed.
 #[derive(Clone)]
 pub struct Keyring {
