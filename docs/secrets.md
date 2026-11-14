@@ -2711,17 +2711,17 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **The Secrets Store CSI Driver provider** (on #62, its own pull request next): secrets mounted
+1. **The Secrets Store CSI Driver provider** (#63, on #62): secrets mounted
    into a pod as files, never a Kubernetes Secret in etcd, as Vault's, AWS', Azure's, GCP's and
    Infisical's providers do; each pod logs in with its own service account. Checked live against
    the driver v1.6.2 on k3s (mount, no Secret, another account refused, rotation in about 20 s, a
    key that stops resolving keeps the files).
-2. **`roll login` for people**: a browser sign-in (roll-access's OAuth with a loopback redirect)
-   whose token sits in the OS keychain and acts as the person, as `doppler login`, `infisical
-   login` and `op signin` do; today a person mints a project token per project and pastes it.
-3. **Conditional reads and caching in the SDKs**: `ETag` (the digest) on `…/values` and
-   `…/resolve`, a 304 that decrypts nothing and writes no audit row, and a TTL cache in the
-   TypeScript, Go and Python clients (AWS' caching clients, Vault Agent, Infisical's `cacheTtl`).
+2. **`roll login` for people** (roll MCP is building it on #25, where a person's own token acts as
+   them): a browser sign-in with PKCE and a loopback redirect, the token kept and refreshed, as
+   `doppler login`, `infisical login` and `op signin` do.
+3. **Conditional reads and caching in the SDKs** (#65, on #62): `ETag` and `If-None-Match` on
+   `…/values` (a 304 reads, issues and audits nothing; never for dynamic credentials), and a TTL
+   cache in the TypeScript, Go and Python clients that revalidates with it.
 4. **Terraform without values in state**: an `ephemeral "roll_secrets_values"` resource and a
    write-only `value_wo` (Vault's, AWS', Infisical's providers have both); resources for CAs, SSH
    CAs, encryption keys and outside databases; transit in the Go and Python clients (the
