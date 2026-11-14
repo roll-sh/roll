@@ -388,6 +388,10 @@ pub struct FieldTable {
     /// The mapping has vector fields (`dense_vector`, `rank_vectors`, `sparse_vector`), which
     /// fetched `_source` leaves out by default.
     pub has_vectors: bool,
+    /// The vector fields whose values the stored `_source` leaves out (by name), patched back
+    /// by the readers that need them (`source_vectors`); set by the engine from the index's
+    /// settings.
+    pub stripped_vectors: Vec<Arc<FieldInfo>>,
     /// `copy_to` targets and the fields copying into them (`MappingLookup.sourcePaths`):
     /// the fields API reads a target's values from its sources.
     pub copy_sources: HashMap<String, Vec<String>>,
@@ -471,6 +475,7 @@ impl FieldTable {
             analysis: self.analysis.clone(),
             key: self.key,
             has_vectors: self.has_vectors,
+            stripped_vectors: self.stripped_vectors.clone(),
             copy_sources: self.copy_sources.clone(),
             source_filter: self.source_filter.clone(),
         }
@@ -548,6 +553,7 @@ impl FieldTable {
             analysis,
             key: (0, 0, 0),
             has_vectors: false,
+            stripped_vectors: Vec::new(),
             copy_sources: HashMap::new(),
             source_filter: None,
         };

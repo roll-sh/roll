@@ -21,8 +21,11 @@ k-NN query workloads against roll search, Elasticsearch and OpenSearch
     bench-search-vectors.py search <url> <dir> --index <name> --dialect es|os
                                    --kind knn|knn_f10|knn_f1|rrf [--reps 200] [--warmup 30]
                                    [--cgroup dir] [--k 10] [--num-candidates 100]
+                                   [--source none|hidden|vectors]
         One client, the queries in order: latency p50/p99, recall@10 against the exact truth,
-        server CPU per query. Prints one JSON line.
+        server CPU per query. Prints one JSON line. The hits carry no `_source` unless
+        `--source` asks for it: `hidden` (vectors left out, the default `_source`) or
+        `vectors` (`exclude_vectors: false`).
 
 Vectors come from a Gaussian mixture (`clusters` centers of unequal weight, the points of
 each spread along 16 directions of its own plus a little isotropic noise),
@@ -260,7 +263,8 @@ def search(a):
         c.req("PUT", "/_search/pipeline/bench-rrf", {"phase_results_processors": [
             {"score-ranker-processor": {"combination": {"technique": "rrf", "rank_constant": 60}}}]})
         path += "?search_pipeline=bench-rrf"
-    bodies = [json.dumps(search_body(a.dialect, a.kind, q, a.k, a.num_candidates)).encode() for q in queries]
+    shown = {"none": False, "hidden": True, "vectors": {"exclude_vectors": False}}[a.source]
+    bodies = [json.dumps(dict(search_body(a.dialect, a.kind, q, a.k, a.num_candidates), _source=shown)).encode() for q in queries]
     for i in range(a.warmup):
         c.req("POST", path, bodies[i % len(bodies)])
     lat, rec, tot = [], 0, 0
@@ -279,7 +283,7 @@ def search(a):
             rec += len(want & set(ids[:a.k]))
             tot += a.k
     c1 = cpu_us(a.cgroup)
-    out = {"kind": a.kind, "reps": a.reps, "p50_ms": round(pct(lat, 50), 2), "p99_ms": round(pct(lat, 99), 2),
+    out = {"kind": a.kind, "source": a.source, "reps": a.reps, "p50_ms": round(pct(lat, 50), 2), "p99_ms": round(pct(lat, 99), 2),
            "mean_ms": round(sum(lat) / len(lat), 2)}
     if tot:
         out["recall"] = round(rec / tot, 4)
@@ -322,6 +326,8 @@ def main():
     s.add_argument("--k", type=int, default=10)
     s.add_argument("--num-candidates", type=int, default=100)
     s.add_argument("--cgroup")
+    s.add_argument("--source", choices=["none", "hidden", "vectors"], default="none",
+                   help="the hits' _source: none (false), hidden (vectors left out, the default), vectors (exclude_vectors: false)")
     s.add_argument("--dump", help="write every response's (id, score) hits to this file, one line per query")
     a = ap.parse_args()
     if a.cmd == "gen":

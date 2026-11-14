@@ -109,8 +109,14 @@ pub fn vectors(table: &FieldTable, path: &str, m: &mut Map, exclude: bool) {
 }
 
 /// Returns whether a vector stayed in.
+///
+/// Kept vectors print as Elasticsearch's patched ones do (`source_vectors`): at the end of
+/// their object, floats as floats, `sparse_vector` features sorted and as their postings keep
+/// them. A vector of an `index: false` field is never taken out of Elasticsearch's source and
+/// prints as sent. Normalizing twice changes nothing.
 pub fn vectors_keeping(table: &FieldTable, path: &str, m: &mut Map, keep: Option<&super::source::Globs>) -> bool {
     let mut drop = Vec::new();
+    let mut last = Vec::new();
     let mut kept = false;
     for (k, v) in m.iter_mut() {
         let full = join(path, k);
@@ -121,8 +127,11 @@ pub fn vectors_keeping(table: &FieldTable, path: &str, m: &mut Map, keep: Option
             // too, and patches back only the values the field holds: a null never shows.
             if v.is_null() || keep.is_some_and(|g| !g.matches(&full)) {
                 drop.push(k.clone());
+            } else if info.kind == Kind::DenseVector && !info.index {
+                kept = true;
             } else {
                 normalize_vector(info, v);
+                last.push(k.clone());
                 kept = true;
             }
             continue;
@@ -142,10 +151,37 @@ pub fn vectors_keeping(table: &FieldTable, path: &str, m: &mut Map, keep: Option
     for k in drop {
         m.shift_remove(&k);
     }
+    for k in last {
+        if let Some(v) = m.shift_remove(&k) {
+            m.insert(k, v);
+        }
+    }
     kept
 }
 
 fn normalize_vector(info: &FieldInfo, v: &mut Value) {
+    if info.kind == Kind::SparseVector {
+        // Rebuilt from the feature postings: one object (an array of objects merges), features
+        // in term order, each value as its term frequency keeps it (`FeatureField`).
+        let mut features: Vec<(String, Value)> = Vec::new();
+        let mut take = |m: &Map| {
+            for (k, x) in m {
+                let x = match x {
+                    Value::Num(n) => float_value(f32::from_bits(((n.as_f64() as f32).to_bits() >> 15) << 15)),
+                    other => other.clone(),
+                };
+                features.push((k.clone(), x));
+            }
+        };
+        match &*v {
+            Value::Obj(m) => take(m),
+            Value::Arr(items) => items.iter().for_each(|it| if let Value::Obj(m) = it { take(m) }),
+            _ => return,
+        }
+        features.sort_by(|a, b| a.0.cmp(&b.0));
+        *v = Value::Obj(features.into_iter().collect());
+        return;
+    }
     // A base64 (or hex) encoded vector reads back as the values it encodes.
     if let (Value::Str(s), Some(spec)) = (&*v, info.vector) {
         match crate::search::knn::decode_query_vector(s, spec.element, spec.dims as usize) {
@@ -155,17 +191,12 @@ fn normalize_vector(info: &FieldInfo, v: &mut Value) {
         }
         return;
     }
-    let float = match info.kind {
-        Kind::SparseVector => true,
-        _ => info.vector.is_none_or(|s| s.element == search_codec::VectorElement::Float32),
-    };
-    if !float {
+    if !info.vector.is_none_or(|s| s.element == search_codec::VectorElement::Float32) {
         return;
     }
     match v {
         Value::Num(n) => *v = float_value(n.as_f64() as f32),
         Value::Arr(a) => a.iter_mut().for_each(|x| normalize_vector(info, x)),
-        Value::Obj(m) if info.kind == Kind::SparseVector => m.values_mut().for_each(|x| normalize_vector(info, x)),
         _ => {}
     }
 }

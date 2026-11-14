@@ -86,6 +86,10 @@ struct ShardScan {
     idx: Arc<IndexMeta>,
     searcher: search_index::Searcher,
     docs: Vec<u32>,
+    /// An index whose `_source` hides vectors (`index.mapping.exclude_source_vectors`): each
+    /// source gets the vectors it keeps out back, as Elasticsearch shows them (reindex writes
+    /// them to the destination, update by query's scripts see them).
+    vectors: Option<Arc<crate::engine::fields::FieldTable>>,
 }
 
 impl Scanner {
@@ -104,7 +108,15 @@ impl Scanner {
             seg.ensure_stored().map_err(crate::engine::convert::index_error)?;
             let stored = sh.searcher.stored(doc).map_err(crate::engine::convert::index_error)?;
             let id = crate::search::hits::stored_id(&stored).unwrap_or_default();
-            let source = crate::fetch::source_bytes(&stored).map(Bytes::copy_from_slice);
+            let mut source = crate::fetch::source_bytes(&stored).map(Bytes::copy_from_slice);
+            if self.need_source
+                && let (Some(table), Some(b)) = (&sh.vectors, &source)
+                && let Value::Obj(mut m) = crate::fetch::parse_source(b)?
+            {
+                crate::engine::source_vectors::patch(&table.stripped_vectors, &mut m, &mut crate::engine::source_vectors::InSegment(seg, local));
+                crate::engine::synthetic::vectors(table, "", &mut m, false);
+                source = Some(Bytes::from(Value::Obj(m).to_json()));
+            }
             if self.need_source && source.is_none() {
                 return Err(EsError::illegal_argument(format!("[{}][{id}] didn't store _source", sh.idx.name)));
             }
@@ -232,7 +244,7 @@ fn scan_shard(
     {
         match crate::search::id_slice_query(&qctx, sid, max)? {
             Some(f) => b = b.add(Occur::Filter, f),
-            None => return Ok(ShardScan { idx: t.idx.clone(), searcher, docs: Vec::new() }),
+            None => return Ok(ShardScan { idx: t.idx.clone(), searcher, docs: Vec::new(), vectors: None }),
         }
     }
     q = arc(b);
@@ -243,7 +255,8 @@ fn scan_shard(
     if let Some(l) = limit {
         docs.truncate(l.min(usize::MAX as u64) as usize);
     }
-    Ok(ShardScan { idx: t.idx.clone(), searcher, docs })
+    let vectors = (table.has_vectors && t.idx.settings.get("index.mapping.exclude_source_vectors") != Some("false")).then_some(table);
+    Ok(ShardScan { idx: t.idx.clone(), searcher, docs, vectors })
 }
 
 /// What a by-query run counted (`BulkByScrollTask.Status`).

@@ -555,7 +555,18 @@ pub fn get_one(ctx: &Ctx, idx: &Arc<IndexMeta>, id: &str, args: &GetArgs) -> EsR
     if args.realtime {
         shard.shard.note_realtime_get(id.as_bytes()).map_err(crate::engine::convert::index_error)?;
     }
-    let doc = shard.shard.get(id.as_bytes(), args.realtime).map_err(crate::engine::convert::index_error)?;
+    // Vectors kept out of the stored source come back from the vector values: every reader of
+    // a get (the get APIs, `_update`, the knn `lookup` builder) sees them as Elasticsearch's does.
+    let table = engine.table();
+    let mut doc = if table.stripped_vectors.is_empty() {
+        shard.shard.get(id.as_bytes(), args.realtime)
+    } else {
+        shard.shard.get_with_vectors(id.as_bytes(), args.realtime, &crate::engine::source_vectors::numbers(&table.stripped_vectors))
+    }
+    .map_err(crate::engine::convert::index_error)?;
+    if let Some(d) = &mut doc {
+        crate::engine::source_vectors::patch_doc(&table.stripped_vectors, d)?;
+    }
     let c = &shard.counters;
     c.get_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     c.get_time_nanos.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);

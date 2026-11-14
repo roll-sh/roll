@@ -57,6 +57,14 @@ impl FetchSource {
                     match k.as_str() {
                         "includes" | "include" => fs.includes = list(x)?,
                         "excludes" | "exclude" => fs.excludes = list(x)?,
+                        // `top_hits` and `inner_hits` take it as the search's `_source` does.
+                        "exclude_vectors" => {
+                            fs.exclude_vectors = Some(match x {
+                                Value::Bool(b) => *b,
+                                Value::Str(s) if s == "true" || s == "false" => s == "true",
+                                _ => return Err(EsError::parse(format!("Unknown key for a VALUE_STRING in [{k}]."))),
+                            })
+                        }
                         _ => return Err(EsError::parse(format!("Unknown key for a VALUE_STRING in [{k}]."))),
                     }
                 }
