@@ -105,7 +105,7 @@ pub fn options(idx: &crate::meta::IndexMeta) -> Options {
 /// `keep: None` keeps every vector.
 pub fn vectors(table: &FieldTable, path: &str, m: &mut Map, exclude: bool) {
     let none = super::source::Globs::new(&[]);
-    vectors_keeping(table, path, m, exclude.then_some(&none));
+    vectors_keeping(table, path, m, exclude.then_some(&none), true);
 }
 
 /// Returns whether a vector stayed in.
@@ -113,8 +113,9 @@ pub fn vectors(table: &FieldTable, path: &str, m: &mut Map, exclude: bool) {
 /// Kept vectors print as Elasticsearch's patched ones do (`source_vectors`): at the end of
 /// their object, floats as floats, `sparse_vector` features sorted and as their postings keep
 /// them. A vector of an `index: false` field is never taken out of Elasticsearch's source and
-/// prints as sent. Normalizing twice changes nothing.
-pub fn vectors_keeping(table: &FieldTable, path: &str, m: &mut Map, keep: Option<&super::source::Globs>) -> bool {
+/// prints as sent. Normalizing twice changes nothing; `normalize: false` only keeps and drops,
+/// for a source [`vectors`] already went over.
+pub fn vectors_keeping(table: &FieldTable, path: &str, m: &mut Map, keep: Option<&super::source::Globs>, normalize: bool) -> bool {
     let mut drop = Vec::new();
     let mut last = Vec::new();
     let mut kept = false;
@@ -127,7 +128,7 @@ pub fn vectors_keeping(table: &FieldTable, path: &str, m: &mut Map, keep: Option
             // too, and patches back only the values the field holds: a null never shows.
             if v.is_null() || keep.is_some_and(|g| !g.matches(&full)) {
                 drop.push(k.clone());
-            } else if info.kind == Kind::DenseVector && !info.index {
+            } else if !normalize || (info.kind == Kind::DenseVector && !info.index) {
                 kept = true;
             } else {
                 normalize_vector(info, v);
@@ -137,11 +138,11 @@ pub fn vectors_keeping(table: &FieldTable, path: &str, m: &mut Map, keep: Option
             continue;
         }
         match v {
-            Value::Obj(inner) => kept |= crate::stack::maybe_grow(|| vectors_keeping(table, &full, inner, keep)),
+            Value::Obj(inner) => kept |= crate::stack::maybe_grow(|| vectors_keeping(table, &full, inner, keep, normalize)),
             Value::Arr(a) => {
                 for e in a {
                     if let Value::Obj(inner) = e {
-                        kept |= crate::stack::maybe_grow(|| vectors_keeping(table, &full, inner, keep));
+                        kept |= crate::stack::maybe_grow(|| vectors_keeping(table, &full, inner, keep, normalize));
                     }
                 }
             }

@@ -130,8 +130,8 @@ pub fn patched_source(table: &FieldTable, bytes: &[u8], vector: &mut impl Vector
         return Ok(None);
     }
     let Value::Obj(mut m) = crate::fetch::parse_source(bytes)? else { return Ok(None) };
-    patch(&table.stripped_vectors, &mut m, vector);
     super::synthetic::vectors(table, "", &mut m, false);
+    patch(&table.stripped_vectors, &mut m, vector);
     Ok(Some(Value::Obj(m).to_json().into_bytes()))
 }
 

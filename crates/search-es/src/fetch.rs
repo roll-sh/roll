@@ -157,7 +157,8 @@ pub struct SourceView<'a> {
     pub table: &'a FieldTable,
     pub force_synthetic: bool,
     /// The search fetch phase, whose forced synthetic `_source` keeps every vector
-    /// (`get` leaves them out of it as from any other source).
+    /// (`get` leaves them out of it as from any other source), and whose hits print their
+    /// vectors before the view applies (`search::hits`: the view only keeps or drops them).
     pub search: bool,
 }
 
@@ -200,9 +201,9 @@ impl SourceView<'_> {
             let synthetic = self.force_synthetic || synthetic::source_mode(self.idx) == synthetic::SourceMode::Synthetic;
             let filtered = !fs.includes.is_empty() || !fs.excludes.is_empty();
             let kept = if fs.exclude_vectors == Some(false) || (synthetic && filtered && fs.exclude_vectors.is_none()) {
-                synthetic::vectors_keeping(self.table, "", m, None)
+                synthetic::vectors_keeping(self.table, "", m, None, !self.search)
             } else {
-                synthetic::vectors_keeping(self.table, "", m, Some(&crate::engine::source::Globs::new(&fs.includes)))
+                synthetic::vectors_keeping(self.table, "", m, Some(&crate::engine::source::Globs::new(&fs.includes)), !self.search)
             };
             // Patching vectors back in turns the source into a map, which Elasticsearch
             // filters with map semantics (`*` spans dots) rather than over the bytes.

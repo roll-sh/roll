@@ -113,8 +113,8 @@ impl Scanner {
                 && let (Some(table), Some(b)) = (&sh.vectors, &source)
                 && let Value::Obj(mut m) = crate::fetch::parse_source(b)?
             {
-                crate::engine::source_vectors::patch(&table.stripped_vectors, &mut m, &mut crate::engine::source_vectors::InSegment(seg, local));
                 crate::engine::synthetic::vectors(table, "", &mut m, false);
+                crate::engine::source_vectors::patch(&table.stripped_vectors, &mut m, &mut crate::engine::source_vectors::InSegment(seg, local));
                 source = Some(Bytes::from(Value::Obj(m).to_json()));
             }
             if self.need_source && source.is_none() {
