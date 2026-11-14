@@ -613,6 +613,39 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
   execs the command. It writes no file, and it fails before running anything if a reference is
   unresolved. Variables already set in the shell keep their value unless `--override` is passed.
 
+### Docker builds and Compose
+
+- **A build that needs a secret** (a private registry's token): BuildKit's secret mount, from
+  `roll run`'s environment. The value is there for that one `RUN` step and in no layer; a build
+  argument (`--build-arg`) would stay in the image's history.
+
+  ```dockerfile
+  # syntax=docker/dockerfile:1
+  RUN --mount=type=secret,id=npm,env=NPM_TOKEN npm ci
+  ```
+
+  ```sh
+  roll run -e production -- docker build --secret id=npm,env=NPM_TOKEN .
+  ```
+
+- **Compose**: list the variables without values and Compose passes `roll run`'s through, so
+  nothing is written to a file:
+
+  ```yaml
+  services:
+    api:
+      environment: [DATABASE_URL, STRIPE_KEY]
+  ```
+
+  ```sh
+  roll run -e development -- docker compose up
+  ```
+
+  `docker compose config` would print them: pass `--no-interpolate` or don't share its output.
+- Checked on 2026-11-14 (Docker 29.9, Compose 5.6): the build step saw the value, `docker history
+  --no-trunc` and the image's `Config.Env` held none of it, a Compose service saw it, and
+  `docker compose config` printed it unless `--no-interpolate`.
+
 ### Runtime resolve for services (roll apps)
 
 roll apps (docs/apps/) deploys a service into an environment and injects that environment's
@@ -1598,6 +1631,54 @@ background processes holding roll open, `--watch` dropping SIGTERM, a SIGINT jud
 a folder's admin counting toward a protected environment's own gate and an import guard outside its
 transaction (#53), a Vault refusal told by an error's text (#52), and a write during a watch's
 re-read going unnoticed (#49): all fixed and checked live, tested where a test guards behaviour.
+Since then a values answer carries the folder's digest, taken just before its read, and `--watch`
+compares from those answers, which closes the last window (#49).
+Every stacked pull request's API tests (#49, #50, #51, #53, #55, #57) also pass on Postgres, and
+#49 adds **Copy reference** to a key's menu (`roll://ENV[/folder]/KEY`, as 1Password's). Every
+stacked pull request is mergeable, and #20 is level with `main`.
+Then roll secrets for VS Code (#58): hovers and warnings where code reads a variable, names
+completed, and `.env` values moved into roll as `roll://` references (checked in code-server).
+Then `roll completions` and direnv documented (#59).
+Docker builds (BuildKit secrets) and Compose are documented and checked. Then a server's
+credential under a name frameworks put in the browser bundle (`NEXT_PUBLIC_`, `VITE_`…) is
+flagged on write and in health (#60). Measured again (9,900 keys, alternating with #20): health
+is unchanged by #60 and stays under the grid; a values answer takes its digest only when a watch
+asks (`digest=1`, #49), since that costs about a read.
+Then reach (#61): for a folder or key, the tokens and identities that reach it, whether untrusted
+code can, where it flows (syncs, shares, imports), and who read it in 30 days.
+
+A tenth independent review (2026-11-14, of ESO, renewing logins, pinned keys and the ninth review's
+fixes) found no high-severity issue; it found ESO writing an unresolved key as an empty value and
+taking a query through its key (#55: `strict=1`, `urlquery`, checked live on k3s), stdout unmasked in
+Jenkins, Buildkite, pods and units and a JSON value's secret fields (#54), a login with no timeout
+that dropped a working token and ignored 401s (#56), and no way to rotate pinned keys in place
+(#57): all fixed. roll MCP has `secrets_reach` and `secrets_folder_policies` tools for #61 and #53.
+
+An eleventh independent review (2026-11-14, of VS Code, completions, browser-bundle names, reach and
+the tenth review's fixes) found two high-severity issues in #58, both fixed: "Move to roll" misread
+multi-line and commented `.env` entries (it now reads them as the CLI does and replaces the whole
+entry), and a repository's settings could send the token elsewhere (`roll.apiUrl` and
+`roll.project` come from your own settings only). It also found masking that changed data (#54:
+stdout is masked only in CI and never into a file; `ROLL_MASK=1` for pods and units), re-keyed
+identities outliving their re-keyer (#57), readers missed through imports and previews (#61), a
+kind of credential shown to read-only callers and references not judged (#60), a stalled renewal
+(#56) and a refused strict read keeping its leases (#55): all fixed.
+
+A twelfth independent review (2026-11-14, of the eleventh review's fixes) found no high-severity
+issue; it found a login racing a key replacement could still get a token (#57: the login's write
+checks the keys it verified), Jenkins' file log unmasked (#54: documented, `ROLL_MASK=1`, since a
+file can't be told from a dump), late logins and late 401s overwriting fresh tokens (#56), reach
+looking one step away and at unshared importers (#61), a write's warning naming a credential's
+kind without reveal (#60), and `.env` corner cases and a repository choosing the environment (#58):
+all fixed.
+
+A thirteenth review (2026-11-14, narrow: the twelfth review's fixes) found reach naming another
+project's internal environments and walking past where reads go (#61: one hop into a shared
+project, named only as a project, capped at 256 folders), reference warnings shown without reveal
+(#20), `.env` files over roll's limits (#58) and a background login outliving a 401 (#56): all
+fixed. The pinned-keys, relogin and masking fixes it checked were correct.
+Reach measured at its cap (300 importing folders): 5–7 ms on SQLite and 120–150 ms on Postgres, once
+the audit is read per project rather than per folder (#61).
 
 Then (2026-11-14, latest): `roll run` masks values in what the command prints when it isn't a
 terminal (#54), as 1Password's `op run` and GitHub Actions do; pulling into Kubernetes with External
@@ -1705,12 +1786,14 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A tenth independent review** of ESO (#55), renewing identity logins (#56), pinned issuer keys
-   (#57) and the ninth review's fixes, and its fixes.
-2. **`…/values` answers each followed digest from the same read**, so a watch that newly follows an
-   environment (a reference added) compares from that read, not a poll just after it (#49 now
-   polls every known environment before reading; only a newly referenced one is polled after).
-   **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys).
+1. **A landing branch** (`feature/roll-secrets-landing`): every stacked pull request merged on #20
+   in order, conflicts resolved, the whole suite passing, so the stack can land in one step. A
+   rehearsal (2026-11-14) merged each onto the others in order: twelve merge cleanly; twenty
+   conflict with an earlier sibling, nearly all additively (routes in `api.rs`, rows in
+   `catalog.rs`, types in `types.ts`/`secrets-api.ts`, sections of this doc, `rolld/src/secrets.rs`'s
+   providers), and #30 (#20 with roll MCP's #25) touches the most.
+2. **When #56 and #57 meet**: the identities section keeps both (renewal and pinned keys); and when
+   #49 and #54 meet, `watch` keeps both (answered digests, streams and signals).
 3. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
    and outside databases (#33), and transit in the Go and Python clients (#32).
 4. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47; the MCP thread's builder and
@@ -1723,9 +1806,15 @@ user's call).
    token; the trust policy pins `sub`, as GCP's and Azure's do).
 7. *Waits on #30 and #31:* screenshots of the Access tab's tokens, a person's project and the deploy
    notice.
-8. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
+8. *Waits on #30 meeting #24/#25:* the Access tab shows roll-access tokens waiting for an admin's
+   approval (`pending`) and rotations that keep the old secret working (`keep_old_for_s`), and
+   reach (#61) lists roll-access grants too.
+9. *Waits on linking chat users to roll accounts:* approving change requests from Slack. Chat ops
+   installs list Slack user ids and act as the owner's automation; a review must count as the
+   person who pressed the button (their permissions, the request's gates), never as the app.
+10. *Waits on products serving signed-in people:* products say who owns a resource, so a person's
    project can link their own databases, buckets and streams.
-9. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
+11. *Waits on projects with members:* access requests (time-boxed `reveal` on a protected
    environment).
 
 Open pull requests after this one:
@@ -1752,6 +1841,14 @@ Open pull requests after this one:
   after its grace; a user with two keys already is refused, never pruned.
 - **#55, pulling into Kubernetes with External Secrets Operator** (after #20): its webhook
   provider (one store for whole environments and single keys) and `values?dynamic=false`.
+- **#61, reach** (after #20): who and what can read a folder or key; `GET …/reach`, `roll secrets
+  reach`, a key's "Who can read it…".
+- **#60, server credentials under browser-bundle names** (after #20): `NEXT_PUBLIC_`, `VITE_`,
+  `PUBLIC_`… holding a server-only value; the write warns, health's `public` finding.
+- **#59, `roll completions` and direnv** (after #20): completion scripts for every command; a
+  documented `.envrc`.
+- **#58, roll secrets for VS Code** (after #20): hovers, warnings and completion where code reads
+  a variable; `.env` values replaced by `roll://` references or moved into roll first.
 - **#57, workload identities pin their issuer's keys** (after #20): `jwks` on an identity, for a
   cluster's own issuer; `identities add --jwks`, the dashboard's Other OIDC form.
 - **#56, a workload identity's login renews itself** (after #20): long-running `roll run
