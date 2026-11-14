@@ -1044,13 +1044,12 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Screenshots of roll apps' services**: `RollApps::screenshot` takes nothing, so a project on
-   roll apps has no screenshots, comparisons or visual reviews (and gets no baseline). roll apps'
-   #26 adds `apps_control::Apps::reachable(service, env) -> Option<Reachable { container, port }>`
-   (it wakes the instance and holds it awake while the value lives; `None` on Fargate; a
-   `Conflict` for a worker, a cron or a static site). Once #26 is on main: `RollApps::screenshot`
-   joins `container` as the runtime's screenshot does (`--network container:…`, the same
-   hardening), loads `http://127.0.0.1:<port>/`, and lets the baseline be made on roll apps.
+1. **Screenshots of roll apps' services**: built behind rolld's `Reach` port (where an instance
+   runs, held awake: roll apps' #26 `Apps::reachable`) and `Runtime::screenshot_in`, the same
+   browser run joining the instance's network. On #28 `reach` is `None`; the wiring (one node:
+   on a fleet an instance runs on its service's holder) is on the stacked branch
+   `feature/roll-previews-on-apps`, for when #26 is on main. Then: the fleet (ask the holder),
+   and a project on roll apps gets its baseline.
 2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
