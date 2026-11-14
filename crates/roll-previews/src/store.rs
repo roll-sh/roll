@@ -242,6 +242,23 @@ impl Row {
     }
 }
 
+/// A preview's screenshot row without its PNGs ([`Store::shot_facts`]).
+#[derive(Default)]
+struct ShotFacts {
+    /// When it was taken (none: no screenshot).
+    at: Option<i64>,
+    head: Option<String>,
+    prev_head: Option<String>,
+    change_bp: Option<i64>,
+    phone_change_bp: Option<i64>,
+    has_phone: bool,
+    speed: Option<crate::PageSpeed>,
+    prev_speed: Option<crate::PageSpeed>,
+    health: Option<crate::PageHealth>,
+    a11y: Option<crate::PageA11y>,
+    base: Option<BaseRow>,
+}
+
 /// How many of a baseline's heads keep their screenshots (to compare changes at their merge base).
 pub const BASE_HISTORY: usize = 10;
 
@@ -1173,25 +1190,52 @@ impl Store {
     /// How much the page differs from the default branch's preview (its branch, basis points
     /// at both widths), that preview, and the head of it compared with.
     pub fn base_change(&self, id: &str) -> Result<Option<BaseRow>> {
-        type Raw = (Option<String>, Option<String>, Option<i64>, Option<i64>, Option<String>, Option<String>, Option<String>, Option<String>);
-        let row: Option<Raw> = self.db.read(|c| {
-            c.query_row("SELECT base_preview, base_branch, base_change_bp, base_phone_bp, base_head, base_speed, base_a11y, base_health FROM screenshots WHERE preview_id = ?", [id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
-            })
+        Ok(self.shot_facts(id)?.base)
+    }
+
+    /// What a preview's screenshot row says, without its PNGs: one read for the view (a list of
+    /// previews is one of these each, not twenty, and never the images).
+    fn shot_facts(&self, id: &str) -> Result<ShotFacts> {
+        fn json<T: serde::de::DeserializeOwned>(s: Option<String>) -> Option<T> {
+            s.and_then(|s| serde_json::from_str(&s).ok())
+        }
+        let row = self.db.read(|c| {
+            c.query_row(
+                "SELECT CASE WHEN png <> '' THEN at END, head, prev_head, change_bp, phone_change_bp, phone_png IS NOT NULL, speed, prev_speed, health, a11y, \
+                 base_preview, base_branch, base_change_bp, base_phone_bp, base_head, base_speed, base_a11y, base_health FROM screenshots WHERE preview_id = ?",
+                [id],
+                |r| {
+                    let base = match (r.get::<_, Option<String>>(10)?, r.get::<_, Option<String>>(11)?, r.get::<_, Option<i64>>(12)?) {
+                        (Some(preview), Some(branch), Some(change_bp)) => Some(BaseRow {
+                            preview,
+                            branch,
+                            change_bp,
+                            phone_bp: r.get(13)?,
+                            head: r.get(14)?,
+                            speed: json(r.get(15)?),
+                            a11y: json(r.get(16)?),
+                            health: json(r.get(17)?),
+                        }),
+                        _ => None,
+                    };
+                    Ok(ShotFacts {
+                        at: r.get(0)?,
+                        head: r.get(1)?,
+                        prev_head: r.get(2)?,
+                        change_bp: r.get(3)?,
+                        phone_change_bp: r.get(4)?,
+                        has_phone: r.get(5)?,
+                        speed: json(r.get(6)?),
+                        prev_speed: json(r.get(7)?),
+                        health: json(r.get(8)?),
+                        a11y: json(r.get(9)?),
+                        base,
+                    })
+                },
+            )
             .optional()
         })?;
-        Ok(row.and_then(|(p, b, bp, phone, head, speed, a11y, health)| {
-            Some(BaseRow {
-                preview: p?,
-                branch: b?,
-                change_bp: bp?,
-                phone_bp: phone,
-                head,
-                speed: speed.and_then(|s| serde_json::from_str(&s).ok()),
-                a11y: a11y.and_then(|s| serde_json::from_str(&s).ok()),
-                health: health.and_then(|s| serde_json::from_str(&s).ok()),
-            })
-        }))
+        Ok(row.unwrap_or_default())
     }
 
     /// Keep the other pages a screenshot at `head` took (`github.pages`), each with the one it
@@ -1295,14 +1339,13 @@ impl Store {
 
     /// The visual review of a change's preview (`github.visual_review`), once its pages were
     /// compared with the baseline's: the most any of them differs, and who accepted that head.
-    fn visual_review(&self, r: &Row, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck]) -> Result<Option<crate::VisualReview>> {
+    fn visual_review(&self, r: &Row, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck], shot: Option<String>) -> Result<Option<crate::VisualReview>> {
         let rule = self.settings(&r.project_id)?.visual_review;
         if r.change_id.is_none() || rule == crate::settings::VisualReviewRule::Off {
             return Ok(None);
         }
         let Some(base) = base else { return Ok(None) };
         let percent = [Some(base.percent), base.phone_percent].into_iter().chain(pages.iter().map(|p| p.base_percent)).flatten().fold(0.0_f64, f64::max);
-        let shot: Option<String> = self.db.read(|c| c.query_row("SELECT head FROM screenshots WHERE preview_id = ?", [&r.id], |x| x.get(0)).optional())?;
         let accepted: Option<(String, String, i64)> = self.db.read(|c| c.query_row("SELECT head, by, at FROM visual_accepts WHERE preview_id = ?", [&r.id], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?))).optional())?;
         let accepted = accepted.filter(|(h, _, _)| shot.as_deref() == Some(h.as_str()));
         let state = match (&accepted, percent > 0.0) {
@@ -1395,10 +1438,17 @@ impl Store {
     }
 
     fn link(&self, id: &str, variant: Option<&str>) -> Result<Option<(i64, String)>> {
+        match self.screenshot_at(id)? {
+            Some(at) => self.link_at(id, at, variant).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The link to the screenshot taken at `at`.
+    fn link_at(&self, id: &str, at: i64, variant: Option<&str>) -> Result<(i64, String)> {
         use hmac::Mac;
-        let Some(at) = self.screenshot_at(id)? else { return Ok(None) };
         let exp = at + SCREENSHOT_LINK_MS;
-        Ok(Some((exp, hex::encode(self.link_mac(id, exp, variant)?.finalize().into_bytes()))))
+        Ok((exp, hex::encode(self.link_mac(id, exp, variant)?.finalize().into_bytes())))
     }
 
     /// Whether `sig` is the screenshot link's signature for `exp`, it hasn't expired, it's for the
@@ -1640,29 +1690,33 @@ impl Store {
         let schema_changes = self.schema_changes(&r.id)?;
         let kept_until = self.kept_until(&r.id)?;
         let goes_at = self.goes_at(&r.id)?;
-        let screenshot_at = self.screenshot_at(&r.id)?;
-        let phone_percent = self.phone_change(&r.id)?.map(|bp| bp as f64 / 100.0);
-        let visual_change = self.visual_change(&r.id)?.map(|(since, bp)| crate::VisualChange { since, percent: bp as f64 / 100.0, phone_percent });
-        let phone_screenshot = self.phone_screenshot(&r.id, false)?.is_some();
+        // The screenshot row in one read, without its images.
+        let f = self.shot_facts(&r.id)?;
+        let screenshot_at = f.at;
+        let phone_percent = f.phone_change_bp.map(|bp| bp as f64 / 100.0);
+        let visual_change = f.prev_head.clone().zip(f.change_bp).map(|(since, bp)| crate::VisualChange { since, percent: bp as f64 / 100.0, phone_percent });
+        let phone_screenshot = f.has_phone;
         let pages = self.page_checks(&r.id)?;
         let baseline = r.is_baseline();
-        let ours_a11y = self.page_a11y(&r.id)?;
-        let ours_health = self.page_health(&r.id)?;
-        let base_change = self.base_change(&r.id)?.map(|b| crate::BaseChange {
+        let (page_a11y, page_health) = (f.a11y, f.health);
+        let base_row = f.base;
+        let base_differs = base_row.as_ref().is_some_and(|b| b.change_bp > 0);
+        let base_change = base_row.map(|b| crate::BaseChange {
             branch: b.branch,
             percent: b.change_bp as f64 / 100.0,
             phone_percent: b.phone_bp.map(|p| p as f64 / 100.0),
             head: b.head,
             load_ms: b.speed.map(|s| s.load_ms),
-            a11y_added: ours_a11y.as_ref().zip(b.a11y.as_ref()).map(|(ours, main)| ours.added_since(main)),
-            errors_added: ours_health.as_ref().zip(b.health.as_ref()).map(|(ours, main)| ours.added_since(main)),
+            a11y_added: page_a11y.as_ref().zip(b.a11y.as_ref()).map(|(ours, main)| ours.added_since(main)),
+            errors_added: page_health.as_ref().zip(b.health.as_ref()).map(|(ours, main)| ours.added_since(main)),
         });
-        let visual_review = self.visual_review(&r, base_change.as_ref(), &pages)?;
-        let page_speed = self.page_speed(&r.id)?;
-        let page_health = self.page_health(&r.id)?;
-        let page_a11y = self.page_a11y(&r.id)?;
-        let screenshot_link = self.screenshot_link(&r.id)?;
-        let diff_link = if self.base_change(&r.id)?.is_some_and(|b| b.change_bp > 0) { self.diff_link(&r.id)? } else { None };
+        let visual_review = self.visual_review(&r, base_change.as_ref(), &pages, f.head)?;
+        let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
+        let screenshot_link = screenshot_at.map(|at| self.link_at(&r.id, at, None)).transpose()?;
+        let diff_link = match screenshot_at.filter(|_| base_differs) {
+            Some(at) => Some(self.link_at(&r.id, at, Some("diff=base"))?),
+            None => None,
+        };
         let earlier = self.pinned(&r.id)?.into_iter().map(|mut p| {
             p.share_url = Some(share(&p.url));
             p

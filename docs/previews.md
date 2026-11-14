@@ -981,6 +981,8 @@ Ranked by what a person notices first. Done so far:
   visual review's state in the comment, with the way to review it;
 - Accept on GitHub: `roll/visual` a check run with a button, for writers who aren't the author;
 - an acceptance of what was seen only (the head looked at; an older push's button ignored);
+- a preview's view reads its screenshot row once and never its images (50 previews' views: 300 ms
+  to 25 ms on SQLite; about half the queries, which is what counts on the fleet's Postgres);
 - metrics: converges, screenshots and their failures as EMF lines (`PreviewConvergeFailures`,
   `PreviewScreenshotFailures`; docs/cloud/README.md);
 - visual reviews in automations (the `preview` trigger's field, a built-in template);
