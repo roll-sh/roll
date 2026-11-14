@@ -193,12 +193,12 @@ function Form({
                       <option value="skip">Skip</option>
                     </select>
                   </div>
-                  {(r.kind === "nosql" || r.kind === "postgres") && (
+                  {(r.kind === "nosql" || r.kind === "postgres" || r.kind === "search") && (
                     <div className="px-2.5 pb-2">
                       <textarea
-                        aria-label={`Masked columns of ${names.get(id) ?? r.ref}`}
+                        aria-label={`Masked ${r.kind === "search" ? "fields" : "columns"} of ${names.get(id) ?? r.ref}`}
                         defaultValue={masks}
-                        placeholder={r.kind === "postgres" ? "public.users.email = email" : "app.users.email = mask_default()"}
+                        placeholder={r.kind === "postgres" ? "public.users.email = email" : r.kind === "search" ? "users.email = email" : "app.users.email = mask_default()"}
                         rows={Math.max(1, masks.split("\n").length)}
                         onBlur={(e) => {
                           const cols: Record<string, string> = {};
@@ -217,7 +217,9 @@ function Form({
                       <p className="mt-1 text-[11px] text-subtle">
                         {r.kind === "postgres"
                           ? "Rewritten in each preview's branch before anything serves it, one column per line: schema.table.column = null, redact, hash, email or fixed:<value>. The parent is untouched."
-                          : "Masked in previews, one column per line: keyspace.table.column = mask function. The parent is untouched."}
+                          : r.kind === "search"
+                            ? "Rewritten in each preview's branch before anything serves it, one field per line: index.field (nested: index.a.b) = redact, remove or email. The parent is untouched."
+                            : "Masked in previews, one column per line: keyspace.table.column = mask function. The parent is untouched."}
                       </p>
                     </div>
                   )}
