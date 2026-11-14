@@ -258,6 +258,21 @@ export interface CaughtMail {
   size: number;
 }
 
+/**
+ * What the first page's checks found, for the sheet's "Checks" heading: problems (errors and
+ * failed requests, broken links, accessibility and SEO problems) and how many of them are new
+ * against main, where it was compared (`null`: not compared).
+ */
+export function checkSummary(p: Pick<Preview, "page_health" | "page_links" | "page_a11y" | "base_change">): { problems: number; added: number | null } {
+  const errors = (p.page_health?.errors ?? 0) + (p.page_health?.failed ?? 0);
+  const links = p.page_links?.broken.length ?? 0;
+  const a11y = p.page_a11y ? a11yWords(p.page_a11y).length : 0;
+  const seo = p.page_a11y?.seo ? seoWords(p.page_a11y.seo).length : 0;
+  const b = p.base_change;
+  const parts = b ? [b.errors_added, b.links_added, b.a11y_added, b.seo_added].filter((n): n is number => n != null) : [];
+  return { problems: errors + links + a11y + seo, added: parts.length ? parts.reduce((x, y) => x + y, 0) : null };
+}
+
 /** A page as people read it: the first page at another width (`@768`) is "768 px". */
 export const pageLabel = (path: string) => (/^@\d+$/.test(path) ? `${path.slice(1)} px` : path || "/");
 

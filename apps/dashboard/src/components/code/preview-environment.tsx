@@ -73,6 +73,7 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
       <p className="font-mono text-[11px] text-subtle tabular-nums">
         {money(env.sleeping_usd_month)}/mo asleep · {money(env.active_usd_hour)}/h active
       </p>
+      {(env.page_health || env.page_links || env.page_a11y) && <EnvChecks env={env} />}
       {env.page_health && (env.page_health.errors > 0 || env.page_health.failed > 0) && (
         <p className="break-words text-[12px] text-danger">
           While its first page loaded: {[env.page_health.errors > 0 ? `${env.page_health.errors} ${env.page_health.errors === 1 ? "error" : "errors"}` : "", env.page_health.failed > 0 ? `${env.page_health.failed} failed ${env.page_health.failed === 1 ? "request" : "requests"}` : ""].filter(Boolean).join(", ")}
@@ -150,6 +151,21 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
         </a>
       )}
     </div>
+  );
+}
+
+/** The first page's checks in one line: how many problems, how many new against main. */
+function EnvChecks({ env }: { env: PreviewEnvironment }) {
+  const problems =
+    (env.page_health?.errors ?? 0) + (env.page_health?.failed ?? 0) + (env.page_links?.broken.length ?? 0) + (env.page_a11y ? a11yWords(env.page_a11y).length : 0) + (env.page_a11y?.seo?.length ?? 0);
+  const b = env.base_change;
+  const parts = b ? [b.errors_added, b.links_added, b.a11y_added, b.seo_added].filter((n): n is number => n != null) : [];
+  const added = parts.length ? parts.reduce((x, y) => x + y, 0) : null;
+  return (
+    <p className={`text-[12px] ${problems > 0 ? "text-soft" : "text-subtle"}`}>
+      Checks: {problems === 0 ? "nothing found" : `${problems} ${problems === 1 ? "problem" : "problems"}`}
+      {problems > 0 && added != null && b ? ` · ${added === 0 ? "none" : added} new against ${b.branch}` : ""}
+    </p>
   );
 }
 

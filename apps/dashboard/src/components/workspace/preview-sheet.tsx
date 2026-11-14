@@ -2,7 +2,7 @@ import { Boxes, Check, Copy, Database, ExternalLink, Eye, Inbox, ListChecks, Moo
 import { useEffect, useState } from "react";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
-import { a11yWords, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
+import { a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, type PreviewFeedback } from "./preview-feedback";
@@ -311,6 +311,7 @@ export function PreviewSheet({
                 ))}
               </ul>
             )}
+            {(p.page_health || p.page_links || p.page_a11y || p.page_speed) && <ChecksHeading p={p} />}
             {p.page_health && (p.page_health.errors > 0 || p.page_health.failed > 0) && (
               <div className="mt-1.5 space-y-0.5 text-[11.5px] text-danger">
                 {p.page_health.errors > 0 && (
@@ -799,6 +800,21 @@ function Screenshot({
         <p className="text-[11.5px] text-muted">No screenshot of {path} yet.</p>
       )}
     </>
+  );
+}
+
+/** The "Checks" heading: what the screenshot's session found on the first page, problems first,
+ * and how many are new against main; the lines under it are each check's. */
+function ChecksHeading({ p }: { p: Preview }) {
+  const { problems, added } = checkSummary(p);
+  return (
+    <Label>
+      <span>Checks</span>
+      <span className={`ml-auto normal-case ${problems > 0 ? "text-danger" : "text-subtle"}`}>
+        {problems === 0 ? "nothing found" : `${problems} ${problems === 1 ? "problem" : "problems"}`}
+        {problems > 0 && added != null && p.base_change ? ` · ${added === 0 ? "none" : added} new against ${p.base_change.branch}` : ""}
+      </span>
+    </Label>
   );
 }
 
