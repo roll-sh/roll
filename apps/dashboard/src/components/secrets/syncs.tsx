@@ -4,6 +4,7 @@ import { FOLDER_PATH, SECRET_KEY, type NewSync, type Sync, type SyncKind, type S
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, label, primary, Section, Teach, useLoad } from "./ui";
 import { Cas } from "./cas";
+import { SshCas } from "./ssh-cas";
 import { CloudAccounts } from "./cloud-accounts";
 import { OutsideDatabases } from "./outside-databases";
 import { AwsRoles } from "./aws-roles";
@@ -72,6 +73,7 @@ export function SyncsView() {
       <OutsideDatabases />
       <Rotators />
       <Cas />
+      <SshCas />
       <CloudAccounts />
       <AwsRoles />
     </div>

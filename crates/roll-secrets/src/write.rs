@@ -588,6 +588,7 @@ impl Secrets {
         let mut out: BTreeSet<(String, String)> = p.resources.iter().filter(|r| self.workspace.trusts(&p, r.kind, &r.r#ref)).map(|r| (r.kind.as_str().to_string(), r.r#ref.clone())).collect();
         out.extend(self.rotator_refs(project)?.into_iter().map(|(id, _)| (crate::rotators::KIND.to_string(), id)));
         out.extend(self.ca_refs(project)?.into_iter().map(|(id, _)| (crate::pki::KIND.to_string(), id)));
+        out.extend(self.ssh_ca_refs(project)?.into_iter().map(|(id, _)| (crate::ssh::KIND.to_string(), id)));
         out.extend(self.cloud_refs(project)?.into_iter().map(|(kind, id, _)| (kind, id)));
         out.extend(self.aws_role_refs(project)?.into_iter().map(|(id, _)| (crate::aws::KIND.to_string(), id)));
         out.extend(self.aws_user_refs(project)?.into_iter().map(|(id, _)| (crate::iam::KIND.to_string(), id)));

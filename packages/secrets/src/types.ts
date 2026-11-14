@@ -255,6 +255,12 @@ export type ProjectFindings = { project: string; project_name: string; findings:
 export type CaCertificate = { serial: string; names: string[]; source: "csr" | "link"; not_after: number; issued_at: number; issued_by: string; revoked_at?: number };
 export type SignedCertificate = { certificate: string; ca: string; serial: string; names: string[]; not_after: number };
 export type Ca = { id: string; name: string; certificate: string; domains: string[]; allow_ip: boolean; max_days: number; created_at: number; created_by: string };
+/** A project's SSH CA: the principals it signs for, and its public key for servers' TrustedUserCAKeys. */
+export type SshCa = { id: string; name: string; public_key: string; principals: string[]; max_hours: number; host_domains?: string[]; max_host_days: number; known_hosts?: string; created_at: number; created_by: string };
+/** A person's own key certified by an SSH CA (`POST …/ssh-cas/{id}/sign-user`). */
+export type UserCertificate = { certificate: string; serial: string; principals: string[]; valid_before: number };
+/** A server's host key signed by an SSH CA (`POST …/ssh-cas/{id}/sign-host`). */
+export type HostCertificate = { certificate: string; known_hosts: string; serial: string; hosts: string[]; valid_before: number };
 /** A GCP service account or an Azure app that trusts roll's token for this project (dynamic `access_token` links). */
 export type CloudAccount =
   | { id: string; name: string; cloud: "gcp"; audience: string; service_account: string; created_at: number; created_by: string }

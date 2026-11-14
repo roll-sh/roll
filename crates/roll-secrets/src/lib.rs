@@ -33,6 +33,7 @@ pub mod links;
 pub mod names;
 pub mod ocsp;
 pub mod pki;
+pub mod ssh;
 pub mod clouds;
 pub mod issuer;
 mod oidc;
@@ -419,6 +420,7 @@ impl Secrets {
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
         db.ensure_schema(pki::SCHEMA)?;
+        db.ensure_schema(ssh::SCHEMA)?;
         db.ensure_schema(aws::SCHEMA)?;
         db.ensure_schema(issuer::SCHEMA)?;
         db.ensure_schema(clouds::SCHEMA)?;
@@ -445,6 +447,7 @@ impl Secrets {
         let crls = pki::Crls::default();
         if let Ok(keys) = &opts.keyring {
             links.register(Arc::new(pki::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), public_api: public_api.clone(), crls: crls.clone() }));
+            links.register(Arc::new(ssh::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone() }));
         }
         db.ensure_schema(outside::SCHEMA)?;
         if let (Some(outside), Ok(keys)) = (&opts.outside, &opts.keyring) {
@@ -591,7 +594,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "aws_users", "aws_roles", "cas", "ca_certs"];
+const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "aws_users", "aws_roles", "cas", "ca_certs", "ssh_cas"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked, and no
 /// certificate its CAs revoked is still within its lifetime (their CRLs, signed with the CA's key,
