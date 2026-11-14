@@ -228,10 +228,12 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `_msearch`, search templates and async search, `index_options` validation, the `embedding`
    task type and `semantic` field type, the `random_reranker` and `text_similarity_reranker`
    retrievers. A delegate, `wip/search-inference`.
-2. **Semantic search in roll's surfaces**: a dashboard panel for a cluster's inference endpoints
-   (create with a provider form whose API key is sent once and never shown back, test with a
-   sample text, delete), `semantic_text` in the index browser's mapping view, and a quickstart;
-   MCP tools follow the routes (the MCP thread). In progress (the parent).
+2. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
+   endpoints, creates them (OpenAI or any compatible URL, Cohere, Anthropic; the API key sent
+   once, sealed, never shown back), tests them with a sample, deletes them, and opens a
+   `semantic_text` quickstart in the console. Left: `semantic_text` in the index browser's
+   mapping view, a roll secret as an endpoint's key, MCP tools (they follow the routes; the MCP
+   thread).
 3. **Indexing CPU and benchmarks on a quiet host** (docs/benchmarks/search.md). Indexing: the
    direct document parser now takes float types, plain objects and the opensearch dialect
    (nyc_taxis 8 clients 90k docs/s against Elasticsearch's 66k and OpenSearch's 60k; an ECS log
