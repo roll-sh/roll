@@ -89,7 +89,62 @@ pub trait SecretSource: Send + Sync {
     /// The project's secrets in `env`, as variables, for `service` (`svc_…`: the consumer the
     /// audit names, `app:<service>`). An unresolved reference or a missing required key is an
     /// error: the deploy fails rather than start without it.
-    async fn resolve(&self, project: &str, env: &str, service: &str) -> anyhow::Result<Vec<(String, String)>>;
+    async fn resolve(&self, project: &str, env: &str, service: &str) -> anyhow::Result<Vec<SecretVar>>;
+    /// Whether `who` may see the project's secrets in `env` in the clear, by roll secrets' own
+    /// rules (protected environments, a token's scope): `…/variables/values` answers them only
+    /// then. No: the safe default.
+    async fn may_reveal(&self, _who: Asker<'_>, _project: &str, _env: &str) -> bool {
+        false
+    }
+    /// What the project's secrets in `env` are, as a digest with no value in it (roll secrets'
+    /// versions and keyed fingerprints): it changes when one of them does. Kept with each
+    /// deployment that goes live, so an environment can say its secrets changed since. None: no
+    /// such digest.
+    async fn digest(&self, _project: &str, _env: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+}
+
+/// What's been said about a preview's page (roll previews' notes: docs/previews.md, "Feedback on
+/// the preview page"), as its feedback button lists them.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Note {
+    pub path: String,
+    pub selector: String,
+    pub note: String,
+    pub by: String,
+    pub at: i64,
+}
+
+/// roll previews' notes, for a preview environment's own host (rolld fills it with
+/// `roll_previews::Engine::notes_for`). Unset: no list, only the button.
+#[async_trait]
+pub trait FeedbackNotes: Send + Sync {
+    /// `env` (`pv-<id>`)'s notes on `path`, oldest first; none for a name that isn't a live
+    /// preview's.
+    async fn notes(&self, env: &str, path: &str) -> anyhow::Result<Vec<Note>>;
+}
+
+/// One of a project's secrets as a variable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SecretVar {
+    pub name: String,
+    pub value: String,
+    /// It's a linked resource's address as rolld sees it (`Values.linked`: `127.0.0.1`, a
+    /// node's own host name): apps rewrites it for the container, as its own links.
+    pub linked: bool,
+    /// Only for runtimes (roll secrets' `sensitive` keys, Vercel's sensitive variables): it goes
+    /// to builds and instances, and no answer ever holds it, as a sealed variable (shown
+    /// `sealed`, left out of `…/variables/values` for everyone, references to it sealed too).
+    pub sensitive: bool,
+}
+
+/// Who asks for variables' values: what rolld's gate put on the request.
+#[derive(Clone, Copy, Default)]
+pub struct Asker<'a> {
+    pub operator: bool,
+    pub user: Option<&'a roll_auth::SignedIn>,
+    pub grant: Option<&'a roll_auth::Grant>,
 }
 
 /// No project secrets (until roll secrets is on this node): services use their own variables.
@@ -101,7 +156,7 @@ impl SecretSource for NoSecrets {
         "none"
     }
 
-    async fn resolve(&self, _project: &str, _env: &str, _service: &str) -> anyhow::Result<Vec<(String, String)>> {
+    async fn resolve(&self, _project: &str, _env: &str, _service: &str) -> anyhow::Result<Vec<SecretVar>> {
         Ok(Vec::new())
     }
 }
@@ -112,6 +167,29 @@ pub trait Resources: Send + Sync {
     /// The variables a link to this resource injects, under their unprefixed names
     /// (`DATABASE_URL`, `REDIS_URL`, …). An error when the resource doesn't exist.
     async fn link_vars(&self, kind: LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>>;
+    /// A new link's own credentials, made once when the link is made and kept sealed with it
+    /// (a search cluster's API key for this service): `None` for a kind whose variables are
+    /// read fresh with [`Resources::link_vars`] (a database's own URL).
+    async fn link(&self, _kind: LinkKind, _ref: &str, _service: &str) -> anyhow::Result<Option<Minted>> {
+        Ok(None)
+    }
+    /// Revoke what [`Resources::link`] made (`kept`: what it said to keep, a key's id) when
+    /// the link goes.
+    async fn unlink(&self, _kind: LinkKind, _ref: &str, _kept: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// How far `group` is behind on `stream` (messages, every partition): what a worker with
+    /// `run.scale` follows.
+    async fn backlog(&self, _stream: &str, _group: &str) -> anyhow::Result<u64> {
+        anyhow::bail!("roll streams isn't on this node")
+    }
+}
+
+/// Credentials a link made for itself: its variables, and what revoking them needs.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Minted {
+    pub vars: Vec<(String, String)>,
+    pub kept: String,
 }
 
 /// No data products on this node: links can't be made.
@@ -134,6 +212,11 @@ pub trait DomainTls: Send + Sync {
     /// Whether custom domains get certificates here at all.
     fn issues(&self) -> bool {
         true
+    }
+    /// Whether it can issue a wildcard's (DNS-01; HTTP-01 can't). Where it issues and can't, a
+    /// wildcard domain is refused rather than left pending.
+    fn wildcards(&self) -> bool {
+        false
     }
     /// Make sure the provider knows `host` (creating it there if it doesn't), and say where its
     /// certificate is: `None` when the issuer reports that itself.

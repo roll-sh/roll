@@ -1,6 +1,6 @@
 import { Lock, Rocket, Trash2, Unlock } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { appsApi, PRODUCTION, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
+import { appsApi, formatFirewall, parseAllowList, parseFirewall, PRODUCTION, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
 import { btn, Confirm, CopyButton, danger, input, Panel, primary, useCopy } from "../ui";
 import { CPU, MEMORY, mb, SureButton, type Runner } from "./shared";
@@ -30,6 +30,16 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   const [link, setLink] = useState<string | null>(null);
   const [hook, setHook] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [notice, setNotice] = useState(env.maintenance?.message ?? "");
+  const allowText = (env.allow_ips ?? []).map((r) => (r.description ? `${r.cidr} ${r.description}` : r.cidr)).join("\n");
+  const [allow, setAllow] = useState(allowText);
+  useEffect(() => setAllow(allowText), [allowText]);
+  const fwText = formatFirewall(env.firewall ?? []);
+  const [fw, setFw] = useState(fwText);
+  useEffect(() => setFw(fwText), [fwText]);
+  const rateText = env.rate_limit ? String(env.rate_limit.per_minute) : "";
+  const [rate, setRate] = useState(rateText);
+  useEffect(() => setRate(rateText), [rateText]);
   const { copied, copy } = useCopy();
   const repo = service.source.kind === "repo";
   const busy = runner.busy !== null;
@@ -44,6 +54,26 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   return (
     <Panel title={<>Environment <span className="font-mono text-[13px] text-muted">{env.name}</span></>}>
       <div className="divide-y divide-line">
+        {service.run.tcp && <p className="px-5 pb-2 pt-5 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Network</p>}
+
+        {service.run.tcp && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div>
+              <p className="text-[13px] font-medium">TCP address</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {env.tcp ? "Clients connect here; each connection wakes the service and keeps it up while it's open." : "Its port comes once the node has a TCP range (ROLL_APPS_TCP_PORTS)."}
+              </p>
+            </div>
+            {env.tcp && (
+              <span className="flex items-center gap-1">
+                <code className="font-mono text-[12px]">{env.tcp}</code>
+                <CopyButton id="tcp" text={env.tcp} copied={copied} onCopy={copy} />
+              </span>
+            )}
+          </div>
+        )}
+        <p className="px-5 pb-2 pt-5 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Deploys</p>
+
         {repo && (
           <form
             className="flex flex-wrap items-end gap-3 px-5 py-4"
@@ -97,7 +127,19 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </div>
         )}
 
-        <OwnRun service={service} env={env} runner={runner} />
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+          <div>
+            <p className="text-[13px] font-medium">Redeploy when secrets change</p>
+            <p className="mt-1 text-[12px] text-muted">
+              {env.redeploy_on_secrets
+                ? `When the project's ${env.name} secrets change (a rotated key), ${env.name} redeploys the same image with them, checked each minute.`
+                : "A changed project secret waits for the next deploy; the Redeploy banner says when one did."}
+            </p>
+          </div>
+          <button className={btn} disabled={busy} aria-pressed={!!env.redeploy_on_secrets} onClick={() => runner.run("secrets", () => appsApi.putEnvironment(service.id, env.name, { redeploy_on_secrets: !env.redeploy_on_secrets }))}>
+            {env.redeploy_on_secrets ? "Stop redeploying" : "Redeploy on changes"}
+          </button>
+        </div>
 
         <div className="space-y-3 px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -139,8 +181,6 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           )}
         </div>
 
-        {service.run.volume && <Backups service={service} env={env} runner={runner} />}
-
         <div className="flex flex-wrap items-end gap-3 px-5 py-4">
           <div className="min-w-56 flex-1">
             <p className="text-[13px] font-medium">Promote</p>
@@ -167,6 +207,8 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
             </>
           )}
         </div>
+
+        <p className="px-5 pb-2 pt-5 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Who gets in</p>
 
         <div className="space-y-3 px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -201,6 +243,159 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
             </div>
           )}
         </div>
+
+        {service.run.type === "web" && service.run.public !== false && (
+          <div className="px-5 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-[13px] font-medium">Allowed networks</p>
+                <p className="mt-1 text-[12px] text-muted">
+                  {env.allow_ips?.length
+                    ? `Only ${env.allow_ips.length === 1 ? "this network gets" : `these ${env.allow_ips.length} networks get`} in through its public URLs; everyone else gets a 403. The private network is unaffected.`
+                    : "Anyone with its URL gets in. List networks to let only them in."}
+                </p>
+              </div>
+              <button className={btn} disabled={busy || allow === allowText} onClick={() => runner.run("allow", () => appsApi.putEnvironment(service.id, env.name, { allow_ips: parseAllowList(allow) }))}>
+                Save
+              </button>
+            </div>
+            <textarea
+              value={allow}
+              onChange={(e) => setAllow(e.target.value)}
+              rows={Math.min(6, Math.max(2, allow.split("\n").length))}
+              placeholder={"203.0.113.0/24 office\n2001:db8::/32"}
+              spellCheck={false}
+              aria-label="Allowed networks, one per line"
+              className={`${input} mt-2 w-full font-mono text-[12px]`}
+            />
+          </div>
+        )}
+
+        {service.run.type === "web" && service.run.public !== false && !service.run.tcp && (
+          <div className="px-5 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-[13px] font-medium">Firewall</p>
+                <p className="mt-1 text-[12px] text-muted">
+                  {env.firewall?.length
+                    ? `${env.firewall.length} ${env.firewall.length === 1 ? "rule" : "rules"}, in order: the first that matches a request decides.`
+                    : "No rules. One a line: deny /admin/*, deny method=DELETE, allow /admin/health, deny ua=BadBot."}
+                </p>
+              </div>
+              <button className={btn} disabled={busy || fw === fwText} onClick={() => runner.run("firewall", () => appsApi.putEnvironment(service.id, env.name, { firewall: parseFirewall(fw) }))}>
+                Save
+              </button>
+            </div>
+            <textarea
+              value={fw}
+              onChange={(e) => setFw(e.target.value)}
+              rows={Math.min(8, Math.max(2, fw.split("\n").length))}
+              placeholder={"allow /admin/health\ndeny /admin/*"}
+              spellCheck={false}
+              aria-label="Firewall rules, one a line"
+              className={`${input} mt-2 w-full font-mono text-[12px]`}
+            />
+          </div>
+        )}
+
+        {service.run.type === "web" && service.run.public !== false && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div>
+              <p className="text-[13px] font-medium">Rate limit</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {env.rate_limit
+                  ? `Each visitor's address gets ${env.rate_limit.per_minute} requests a minute (${env.rate_limit.burst ?? env.rate_limit.per_minute} at once); more get a 429 that says when to come back.`
+                  : "No limit per visitor."}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                value={rate}
+                onChange={(e) => setRate(e.target.value.replace(/[^0-9]/g, ""))}
+                placeholder="per minute"
+                aria-label="Requests a minute per visitor"
+                className={`${input} w-28 font-mono text-[12px]`}
+              />
+              <button className={btn} disabled={busy || rate === rateText} onClick={() => runner.run("rate", () => appsApi.putEnvironment(service.id, env.name, { rate_limit: rate ? { per_minute: Number(rate) } : null }))}>
+                {rate ? "Save" : "Remove"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {service.run.type === "web" && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div className="min-w-0 flex-1">
+              <p className="text-[13px] font-medium">Maintenance</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {env.maintenance
+                  ? `Visitors get roll's maintenance page${env.maintenance.message ? " with your note" : ""}; nothing wakes. Deployment URLs still answer.`
+                  : "Serving. In maintenance its public names answer a maintenance page instead, and nothing wakes."}
+              </p>
+              {!env.maintenance && (
+                <input value={notice} onChange={(e) => setNotice(e.target.value.slice(0, 500))} placeholder="What visitors read (optional)" className={`${input} mt-2 w-full text-[12px]`} aria-label="Maintenance note" />
+              )}
+            </div>
+            <button
+              className={env.maintenance ? primary : btn}
+              disabled={busy}
+              aria-pressed={!!env.maintenance}
+              onClick={() => runner.run("maintenance", () => appsApi.putEnvironment(service.id, env.name, { maintenance: env.maintenance ? false : { message: notice.trim() || null } }))}
+            >
+              {env.maintenance ? "End maintenance" : "Start maintenance"}
+            </button>
+          </div>
+        )}
+
+        {service.run.type === "web" && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div className="min-w-0 flex-1">
+              <p className="text-[13px] font-medium">Your pages</p>
+              <p className="mt-1 text-[12px] text-muted">Your own HTML instead of roll's, for while the app can't answer or wake, and for maintenance. At most 64 KiB each, served as it is.</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {(["error", "maintenance"] as const).map((k) => (
+                <span key={k} className="inline-flex items-center gap-1">
+                  <label className={`${btn} cursor-pointer`}>
+                    {env.pages?.[k] ? `Replace ${k} page` : `${k === "error" ? "Error" : "Maintenance"} page…`}
+                    <input
+                      type="file"
+                      accept=".html,text/html"
+                      className="sr-only"
+                      disabled={busy}
+                      onChange={async (e) => {
+                        const f = e.target.files?.[0];
+                        e.target.value = "";
+                        if (f) await runner.run(`page:${k}`, async () => appsApi.putEnvironment(service.id, env.name, { pages: { [k]: await f.text() } }));
+                      }}
+                    />
+                  </label>
+                  {env.pages?.[k] && (
+                    <button className="p-1 text-[12px] text-subtle hover:text-fg" disabled={busy} onClick={() => runner.run(`page:${k}`, () => appsApi.putEnvironment(service.id, env.name, { pages: { [k]: null } }))}>
+                      Use roll's
+                    </button>
+                  )}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <p className="px-5 pb-2 pt-5 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Scale</p>
+
+        {env.scaling && (
+          <div className="px-5 py-4">
+            <p className="text-[13px] font-medium">Following {service.run.scale?.group ?? "its work"}</p>
+            <p className="mt-1 text-[12px] text-muted">
+              {env.scaling.backlog == null ? "Its backlog hasn't been read yet." : `${env.scaling.backlog.toLocaleString()} messages behind`}: {env.scaling.wanted} of {service.run.max_instances} instances
+              wanted, read every 10 s.
+            </p>
+          </div>
+        )}
+
+        <OwnRun service={service} env={env} runner={runner} />
+
+        {service.run.volume && <Backups service={service} env={env} runner={runner} />}
 
         {env.name !== PRODUCTION && (
           <div className="px-5 py-4">

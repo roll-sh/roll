@@ -35,6 +35,11 @@ pub struct AppsArgs {
     /// Where those ports listen (default: the apps listener's address).
     #[arg(id = "apps_ports_host", long = "apps-ports-host", env = "ROLL_APPS_PORTS_HOST")]
     pub ports_host: Option<std::net::IpAddr>,
+    /// TCP services' ports (`run.tcp`): each environment of one gets a port from this range
+    /// (`20000-20999`), on the apps listener's address; clients reach it at `ROLL_PUBLIC_HOST`.
+    /// One node only.
+    #[arg(id = "apps_tcp_ports", long = "apps-tcp-ports", env = "ROLL_APPS_TCP_PORTS")]
+    pub tcp_ports: Option<String>,
     /// DNS over HTTPS, for checking custom domains.
     #[arg(id = "apps_doh", long = "apps-doh", env = "ROLL_APPS_DOH", default_value = "https://cloudflare-dns.com/dns-query")]
     pub doh: String,
@@ -283,10 +288,29 @@ impl Sources for CodeSources {
 struct RollResources {
     postgres: Option<Arc<pg_control::Control>>,
     redis: Option<Arc<redis_control::Control>>,
+    /// rolld's own API (its address and the operator's token): a stream's routes answer there
+    /// on any node, forwarded to the stream's owner on a fleet.
+    api: (String, Option<String>, reqwest::Client),
 }
 
 #[async_trait]
 impl Resources for RollResources {
+    /// A group's lag on a stream, as the broker's `GET /v1/streams/{s}/groups/{g}` adds it up
+    /// (committed offsets against high watermarks), asked of rolld's own API: on a fleet that
+    /// forwards to the stream's owner, the only node whose numbers are right.
+    async fn backlog(&self, stream: &str, group: &str) -> anyhow::Result<u64> {
+        let (base, token, http) = &self.api;
+        let enc = |s: &str| urlencoding::encode(s).into_owned();
+        let mut req = http.get(format!("{base}/v1/streams/{}/groups/{}", enc(stream), enc(group)));
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await?;
+        anyhow::ensure!(resp.status().is_success(), "the stream answered {}", resp.status());
+        let v: serde_json::Value = resp.json().await?;
+        Ok(v["lag"].as_i64().unwrap_or(0).max(0) as u64)
+    }
+
     async fn link_vars(&self, kind: LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>> {
         match kind {
             LinkKind::Postgres => {
@@ -392,6 +416,25 @@ pub async fn start(
         anyhow::ensure!(single, "ROLL_APPS_PORTS is for a node alone: on a fleet services answer on their hostnames");
         cfg.ports = Some(parse_ports(p)?);
     }
+    if let Some(p) = &a.tcp_ports {
+        anyhow::ensure!(single, "ROLL_APPS_TCP_PORTS is for a node alone (a TCP service answers on its owner's port; the fleet's edge doesn't carry TCP yet)");
+        let (lo, hi) = parse_ports(p).map_err(|e| anyhow::anyhow!("ROLL_APPS_TCP_PORTS: {e}"))?;
+        anyhow::ensure!(!(lo..=hi).contains(&a.listen.port()), "ROLL_APPS_TCP_PORTS holds the apps listener's port {}", a.listen.port());
+        if let Some((plo, phi)) = cfg.ports {
+            anyhow::ensure!(hi < plo || lo > phi, "ROLL_APPS_TCP_PORTS overlaps ROLL_APPS_PORTS");
+        }
+        // Instances' host ports come from the kernel's ephemeral range: a TCP port there may be
+        // taken when it's wanted.
+        if let Some((elo, ehi)) = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").ok().and_then(|r| {
+            let mut n = r.split_whitespace().filter_map(|x| x.parse::<u16>().ok());
+            Some((n.next()?, n.next()?))
+        }) && !(hi < elo || lo > ehi)
+        {
+            warn!(range = %p, ephemeral = %format!("{elo}-{ehi}"), "apps: ROLL_APPS_TCP_PORTS is inside the kernel's ephemeral ports (instances' host ports come from there): pick one below {elo}");
+        }
+        cfg.tcp_ports = Some((lo, hi));
+        cfg.tcp_host = args.public_host.clone();
+    }
     let objects = match storage {
         // A local directory is this node's alone: logs stay with it.
         pg_storage::StorageConfig::Local(_) if !single => None,
@@ -416,7 +459,15 @@ pub async fn start(
         builder,
         sources: code.map(|c| Arc::new(CodeSources(c)) as Arc<dyn Sources>),
         secrets: Arc::new(NoSecrets),
-        resources: Arc::new(RollResources { postgres, redis }),
+        resources: Arc::new(RollResources {
+            postgres,
+            redis,
+            api: {
+                let ip = if args.api.ip().is_unspecified() { std::net::IpAddr::from([127, 0, 0, 1]) } else { args.api.ip() };
+                let token = std::env::var("ROLL_ADMIN_TOKEN").ok().filter(|t| !t.trim().is_empty());
+                (format!("http://{}", std::net::SocketAddr::new(ip, args.api.port())), token, reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).no_proxy().build()?)
+            },
+        }),
         resolver: Arc::new(Doh::new(&a.doh)),
         tls: domain_tls(args, single)?,
         objects,
@@ -453,6 +504,7 @@ impl AppsNode {
         let public = apps_control::public::router(self.apps.clone());
         let main = axum::serve(listener, public.into_make_service_with_connect_info::<SocketAddr>()).into_future();
         let ports = self.serve_ports();
+        tokio::spawn(self.apps.clone().serve_tcp_ports(self.listen.ip()));
         tokio::select! {
             r = main => Ok(r?),
             r = ports => r,
