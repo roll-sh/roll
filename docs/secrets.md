@@ -1586,6 +1586,14 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
+A fourth independent review (2026-11-14, of the rotations overview, transit signing, HMAC and
+brought keys, CSR signing, revocation and the CRL, SQL Server) found no high-severity issue; it
+found an ended SQL Server lease whose login could stay usable, generated passwords SQL Server's
+policy refuses, deleted CAs undoing their revocations, a public CRL signed per request, P-384 CSRs
+mislabelled, unrevocable serials, a batch failed by one retired version and a restore that forgot
+brought keys: all fixed, tested where a test guards behaviour, and checked live (SQL Server 2022,
+OpenSSL). Then SSH host certificates (#45, checked against a real `sshd`).
+
 Built on 2026-11-14 (later), again without a merge: revoking certificates (#44: a list of what a
 CA signed, `…/revoke`, revocation when a lease ends, a public CRL every certificate names, checked
 with `openssl verify -crl_check`); SQL Server outside roll (#39, merged up into #41 and #42;
@@ -1623,14 +1631,13 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **A fourth independent security review** of what was built on 2026-11-14 (the rotations
-   overview, transit signing, HMAC and brought keys, CSR signing, revocation and the public CRL,
-   SQL Server outside roll), and its fixes.
-2. **SSH host certificates** (on #45), as Vault's SSH engine signs host keys: a server's key signed
-   for its host names, so clients trust the CA (`@cert-authority` in `known_hosts`) instead of
-   trusting each host on first use.
-3. **ClickHouse outside roll** (on #39): two users take turns, or a user per lease with a role, over
+1. **ClickHouse outside roll** (on #39): two users take turns, or a user per lease with a role, over
    its native TLS port, through the same guards.
+2. **A certificate's own page of what's coming due**: certificates from CSRs and SSH host
+   certificates that end within two weeks as health findings (`expiring`), so a device's
+   certificate isn't found expired by an outage.
+3. **Transit keys scoped by name**: a grant's resources include one encryption key
+   (`secrets:transit/<name>`), so signing with one key doesn't need write on the project.
 4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
 5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
