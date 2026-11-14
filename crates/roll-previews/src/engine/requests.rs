@@ -192,6 +192,13 @@ impl Engine {
         if !person && self.store.settings(&r.project_id)?.visual_review == crate::settings::VisualReviewRule::Required {
             return Err(Error::Forbidden("a required visual review is accepted by a person, in roll, not by a token".into()));
         }
+        // Not by the change's own author, as approvals aren't (and as GitHub's button isn't).
+        if let Some(change) = &r.change_id
+            && let Ok(Some(c)) = self.source.change(change).await
+            && (by.eq_ignore_ascii_case(&c.author) || by.eq_ignore_ascii_case(c.author.trim_start_matches('@')))
+        {
+            return Err(Error::Forbidden("the change's own author can't accept its visual change: someone else looks at it".into()));
+        }
         let head = self.store.accept_visual(id, by, seen)?.ok_or_else(|| Error::Conflict("the preview has no screenshot to accept yet".into()))?;
         self.store.log(id, &format!("{by} accepted how its pages look at {}", short(&head)))?;
         self.report(r.clone()).await;

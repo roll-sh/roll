@@ -661,7 +661,7 @@ and admins see every project.
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each) | `{vars}`: the preview's own variables; its services redeploy with them |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
-| `POST /v1/previews/{id}/visual/accept` | `{head?}` (the screenshot's looked at, `visual_review.head`) | `Preview`: how a change's pages look at its latest screenshot is accepted (`visual_review`, `roll/visual`); 409 with no screenshot yet, 400 for a branch's preview, 403 from a token when the review is required, 409 when `head` isn't the latest screenshot's (a newer one came in) |
+| `POST /v1/previews/{id}/visual/accept` | `{head?}` (the screenshot's looked at, `visual_review.head`) | `Preview`: how a change's pages look at its latest screenshot is accepted (`visual_review`, `roll/visual`); 409 with no screenshot yet, 400 for a branch's preview, 403 from the change's author or from a token when the review is required, 409 when `head` isn't the latest screenshot's (a newer one came in) |
 | `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}` |
 | `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come. `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s (2,000 lines wide after the first read) and only new lines are sent, with a line saying so when some were missed. Runs on the preview's holder; the stream ends when the client goes |
 | `GET /v1/previews/{id}/activity` | | `Activity[]`, newest first |
@@ -837,9 +837,10 @@ type Settings = {
     other pages) looks exactly as at the accepted head, when the acceptance carries over (as
     Chromatic carries accepted baselines forward). GitHub's branch protection can require
     `roll/visual`; with `required` roll's own landing does too (a `visual` blocker in
-    `Code::blockers`, from the project's rule, never the change's). A required review is a
-    person's: its author's acceptance doesn't count (as with approvals), and a scoped or OAuth
-    token (an agent's) can't give one (403). Automations see it too: the `preview` trigger's
+    `Code::blockers`, from the project's rule, never the change's). A review is someone else's:
+    the change's author can't accept it (403 in roll, ignored from GitHub, and an older such
+    acceptance doesn't clear the blocker), as with approvals; and a required one is a person's,
+    which a scoped or OAuth token (an agent's) can't give (403). Automations see it too: the `preview` trigger's
     `preview.environment.visual_review.state` field, and the built-in "Tell me when a visual change
     waits for a review" template (a notice linking to the preview, or a Slack step instead).
     The same session checks what a screen reader can't name (images without alt text, form

@@ -577,6 +577,7 @@ mod tests {
             labels: Vec::new(),
             trusted: true,
             approved: false,
+            author: String::new(),
             github_pr: None,
         };
         assert!(wants(&s, &ch));

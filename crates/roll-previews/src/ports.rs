@@ -108,6 +108,8 @@ pub struct ChangeInfo {
     pub trusted: bool,
     /// A writer approved running the current head (roll code's `approve-run`).
     pub approved: bool,
+    /// Who opened it (roll code's `author`): not the one to accept its visual change.
+    pub author: String,
     pub github_pr: Option<i64>,
 }
 
