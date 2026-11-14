@@ -592,7 +592,7 @@ impl Secrets {
             Ok(())
         });
         if done.is_ok() {
-            self.revoke_managed(managed);
+            self.revoke_gone(project, managed);
         }
         done
     }
@@ -615,7 +615,7 @@ impl Secrets {
                 drop_env(c, &e)?;
                 audit::record(c, project, caller, "environment.delete", Some(&e.slug), None, &[], &format!("deleted ephemeral environment {} ({k}={v})", e.slug), now)
             })?;
-            self.revoke_managed(managed);
+            self.revoke_gone(project, managed);
             deleted.push(e.slug);
         }
         Ok(deleted)
