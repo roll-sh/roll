@@ -645,7 +645,7 @@ static TOOLS: &[Tool] = &[
         "apps",
         "POST",
         "/v1/apps/projects/{project}/services",
-        &[req("project", "Workspace project"), breq("name", Ty::Str, "Service name"), breq("source", Ty::Obj, "Where the code comes from"), b("variables", Ty::Obj, "{NAME: value}, set before the first deploy"), b("run", Ty::Obj, "Run settings: start, port, scale, size"), b("links", Ty::Arr, "[{kind: postgres|redis|bucket|stream|queue|nosql, ref, prefix?}]: connection variables, before the first deploy (reveal on each)")],
+        &[req("project", "Workspace project"), breq("name", Ty::Str, "Service name"), breq("source", Ty::Obj, "Where the code comes from"), b("branch", Ty::Str, "A repo source's branch for production (default: the repo's default)"), b("variables", Ty::Obj, "{NAME: value}, set before the first deploy"), b("run", Ty::Obj, "Run settings: start, port, scale, size"), b("links", Ty::Arr, "[{kind: postgres|redis|bucket|stream|queue|nosql, ref, prefix?}]: connection variables, before the first deploy (reveal on each)")],
     ),
     t("apps_list_environments", "List environments", "A service's environments.", "apps", "GET", "/v1/apps/services/{service}/environments", &[SERVICE]),
     t("apps_get_service", "Get a service", "A service with its environments' summaries (apps_list_deploys lists an environment's deploys).", "apps", "GET", "/v1/apps/services/{service}", &[SERVICE]),
@@ -664,6 +664,7 @@ static TOOLS: &[Tool] = &[
         b("rate_limit", Ty::Obj, "{per_minute, burst?}: requests a client address may make"),
         b("firewall", Ty::Arr, "[{action: allow|deny, path?, methods?, user_agent?}], first match wins"),
         b("headers", Ty::Any, "Response header rules: [{path?, set: {name: value}, replace?}] (at most 20), or null for none"),
+        b("paused", Ty::Bool, "Pause it (no deploys on push, nothing running) or resume it"),
     ]),
     t("apps_update_service", "Update a service", "Change a service's name, source, build or run settings (fields given are changed; run takes alerts {memory_pct, error_pct, p95_ms} for metric alerts).", "apps", "PATCH", "/v1/apps/services/{service}", &[
         SERVICE,

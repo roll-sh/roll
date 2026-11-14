@@ -563,7 +563,8 @@ per ten minutes and 20 a person an hour; workload tokens capped per owner and a 
 before the limit; a refresh token's retry within its grace audited; apps settings that change what
 production runs, its source, build, start and pre-deploy commands, schedule, kind, port, volume and
 `run.public`, are deploy; `create_grant` refuses extensions that name no caller; the expiry digest
-leaves out tokens made for a day or less); every answer to an expiring token says when
+leaves out tokens made for a day or less); `apps_set_environment` takes `paused` and
+`apps_create_service` a repo's `branch` (apps-next); every answer to an expiring token says when
 (`Roll-Token-Expiration`, GitHub's `GitHub-Authentication-Token-Expiration`), and the CLI warns a
 week ahead; `apps_import` (a roll.toml or compose file checked before `roll up --all`; apps-next);
 the approval UI checked in a browser against `users-live` (the policy's checkboxes, a waiting
