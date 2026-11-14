@@ -999,6 +999,8 @@ fn vector_batches_body() {
     s.query("UPDATE v SET d = NULL WHERE id % 401 = 0").unwrap();
     s.query("UPDATE v SET d = 'infinity' WHERE id % 503 = 0").unwrap();
     s.query("UPDATE v SET d = '-infinity' WHERE id % 509 = 0").unwrap();
+    s.query("UPDATE v SET f = NULL WHERE id % 601 = 0").unwrap();
+    s.query("UPDATE v SET f = CASE WHEN id % 2 = 0 THEN float8 '-0' ELSE float8 '0' END WHERE id % 1009 = 0").unwrap();
     s.query("SET max_parallel_workers_per_gather = 0").unwrap();
     let run = |s: &mut Session| VECTOR_QUERIES.iter().map(|q| out(s, q)).collect::<Vec<_>>();
     let rows = without_vectors(|| run(&mut s));
@@ -1027,7 +1029,8 @@ fn vector_batches_body() {
 
 /// `n` aggregations of table `v` drawn from `seed`: up to two group keys, up to four
 /// counts, sums and averages of numeric expressions (columns of one scale, of mixed scales,
-/// past an i128, NaN; integers; constants; NULLs), a filter or none.
+/// past an i128, NaN; integers; constants; NULLs), of float8 and integer columns, min / max
+/// of columns, a filter or none.
 fn random_aggregates(seed: u64, n: usize) -> Vec<String> {
     let mut st = seed;
     let mut next = move |m: usize| {
@@ -1059,10 +1062,15 @@ fn random_aggregates(seed: u64, n: usize) -> Vec<String> {
             let keys: Vec<&str> = (0..next(3)).map(|_| KEYS[next(KEYS.len())]).collect();
             let mut cols: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
             for _ in 0..1 + next(4) {
-                cols.push(match next(5) {
+                cols.push(match next(8) {
                     0 => "count(*)".into(),
                     1 => format!("count({})", LEAVES[next(7)]),
                     2 => format!("avg({})", expr(&mut next, 2)),
+                    // (Float aggregates sum in row order; integer sums raise past an int8.)
+                    3 => format!("{}(f)", ["sum", "avg", "stddev", "var_pop"][next(4)]),
+                    4 => format!("sum({})", ["id", "a", "z"][next(3)]),
+                    // (A later value equal to the best replaces it: 0 and -0 tell.)
+                    5 => format!("{}({})", ["min", "max"][next(2)], ["a", "b", "id", "d", "f", "z"][next(6)]),
                     _ => format!("sum({})", expr(&mut next, 3)),
                 });
             }

@@ -535,9 +535,11 @@ struct RunScratch {
     /// By group number: its slot this batch (u32::MAX: none).
     slot_of: Vec<u32>,
     touched: Vec<u32>,
-    /// By slot and aggregate: the batch's sum and count.
+    /// By slot and aggregate: the batch's sum and count, and a min / max's best row
+    /// (u32::MAX: none).
     acc: Vec<i128>,
     cnt: Vec<i64>,
+    best: Vec<u32>,
     /// New groups by their key's bytes (`batch_key`, or a words key's), and the groups.
     newk: hashbrown::HashMap<Box<[u8]>, u32, super::fasthash::FastState>,
     newg: Vec<NewGroup>,
@@ -1037,6 +1039,13 @@ impl<'a> Partials<'a> {
                     Some(v) => v,
                     None => return false,
                 },
+                // (A float's bits: `Floats` pushes the value back.)
+                AggArg::Float(c) => match b.cols[*c].as_ref().map(|c| (&c.data, c.nulls[r])) {
+                    Some((_, true)) => None,
+                    Some((crate::storage::cols::ColData::F64(v), false)) => Some((v[r].to_bits() as i128, 0)),
+                    _ => return false,
+                },
+                AggArg::Best(..) => return false,
             };
             // (A NULL an aggregate doesn't skip: `row` adds it as only it can.)
             if v.is_none() && !*skip {
@@ -1120,6 +1129,7 @@ impl<'a> Partials<'a> {
                     *n += 1;
                 }
                 Partial::SumNum(sn) => sn.add_wide(x, sc),
+                Partial::Floats(xs) => xs.push(f64::from_bits(x as u64)),
                 _ => {}
             }
         }
@@ -1203,6 +1213,35 @@ impl<'a> Partials<'a> {
                         return false;
                     }
                 }
+                // (An integer sum raises at the row whose running sum leaves an int8: taken
+                // where none can, `run_sums` checking each group's state with the batch's
+                // bound.)
+                (AggArg::Num(_), Partial::SumInt(_)) => {
+                    let l = lanes.arg(i);
+                    if (!*skip && l.nulls.iter().any(|n| *n))
+                        || l.scale != 0
+                        || l.bound.checked_mul(live.len() as u128).is_none_or(|t| t >= 1 << 62)
+                    {
+                        return false;
+                    }
+                }
+                (AggArg::Float(c), Partial::Floats(_)) => {
+                    let Some(col) = &b.cols[*c] else { return false };
+                    if !matches!(col.data, crate::storage::cols::ColData::F64(_))
+                        || (!*skip && live.iter().any(|&r| col.nulls[r as usize]))
+                    {
+                        return false;
+                    }
+                }
+                (AggArg::Best(c, _), Partial::Best(_)) => {
+                    use crate::storage::cols::ColData as D;
+                    let Some(col) = &b.cols[*c] else { return false };
+                    if !matches!(col.data, D::I32(_) | D::I64(_) | D::Date(_) | D::F64(_))
+                        || (!*skip && live.iter().any(|&r| col.nulls[r as usize]))
+                    {
+                        return false;
+                    }
+                }
                 _ => return false,
             }
         }
@@ -1216,7 +1255,7 @@ impl<'a> Partials<'a> {
         let ok = self.run_groups(plan, b, live, base, &mut run);
         let ok = ok && self.run_sums(plan, b, live, lanes, base, &mut run);
         if ok {
-            self.run_commit(plan, lanes, &mut run);
+            self.run_commit(plan, b, live, lanes, &mut run);
         }
         for &g in &run.touched {
             run.slot_of[g as usize] = u32::MAX;
@@ -1356,6 +1395,8 @@ impl<'a> Partials<'a> {
         run.acc.resize(nslots * na, 0);
         run.cnt.clear();
         run.cnt.resize(nslots * na, 0);
+        run.best.clear();
+        run.best.resize(nslots * na, u32::MAX);
         for (i, arg) in plan.args.iter().enumerate() {
             let (acc, cnt) = (&mut run.acc, &mut run.cnt);
             match arg {
@@ -1365,6 +1406,39 @@ impl<'a> Partials<'a> {
                         for (&s, &r) in run.slots.iter().zip(live) {
                             cnt[s as usize * na + i] += !col.nulls[r as usize] as i64;
                         }
+                    }
+                }
+                AggArg::Float(_) => {}
+                AggArg::Best(c, _) => {
+                    use crate::storage::cols::ColData as D;
+                    let col = b.cols[*c].as_ref().expect("batch_run checked it");
+                    let Partial::Best(st) = &self.spec.aggs[i].2 else { unreachable!("a min / max") };
+                    let best = &mut run.best;
+                    // (Each slot's best row of the batch, by the row path's rule: a later
+                    // row equal to the best replaces it.)
+                    macro_rules! pick {
+                        ($v:expr, $cmp:expr) => {
+                            for (&s, &r) in run.slots.iter().zip(live) {
+                                let r = r as usize;
+                                if col.nulls[r] {
+                                    continue;
+                                }
+                                let j = s as usize * na + i;
+                                let take = best[j] == u32::MAX || {
+                                    let o: Ordering = $cmp($v[r], $v[best[j] as usize]);
+                                    o == Ordering::Equal || (o == Ordering::Greater) == st.max
+                                };
+                                if take {
+                                    best[j] = r as u32;
+                                }
+                            }
+                        };
+                    }
+                    match &col.data {
+                        D::I32(v) | D::Date(v) => pick!(v, |a: i32, b: i32| a.cmp(&b)),
+                        D::I64(v) => pick!(v, |a: i64, b: i64| a.cmp(&b)),
+                        D::F64(v) => pick!(v, crate::types::value::float_cmp),
+                        _ => unreachable!("batch_run checked it"),
                     }
                 }
                 AggArg::Num(_) => {
@@ -1386,14 +1460,19 @@ impl<'a> Partials<'a> {
             }
         }
         let Some(l) = self.spec.words.clone() else {
-            // (Values states: an exact sum takes any; an integer average's sum is checked.)
+            // (Values states: an exact sum takes any; an integer average's sum is checked, and
+            // an integer sum's running sums kept inside an int8 by the batch's bound.)
             for (s, &g) in run.touched.iter().enumerate() {
                 if (g as usize) < self.groups.len() {
                     for (i, st) in self.groups[g as usize].1.iter().enumerate() {
-                        if let Partial::AvgInt(sum, _) = st
-                            && sum.checked_add(run.acc[s * na + i]).is_none()
-                        {
-                            return false;
+                        match st {
+                            Partial::AvgInt(sum, _) if sum.checked_add(run.acc[s * na + i]).is_none() => return false,
+                            Partial::SumInt(Some(t))
+                                if t.unsigned_abs() as u128 + lanes.arg(i).bound * run.cnt[s * na + i] as u128 > i64::MAX as u128 =>
+                            {
+                                return false;
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1440,15 +1519,30 @@ impl<'a> Partials<'a> {
                         };
                         (w[0], w[1], w[2], w[3]) = (t as u64, (t >> 64) as u64, ns as u64, w[3] + n as u64);
                     }
-                    WordState::SumInt => return false,
+                    WordState::SumInt if n == 0 => {}
+                    WordState::SumInt => {
+                        let t = if w[0] != 0 { w[1] as i64 } else { 0 };
+                        if t.unsigned_abs() as u128 + lanes.arg(i).bound * n as u128 > i64::MAX as u128 {
+                            return false;
+                        }
+                        (w[0], w[1]) = (1, (t + x as i64) as u64);
+                    }
                 }
             }
         }
         true
     }
 
-    /// `batch_run`'s groups made and sums added (`run_sums` checked them).
-    fn run_commit(&mut self, plan: &super::vector::AggPlan, lanes: &super::vector::Lanes, run: &mut RunScratch) {
+    /// `batch_run`'s groups made and sums added (`run_sums` checked them), and float
+    /// aggregates' values pushed in row order.
+    fn run_commit(
+        &mut self,
+        plan: &super::vector::AggPlan,
+        b: &crate::storage::cols::ColBatch,
+        live: &[u32],
+        lanes: &super::vector::Lanes,
+        run: &mut RunScratch,
+    ) {
         use std::hash::BuildHasher;
         let na = plan.args.len();
         for ng in run.newg.drain(..) {
@@ -1498,7 +1592,37 @@ impl<'a> Partials<'a> {
                                 *sum += x;
                                 *c += n;
                             }
-                            _ => unreachable!("batch_run takes no other state"),
+                            Partial::SumInt(t) if n > 0 => *t = Some(t.unwrap_or(0) + x as i64),
+                            Partial::SumInt(_) | Partial::Floats(_) => {}
+                            Partial::Best(bs) => {
+                                let (super::vector::AggArg::Best(c, ty), r) = (&plan.args[i], run.best[s * na + i]) else {
+                                    unreachable!("a min / max's argument")
+                                };
+                                if r != u32::MAX
+                                    && let Some(Ok(v)) = b.cols[*c].as_ref().map(|col| col.value(b, r as usize, ty))
+                                {
+                                    bs.add(&v);
+                                }
+                            }
+                        }
+                    }
+                }
+                for (i, arg) in plan.args.iter().enumerate() {
+                    let super::vector::AggArg::Float(c) = arg else { continue };
+                    let col = b.cols[*c].as_ref().expect("a float column");
+                    let crate::storage::cols::ColData::F64(v) = &col.data else { unreachable!("batch_run checked it") };
+                    let vals = live.iter().map(|&r| r as usize).filter(|&r| !col.nulls[r]).map(|r| v[r]);
+                    if plan.keys.is_empty() {
+                        if let Partial::Floats(xs) = &mut self.groups[0].1[i] {
+                            xs.extend(vals);
+                        }
+                    } else {
+                        for (&r, &g) in live.iter().zip(&run.gids) {
+                            if !col.nulls[r as usize]
+                                && let Partial::Floats(xs) = &mut self.groups[g as usize].1[i]
+                            {
+                                xs.push(v[r as usize]);
+                            }
                         }
                     }
                 }

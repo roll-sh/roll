@@ -833,6 +833,10 @@ pub enum AggArg {
     Count(usize),
     /// A sum's or average's exact number.
     Num(VN),
+    /// A float aggregate's column (float4 or float8): its values, in row order.
+    Float(usize),
+    /// min / max of an integer, date or float column (and its type).
+    Best(usize, DataType),
 }
 
 /// A scan's filter and partial aggregation (`partial::Spec`) over column batches: the
@@ -882,6 +886,17 @@ impl AggPlan {
                     (None, Partial::Count(_)) => AggArg::Star,
                     (Some(K::Col(c)), Partial::Count(_)) => AggArg::Count(*c),
                     (Some(k), Partial::SumInt(_) | Partial::AvgInt(..) | Partial::SumNum(_)) => AggArg::Num(VN::compile(k)?),
+                    (Some(K::Col(c)), Partial::Floats(_)) if matches!(types.get(*c), Some(DataType::Float4 | DataType::Float8)) => AggArg::Float(*c),
+                    (Some(K::Col(c)), Partial::Best(b))
+                        if !b.keep_old
+                            && !b.bpchar
+                            && matches!(
+                                types.get(*c),
+                                Some(DataType::Int2 | DataType::Int4 | DataType::Int8 | DataType::Date | DataType::Float4 | DataType::Float8)
+                            ) =>
+                    {
+                        AggArg::Best(*c, types[*c].clone())
+                    }
                     _ => return None,
                 });
             }
@@ -894,7 +909,7 @@ impl AggPlan {
         for a in &args {
             match a {
                 AggArg::Star => {}
-                AggArg::Count(c) => cols.push(*c),
+                AggArg::Count(c) | AggArg::Float(c) | AggArg::Best(c, _) => cols.push(*c),
                 AggArg::Num(n) => n.cols(&mut cols),
             }
         }
