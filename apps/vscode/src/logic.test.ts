@@ -70,6 +70,14 @@ describe("dotenv files", () => {
     expect(rows[1].slice(db.from, db.to)).toBe('"postgres://u:p@h/db"');
     expect(rollRef("staging", "/payments", "STRIPE_KEY")).toBe("roll://staging/payments/STRIPE_KEY");
   });
+
+  it("follow the CLI where it's strict: a trimmed first line, the last of a key, nothing for a file it refuses", () => {
+    expect(dotenvLines('PEM="abc  \ndef"')[0].value).toBe("abc\ndef");
+    expect(dotenvLines("A=1\nB=2\nA=3").map((l) => [l.key, l.value])).toEqual([["B", "2"], ["A", "3"]]);
+    expect(dotenvLines("A=1\nnot a pair\nB=2")).toEqual([]);
+    expect(dotenvLines("export\tA=1")).toEqual([]);
+    expect(dotenvLines('A="never closed\nB=2')).toEqual([]);
+  });
 });
 
 describe("the CLI's setup", () => {

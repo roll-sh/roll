@@ -98,17 +98,24 @@ function unescape(s: string): string {
   return s.replace(/\\(.?)/gs, (_, c: string) => named[c] ?? (c === "" ? "\\" : c));
 }
 
-/** A dotenv file's entries; one it can't read (an unclosed quote) ends the list, as the CLI refuses it. */
+/**
+ * A dotenv file's entries, or none at all when the CLI would refuse the file (a line that isn't
+ * `KEY=value`, an unclosed quote): nothing is offered on a file `roll run --env-file` won't read. A
+ * key set twice is its last entry, as the CLI keeps it.
+ */
 export function dotenvLines(text: string): DotenvLine[] {
   const out: DotenvLine[] = [];
   const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
-    if (raw.trimStart().startsWith("#")) continue;
-    const m = /^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)\s*=[ \t]*/.exec(raw);
-    if (!m) continue;
+    const raw = lines[i].replace(/^\uFEFF/, "");
+    const t = raw.trim();
+    if (!t || t.startsWith("#")) continue;
+    // `export ` (a space, as the CLI strips it), then the key, `=`, and the value.
+    const m = /^(\s*(?:export \s*)?)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*/.exec(raw);
+    if (!m) return [];
     const from = m[0].length;
-    const rest = raw.slice(from);
+    // The CLI reads a line trimmed: a double-quoted value's first line ends where its text does.
+    const rest = raw.slice(from).trimEnd();
     const line = i;
     if (rest.startsWith('"')) {
       let cur = rest.slice(1);
@@ -119,14 +126,14 @@ export function dotenvLines(text: string): DotenvLine[] {
         cur = lines[++i];
         end = closing(cur);
       }
-      if (end < 0) break;
+      if (end < 0) return [];
       acc += cur.slice(0, end);
       const to = (i === line ? from + 1 : 0) + end + 1;
       const value = unescape(acc);
       out.push({ line, endLine: i, key: m[2], value, from, to, reference: value.startsWith("roll://") });
     } else if (rest.startsWith("'")) {
       const end = rest.indexOf("'", 1);
-      if (end < 0) break;
+      if (end < 0) return [];
       const value = rest.slice(1, end);
       out.push({ line, endLine: line, key: m[2], value, from, to: from + end + 1, reference: value.startsWith("roll://") });
     } else {
@@ -137,7 +144,7 @@ export function dotenvLines(text: string): DotenvLine[] {
       out.push({ line, endLine: line, key: m[2], value, from: start, to: start + value.length, reference: value.startsWith("roll://") });
     }
   }
-  return out;
+  return out.filter((e, i) => !out.slice(i + 1).some((later) => later.key === e.key));
 }
 
 /** A key's `roll://` reference for a folder (the CLI's grammar), or null when a part can't be written in one. */

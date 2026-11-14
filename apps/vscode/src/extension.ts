@@ -36,7 +36,6 @@ export function activate(context: vscode.ExtensionContext) {
   /** Where the workspace's secrets are: settings, else the CLI's setup for the folder; null without a token. */
   async function where(uri?: vscode.Uri): Promise<Where | null> {
     const folder = (uri && vscode.workspace.getWorkspaceFolder(uri)) ?? vscode.workspace.workspaceFolders?.[0];
-    const cfg = vscode.workspace.getConfiguration("roll", folder);
     const setup = folder ? nearestSetup(setups(), folder.uri.fsPath) : undefined;
     // Your own settings only (machine scope, and read so): a repository's .vscode/settings.json
     // mustn't choose where your token goes or which project "Move to roll" writes to.
@@ -44,11 +43,13 @@ export function activate(context: vscode.ExtensionContext) {
     const project = own("project") || setup?.project;
     const token = (await context.secrets.get(TOKEN)) || process.env.ROLL_TOKEN;
     if (!project || !token) return null;
-    const env = context.workspaceState.get<string>("roll.environment") || cfg.get<string>("environment") || setup?.env || "development";
+    // Where "Move to roll" writes: the status bar's choice, your own settings, or the setup; never a
+    // repository's settings.
+    const env = context.workspaceState.get<string>("roll.environment") || own("environment") || setup?.env || "development";
     const api = own("apiUrl") || process.env.ROLL_API_URL || "http://127.0.0.1:7070";
     // The name only when it's the setup's own project: confirmations name what's written to.
     const name = setup && setup.project === project ? `${setup.name} (${project})` : project;
-    return { conn: { api, token, project }, name, env, path: cfg.get<string>("path") || setup?.path || "/" };
+    return { conn: { api, token, project }, name, env, path: own("path") || setup?.path || "/" };
   }
 
   /** The folder's grid, kept a minute (names and presence only). */

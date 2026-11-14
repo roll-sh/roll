@@ -58,12 +58,14 @@
         "roll.environment": {
           "type": "string",
           "default": "",
-          "description": "The environment this workspace runs. Default: the folder's setup, else development."
+          "description": "The environment this workspace runs. Default: the folder's setup, else development.",
+          "scope": "machine"
         },
         "roll.path": {
           "type": "string",
           "default": "",
-          "description": "The folder in roll (default: the setup's, else /)."
+          "description": "The folder in roll (default: the setup's, else /).",
+          "scope": "machine"
         }
       }
     }

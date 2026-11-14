@@ -800,18 +800,19 @@ vercel env pull .env.production --environment=production  &&  roll secrets impor
   environment has the key, and "Move to roll": after a confirmation that names the project,
   environment and folder (and says when it replaces roll's value), the value is set in roll as one
   change and the entry becomes its reference, which `roll run --env-file` resolves. The file is
-  read as the CLI reads it (a double-quoted value over several lines, a comment after its quote),
-  and the whole entry is replaced, every line of a multi-line key; if the entry changed while roll
+  read as the CLI reads it (a double-quoted value over several lines, a comment after its quote,
+  the last entry of a key set twice; nothing is offered on a file the CLI would refuse), and the
+  whole entry is replaced, every line of a multi-line key; if the entry changed while roll
   answered, it's left alone and the message says so. A protected environment's 409 says to open a
   change request in the dashboard.
 - **What it reads**: the folder's grid (`GET …/grid`: names and which environments set them, never
   a value; `read` is enough), cached a minute. It writes only for "Move to roll". A value never
   goes into a message, a log or the extension's state.
 - **Setup**: what `roll secrets setup` remembers for the folder (`~/.config/roll/secrets.json`),
-  or the `roll.project`, `roll.environment` and `roll.path` settings. `roll.apiUrl` and
-  `roll.project` come from your own settings only, never a repository's `.vscode/settings.json`
-  (which could send your token elsewhere, or point "Move to roll" at another project), and a
-  confirmation names the project it writes to. The status bar's
+  or the `roll.project`, `roll.environment` and `roll.path` settings. All of them, and
+  `roll.apiUrl`, come from your own settings only, never a repository's `.vscode/settings.json`
+  (which could send your token elsewhere, or point "Move to roll" at another project or
+  environment), and a confirmation names the project it writes to. The status bar's
   `roll: shop · staging` chooses another environment for the workspace. The token is a project
   token kept in VS Code's secret storage (`roll secrets: Sign in`), or `ROLL_TOKEN`.
 - Checked in code-server 4.96 (VS Code 1.96) against a live rolld: the hover, the warning, and a
