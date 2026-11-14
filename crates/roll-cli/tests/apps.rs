@@ -63,6 +63,18 @@ impl T {
         (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
     }
 
+    /// `roll apps <args>` from a directory under the work directory.
+    async fn run_in(&self, sub: &str, args: &[&str]) -> (Option<i32>, String, String) {
+        let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).arg("apps").args(args).current_dir(self.work.path().join(sub)).env("ROLL_API_URL", &self.api).env_remove("ROLL_API_KEY").stdin(Stdio::null()).output().await.unwrap();
+        (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+
+    /// `roll up` in the work directory.
+    async fn run_up(&self) -> (Option<i32>, String, String) {
+        let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).arg("up").current_dir(self.work.path()).env("ROLL_API_URL", &self.api).env_remove("ROLL_API_KEY").stdin(Stdio::null()).output().await.unwrap();
+        (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+
     async fn ok(&self, args: &[&str]) -> String {
         let (code, out, err) = self.run(args).await;
         assert_eq!(code, Some(0), "roll apps {args:?}: {err}\n{out}");
@@ -122,4 +134,12 @@ async fn settings_through_the_cli() {
     assert_eq!((copy["service"]["run"]["health_timeout_s"].as_u64(), &copy["sealed"]), (Some(90), &serde_json::json!(["KEY"])), "{copy}");
     let vars = t.ok(&["vars", "-s", "site-copy", "-p", "acme", "--reveal"]).await;
     assert!(vars.contains("MODE=prod") && !vars.contains("KEY="), "{vars}");
+    // A directory linked to a service made elsewhere: no --service, in it or under it.
+    t.ok(&["use", "site", "-p", "acme"]).await;
+    std::fs::create_dir_all(t.work.path().join("src/lib")).unwrap();
+    let here = t.run_in("src/lib", &["--json", "show"]).await;
+    assert_eq!((here.0, serde_json::from_str::<serde_json::Value>(&here.1).map(|v| v["name"].clone()).ok()), (Some(0), Some(serde_json::json!("site"))), "{here:?}");
+    // `roll up` doesn't upload to an image service: it says what deploys one.
+    let (code, _, err) = t.run_up().await;
+    assert!(code != Some(0) && err.contains("roll deploy"), "{err}");
 }

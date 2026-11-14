@@ -2,7 +2,9 @@
 //! `roll domains` and `roll apps …`, all on `/v1/apps` (docs/apps/http-api.md).
 //!
 //! A directory remembers its service in `.roll/app.json` (roll's local state directory, never
-//! committed), so `roll up`, `roll logs` and the rest need no flags after the first `roll up`.
+//! committed), so `roll up`, `roll logs` and the rest need no flags after the first `roll up` or
+//! `roll apps use` (a service made elsewhere: the dashboard, a repo). Commands other than
+//! `roll up` find it in a parent directory too, as git finds its repo.
 
 use crate::{Api, s};
 use anyhow::{Context, bail};
@@ -355,6 +357,18 @@ pub enum AppsCmd {
         name: String,
         #[command(flatten)]
         target: Target,
+    },
+    /// Link this directory to a service that exists (Railway's `railway link`): `roll logs`,
+    /// `roll apps …` and `roll deploy` here, and in directories under it, need no `--service`.
+    /// `--clear` forgets it.
+    Use {
+        /// The service: an id or a name (with `--project` when two projects have one).
+        #[arg(required_unless_present = "clear")]
+        service: Option<String>,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long, conflicts_with = "service")]
+        clear: bool,
     },
     /// Delete a service: its environments, instances, deployments and images (asks first;
     /// `--yes` doesn't).
@@ -752,6 +766,12 @@ fn read_link(dir: &Path) -> Option<Value> {
     std::fs::read(dir.join(LINK)).ok().and_then(|b| serde_json::from_slice(&b).ok())
 }
 
+/// The nearest link from `dir` up (a monorepo's app directory, or its root): every command but
+/// `roll up`, which uploads its own directory and so reads only that one's.
+fn find_link(dir: &Path) -> Option<Value> {
+    dir.ancestors().find_map(read_link)
+}
+
 fn write_link(dir: &Path, v: &Value) -> anyhow::Result<()> {
     let path = dir.join(LINK);
     std::fs::create_dir_all(path.parent().expect("a parent"))?;
@@ -782,9 +802,9 @@ async fn project_id(api: &Api, p: &str) -> anyhow::Result<String> {
 async fn service(api: &Api, t: &Target) -> anyhow::Result<Value> {
     let key = match &t.service {
         Some(k) => k.clone(),
-        None => match read_link(&std::env::current_dir()?) {
+        None => match find_link(&std::env::current_dir()?) {
             Some(l) => s(&l["service"]),
-            None => bail!("which service? pass --service, or run `roll up` here first"),
+            None => bail!("which service? pass --service; `roll apps use <service>` links this directory to one that exists, `roll up` makes one from it"),
         },
     };
     if key.starts_with("svc_") {
@@ -1299,6 +1319,10 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
             svc
         }
     };
+    // A repo or an image service isn't uploaded to: its own source deploys.
+    if let Some(kind) = svc["source"]["kind"].as_str().filter(|k| *k != "upload") {
+        bail!("{} deploys its {kind}, not an upload: `roll deploy -s {}` deploys it", s(&svc["name"]), s(&svc["name"]));
+    }
     write_link(&dir, &json!({ "service": svc["id"], "project": svc["project"], "name": svc["name"] }))?;
     let bundle = tokio::task::spawn_blocking(move || pack(&dir)).await??;
     eprintln!("uploading {} KiB", bundle.len() / 1024);
@@ -1960,6 +1984,26 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             json!({ "service": made, "sealed": sealed })
+        }
+        AppsCmd::Use { service: key, project, clear } => {
+            let dir = std::env::current_dir()?;
+            if clear {
+                let _ = std::fs::remove_file(dir.join(LINK));
+                return Ok(());
+            }
+            let svc = service(api, &Target { service: key, project, env: "production".into() }).await?;
+            write_link(&dir, &json!({ "service": svc["id"], "project": svc["project"], "name": svc["name"] }))?;
+            if !json_out {
+                println!("linked {} to {} ({})", dir.display(), s(&svc["name"]), s(&svc["id"]));
+                // `roll up` uploads: what deploys a repo or an image service is another command.
+                match svc["source"]["kind"].as_str() {
+                    Some("repo") => eprintln!("it deploys its repo's pushes; `roll deploy` deploys its branch's head now"),
+                    Some("image") => eprintln!("it runs an image; `roll deploy --image <ref>` deploys another"),
+                    _ => {}
+                }
+                return Ok(());
+            }
+            svc
         }
         AppsCmd::Delete { target, yes } => {
             let svc = service(api, &target).await?;
