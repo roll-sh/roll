@@ -599,7 +599,10 @@ pub fn parse_ip_allow(list: &[String]) -> Result<Vec<ipnet::IpNet>> {
 fn check_name(name: &str) -> Result<()> {
     match name.trim().chars().count() {
         // Agents read names (`roll://access/me`, approvals): one line of plain text.
-        _ if name.chars().any(|c| c.is_control() || c == '`') => Err(Error::BadRequest("a token's name is one line, without control characters or backticks".into())),
+        // Invisible characters too: a name reaches consent screens and agents' instructions.
+        _ if name.chars().any(|c| c.is_control() || c == '`' || matches!(c as u32, 0x00AD | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2069 | 0xFE00..=0xFE0F | 0xFEFF | 0xE0000..=0xE007F | 0xE0100..=0xE01EF)) => {
+            Err(Error::BadRequest("a token's name is one line, without control characters, invisible characters or backticks".into()))
+        }
         1..=64 => Ok(()),
         _ => Err(Error::BadRequest("a token's name is 1-64 characters".into())),
     }

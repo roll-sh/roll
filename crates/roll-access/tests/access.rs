@@ -528,6 +528,11 @@ async fn a_token_never_makes_a_stronger_one() {
     let month = json!({ "name": "month", "rules": read, "expires_at": code_sql::now_ms() + 30 * 86_400_000 });
     assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(month)).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({}))).await.0, StatusCode::OK);
+    // A name reaches consent screens and agents' instructions: one hiding text (tag characters) is
+    // refused.
+    let hidden = json!({ "name": "ci\u{e0072}\u{e006d}", "rules": read, "expires_at": code_sql::now_ms() + 86_400_000 });
+    let (s, e) = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(hidden)).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("invisible"), "{e}");
     assert_eq!(make(json!([{ "product": "postgres", "resources": "*", "actions": { "write": "allow" } }]), Some(end)).await.0, StatusCode::FORBIDDEN);
     assert_eq!(make(read.clone(), None).await.0, StatusCode::FORBIDDEN, "outlives its maker");
     // A limited maker makes only tokens limited as tightly.

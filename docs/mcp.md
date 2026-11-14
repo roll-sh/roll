@@ -540,53 +540,55 @@ by its maker, out of the list and caps) for secrets' identity logins; a person's
 mailed to them (an approval waiting on them, used from a new network, revoked as leaked, about to
 expire; only their own, never a secret); `previews_resolve_note` (a preview page's note, write by
 the prefix; previews-next), and `apps_logs` takes `before`, `instance`, `deployment` and `stream`
-(apps-next); `apps_set_environment` takes response header rules (`headers`, apps-next); a cron run's
-logs are read again, as apps-next decided (its lines were always in the read-level environment log);
-`apps_restart_instance` (apps-next, reviewed under the environment prefix: deploy in production);
-invisible characters (tag characters, zero-width and bidi controls, variation selectors) escaped in
-results' text, so instructions hidden in other people's text stay visible to the model; plain-read
-answers checked for credentials (key listings: streams' are usernames, storage's skip the secret,
-tasks' are hashes and prefixes); the fifteenth review: a list's credentials redacted item by item (a
-token with reveal on one Postgres database and read on all saw every database's password in `GET
-/v1/projects`; the same for every list with credential fields), a preview's `share_url` redacted
-without reveal (its access token: the QR code's reveal row protected nothing), and a cron run's logs
-reveal on this branch too; `previews_list_notes` and `previews_resolve_note` (a preview page's note,
-write by the prefix; previews-next), and `apps_logs` takes `before`, `instance`, `deployment` and
-`stream` (apps-next); apps-next's cron runs as tools (`apps_get_cron_run`, `apps_cron_run_logs`,
-`apps_cancel_cron_run`); a preview's caught mail as reveal, with `previews_list_mail` and
-`previews_read_mail` (previews-next); the connect panel says what a choice of toolsets costs (tools
-and context tokens, from `GET /v1/mcp/toolsets`) and warns past a client's limit (VS Code refuses
-more than 128 tools a request; with every product on roll lists about 259); the token page counts
-what a model reads (name, description, schema); `previews_connect` and its reveal row, and a
-preview's QR code as reveal (previews-next); the core products' everyday routes as tools (streams: a
-topic, a group's lag, branching; tasks: retrying messages and dead letters, cancelling and rerunning
-runs, functions, queues; NoSQL: reset, restore, a branch's diff; storage: branching a bucket, the
-trash and restoring from it); against Neon's MCP server and main's routes: `postgres_reset_branch`
-(reset from parent), `postgres_get_endpoint`, `postgres_update_endpoint`, `redis_restore`,
-`apps_delete_environment`; each product's routes compared with its tools (`tool-gaps.py`):
-`search_update_cluster`, `search_delete_cluster`, `secrets_list_rotators`, `secrets_list_syncs` and
-`secrets_diff` added; previews' bypass, search's keys, password and console, and secrets' bulk
-values, reviews and settings stay a person's; apps' missing everyday tools (`apps_create_service`
-takes links and run settings, an environment's state, linking and unlinking resources, checking a
-domain, volume backups and restoring one; all on main); a tool any token may call (`apps_plan`) is
-listed only where its product runs (it showed with apps off); previews' tools listed (they never
-were: roll previews runs with roll code and has no product switch, so MCP's product list left it
-out; rolld's auth test now fails on any product it serves with no tools listed); the token builder
-offers only the products this rolld runs (and any a token's rules name already), not all sixteen;
-checked live on #25's build (both official SDKs end to end, progress during an approval, URL
-elicitation; `serverInfo.icons` answered), which found roll code's fronted tools still carrying the
-approval argument for the operator (37 of 78): they drop it too now; the fourteenth review
-(key-scoped rules, before any row uses them): secrets' key names are literal (a key named `_all` is
-only that key; a list or a `*` in a request names none) and an approval remembers only a request
-that named one key; a pending answer says the call finds its approval without the argument too; the
-approval argument only where a person can be asked (a model reads every tool's schema: 92 → 73 KB
-for the operator and for tokens that only allow, every product on; `tools/list` 140 → 120 KB, 190
-tools); the builder lists a secrets project's encryption keys to tick (one picker with search's
-indices; secrets' projects come from the workspace); encryption keys as MCP tools
-(`secrets_transit_encrypt`, `_decrypt`, `_sign`, `_verify`, `_public_key`; secrets #47: their rows
-narrow to one key); roll's mark as the server's icon (`serverInfo.icons`); a rule can narrow a
-secrets project to some of its encryption keys (`{id, index}`, as search's indices: signing with one
-key needn't be write on the project; secrets' transit rows add `.index("name")`);
+(apps-next); names people choose can't hide text: a token's name with invisible characters is
+refused, OAuth clients' names (registered or from a metadata document) drop them, and `initialize`'s
+instructions escape them; `apps_set_environment` takes response header rules (`headers`, apps-next);
+a cron run's logs are read again, as apps-next decided (its lines were always in the read-level
+environment log); `apps_restart_instance` (apps-next, reviewed under the environment prefix: deploy
+in production); invisible characters (tag characters, zero-width and bidi controls, variation
+selectors) escaped in results' text, so instructions hidden in other people's text stay visible to
+the model; plain-read answers checked for credentials (key listings: streams' are usernames,
+storage's skip the secret, tasks' are hashes and prefixes); the fifteenth review: a list's
+credentials redacted item by item (a token with reveal on one Postgres database and read on all saw
+every database's password in `GET /v1/projects`; the same for every list with credential fields), a
+preview's `share_url` redacted without reveal (its access token: the QR code's reveal row protected
+nothing), and a cron run's logs reveal on this branch too; `previews_list_notes` and
+`previews_resolve_note` (a preview page's note, write by the prefix; previews-next), and `apps_logs`
+takes `before`, `instance`, `deployment` and `stream` (apps-next); apps-next's cron runs as tools
+(`apps_get_cron_run`, `apps_cron_run_logs`, `apps_cancel_cron_run`); a preview's caught mail as
+reveal, with `previews_list_mail` and `previews_read_mail` (previews-next); the connect panel says
+what a choice of toolsets costs (tools and context tokens, from `GET /v1/mcp/toolsets`) and warns
+past a client's limit (VS Code refuses more than 128 tools a request; with every product on roll
+lists about 259); the token page counts what a model reads (name, description, schema);
+`previews_connect` and its reveal row, and a preview's QR code as reveal (previews-next); the core
+products' everyday routes as tools (streams: a topic, a group's lag, branching; tasks: retrying
+messages and dead letters, cancelling and rerunning runs, functions, queues; NoSQL: reset, restore,
+a branch's diff; storage: branching a bucket, the trash and restoring from it); against Neon's MCP
+server and main's routes: `postgres_reset_branch` (reset from parent), `postgres_get_endpoint`,
+`postgres_update_endpoint`, `redis_restore`, `apps_delete_environment`; each product's routes
+compared with its tools (`tool-gaps.py`): `search_update_cluster`, `search_delete_cluster`,
+`secrets_list_rotators`, `secrets_list_syncs` and `secrets_diff` added; previews' bypass, search's
+keys, password and console, and secrets' bulk values, reviews and settings stay a person's; apps'
+missing everyday tools (`apps_create_service` takes links and run settings, an environment's state,
+linking and unlinking resources, checking a domain, volume backups and restoring one; all on main);
+a tool any token may call (`apps_plan`) is listed only where its product runs (it showed with apps
+off); previews' tools listed (they never were: roll previews runs with roll code and has no product
+switch, so MCP's product list left it out; rolld's auth test now fails on any product it serves with
+no tools listed); the token builder offers only the products this rolld runs (and any a token's
+rules name already), not all sixteen; checked live on #25's build (both official SDKs end to end,
+progress during an approval, URL elicitation; `serverInfo.icons` answered), which found roll code's
+fronted tools still carrying the approval argument for the operator (37 of 78): they drop it too
+now; the fourteenth review (key-scoped rules, before any row uses them): secrets' key names are
+literal (a key named `_all` is only that key; a list or a `*` in a request names none) and an
+approval remembers only a request that named one key; a pending answer says the call finds its
+approval without the argument too; the approval argument only where a person can be asked (a model
+reads every tool's schema: 92 → 73 KB for the operator and for tokens that only allow, every product
+on; `tools/list` 140 → 120 KB, 190 tools); the builder lists a secrets project's encryption keys to
+tick (one picker with search's indices; secrets' projects come from the workspace); encryption keys
+as MCP tools (`secrets_transit_encrypt`, `_decrypt`, `_sign`, `_verify`, `_public_key`; secrets #47:
+their rows narrow to one key); roll's mark as the server's icon (`serverInfo.icons`); a rule can
+narrow a secrets project to some of its encryption keys (`{id, index}`, as search's indices: signing
+with one key needn't be write on the project; secrets' transit rows add `.index("name")`);
 `secrets_list_rotations` and `secrets_ca_certificates` (secrets #48, #44); `tools/list` 11% smaller
 with every product on (183 tools, 150 → 134 KB: the approval argument's description shortened, the
 title not repeated in annotations); apps' plan, activity, deploys, links, cron runs and limits as
