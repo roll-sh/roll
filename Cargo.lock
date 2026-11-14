@@ -6783,6 +6783,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "http-body 1.1.0",
+ "ipnet",
  "kafka-protocol",
  "lapin",
  "libc",

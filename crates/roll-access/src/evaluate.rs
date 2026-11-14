@@ -84,29 +84,37 @@ pub fn client_ip(req: &Request, config: &crate::Config) -> Option<IpAddr> {
     if let Some(f) = req.extensions().get::<roll_cluster::Forwarded>() {
         return f.client.as_deref().and_then(|c| c.parse().ok());
     }
-    let peer = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip());
-    if config.trust_forwarded_for
-        && let Some(xff) = req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok())
-        && let Some(ip) = forwarded_client(xff, peer, &config.trusted_proxies)
-    {
-        return Some(ip);
+    let peer = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_canonical());
+    if config.trust_forwarded_for {
+        // Every X-Forwarded-For line, in order: a proxy may add its own line rather than append.
+        let xff = req.headers().get_all("x-forwarded-for").iter().filter_map(|v| v.to_str().ok()).collect::<Vec<_>>().join(",");
+        if !xff.is_empty()
+            && let Some(ip) = forwarded_client(&xff, peer, &config.trusted_proxies)
+        {
+            return Some(ip);
+        }
     }
     peer
 }
 
-/// The client an `X-Forwarded-For` names. With no trusted proxies listed, the left-most entry (the
-/// edge overwrites the header). With some, the header counts only when `peer` is one of them, and
-/// the client is the right-most entry that isn't: entries left of it are whatever the client sent.
+/// The client an `X-Forwarded-For` names: only from a listed proxy (`peer` one of `trusted`), the
+/// right-most entry that isn't a proxy; entries left of it are whatever the client sent. Nothing
+/// listed, nothing counts (roll's edge hands the client's address over as the connection's own),
+/// and an entry that doesn't parse (`ip:port`) stops the walk: the peer is the answer then.
 pub fn forwarded_client(xff: &str, peer: Option<IpAddr>, trusted: &[ipnet::IpNet]) -> Option<IpAddr> {
-    let hops: Vec<IpAddr> = xff.split(',').filter_map(|h| h.trim().parse().ok()).collect();
-    if trusted.is_empty() {
-        return hops.first().copied();
-    }
-    let is_trusted = |ip: &IpAddr| trusted.iter().any(|n| n.contains(ip));
-    if !peer.is_some_and(|p| is_trusted(&p)) {
+    let is_trusted = |ip: &IpAddr| trusted.iter().any(|n| n.contains(&ip.to_canonical()));
+    if trusted.is_empty() || !peer.is_some_and(|p| is_trusted(&p)) {
         return None;
     }
-    hops.iter().rev().find(|h| !is_trusted(h)).copied().or_else(|| hops.first().copied())
+    let mut last = None;
+    for hop in xff.split(',').map(str::trim).filter(|h| !h.is_empty()).rev() {
+        let ip = hop.parse::<IpAddr>().ok()?.to_canonical();
+        if !is_trusted(&ip) {
+            return Some(ip);
+        }
+        last = Some(ip);
+    }
+    last
 }
 
 fn deny(status: StatusCode, code: &str, message: String, extra: Value) -> Response {
@@ -947,6 +955,9 @@ mod forwarded_tests {
         // The client claimed 1.1.1.1; the edge appended what it saw, 203.0.113.9.
         assert_eq!(super::forwarded_client("1.1.1.1, 203.0.113.9", edge, &trusted), Some("203.0.113.9".parse().unwrap()));
         assert_eq!(super::forwarded_client("1.1.1.1", Some("198.51.100.7".parse().unwrap()), &trusted), None, "not from a proxy");
-        assert_eq!(super::forwarded_client("1.1.1.1, 203.0.113.9", edge, &[]), Some("1.1.1.1".parse().unwrap()), "unlisted: as before");
+        assert_eq!(super::forwarded_client("1.1.1.1, 203.0.113.9", edge, &[]), None, "no proxies listed: the header counts for nothing");
+        assert_eq!(super::forwarded_client("1.1.1.1, 203.0.113.9:443", edge, &trusted), None, "an entry that doesn't parse stops the walk");
+        // An IPv4 address as a dual-stack listener reports it.
+        assert_eq!(super::forwarded_client("203.0.113.9", Some("::ffff:10.1.2.3".parse().unwrap()), &trusted), Some("203.0.113.9".parse().unwrap()));
     }
 }
