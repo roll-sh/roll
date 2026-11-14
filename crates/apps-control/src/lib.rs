@@ -386,7 +386,7 @@ impl Apps {
     pub async fn create_service(self: &Arc<Self>, body: Value, actor: Option<String>) -> Result<Service> {
         let o = body.as_object().ok_or_else(|| Error::BadRequest("the body is an object".into()))?;
         for k in o.keys() {
-            if !["project", "name", "source", "build", "run", "variables", "registry", "links", "x", "y"].contains(&k.as_str()) {
+            if !["project", "name", "source", "build", "run", "variables", "registry", "links", "branch", "x", "y"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -445,11 +445,20 @@ impl Apps {
             let p = project.clone();
             tokio::task::spawn_blocking(move || this.project_name(&p)).await.map_err(|e| Error::Internal(e.to_string()))??
         };
-        // A repo's production environment follows its default branch.
+        // A repo's production environment follows its default branch, or the one named (its
+        // first deploy is that branch's head, not the default's).
+        let named = match o.get("branch") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(b)) if matches!(source, Source::Repo { .. }) && !b.is_empty() && b.len() <= 255 => Some(b.clone()),
+            Some(_) => return Err(Error::BadRequest("branch is a repo source's branch name".into())),
+        };
         let branch = match (&source, &self.deps.sources) {
             (Source::Repo { repo, .. }, Some(src)) => {
-                let _ = src.resolve(repo, None).await.map_err(|e| Error::BadRequest(format!("repo {repo}: {e}")))?;
-                Some(self.default_branch(repo).await)
+                let _ = src.resolve(repo, named.as_deref()).await.map_err(|e| Error::BadRequest(format!("repo {repo}: {e}")))?;
+                Some(match named {
+                    Some(b) => b,
+                    None => self.default_branch(repo).await,
+                })
             }
             (Source::Repo { repo, .. }, None) => return Err(Error::BadRequest(format!("roll code isn't on this node, so {repo} can't be a source"))),
             _ => None,
@@ -628,7 +637,23 @@ impl Apps {
                 None => InstanceState::None,
             }
         };
-        Ok(EnvironmentSummary { name: e.name.clone(), state, url: public.then(|| self.url(&e.slug)), active, latest })
+        let mut attention = Vec::new();
+        if self.lives.lock().get(&env_key(&e.service, &e.name)).is_some_and(|l| l.crash_loop().is_some()) {
+            attention.push("crash_loop");
+        }
+        if self.capped(&e.service) {
+            attention.push("capped");
+        }
+        if e.paused {
+            attention.push("paused");
+        }
+        if e.maintenance.is_some() {
+            attention.push("maintenance");
+        }
+        if latest.as_ref().is_some_and(|l| l.status == DeployStatus::Failed) {
+            attention.push("deploy_failed");
+        }
+        Ok(EnvironmentSummary { name: e.name.clone(), state, url: public.then(|| self.url(&e.slug)), active, latest, attention })
     }
 
     pub async fn patch_service(self: &Arc<Self>, id: &str, body: Value) -> Result<Service> {
@@ -904,6 +929,7 @@ impl Apps {
             redeploy_on_secrets: r.redeploy_on_secrets,
             feedback: r.feedback,
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
+            paused: r.paused,
             pages: r.pages.clone(),
             allow_ips: r.allow_ips.clone(),
             rate_limit: r.rate_limit,
@@ -921,11 +947,16 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
         // The new settings are checked before anything is written: a 400 changes nothing.
+        let paused = match o.get("paused") {
+            None => None,
+            Some(Value::Bool(b)) => Some(*b),
+            Some(_) => return Err(Error::BadRequest("paused is a boolean".into())),
+        };
         // Maintenance: true or {message?} turns it on, false or null off.
         let maintenance: Option<Option<String>> = match o.get("maintenance") {
             None => None,
@@ -1127,6 +1158,20 @@ impl Apps {
             }
             Some(_) => return Err(Error::BadRequest("feedback is a boolean".into())),
         }
+        if let Some(on) = paused {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_paused(&sid, &e, on)).await?;
+            // At once on its owner: what runs stops, and the next tick keeps no floor; resumed,
+            // the next tick (or request) starts what it wants again.
+            let live = self.live(service, env);
+            live.set_paused(on);
+            if on {
+                live.sleep().await;
+            } else {
+                live.tick().await;
+            }
+            self.changed(service);
+        }
         if let Some(m) = maintenance {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_maintenance(&sid, &e, m.as_deref())).await?;
@@ -1320,13 +1365,15 @@ impl Apps {
         // Only an environment that exists gets live state.
         let (sid, e) = (service.to_string(), env.to_string());
         let row = self.db(move |s| s.environment(&sid, &e)).await?;
-        // Adopting keeps what runs on a runtime the nodes share: only the service's owner does
-        // (a request that reached this node as the service moved away mustn't take what the
-        // next owner kept, nor leave live state behind here).
-        if self.deps.runtime.shares_instances() && !self.owns(service) {
+        // Only the service's owner has live state: a request that reached this node as the
+        // service moved away mustn't take what the next owner kept (a runtime the nodes share),
+        // nor start instances here that nothing will stop (one this node alone runs).
+        if !self.owns(service) {
             return Err(Error::Unavailable("the service is moving to another node; try again in a moment".into()));
         }
         let live = self.live(service, env);
+        // Paused before anything starts: an owner taking over keeps it paused.
+        live.set_paused(row.paused);
         let Some(active) = row.active.clone() else { return Ok(live) };
         let dep = self.db(move |s| s.deployment(&active)).await?;
         let sid = service.to_string();
@@ -1991,11 +2038,11 @@ impl Apps {
     }
 
     /// `GET /v1/apps/services/{id}/activity`: its audit trail, newest first.
-    pub async fn activity(self: &Arc<Self>, service: &str) -> Result<Vec<Event>> {
+    pub async fn activity(self: &Arc<Self>, service: &str, all: bool) -> Result<Vec<Event>> {
         let sid = service.to_string();
         self.db(move |s| {
             s.service(&sid)?;
-            s.activity(&sid, 200)
+            s.activity(&sid, 200, all)
         })
         .await
     }

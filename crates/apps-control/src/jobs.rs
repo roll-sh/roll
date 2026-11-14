@@ -47,6 +47,9 @@ impl Apps {
             return Err(Error::Conflict("this project reached its spending limit for the month".into()));
         }
         let live = self.load_live(service, env).await?;
+        if live.paused() {
+            return Err(Error::Conflict("this environment is paused: resume it to run a job".into()));
+        }
         let Some(tpl) = live.template() else { return Err(Error::Conflict(format!("nothing is deployed in {env} yet"))) };
         // The slot is taken under the lock that counts them (a placeholder until the job has an
         // id), so requests at once can't all pass the count.

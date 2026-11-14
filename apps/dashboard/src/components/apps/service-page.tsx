@@ -1,6 +1,6 @@
 import { HorizonMark } from "@roll/brand";
 import { useNavigate } from "@tanstack/react-router";
-import { ArrowLeft, ChevronDown, ExternalLink, Moon, Play, RotateCw, Rocket, Sun } from "lucide-react";
+import { ArrowLeft, ChevronDown, ExternalLink, Moon, Pause, Play, Rocket, RotateCw, Sun } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import {
@@ -17,9 +17,10 @@ import {
   type Overview,
   type Service,
 } from "@/lib/apps-api";
+import { titled } from "@/lib/head";
 import { workspace, useWorkspace } from "@/lib/workspace-store";
 import { AppShell } from "../app-shell";
-import { btn, Connecting, EmptyPanel, ErrorNote, input, Offline, primary } from "../ui";
+import { btn, Connecting, EmptyPanel, input, Offline, primary } from "../ui";
 import { Deployments } from "./deployments";
 import { DomainsTab } from "./domains";
 import { JobsTab } from "./jobs";
@@ -28,11 +29,12 @@ import { anyPending, POLL_BUSY_MS, POLL_IDLE_MS, POLL_STREAMED_MS, useDeployMark
 import { RuntimeLogs } from "./logs";
 import { MetricsTab } from "./metrics";
 import { SettingsTab } from "./settings";
-import { clock, StateBadge, SureButton, until, useRunner, type Runner } from "./shared";
+import { clock, RunnerError, StateBadge, SureButton, until, useRunner, type Runner } from "./shared";
 import { UsageTab } from "./usage";
-import { VariablesTab } from "./variables";
+import { RedeployBanner, VariablesTab } from "./variables";
+import { EventsTab } from "./activity";
 
-export const SERVICE_TABS = ["deployments", "logs", "metrics", "variables", "jobs", "shell", "domains", "usage", "settings"] as const;
+export const SERVICE_TABS = ["deployments", "logs", "metrics", "events", "variables", "jobs", "shell", "domains", "usage", "settings"] as const;
 export type ServiceTab = (typeof SERVICE_TABS)[number];
 
 const TAB_LABEL: Record<ServiceTab, string> = {
@@ -44,6 +46,7 @@ const TAB_LABEL: Record<ServiceTab, string> = {
   shell: "Shell",
   domains: "Domains",
   usage: "Usage",
+  events: "Events",
   settings: "Settings",
 };
 
@@ -215,6 +218,16 @@ function Conditions({ service, env, runner, go }: { service: Service; env: Envir
         </button>
       ),
     });
+  if (env.paused)
+    lines.push({
+      key: "paused",
+      text: "Paused: nothing runs, wakes, deploys or is scheduled here until it's resumed.",
+      action: (
+        <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => runner.run("resume", () => appsApi.putEnvironment(service.id, env.name, { paused: false }))}>
+          Resume
+        </button>
+      ),
+    });
   if (env.maintenance)
     lines.push({
       key: "maintenance",
@@ -281,10 +294,17 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
   const [rev, setRev] = useState("");
   const [noTraffic, setNoTraffic] = useState(false);
   const [noCache, setNoCache] = useState(false);
+  const [image, setImage] = useState("");
+  const [note, setNote] = useState("");
   useEffect(() => {
     appsApi.overview().then(setOverview, () => {});
   }, []);
   useDeployMark(data ? [data.service] : null);
+  // Its name in the tab (the route's head only knows "Service" before the service is read).
+  const named = data?.service.name;
+  useEffect(() => {
+    if (named) document.title = titled(named);
+  }, [named]);
 
   const go = (next: { env?: string; tab?: ServiceTab }) => {
     const e = next.env ?? envParam;
@@ -361,12 +381,21 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
               <Play className="size-3.5" /> Run now
             </button>
           )}
-          {asleep ? (
+          {env?.paused ? (
+            <button className={`${btn} shrink-0`} disabled={busy} onClick={() => runner.run("resume", () => appsApi.putEnvironment(service.id, envName, { paused: false }))} title="Run, wake, deploy and schedule again">
+              <Play className="size-3.5" /> Resume
+            </button>
+          ) : service.run.type !== "web" ? (
+            // A worker's floor (and a schedule) would start it again: sleeping isn't stopping.
+            <SureButton className={`${btn} shrink-0`} disabled={busy || !env} sure="Sure? Pause it" onSure={() => runner.run("pause", () => appsApi.putEnvironment(service.id, envName, { paused: true }))} title="Stop its instances; nothing runs, deploys or is scheduled until it's resumed">
+              <Pause className="size-3.5" /> Pause
+            </SureButton>
+          ) : asleep ? (
             <button className={`${btn} shrink-0`} disabled={busy || !env?.active} onClick={() => runner.run("wake", () => appsApi.wake(service.id, envName))} title="Start an instance now">
               <Sun className="size-3.5" /> Wake
             </button>
           ) : (
-            <SureButton className={`${btn} shrink-0`} disabled={busy || st !== "running"} sure="Sure? Stop it now" onSure={() => runner.run("sleep", () => appsApi.sleep(service.id, envName))} title="Scale to zero now">
+            <SureButton className={`${btn} shrink-0`} disabled={busy || st !== "running"} sure="Sure? Stop it now" onSure={() => runner.run("sleep", () => appsApi.sleep(service.id, envName))} title="Scale to zero now (the next request wakes it)">
               <Moon className="size-3.5" /> Sleep
             </SureButton>
           )}
@@ -382,7 +411,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
               <button className={`${primary} !rounded-r-none !py-1 !text-[12px]`} disabled={busy} onClick={() => deploy()} title="Build the source and roll it out">
                 <Rocket className="size-3.5" /> Deploy
               </button>
-              <button className={`${primary} !rounded-l-none border-l border-bg/20 !px-1.5 !py-1 !text-[12px]`} disabled={busy} aria-expanded={opts} aria-label="Deploy options" title="A revision, no traffic, without the cache" onClick={() => setOpts((o) => !o)}>
+              <button className={`${primary} !rounded-l-none border-l border-bg/20 !px-1.5 !py-1 !text-[12px]`} disabled={busy} aria-expanded={opts} aria-label="Deploy options" title={service.source.kind === "image" ? "Another tag, a message, no traffic" : "A revision, a message, no traffic, without the cache"} onClick={() => setOpts((o) => !o)}>
                 <ChevronDown className="size-3.5" />
               </button>
             </span>
@@ -450,10 +479,19 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           className="rise mt-3 flex flex-wrap items-end gap-3 rounded-xl border border-line bg-panel px-4 py-3"
           onSubmit={async (e) => {
             e.preventDefault();
-            const body: NewDeploy = { ...(rev.trim() ? { revision: rev.trim() } : {}), ...(noTraffic ? { no_traffic: true } : {}), ...(noCache ? { no_cache: true } : {}) };
+            const built = service.source.kind === "repo";
+            const body: NewDeploy = {
+              ...(built && rev.trim() ? { revision: rev.trim() } : {}),
+              ...(!built && image.trim() ? { image: image.trim() } : {}),
+              ...(note.trim() ? { message: note.trim() } : {}),
+              ...(noTraffic ? { no_traffic: true } : {}),
+              ...(built && noCache ? { no_cache: true } : {}),
+            };
             if (await deploy(body)) {
               setOpts(false);
               setRev("");
+              setImage("");
+              setNote("");
             }
           }}
         >
@@ -463,14 +501,26 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
               <input value={rev} onChange={(e) => setRev(e.target.value)} placeholder="the branch's head" spellCheck={false} className={`${input} w-56 font-mono text-[12px]`} />
             </label>
           )}
+          {service.source.kind === "image" && (
+            <label className="flex flex-col gap-1 text-[12px] text-muted" title="This deploy only: the service's image stays as Settings has it">
+              Image
+              <input value={image} onChange={(e) => setImage(e.target.value)} placeholder={service.source.image} spellCheck={false} className={`${input} w-72 font-mono text-[12px]`} />
+            </label>
+          )}
+          <label className="flex flex-col gap-1 text-[12px] text-muted">
+            Message
+            <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={service.source.kind === "repo" ? "the commit's subject" : "what this deploy is"} maxLength={500} className={`${input} w-64 text-[12px]`} />
+          </label>
           <label className="inline-flex items-center gap-1.5 pb-2 text-[12px] text-muted" title="Built and health-checked at its own URL; put it live from the deployments list">
             <input type="checkbox" checked={noTraffic} onChange={(e) => setNoTraffic(e.target.checked)} />
             No traffic (try it first)
           </label>
-          <label className="inline-flex items-center gap-1.5 pb-2 text-[12px] text-muted" title="No cached layer; base images pulled again">
-            <input type="checkbox" checked={noCache} onChange={(e) => setNoCache(e.target.checked)} />
-            Without the cache
-          </label>
+          {service.source.kind === "repo" && (
+            <label className="inline-flex items-center gap-1.5 pb-2 text-[12px] text-muted" title="No cached layer; base images pulled again">
+              <input type="checkbox" checked={noCache} onChange={(e) => setNoCache(e.target.checked)} />
+              Without the cache
+            </label>
+          )}
           <button type="submit" className={primary} disabled={busy}>
             Deploy
           </button>
@@ -504,8 +554,9 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         />
       )}
 
-      <ErrorNote error={runner.error} />
+      <RunnerError runner={runner} />
       {env && <Conditions service={service} env={env} runner={runner} go={go} />}
+      {env && <RedeployBanner service={service.id} env={env} runner={runner} onRedeploy={redeploy} />}
       {env?.crash_loop && (
         <div role="alert" className="rise mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-danger/40 bg-danger/[0.06] px-4 py-3 text-[13px]">
           <span className="font-medium text-danger">Crashing</span>
@@ -581,11 +632,13 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         ) : tab === "jobs" ? (
           <JobsTab service={service.id} env={envName} runner={runner} cron={service.run.type === "cron"} />
         ) : tab === "shell" ? (
-          <ShellTab service={service.id} env={envName} />
+          <ShellTab service={service.id} env={envName} instances={env?.instances} />
         ) : tab === "domains" ? (
           <DomainsTab service={service.id} env={env!} runner={runner} />
         ) : tab === "usage" ? (
           <UsageTab service={service.id} env={envName} prices={overview?.prices ?? null} />
+        ) : tab === "events" ? (
+          <EventsTab service={service.id} changed={`${data.deploys?.[0]?.id ?? ""}:${data.deploys?.[0]?.status ?? ""}:${env?.state ?? ""}`} />
         ) : (
           <SettingsTab
             service={service}

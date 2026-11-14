@@ -38,6 +38,9 @@ struct FakeInstance {
     killed: tokio_util::sync::CancellationToken,
     /// Where it answers while running.
     addr: Option<SocketAddr>,
+    /// An app that listens elsewhere: its port held, bound but not listening, so a connection is
+    /// refused and no other test's server on this machine can be handed the port and answer.
+    reserved: Option<tokio::net::TcpSocket>,
 }
 
 #[derive(Default)]
@@ -291,7 +294,7 @@ impl Runtime for Fake {
         self.counts.creates.fetch_add(1, Ordering::SeqCst);
         let mut m = self.instances.lock();
         anyhow::ensure!(!m.contains_key(&spec.name), "{} exists", spec.name);
-        m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, addr: None, exited: watch::channel(None).0, killed: Default::default() });
+        m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, addr: None, reserved: None, exited: watch::channel(None).0, killed: Default::default() });
         Ok(())
     }
 
@@ -322,8 +325,11 @@ impl Runtime for Fake {
         let addr = match spec.port {
             // An app that binds elsewhere (`FAKE_LISTEN=127.0.0.1:3000`): nothing on its port.
             Some(_) if var(&spec, "FAKE_LISTEN").is_some() => {
-                let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-                Some(l.local_addr()?)
+                let s = tokio::net::TcpSocket::new_v4()?;
+                s.bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+                let addr = s.local_addr()?;
+                self.instances.lock().get_mut(name).expect("exists").reserved = Some(s);
+                Some(addr)
             }
             Some(_) => {
                 let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;

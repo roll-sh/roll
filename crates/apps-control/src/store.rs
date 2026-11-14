@@ -352,6 +352,9 @@ pub struct EnvRow {
     pub tcp_port: Option<u16>,
     pub firewall: Vec<crate::model::FirewallRule>,
     pub headers: Vec<crate::model::HeaderRule>,
+    /// Paused (Render's Suspend): nothing of it runs, wakes, deploys or is scheduled until it's
+    /// resumed.
+    pub paused: bool,
 }
 
 /// A link: its kind, resource, variables' prefix, and the credentials it made for itself.
@@ -451,7 +454,7 @@ pub struct Store {
 }
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -520,6 +523,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         redeploy_on_secrets: r.get::<_, i64>(20)? != 0,
         secrets_seen: r.get(21)?,
         headers: r.get::<_, Option<String>>(22)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+        paused: r.get::<_, i64>(23)? != 0,
     })
 }
 
@@ -627,6 +631,7 @@ impl Store {
         db.add_column("environments", "tcp_port", "INTEGER")?;
         db.add_column("environments", "firewall", "TEXT")?;
         db.add_column("environments", "headers", "TEXT")?;
+        db.add_column("environments", "paused", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("domains", "redirect_to", "TEXT")?;
         Ok(Store { db, sealer })
     }
@@ -797,7 +802,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -1037,9 +1042,12 @@ impl Store {
     }
 
     /// A service's audit trail (`audit.*` events), newest first.
-    pub fn activity(&self, service: &str, limit: usize) -> Result<Vec<Event>> {
+    /// A service's events, newest first: the audit trail (what people changed), or (`all`) every
+    /// kind (deploys, failures, crash loops, alerts, domains) as one timeline.
+    pub fn activity(&self, service: &str, limit: usize, all: bool) -> Result<Vec<Event>> {
+        let only = if all { "" } else { " AND kind LIKE 'audit.%'" };
         Ok(self.db.query(
-            "SELECT seq, at, kind, service, env, deployment, data FROM events WHERE service = ? AND kind LIKE 'audit.%' ORDER BY seq DESC LIMIT ?",
+            &format!("SELECT seq, at, kind, service, env, deployment, data FROM events WHERE service = ?{only} ORDER BY seq DESC LIMIT ?"),
             params![service, limit.clamp(1, 500) as i64],
             |r| {
                 let data: String = r.get(6)?;
@@ -1921,6 +1929,11 @@ impl Store {
             c.execute("UPDATE environments SET pages = ? WHERE service = ? AND name = ?", params![j, service, env])?;
             Ok(())
         })
+    }
+
+    pub fn set_paused(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        self.db.execute("UPDATE environments SET paused = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
+        Ok(())
     }
 
     pub fn set_maintenance(&self, service: &str, env: &str, message: Option<&str>) -> Result<()> {

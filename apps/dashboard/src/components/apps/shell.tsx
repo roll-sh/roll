@@ -2,8 +2,8 @@ import "@xterm/xterm/css/xterm.css";
 import { resolveColor } from "@roll/brand";
 import { SquareTerminal, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { appsApi, followShell } from "@/lib/apps-api";
-import { btn, EmptyPanel, Panel, primary } from "../ui";
+import { appsApi, followShell, type Instance } from "@/lib/apps-api";
+import { btn, EmptyPanel, input, Panel, primary } from "../ui";
 import { message } from "./shared";
 
 const cssVar = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -32,8 +32,11 @@ function encode(text: string): string {
  * SSE, keystrokes batched into POSTs, the size sent when the panel changes. A web service asleep is
  * woken and kept up while the shell is open.
  */
-export function ShellTab({ service, env }: { service: string; env: string }) {
+export function ShellTab({ service, env, instances = [] }: { service: string; env: string; instances?: Instance[] }) {
   const [session, setSession] = useState<string | null>(null);
+  // An instance of its own (empty: one that's running, or a woken one).
+  const [instance, setInstance] = useState("");
+  const running = instances.filter((i) => i.state === "running");
   const [state, setState] = useState<"idle" | "opening" | "open" | "ended">("idle");
   const [error, setError] = useState<string | null>(null);
 
@@ -41,7 +44,7 @@ export function ShellTab({ service, env }: { service: string; env: string }) {
     setError(null);
     setState("opening");
     try {
-      const { id } = await appsApi.openShell(service, env, { cols: 100, rows: 30 });
+      const { id } = await appsApi.openShell(service, env, { cols: 100, rows: 30, ...(instance && running.some((i) => i.id === instance) ? { instance } : {}) });
       setSession(id);
       setState("open");
     } catch (e) {
@@ -66,9 +69,21 @@ export function ShellTab({ service, env }: { service: string; env: string }) {
               <X className="size-3.5" /> Close
             </button>
           ) : (
+            <span className="flex items-center gap-2">
+              {running.length > 1 && (
+                <select value={instance} onChange={(e) => setInstance(e.target.value)} aria-label="Instance" className={`${input} !w-auto font-mono text-[12px]`}>
+                  <option value="">Any instance</option>
+                  {running.map((i) => (
+                    <option key={i.id} value={i.id}>
+                      {i.id}
+                    </option>
+                  ))}
+                </select>
+              )}
             <button type="button" className={primary} disabled={state === "opening"} onClick={() => void open()}>
               <SquareTerminal className="size-3.5" /> {state === "opening" ? "Opening…" : state === "ended" ? "Open another" : "Open a shell"}
             </button>
+            </span>
           )
         }
       >

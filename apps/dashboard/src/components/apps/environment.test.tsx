@@ -29,7 +29,7 @@ const service = {
 } as unknown as Service;
 const env = (over: Partial<Environment> = {}) =>
   ({ ...summary("staging", true), service: "svc_1", branch: null, ephemeral: false, instances: [], domains: [], port: null, needs_deploy: false, private: false, next_run_at: null, crash_loop: null, created_at: T0, ...over }) as Environment;
-const runner: Runner = { busy: null, error: null, setError: () => {}, run: async (_k, fn) => fn() } as Runner;
+const runner: Runner = { busy: null, error: null, failed: null, setError: () => {}, run: async (_k, fn) => fn() } as Runner;
 
 describe("EnvironmentPanel", () => {
   it("making it private sends a fresh token and shows its link once", async () => {

@@ -36,6 +36,12 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   const [events, setEvents] = useState<NotifyEvent[]>(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed"]);
   const [envs, setEnvs] = useState("");
   const [previews, setPreviews] = useState(false);
+  // Only some of the project's services (none chosen: every one).
+  const [all, setAll] = useState<{ id: string; name: string }[]>([]);
+  const [only, setOnly] = useState<string[]>([]);
+  useEffect(() => {
+    appsApi.services(project).then((s) => setAll(s.map((x) => ({ id: x.id, name: x.name }))), () => setAll([]));
+  }, [project]);
   const [secret, setSecret] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const { copied, copy } = useCopy();
@@ -46,17 +52,18 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
 
   const add = async () => {
     const environments = envs.split(",").map((e) => e.trim()).filter(Boolean);
-    const t = await runner.run("notification", () => appsApi.addNotifyTarget(project, { kind, url: url.trim(), events, environments, previews }));
+    const t = await runner.run("notification", () => appsApi.addNotifyTarget(project, { kind, url: url.trim(), events, environments, previews, ...(only.length ? { services: only } : {}) }));
     if (t) {
       setUrl("");
       setEnvs("");
+      setOnly([]);
       setSecret(t.secret ?? null);
       void load();
     }
   };
 
   return (
-    <Panel title={`Notifications for ${projectName}`} aside={<span className="text-[12px] text-muted">every service in the project</span>}>
+    <Panel title={`Notifications for ${projectName}`} aside={<span className="text-[12px] text-muted">the project's services</span>}>
       {targets && targets.length > 0 && (
         <ul className="divide-y divide-line border-b border-line">
           {targets.map((t) => (
@@ -67,7 +74,8 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
                 <span className="font-mono text-[12px] text-muted">{t.host}</span>
                 <span className="text-[12px] text-subtle">{t.events.map((e) => EVENTS.find((x) => x.value === e)?.label ?? e).join(", ")}</span>
                 <span className="text-[12px] text-subtle">
-                  · {t.environments.length ? t.environments.join(", ") : "every environment"}
+                  · {t.services.length ? t.services.map((id) => all.find((s) => s.id === id)?.name ?? id).join(", ") : "every service"}
+                  {" "}· {t.environments.length ? t.environments.join(", ") : "every environment"}
                   {t.previews ? ", previews too" : ""}
                 </span>
                 <span className="ml-auto flex gap-1.5">
@@ -109,7 +117,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
           ))}
         </select>
         <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder={KINDS.find((k) => k.value === kind)?.placeholder} aria-label="URL" spellCheck={false} autoComplete="off" className={`${input} min-w-0 flex-1 font-mono text-[12px]`} />
-        <div className="flex gap-2 text-[12px] text-muted">
+        <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-muted">
           {EVENTS.map((e) => (
             <label key={e.value} className="inline-flex items-center gap-1">
               <input type="checkbox" checked={events.includes(e.value)} onChange={(x) => setEvents((es) => (x.target.checked ? [...es, e.value] : es.filter((v) => v !== e.value)))} />
@@ -118,6 +126,16 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
           ))}
         </div>
         <input value={envs} onChange={(e) => setEnvs(e.target.value)} placeholder="every environment" aria-label="Only these environments (comma-separated)" title="Only these environments' events (comma-separated); empty: every environment" spellCheck={false} autoComplete="off" className={`${input} w-44 font-mono text-[12px]`} />
+        {all.length > 1 && (
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-muted" role="group" aria-label="Only these services (none: every one)">
+            {all.map((s) => (
+              <label key={s.id} className="inline-flex items-center gap-1">
+                <input type="checkbox" checked={only.includes(s.id)} onChange={(x) => setOnly((o) => (x.target.checked ? [...o, s.id] : o.filter((v) => v !== s.id)))} />
+                {s.name}
+              </label>
+            ))}
+          </div>
+        )}
         <label className="inline-flex items-center gap-1 text-[12px] text-muted" title="Each pull request's preview: its failed deploys and alerts too">
           <input type="checkbox" checked={previews} onChange={(e) => setPreviews(e.target.checked)} />
           Include previews

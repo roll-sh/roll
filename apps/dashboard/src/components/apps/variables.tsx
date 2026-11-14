@@ -51,16 +51,6 @@ export function VariablesTab({
   const [added, setAdded] = useState<Edit[]>([]);
   const [pasting, setPasting] = useState(false);
   const [pasted, setPasted] = useState("");
-  // What the next deploy would change, named (read again whenever the environment changes).
-  const [pending, setPending] = useState<string | null>(null);
-  useEffect(() => {
-    if (!env.needs_deploy) return setPending(null);
-    let live = true;
-    appsApi.pending(service, env.name).then((p) => live && setPending(describePending(p)), () => live && setPending(null));
-    return () => {
-      live = false;
-    };
-  }, [service, env.name, env.needs_deploy, env.active?.id, vars]);
   const parsed = useMemo(() => parseEnv(pasted), [pasted]);
   // Railway's raw editor: the environment's own variables as one `.env` text, saved as the
   // difference (a line gone is unset). Sealed ones aren't in it and stay.
@@ -156,17 +146,6 @@ export function VariablesTab({
 
   return (
     <div className="space-y-6">
-      {env.needs_deploy && (
-        <div className="rise flex flex-wrap items-center gap-3 rounded-xl border border-accent/40 bg-accent/[0.06] px-4 py-3">
-          <div className="min-w-0 flex-1">
-            <p className="text-[13px]">Variables or settings changed since the live deployment. Redeploy to apply them: the same image, no build.</p>
-            {pending && <p className="mt-1 font-mono text-[11.5px] text-muted">{pending}</p>}
-          </div>
-          <button className={primary} onClick={onRedeploy} disabled={runner.busy !== null || !env.active}>
-            <Rocket className="size-3.5" /> Redeploy
-          </button>
-        </div>
-      )}
 
       <section className={panel}>
         <div className="flex min-h-14 flex-wrap items-center justify-between gap-3 border-b border-line px-5 py-3">
@@ -463,3 +442,32 @@ function Links({ service, project, runner, onChange }: { service: string; projec
     </section>
   );
 }
+
+/**
+ * Variables or settings changed since the live deployment: what the next deploy changes, named,
+ * and Redeploy (the same image, no build), on every tab (Railway's "Apply changes" bar).
+ */
+export function RedeployBanner({ service, env, runner, onRedeploy }: { service: string; env: Environment; runner: Runner; onRedeploy: () => void }) {
+  const [pending, setPending] = useState<string | null>(null);
+  useEffect(() => {
+    if (!env.needs_deploy) return setPending(null);
+    let live = true;
+    appsApi.pending(service, env.name).then((p) => live && setPending(describePending(p)), () => live && setPending(null));
+    return () => {
+      live = false;
+    };
+  }, [service, env.name, env.needs_deploy, env.active?.id]);
+  if (!env.needs_deploy) return null;
+  return (
+    <div className="rise mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-accent/40 bg-accent/[0.06] px-4 py-3">
+      <div className="min-w-0 flex-1">
+        <p className="text-[13px]">Variables or settings changed since the live deployment. Redeploy to apply them: the same image, no build.</p>
+        {pending && <p className="mt-1 font-mono text-[11.5px] text-muted">{pending}</p>}
+      </div>
+      <button className={primary} onClick={onRedeploy} disabled={runner.busy !== null || !env.active}>
+        <Rocket className="size-3.5" /> Redeploy
+      </button>
+    </div>
+  );
+}
+

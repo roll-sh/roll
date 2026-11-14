@@ -1,11 +1,14 @@
 import { HorizonMark } from "@roll/brand";
 import { ExternalLink, Rocket, RotateCcw, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { appsApi, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type DeployCommits, type Environment, type LogLine } from "@/lib/apps-api";
 import { btn, panel } from "../ui";
 import { PlanDetails } from "./new-service";
 import { usePageVisible } from "./live";
 import { clock, DeployBadge, LogView, since, SureButton, type Runner } from "./shared";
+
+/** The API's page of deployments. */
+const PAGE = 100;
 
 const MAX_LINES = 5000;
 
@@ -57,8 +60,43 @@ export function Deployments({
   // A rollback brings its variables back as they were (Heroku's, Railway's), unless they're kept
   // as they are now: after a leaked secret's rotation, the old value must not come back.
   const [keepVars, setKeepVars] = useState(false);
+  // Pages past the newest 100, loaded on asking (the newest keep refreshing above them).
+  const [older, setOlder] = useState<Deployment[]>([]);
+  const [more, setMore] = useState<"idle" | "loading" | "done">("idle");
+  useEffect(() => {
+    setOlder([]);
+    setMore("idle");
+  }, [service, env.name]);
+  // Once older pages are open, a deployment that new ones push out of the newest 100 stays (kept
+  // here), so the list has no gap between the two.
+  useEffect(() => {
+    if (!deploys || !older.length) return;
+    setOlder((o) => {
+      const have = new Set(o.map((d) => d.id));
+      const fell = deploys.filter((d) => !have.has(d.id));
+      return fell.length ? [...o, ...fell] : o;
+    });
+  }, [deploys, older.length]);
+  const list = useMemo(() => {
+    if (!deploys) return null;
+    const fresh = new Map(deploys.map((d) => [d.id, d]));
+    const all = [...deploys, ...older.filter((d) => !fresh.has(d.id))];
+    return all.sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? 1 : -1));
+  }, [deploys, older]);
+  const loadOlder = async () => {
+    const last = list?.at(-1);
+    if (!last) return;
+    setMore("loading");
+    try {
+      const page = await appsApi.deploys(service, env.name, last.created_at);
+      setOlder((o) => [...o, ...page]);
+      setMore(page.length < PAGE ? "done" : "idle");
+    } catch {
+      setMore("idle");
+    }
+  };
   // The newest opens by itself, so a deploy that just started shows its build.
-  const shown = deploys?.find((d) => d.id === open) ?? deploys?.[0] ?? null;
+  const shown = list?.find((d) => d.id === open) ?? list?.[0] ?? null;
   const activeId = env.active?.id ?? null;
   const now = Date.now();
 
@@ -80,18 +118,14 @@ export function Deployments({
           Rollbacks keep today's variables
         </label>
         <ul className="divide-y divide-line">
-          {deploys.map((d) => {
+          {list!.map((d) => {
             const active = d.id === activeId;
             const selected = shown?.id === d.id;
             return (
               <li key={d.id}>
-                <div
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => setOpen(d.id)}
-                  onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), setOpen(d.id))}
-                  className={`group flex cursor-pointer items-start gap-3 px-4 py-3 transition-colors outline-none focus-visible:bg-fg/[0.04] ${selected ? "bg-fg/[0.05]" : "hover:bg-fg/[0.03]"}`}
-                >
+                {/* The whole row opens it for a pointer; its message is the button keyboards and screen
+                    readers use (a row holding buttons can't itself be one). */}
+                <div onClick={() => setOpen(d.id)} className={`group flex cursor-pointer items-start gap-3 px-4 py-3 transition-colors focus-within:bg-fg/[0.04] ${selected ? "bg-fg/[0.05]" : "hover:bg-fg/[0.03]"}`}>
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <DeployBadge status={d.status} />
@@ -102,7 +136,9 @@ export function Deployments({
                       </span>
                       {d.revision && <span className="font-mono text-[11.5px] text-muted">{shortSha(d.revision)}</span>}
                     </div>
-                    <p className="mt-1 truncate text-[13px]">{d.message || (d.rollback_of ? `Roll back to ${d.rollback_of}` : <span className="text-muted">No message</span>)}</p>
+                    <button type="button" aria-pressed={selected} onClick={() => setOpen(d.id)} className="mt-1 block w-full truncate text-left text-[13px] outline-none focus-visible:underline">
+                      {d.message || (d.rollback_of ? `Roll back to ${d.rollback_of}` : <span className="text-muted">No message</span>)}
+                    </button>
                     <p className="mt-0.5 flex gap-2 font-mono text-[11px] text-subtle">
                       <span title={clock(d.created_at, true)}>{since(d.created_at, now)}</span>
                       {d.ready_ms != null && <span>ready in {formatMs(d.ready_ms)}</span>}
@@ -158,6 +194,13 @@ export function Deployments({
             );
           })}
         </ul>
+        {deploys.length >= PAGE && more !== "done" && (
+          <div className="border-t border-line px-4 py-2.5">
+            <button type="button" className={btn} disabled={more === "loading"} onClick={() => void loadOlder()}>
+              {more === "loading" ? <span className="shimmer">Loading…</span> : "Older deployments"}
+            </button>
+          </div>
+        )}
       </section>
       {shown && <BuildLog key={shown.id} service={service} env={env.name} d={shown} />}
     </div>

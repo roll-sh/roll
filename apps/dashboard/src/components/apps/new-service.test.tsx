@@ -24,7 +24,7 @@ describe("NewServiceSheet", () => {
     ws.make.mockResolvedValue("pg_9");
     apps.create.mockResolvedValue({ id: "svc_1" });
     const created = vi.fn();
-    render(<NewServiceSheet project={project} spot={{ x: 48, y: 48 }} onClose={() => {}} onCreated={created} />);
+    render(<NewServiceSheet project={project} spot={{ x: 48, y: 48 }} onClose={() => {}} onCreated={created} onImported={() => {}} />);
 
     const fresh = await screen.findByRole("button", { name: /new postgres/i });
     await waitFor(() => expect(fresh).toHaveAttribute("aria-pressed", "true"));

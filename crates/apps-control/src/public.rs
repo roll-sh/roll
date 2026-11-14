@@ -63,6 +63,24 @@ fn strip_ours(req: &mut Request) {
 /// service and the visitor's path in headers), never as a call to its API: an app's paths aren't
 /// the API's, and only a node can send to that route.
 pub async fn serve(apps: Arc<Apps>, service: String, env: String, deployment: Option<String>, req: Request) -> Response {
+    // A request with no body can be sent again: one that met the service moving (a node that
+    // had just given it up) goes on to its new owner a moment later instead of a 503.
+    let empty = req.headers().get(header::CONTENT_LENGTH).is_none_or(|v| v.as_bytes() == b"0") && !req.headers().contains_key(header::TRANSFER_ENCODING);
+    let again = empty.then(|| (req.method().clone(), req.uri().clone(), req.headers().clone(), req.version()));
+    let r = serve_once(apps.clone(), service.clone(), env.clone(), deployment.clone(), req).await;
+    let moving = r.extensions().get::<By>().is_some_and(|b| b.0 == "moving");
+    match again {
+        Some((method, uri, headers, version)) if moving => {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let mut req = Request::new(Body::empty());
+            (*req.method_mut(), *req.uri_mut(), *req.headers_mut(), *req.version_mut()) = (method, uri, headers, version);
+            serve_once(apps, service, env, deployment, req).await
+        }
+        _ => r,
+    }
+}
+
+async fn serve_once(apps: Arc<Apps>, service: String, env: String, deployment: Option<String>, req: Request) -> Response {
     let req = match to_internal(req, &service, &env, deployment.as_deref()) {
         Ok(r) => r,
         Err(r) => return *r,
@@ -931,6 +949,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         Err(WakeError::NotWeb) => return by("not_deployed", page(StatusCode::NOT_FOUND, "Not a web service", "This service is a worker or a cron job: it doesn't answer HTTP.")),
         Err(WakeError::Busy) => return by("wake", retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Busy starting", "Too many requests are waiting for this service to start. Try again in a moment."))),
         Err(WakeError::Capped) => return by("capped", page(StatusCode::PAYMENT_REQUIRED, "Paused", "This project reached its spending limit for the month. Its owner can raise the limit to bring it back.")),
+        Err(WakeError::Paused) => return by("paused", page(StatusCode::SERVICE_UNAVAILABLE, "Paused", "This service is paused. Its owner can resume it.")),
         Err(e) => {
             live.log.stream(crate::logs::Stream::System).line(format!("a request couldn't wake the service: {e}"));
             return by("wake", page(StatusCode::SERVICE_UNAVAILABLE, "Starting up", "The service is waking up or failing to start. Try again in a few seconds."));
@@ -1208,7 +1227,7 @@ impl Seen {
 }
 
 /// Marks an answer roll gave itself before any instance: `by` what (`allow_list`, `firewall`,
-/// `rate_limit`, `private`, `maintenance`, `wake`, `capped`, `not_deployed`, `moving`,
+/// `rate_limit`, `private`, `maintenance`, `wake`, `capped`, `paused`, `not_deployed`, `moving`,
 /// `unavailable`), for [`proxy`] to log and meter.
 #[derive(Clone, Copy)]
 struct By(&'static str);

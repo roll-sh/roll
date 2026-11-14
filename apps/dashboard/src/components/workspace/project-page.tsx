@@ -237,6 +237,10 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
               project={project}
               spot={newService}
               onClose={() => setNewService(null)}
+              onImported={() => {
+                setNewService(null);
+                live.refresh();
+              }}
               onCreated={(s) => {
                 workspace.added(project.id, serviceView(s), newService.x, newService.y);
                 setNewService(null);

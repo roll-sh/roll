@@ -828,6 +828,10 @@ pub struct EnvironmentSummary {
     pub url: Option<String>,
     pub active: Option<DeployRef>,
     pub latest: Option<LatestRef>,
+    /// What wants its owner's eye, for a list or a canvas card (Render's, Railway's): a crash loop,
+    /// the project capped by its spend limit, maintenance, its latest deploy failed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attention: Vec<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -866,6 +870,9 @@ pub struct Environment {
     /// In maintenance (Render's maintenance mode): its public names answer a 503 page with the
     /// message, and nothing wakes. Null: serving.
     pub maintenance: Option<Maintenance>,
+    /// Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until it's resumed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
     /// Its own pages for what roll would otherwise answer (Heroku's error and maintenance pages).
     #[serde(skip_serializing_if = "Pages::is_empty")]
     pub pages: Pages,

@@ -102,6 +102,8 @@ export interface EnvironmentSummary {
   url: string | null;
   active: { id: string; revision: string | null; created_at: number } | null;
   latest: { id: string; status: DeployStatus } | null;
+  /** What wants its owner's eye: a crash loop, the project capped by its spend limit, paused, maintenance, its latest deploy failed. */
+  attention?: ("crash_loop" | "capped" | "paused" | "maintenance" | "deploy_failed")[];
 }
 
 export interface Service {
@@ -119,6 +121,25 @@ export interface Service {
   environments: EnvironmentSummary[];
 }
 
+/** A project in one file (`POST /v1/apps/import`): a roll.toml's `[apps]` and `[databases]`, or a Compose file as them. */
+export interface ProjectImport {
+  /** The file as roll.toml (a Compose file's, to keep). */
+  roll_toml: string;
+  /** What a Compose file's import left out, and why. */
+  notes: string[];
+  apps: Record<
+    string,
+    {
+      source: { kind: "repo"; repo: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
+      branch: string | null;
+      run: Partial<Run>;
+      links: { kind: "postgres" | "redis"; name: string }[];
+      variables: Record<string, string>;
+    }
+  >;
+  databases: Record<string, { kind: "postgres" | "redis" }>;
+}
+
 export interface NewService {
   project: string;
   name: string;
@@ -131,6 +152,8 @@ export interface NewService {
   registry?: { username: string; password: string; server?: string };
   /** Resources to link before the first deploy (their variables are in it). */
   links?: { kind: LinkKind; ref: string; prefix?: string }[];
+  /** A repo source: production follows it (default: the repo's default branch). */
+  branch?: string;
   x?: number;
   y?: number;
 }
@@ -317,6 +340,8 @@ export interface EnvironmentPut {
   follow_tag?: boolean;
   /** Redeploy (same image, new values) when the project's secrets change. */
   redeploy_on_secrets?: boolean;
+  /** Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until false. */
+  paused?: boolean;
   /** Maintenance: its public names answer roll's page with the message; false ends it. */
   maintenance?: boolean | { message?: string | null };
   /** Its own HTML (at most 64 KiB) instead of roll's pages; null goes back to roll's, an absent field stays. */
@@ -395,6 +420,8 @@ export interface Environment extends EnvironmentSummary {
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
   waiting_for_ci?: string | null;
+  /** Paused: nothing runs, wakes, deploys or is scheduled. Absent: not paused. */
+  paused?: boolean;
   /** In maintenance: what visitors read (null: roll's words). Null: serving. */
   maintenance?: { message: string | null } | null;
   /** Its own pages (Heroku's): `error` for the 502/503/504 while the app can't answer or wake, `maintenance` while in maintenance. Absent: roll's. */
@@ -654,6 +681,8 @@ export interface LogQuery {
 export const appsApi = {
   overview: () => call<Overview>("GET", "/v1/apps"),
   plan: (req: PlanRequest) => call<Plan>("POST", "/v1/apps/plan", req),
+  /** A roll.toml or Compose file read as a project (nothing made). */
+  importProject: (file: { roll_toml: string } | { compose: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
 
   services: (project?: string) => call<Service[]>("GET", `/v1/apps/services${qs({ project })}`),
   /** Makes the service and places its card; a repo or an image source deploys to production at once. */
@@ -663,7 +692,8 @@ export const appsApi = {
   remove: (id: string) => call<null>("DELETE", svc(id)),
 
   links: (id: string) => call<Link[]>("GET", `${svc(id)}/links`),
-  activity: (id: string) => call<AppEvent[]>("GET", `${svc(id)}/activity`),
+  /** `all`: every kind of event (its timeline), not only what people changed. */
+  activity: (id: string, all = false) => call<AppEvent[]>("GET", `${svc(id)}/activity${qs({ all: all || undefined })}`),
   link: (id: string, kind: LinkKind, ref: string, prefix?: string) =>
     call<Link>("PUT", `${svc(id)}/links/${kind}/${enc(ref)}`, prefix ? { prefix } : {}),
   unlink: (id: string, kind: LinkKind, ref: string) => call<null>("DELETE", `${svc(id)}/links/${kind}/${enc(ref)}`),
@@ -686,7 +716,8 @@ export const appsApi = {
   removeEnvironment: (id: string, e: string) => call<null>("DELETE", env(id, e)),
 
   deploy: (id: string, e: string, body: NewDeploy = {}) => call<Deployment>("POST", `${env(id, e)}/deploys`, body),
-  deploys: (id: string, e: string) => call<Deployment[]>("GET", `${env(id, e)}/deploys`),
+  /** Newest first, 100 at most; `before` (the last one's `created_at`): the page after it. */
+  deploys: (id: string, e: string, before?: number) => call<Deployment[]>("GET", `${env(id, e)}/deploys${qs({ before })}`),
   deployment: (id: string, e: string, d: string) => call<Deployment>("GET", dep(id, e, d)),
   /** What a repo deployment brings over the live one (for the live one, the one before it). */
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
@@ -733,7 +764,7 @@ export const appsApi = {
   readLogs: async (
     id: string,
     e: string,
-    q: { q?: string; since?: number; before?: number; instance?: string; deployment?: string; stream?: string; http?: boolean; by?: string; tail?: number },
+    q: { q?: string; since?: number; before?: number; instance?: string; deployment?: string; stream?: string; http?: boolean; by?: string; status?: string; min_ms?: number; tail?: number },
   ): Promise<{ lines: LogLine[]; truncated: boolean }> => {
     const res = await fetch(`${ROLL_API}${env(id, e)}/logs${qs({ ...q, http: q.http || undefined, tail: q.tail ?? 500 })}`, { headers: apiHeaders(), cache: "no-store" });
     onApiStatus(res.status);
@@ -754,7 +785,10 @@ export const appsApi = {
   cancelJob: (id: string, e: string, j: string) => call<Job>("POST", `${env(id, e)}/jobs/${encodeURIComponent(j)}/cancel`),
 
   /** A shell in a running instance over HTTP (a browser can't send the token on a WebSocket). */
-  openShell: (id: string, e: string, size: { cols: number; rows: number }) => call<{ id: string }>("POST", `${env(id, e)}/shell/sessions`, size),
+  /** `instance`: that one (default: one that's running, or a woken one). */
+  openShell: (id: string, e: string, body: { cols: number; rows: number; instance?: string }) => call<{ id: string }>("POST", `${env(id, e)}/shell/sessions`, body),
+  /** The environment's last finished minute as Prometheus text, for a scraper with a token that may read it. */
+  prometheusUrl: (id: string, e: string) => `${ROLL_API}${env(id, e)}/metrics?format=prometheus`,
   shellKeys: (id: string, e: string, sh: string, data: string) => call<null>("POST", `${env(id, e)}/shell/sessions/${encodeURIComponent(sh)}/keys`, { data }),
   resizeShell: (id: string, e: string, sh: string, size: { cols: number; rows: number }) => call<null>("POST", `${env(id, e)}/shell/sessions/${encodeURIComponent(sh)}/resize`, size),
   closeShell: (id: string, e: string, sh: string) => call<null>("DELETE", `${env(id, e)}/shell/sessions/${encodeURIComponent(sh)}`),
@@ -816,7 +850,7 @@ export interface AccessLine {
   cold?: boolean;
   waited_ms?: number;
   /** An answer roll gave itself, before any instance, and why. */
-  by?: "allow_list" | "firewall" | "rate_limit" | "private" | "maintenance" | "wake" | "capped" | "not_deployed" | "moving" | "unavailable";
+  by?: "allow_list" | "firewall" | "rate_limit" | "private" | "maintenance" | "wake" | "capped" | "paused" | "not_deployed" | "moving" | "unavailable";
 }
 
 /** Follows a service's changes (`…/changes`): `onChange` for each tick, `onOpen` as the stream comes and goes. */

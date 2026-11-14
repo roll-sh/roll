@@ -24,6 +24,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | --- | --- | --- | --- |
 | `GET /v1/apps` | | `Overview` | read |
 | `POST /v1/apps/plan` | `PlanRequest` | `Plan` | read |
+| `POST /v1/apps/import` | `{ roll_toml }` or `{ compose }` (each at most 1 MiB) | `ProjectImport` (read, nothing made: checked as `roll up --all` checks it; 400 says what's wrong) | read |
 | `GET /v1/apps/services?project=` | | `Service[]` | read |
 | `POST /v1/apps/services` | `NewService` | 201 `Service` | deploy* (a repo or image source deploys production at once; write for an upload source) |
 | `GET /v1/apps/projects/{project}/services` | | `Service[]` | read |
@@ -31,7 +32,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}` | | `Service` | read |
 | `PATCH /v1/apps/services/{id}` | `ServicePatch` | `Service` | write |
 | `DELETE /v1/apps/services/{id}` | | 204 | delete |
-| `GET /v1/apps/services/{id}/activity` | | `Event[]` (`audit.*`, newest first, 200): who changed what, never a value | read |
+| `GET /v1/apps/services/{id}/activity?all=` | | `Event[]` (`audit.*`, newest first, 200): who changed what, never a value; `all=1`: every kind (deploys, failures, crash loops, alerts, domains, spend), the service's timeline | read |
 | `GET /v1/apps/services/{id}/links` | | `Link[]` | read |
 | `PUT /v1/apps/services/{id}/links/{kind}/{ref}` | `{prefix?}` | `Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it) | write |
 | `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` | | 204 (revokes a credential the link made) | write |
@@ -246,12 +247,13 @@ type EnvironmentSummary = {
   url: string | null;
   active: { id: string; revision: string | null; created_at: number } | null;
   latest: { id: string; status: DeployStatus } | null;
+  attention?: ("crash_loop" | "capped" | "paused" | "maintenance" | "deploy_failed")[]; // what wants its owner's eye (absent: nothing)
 };
 
 type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
 
 type Patch<T> = { [K in keyof T]?: T[K] | null }; // null: back to the default
-type NewService = { project: string; name: string; source: Source; build?: Patch<Build>; run?: Patch<Run>; variables?: { [name: string]: string } /* production, before its first deploy */; registry?: { username: string; password: string; server?: string } /* an image's login, before its first pull (as PUT …/registry) */; links?: { kind: LinkKind; ref: string; prefix?: string }[] /* at most 20, made before the first deploy (as PUT …/links); one that doesn't resolve makes no service */; x?: number; y?: number };
+type NewService = { project: string; name: string; source: Source; build?: Patch<Build>; run?: Patch<Run>; variables?: { [name: string]: string } /* production, before its first deploy */; registry?: { username: string; password: string; server?: string } /* an image's login, before its first pull (as PUT …/registry) */; links?: { kind: LinkKind; ref: string; prefix?: string }[] /* at most 20, made before the first deploy (as PUT …/links); one that doesn't resolve makes no service */; branch?: string /* a repo source: production follows it, its first deploy that branch's head (default: the repo's default branch); 400 when the repo has no such branch */; x?: number; y?: number };
 type ServicePatch = { name?: string; source?: Source; build?: Patch<Build>; run?: Patch<Run> };
 
 type EnvironmentPut = {
@@ -284,6 +286,10 @@ type EnvironmentPut = {
    *  answer roll's 503 page (Retry-After 30) with the message, waking nothing; a deployment's own
    *  URL still answers. `false` or null serves again. */
   maintenance?: boolean | { message?: string | null } | null;
+  /** Paused (Render's Suspend): its instances stop, and nothing runs, wakes (a request gets roll's
+   *  503 "Paused" page), deploys (409), is scheduled (a cron run is skipped, not made up) or takes
+   *  a job (409) until `false`. A push to its branch is logged, not deployed. */
+  paused?: boolean;
   /** Its own HTML instead of roll's pages, each at most 64 KiB (400 past it or empty); null goes back
    *  to roll's, a field left out stays. */
   pages?: { error?: string | null; maintenance?: string | null };
@@ -327,6 +333,7 @@ type Environment = EnvironmentSummary & {
   redeploy_on_secrets: boolean; // the project's secrets changing redeploys it (same image, new values)
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
   maintenance: { message: string | null } | null; // in maintenance (null message: roll's words); null: serving
+  paused?: true;              // paused (absent: not)
   pages?: { error?: string; maintenance?: string }; // its own pages (absent: roll's): error for the 502/503/504 while it can't answer or wake, maintenance while in maintenance
   allow_ips: { cidr: string; description?: string }[]; // only these networks get in through its public names ([]: anyone)
   tcp: string | null; // a TCP service's address, host:port (null until it has its port)
@@ -378,6 +385,20 @@ type Deployment = {
   finished_at: number | null;
   /** Milliseconds from the deploy's start to its first healthy answer. */
   ready_ms: number | null;
+};
+
+/** A project in one file: a root roll.toml's `[apps]` and `[databases]`, or a Compose file as them. */
+type ProjectImport = {
+  roll_toml: string;          // the file as roll.toml (a Compose file's, to keep)
+  notes: string[];            // what a Compose file's import left out, and why
+  apps: { [name: string]: {
+    source: { kind: "repo"; repo: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
+    branch: string | null;    // a repo's production branch
+    run: Patch<Run>;          // the run settings the entry names
+    links: { kind: "postgres" | "redis"; name: string }[]; // databases below, by name
+    variables: { [name: string]: string }; // set when the service is made, never over what it has
+  } };
+  databases: { [name: string]: { kind: "postgres" | "redis" } };
 };
 
 type PlanRequest = { repo: string; revision?: string; root?: string } | { files: Record<string, string> };
@@ -459,7 +480,7 @@ type AccessLine = {
   // An instance's answer:
   instance?: string; request_id?: string; cold?: boolean; waited_ms?: number;
   // Or one roll gave itself, before any instance, and why (metered: a failed wake counts as an error):
-  by?: "allow_list" | "firewall" | "rate_limit" | "private" | "maintenance" | "wake" | "capped" | "not_deployed" | "moving" | "unavailable";
+  by?: "allow_list" | "firewall" | "rate_limit" | "private" | "maintenance" | "wake" | "capped" | "paused" | "not_deployed" | "moving" | "unavailable";
 };
 /** A volume's backup: a tar in object storage (`apps/volumes/<service>/<env>/<id>.tar`). */
 type Backup = { id: string; at: number; size: number };

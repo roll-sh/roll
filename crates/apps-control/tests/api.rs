@@ -1110,6 +1110,11 @@ async fn changes_are_an_audit_trail_without_values() {
     assert_eq!(trail[2]["data"]["set"], json!(["API_KEY"]));
     assert_eq!(trail[0]["data"]["changed"], json!(["run.min_instances"]));
     assert!(!trail.to_string().contains("sk-s3cr3t"), "a value never reaches the trail");
+    // Its timeline: what roll did too (the deploy that went live), never a value either.
+    let (_, all) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity?all=1"), None).await;
+    let kinds: Vec<&str> = all.as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert!(kinds.contains(&"deploy.active") && kinds.contains(&"audit.settings"), "{kinds:?}");
+    assert!(!all.to_string().contains("sk-s3cr3t"));
 }
 
 /// A project past its alert gets `spend.alert` once; past its hard limit it's capped: its
@@ -1147,6 +1152,9 @@ async fn a_project_over_its_spend_limit_is_paused_until_the_limit_is_raised() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(stopped, "a capped project's instances stop: {:?}", w.fake.instances(&id));
+    // Its summary says so, for a list or a canvas card.
+    let (_, s) = call(&w.api, "GET", &format!("/v1/apps/services/{id}"), None).await;
+    assert!(s["environments"][0]["attention"].as_array().is_some_and(|a| a.contains(&json!("capped"))), "{s}");
     assert_eq!(visit(&w, &host, "/").await.0, StatusCode::PAYMENT_REQUIRED);
     assert_eq!(call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), Some(json!({}))).await.0, StatusCode::CONFLICT);
     // Raised: it answers again.
@@ -2319,10 +2327,19 @@ async fn a_crowd_wakes_one_instance_and_a_slow_start_says_when_to_retry() {
         (resp.status(), resp.headers().get("retry-after").map(|v| v.to_str().unwrap().to_string()))
     };
     let created = Fake::count(&w.fake.counts.creates);
+    let before: Vec<(String, apps_control::model::InstanceState)> = w.apps.live(&id, "production").instances().iter().map(|i| (i.name.clone(), i.state())).collect();
     let crowd = futures::future::join_all((0..8).map(|_| get())).await;
     // The one that woke it waits for its start; those behind it give up at the timeout.
     let waited = crowd.iter().filter(|(st, retry)| *st == StatusCode::SERVICE_UNAVAILABLE && retry.is_some()).count();
-    assert!(waited >= 7 && crowd.iter().all(|(st, _)| *st == StatusCode::OK || *st == StatusCode::SERVICE_UNAVAILABLE), "{crowd:?}");
+    // It failed once (all eight 200 at once, an instance already up): what was there says why.
+    let c = &w.fake.counts;
+    assert!(
+        waited >= 7 && crowd.iter().all(|(st, _)| *st == StatusCode::OK || *st == StatusCode::SERVICE_UNAVAILABLE),
+        "{crowd:?}; instances before the crowd {before:?}; fake creates {} starts {} resumes {}",
+        Fake::count(&c.creates),
+        Fake::count(&c.starts),
+        Fake::count(&c.resumes)
+    );
     let mut ok = None;
     for _ in 0..50 {
         let (st, _) = get().await;
@@ -3123,4 +3140,77 @@ async fn reference_variables_are_filled_at_the_deploy() {
     assert_eq!(st, StatusCode::OK);
     let (_, listed) = call(&w.api, "GET", &staging, None).await;
     assert!(!listed["vars"].as_array().unwrap().iter().any(|v| v["name"] == "PASS"), "a copy leaves sealed ones behind: {listed}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_compose_file_is_read_as_a_project_without_making_anything() {
+    let w = world().await;
+    let compose = "services:\n  web:\n    image: ghcr.io/acme/web:1\n    ports: [\"8080:3000\"]\n    environment: [\"MODE=prod\", \"DATABASE_URL=postgres://u:p@db:5432/x\"]\n    depends_on: [db]\n  db:\n    image: postgres:17\n";
+    let (st, v) = call(&w.api, "POST", "/v1/apps/import", Some(json!({ "compose": compose }))).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let web = &v["apps"]["web"];
+    assert_eq!(web["source"], json!({ "kind": "image", "image": "ghcr.io/acme/web:1" }), "{v}");
+    assert_eq!((web["run"]["port"].as_u64(), &web["links"], &web["variables"]), (Some(3000), &json!([{ "kind": "postgres", "name": "db" }]), &json!({ "MODE": "prod" })), "{v}");
+    assert_eq!(v["databases"]["db"]["kind"], "postgres", "{v}");
+    assert!(v["roll_toml"].as_str().unwrap().contains("[apps.web]") && v["notes"].as_array().is_some_and(|n| !n.is_empty()), "{v}");
+    // Read, not made; and a file that isn't a project says why.
+    let (_, all) = call(&w.api, "GET", "/v1/apps/services", None).await;
+    assert_eq!(all, json!([]));
+    let (st, v) = call(&w.api, "POST", "/v1/apps/import", Some(json!({ "roll_toml": "[apps.web]\nimage = \"a\"\nrepo = \"b/c\"\n" }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("app web"), "{v}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_service_is_made_again_from_its_own_settings() {
+    // The dashboard's Duplicate sends a service's build and run back as GET gave them.
+    let w = world().await;
+    let run = json!({ "port": 80, "min_instances": 1, "health_path": "/healthz", "alerts": { "memory_pct": 80, "error_pct": 5, "p95_ms": 900, "log_match": "panic", "log_count": 3 }, "rollout": { "steps": [10, 50], "step_s": 60, "error_pct": 5 }, "affinity": true });
+    let (a, _) = image_service(&w, "web", run).await;
+    let (st, b) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "web-copy", "source": a["source"], "build": a["build"], "run": a["run"] }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{b}");
+    assert_eq!((&b["run"], &b["build"]), (&a["run"], &a["build"]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_repo_service_made_with_a_branch_follows_it_from_the_first_deploy() {
+    // A project file's `branch` (roll up --all, the dashboard's import): set as it's made, never after.
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"}, "branch": "release" }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap()), None).await;
+    assert_eq!(env["branch"], "release", "{env}");
+    let (st, v) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "img", "source": {"kind": "image", "image": "nginx:1.27"}, "branch": "main" }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "a branch is a repo's: {v}");
+}
+
+/// A paused environment (Render's Suspend): a worker's instances stop and stay stopped through
+/// the reaper's passes, nothing deploys, runs or wakes, and resuming brings it back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paused_worker_stays_stopped_until_its_resumed() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "billing", json!({"type": "worker", "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    get_until(&w.api, &env, |e| e["state"] == "running").await;
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({ "paused": true }))).await;
+    assert_eq!((st, &e["paused"]), (StatusCode::OK, &json!(true)), "{e}");
+    get_until(&w.api, &env, |e| e["state"] == "stopped").await;
+    // The reaper passes and keeps no floor.
+    for _ in 0..5 {
+        w.apps.live(&id, "production").tick().await;
+    }
+    let (_, e) = call(&w.api, "GET", &env, None).await;
+    assert_eq!(e["state"], "stopped", "{e}");
+    let (_, list) = call(&w.api, "GET", "/v1/apps/services", None).await;
+    assert!(list[0]["environments"][0]["attention"].as_array().unwrap().contains(&json!("paused")), "{list}");
+    let (st, v) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "nothing deploys: {v}");
+    let (st, v) = call(&w.api, "POST", &format!("{env}/jobs"), Some(json!({ "command": "true" }))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "nothing runs: {v}");
+    // Resumed: back at its floor.
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({ "paused": false }))).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    assert!(e.get("paused").is_none(), "{e}");
+    get_until(&w.api, &env, |e| e["state"] == "running").await;
 }

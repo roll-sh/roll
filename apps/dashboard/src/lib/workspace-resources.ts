@@ -255,6 +255,10 @@ export function service(s: Service): ResourceView {
   const pending = latest?.tone === "busy";
   // A first deploy that failed: nothing serves, and why is in its deploy log.
   const failedFirst = !pending && latest?.tone === "error" && !env?.active;
+  // What wants its owner's eye, over the instances' state: crashing reads failed even between
+  // restarts, a capped project paused, maintenance said.
+  const attention = env?.attention ?? [];
+  const flagged = attention.includes("crash_loop") ? ({ state: "failed", label: "Crashing" } as const) : attention.includes("capped") ? ({ state: "idle", label: "Paused (spend limit)" } as const) : attention.includes("paused") ? ({ state: "idle", label: "Paused" } as const) : attention.includes("maintenance") ? ({ state: "idle", label: "In maintenance" } as const) : null;
   const instances = s.run.min_instances === s.run.max_instances ? `${s.run.min_instances}` : `${s.run.min_instances}–${s.run.max_instances}`;
   return {
     kind: "service",
@@ -262,8 +266,8 @@ export function service(s: Service): ResourceView {
     name: s.name,
     sub: hostOf(env?.url) || sourceLabel(s.source),
     // A deploy on its way is busy whatever the instances are doing.
-    state: pending ? "starting" : failedFirst ? "failed" : instanceTone(st),
-    stateLabel: pending ? `${latest.label}…` : failedFirst ? "Deploy failed" : instanceStateLabel(st),
+    state: pending ? "starting" : failedFirst ? "failed" : (flagged?.state ?? instanceTone(st)),
+    stateLabel: pending ? `${latest.label}…` : failedFirst ? "Deploy failed" : (flagged?.label ?? instanceStateLabel(st)),
     // Asleep or frozen meters nothing: say so where the state is.
     note: !pending && (st === "stopped" || st === "suspended") ? "$0.00/h" : undefined,
     meta: latest && !pending ? latest.label : `${instances} ${instances === "1" ? "instance" : "instances"}`,

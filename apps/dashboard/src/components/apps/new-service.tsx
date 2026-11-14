@@ -1,15 +1,16 @@
-import { ChevronRight, GitBranch, Image, LoaderCircle, Plus, Terminal } from "lucide-react";
+import { ChevronRight, FileText, GitBranch, Image, LoaderCircle, Plus, Terminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { appsApi, parseEnv, SERVICE_NAME, type Plan, type Service, type ServiceType, type Source } from "@/lib/apps-api";
 import { codeApi, type GithubInstallation, type Owner, type Repo } from "@/lib/code-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { freeSpot, KIND_LABEL, resourceKey, suggestName, type ResourceView } from "@/lib/workspace-resources";
 import { PlaceError, refreshInventory, useWorkspace, workspace } from "@/lib/workspace-store";
+import { ImportPane } from "./import";
 import { LINKABLE } from "./variables";
 import { CopyField, Head, Label, Rows } from "../workspace/inspector";
 import { KindTile } from "../workspace/kind";
 
-type From = "repo" | "image" | "upload";
+type From = "repo" | "image" | "upload" | "file";
 
 /** Databases New service can make with the service (a template without a template). */
 type Store = "postgres" | "redis";
@@ -18,7 +19,8 @@ const STORES: Store[] = ["postgres", "redis"];
 const FROM: { value: From; label: string; Icon: typeof GitBranch }[] = [
   { value: "repo", label: "Repository", Icon: GitBranch },
   { value: "image", label: "Image", Icon: Image },
-  { value: "upload", label: "Your machine", Icon: Terminal },
+  { value: "upload", label: "roll up", Icon: Terminal },
+  { value: "file", label: "File", Icon: FileText },
 ];
 
 const field = "h-8 w-full rounded-lg border border-line-2 bg-canvas px-2.5 font-mono text-[12px] outline-none placeholder:text-subtle focus:border-accent/60";
@@ -44,11 +46,14 @@ export function NewServiceSheet({
   spot,
   onClose,
   onCreated,
+  onImported,
 }: {
   project: WorkspaceProject;
   spot: { x: number; y: number };
   onClose: () => void;
   onCreated: (s: Service) => void;
+  /** A file's services made (already on the canvas). */
+  onImported: (made: Service[]) => void;
 }) {
   const [from, setFrom] = useState<From>("repo");
   const [repos, setRepos] = useState<Repo[] | null>(null);
@@ -61,6 +66,7 @@ export function NewServiceSheet({
   const [name, setName] = useState("");
   const [named, setNamed] = useState(false);
   const [port, setPort] = useState("");
+  const [health, setHealth] = useState("");
   const [kind, setKind] = useState<ServiceType>("web");
   const [schedule, setSchedule] = useState("");
   const [env, setEnv] = useState("");
@@ -151,7 +157,8 @@ export function NewServiceSheet({
   const portOk = portN === undefined || (Number.isInteger(portN) && portN > 0 && portN < 65536);
   const parsed = useMemo(() => parseEnv(env), [env]);
   const scheduleOk = kind !== "cron" || schedule.trim().split(/\s+/).length === 5;
-  const ready = !!source && SERVICE_NAME.test(name) && portOk && scheduleOk && parsed.errors.length === 0 && !busy;
+  const healthOk = !health.trim() || health.trim().startsWith("/");
+  const ready = !!source && SERVICE_NAME.test(name) && portOk && healthOk && scheduleOk && parsed.errors.length === 0 && !busy;
 
   const create = async () => {
     if (!source) return;
@@ -159,7 +166,8 @@ export function NewServiceSheet({
     setError(null);
     try {
       const variables = Object.keys(parsed.vars).length ? { variables: parsed.vars } : {};
-      const run = kind === "web" ? (portN ? { port: portN } : undefined) : kind === "cron" ? { type: kind, schedule: schedule.trim() } : { type: kind };
+      const web = { ...(portN ? { port: portN } : {}), ...(health.trim() ? { health_path: health.trim() } : {}) };
+      const run = kind === "web" ? (Object.keys(web).length ? web : undefined) : kind === "cron" ? { type: kind, schedule: schedule.trim() } : { type: kind };
       const registry = from === "image" && regUser.trim() && regPassword ? { registry: { username: regUser.trim(), password: regPassword } } : {};
       // The new databases first, each placed beside the service, so their variables are in the
       // first deploy. One made before a failure stays in the project, and a retry links it.
@@ -267,7 +275,9 @@ export function NewServiceSheet({
             <p className="mt-1.5 text-[11px] leading-relaxed text-subtle">Sealed, sent only to the image's own registry, never shown again.</p>
           </>
         )}
-        {from === "upload" ? (
+        {from === "file" ? (
+          <ImportPane project={project} spot={spot} onDone={onImported} />
+        ) : from === "upload" ? (
           <>
             <Label>From the app's directory</Label>
             <CopyField shown={`roll up --project ${shellQuote(project.name)}`} value={`roll up --project ${shellQuote(project.name)}`} />
@@ -311,6 +321,10 @@ export function NewServiceSheet({
                   Port <span className="font-normal">{from === "repo" && plan?.plan ? `detected ${plan.plan.port}` : "default 8080"}</span>
                 </Label>
                 <input value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} placeholder={String(plan?.plan?.port ?? 8080)} inputMode="numeric" className={field} />
+                <Label>
+                  Health check path <span className="font-normal">optional; none: the port accepting</span>
+                </Label>
+                <input value={health} onChange={(e) => setHealth(e.target.value)} placeholder="/healthz" spellCheck={false} className={`${field} font-mono ${health && !health.startsWith("/") ? "border-danger/60" : ""}`} />
               </>
             )}
             {kind === "cron" && (
@@ -384,11 +398,11 @@ export function NewServiceSheet({
         {error && <p className="mt-3 rounded-lg border border-danger/40 bg-danger/10 px-2.5 py-2 text-[11.5px] text-danger">{error}</p>}
       </div>
       <div className="flex items-center gap-2 border-t border-line px-3 py-2">
-        <span className="mr-auto text-[11px] text-subtle">{from === "upload" ? "Nothing is made until you run it." : "Deploys to production when it's made."}</span>
+        <span className="mr-auto text-[11px] text-subtle">{from === "upload" ? "Nothing is made until you run it." : from === "file" ? "A project's roll.toml, or a Compose file." : "Deploys to production when it's made."}</span>
         <button onClick={onClose} className="rounded-md px-2 py-1 text-[11.5px] text-muted hover:bg-white/[0.05] hover:text-fg">
           {from === "upload" ? "Done" : "Cancel"}
         </button>
-        {from !== "upload" && (
+        {from !== "upload" && from !== "file" && (
           <button
             onClick={create}
             disabled={!ready}

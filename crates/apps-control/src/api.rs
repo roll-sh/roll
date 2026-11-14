@@ -117,6 +117,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
     Router::new()
         .route("/v1/apps", get(overview))
         .route("/v1/apps/plan", post(plan))
+        .route("/v1/apps/import", post(import))
         .route("/v1/apps/services", get(list_services).post(create_service))
         .route("/v1/apps/projects/{project}/services", get(project_services).post(create_project_service))
         .merge(service_routes)
@@ -138,6 +139,42 @@ async fn overview(State(apps): S) -> R {
     let mut o = apps.overview();
     o["services"] = serde_json::to_value(services).expect("JSON");
     ok(o)
+}
+
+/// A project in one file, read (no service made): a roll.toml's `[apps]` and `[databases]`, or
+/// a Compose file turned into them, checked as `roll up --all` checks them. The dashboard's import
+/// plans against the project with it and makes what's missing through the usual routes.
+async fn import(b: Bytes) -> R {
+    use apps_build::project::{compose_to_toml, entry_kind, entry_run, parse_project};
+    let v = body(&b)?;
+    let text = |k: &str| v.get(k).and_then(Value::as_str);
+    if [text("roll_toml"), text("compose")].into_iter().flatten().any(|t| t.len() > 1 << 20) {
+        return Err(Error::BadRequest("the file is at most 1 MiB".into()));
+    }
+    let (toml_text, notes) = match (text("roll_toml"), text("compose")) {
+        (Some(t), None) => (t.to_string(), Vec::new()),
+        // Off the runtime's threads: a large file is a few hundred milliseconds of parsing.
+        (None, Some(c)) => {
+            let c = c.to_string();
+            tokio::task::spawn_blocking(move || compose_to_toml(&c)).await.map_err(|e| Error::Internal(e.to_string()))?.map_err(|e| Error::BadRequest(e.to_string()))?
+        }
+        _ => return Err(Error::BadRequest("give roll_toml or compose".into())),
+    };
+    let f = parse_project(&toml_text).map_err(|e| Error::BadRequest(e.to_string()))?;
+    let apps: serde_json::Map<String, Value> = f
+        .apps
+        .iter()
+        .map(|(n, a)| {
+            let source = match entry_kind(a) {
+                "repo" => json!({ "kind": "repo", "repo": a.repo, "root": a.root }),
+                "image" => json!({ "kind": "image", "image": a.image }),
+                _ => json!({ "kind": "upload", "root": a.root.as_deref().unwrap_or(".") }),
+            };
+            let links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": f.databases[l].kind, "name": l })).collect();
+            (n.clone(), json!({ "source": source, "branch": a.branch, "run": entry_run(a), "links": links, "variables": a.variables }))
+        })
+        .collect();
+    ok(json!({ "roll_toml": toml_text, "notes": notes, "apps": apps, "databases": f.databases }))
 }
 
 /// `POST /v1/apps/plan`: what a build would detect, for a repo at a revision or for files.
@@ -278,8 +315,14 @@ async fn links(State(apps): S, Path(id): Path<String>) -> R {
     ok(apps.links(&id).await?)
 }
 
-async fn activity(State(apps): S, Path(id): Path<String>) -> R {
-    ok(apps.activity(&id).await?)
+#[derive(Deserialize)]
+struct ActivityQuery {
+    /// Every kind of event, not only the audit trail: the service's timeline.
+    all: Option<String>,
+}
+
+async fn activity(State(apps): S, Path(id): Path<String>, Query(q): Query<ActivityQuery>) -> R {
+    ok(apps.activity(&id, truthy(&q.all)).await?)
 }
 
 async fn put_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
