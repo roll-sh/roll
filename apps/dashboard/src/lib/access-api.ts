@@ -60,6 +60,8 @@ export interface Grant {
   kind: "token" | "oauth" | "workload";
   rules: Rule[];
   expires_at: number | null;
+  /** It works only from then on (Cloudflare's TTL start); before, it's refused. */
+  not_before?: number | null;
   ip_allow: string[];
   /** "operator", or the grant that made it. */
   created_by: string;
@@ -84,6 +86,7 @@ export interface NewGrant {
   name: string;
   rules: Rule[];
   expires_at?: number | null;
+  not_before?: number | null;
   ip_allow?: string[];
   rate_per_minute?: number | null;
   ask_otherwise?: boolean;
@@ -441,6 +444,9 @@ export function reach(g: Pick<Grant, "rules">): "read only" | "can change things
 }
 
 export type GrantStatus = "active" | "revoked" | "expired";
+
+/** When a live token starts working, if that's still ahead. */
+export const startsLater = (g: Pick<Grant, "not_before">, now = Date.now()): number | null => (g.not_before && g.not_before > now ? g.not_before : null);
 
 export function statusOf(g: Pick<Grant, "revoked_at" | "expires_at">, now = Date.now()): GrantStatus {
   if (g.revoked_at) return "revoked";

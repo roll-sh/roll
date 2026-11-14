@@ -78,6 +78,7 @@ type Grant = {
   kind: "token" | "oauth";
   rules: Rule[];         // at least one; nothing else is allowed
   expires_at: number | null; // unix ms; the builder defaults to 30 days
+  not_before?: number | null; // unix ms: it works only from then on (Cloudflare's TTL start); refused before, as an unknown token
   ip_allow: string[];    // CIDRs; empty: any address
   created_by: string;    // "operator", or the grant that made it ("tok_…")
   created_at: number;
@@ -734,7 +735,7 @@ On a single node the data is SQLite at `<home>/access.db`; with the system datab
 leases (each read-then-write is one `code_sql` write).
 
 ```sql
-grants(id PRIMARY KEY, name, kind, rules JSON, expires_at, ip_allow JSON, created_by, created_at,
+grants(id PRIMARY KEY, name, kind, rules JSON, expires_at, not_before, ip_allow JSON, created_by, created_at,
        last_used_at, last_used_ip, revoked_at, client_id)
 secrets(hash PRIMARY KEY, grant_id, kind /* token | access | refresh */, expires_at, created_at)
 approvals(id PRIMARY KEY, grant_id, …, request_hash, state, created_at, decided_at, decided_by, expires_at)

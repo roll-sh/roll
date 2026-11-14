@@ -14,6 +14,8 @@ export function NewToken() {
   const [name, setName] = useState("");
   const [rules, setRules] = useState<Rule[]>([]);
   const [expiry, setExpiry] = useState(1);
+  // A start later on (Cloudflare's TTL start): the expiry counts from it.
+  const [starts, setStarts] = useState("");
   const [ips, setIps] = useState("");
   const [rateText, setRateText] = useState("");
   const [askOtherwise, setAskOtherwise] = useState(false);
@@ -35,7 +37,9 @@ export function NewToken() {
 
   const ipList = ips.split(/[\s,]+/).filter(Boolean);
   const rate = parseRate(rateText);
+  const startMs = starts ? new Date(starts).getTime() : null;
   const problems = [
+    ...(startMs !== null && !(startMs > Date.now()) ? ["The start has to be later than now"] : []),
     ...(name.trim() ? [] : ["Name the token"]),
     ...(rules.length ? [] : ["Allow at least one action"]),
     ...ipProblems(ipList),
@@ -47,7 +51,7 @@ export function NewToken() {
     setError(null);
     try {
       const ms = EXPIRIES[expiry].ms;
-      setMade(await accessApi.create({ name: name.trim(), rules, expires_at: ms === null ? null : Date.now() + ms, ip_allow: ipList, rate_per_minute: rate.rate, ask_otherwise: askOtherwise }));
+      setMade(await accessApi.create({ name: name.trim(), rules, not_before: startMs, expires_at: ms === null ? null : (startMs ?? Date.now()) + ms, ip_allow: ipList, rate_per_minute: rate.rate, ask_otherwise: askOtherwise }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -100,6 +104,10 @@ export function NewToken() {
                       </option>
                     ))}
                   </select>
+                </label>
+                <label className="block space-y-1.5">
+                  <span className="block text-[12px] text-subtle">Starts (optional: it works only from then on)</span>
+                  <input type="datetime-local" value={starts} onChange={(e) => setStarts(e.target.value)} className={`${input} w-full font-mono text-[12px]`} />
                 </label>
                 <label className="block space-y-1.5">
                   <span className="block text-[12px] text-subtle">Only from (optional)</span>

@@ -145,6 +145,7 @@ mod policy_tests {
             kind: "token",
             rules: Default::default(),
             expires_at: None,
+            not_before: None,
             ip_allow: vec![],
             created_by: "operator".into(),
             created_at: created,
@@ -947,7 +948,7 @@ impl roll_auth::Grants for Access {
             let people = self.people.get()?;
             people.person_now(user).ok()??;
         }
-        g.live(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.effective_rules(code_sql::now_ms())), user: g.user.as_deref().map(Into::into), ask_otherwise: g.ask_otherwise })
+        g.usable(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.effective_rules(code_sql::now_ms())), user: g.user.as_deref().map(Into::into), ask_otherwise: g.ask_otherwise })
     }
 }
 
