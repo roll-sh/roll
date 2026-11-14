@@ -987,13 +987,21 @@ async fn post_process(
                 Some(if product == "workspace" { Resource { project: Some(id.into()), ..Resource::new("workspace", id) } } else { a.resource(product, kind, id) })
             };
             let may = |item: &Value, act: Action| resource(item).is_some_and(|r| s.outcome(&Target::One(r), act) == Outcome::Allow);
-            for list in item_lists(&mut v, items, id_field) {
-                if filter_list {
+            if filter_list {
+                for list in item_lists(&mut v, items, id_field) {
                     list.retain(|item| may(item, action));
                 }
-                if redact_items {
-                    for item in list.iter_mut().filter(|i| !may(i, Action::Reveal)) {
-                        redact::fields(item, fields);
+            }
+            if redact_items {
+                // Everything is redacted but the items it may reveal, which go back as they were:
+                // a credential outside the items (or in one with no id) is never shown.
+                let kept: Vec<Vec<Option<Value>>> = item_lists(&mut v, items, id_field).into_iter().map(|l| l.iter().map(|i| may(i, Action::Reveal).then(|| i.clone())).collect()).collect();
+                redact::fields(&mut v, fields);
+                for (list, kept) in item_lists(&mut v, items, id_field).into_iter().zip(kept) {
+                    for (item, original) in list.iter_mut().zip(kept) {
+                        if let Some(original) = original {
+                            *item = original;
+                        }
                     }
                 }
             }
