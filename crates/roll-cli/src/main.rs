@@ -539,7 +539,11 @@ async fn main() -> anyhow::Result<()> {
                 Ok(a) => a,
                 Err(e) if secrets::no_answer(&e) => {
                     eprintln!("roll run: logging in: {e}");
-                    Api { key: None, ..timed }
+                    // A workload identity logs in at the first request rolld answers: a watch
+                    // started from the fallback reloads then, as with a token.
+                    let identity = std::env::var("ROLL_TOKEN").ok().filter(|t| !t.trim().is_empty()).is_none().then(|| std::env::var("ROLL_IDENTITY").ok()).flatten().filter(|i| !i.trim().is_empty());
+                    let login = identity.map(|i| std::sync::Arc::new(secrets::Relogin::pending(i.trim())));
+                    Api { key: None, login, ..timed }
                 }
                 Err(e) => return Err(e),
             };

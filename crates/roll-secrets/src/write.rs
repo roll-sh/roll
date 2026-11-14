@@ -619,13 +619,6 @@ impl Secrets {
         Ok(out)
     }
 
-    /// What this project may link, sink to or sync to, as (kind, ref): its canvas's resources and
-    /// its own rotators and databases outside roll, checked on every write, read, issue, rotation and delivery (a resource
-    /// can move to another project).
-    ///
-    /// A person's project (docs/accounts.md) has only what the workspace trusts it for
-    /// ([`roll_workspace::Workspace::trusts`]) and its rotators: anyone may put any resource on
-    /// their own canvas, and a link reaches a resource as the operator.
     /// A linked key's field, when its provider says it's secret: `a postgres password`.
     pub(crate) fn secret_field(&self, link: Option<&Link>) -> Option<String> {
         let l = link?;
@@ -634,6 +627,14 @@ impl Secrets {
         Some(format!("a {} {}", l.kind, f.label.to_lowercase()))
     }
 
+    /// What this project may link, sink to or sync to, as (kind, ref): its canvas's resources and
+    /// its own registrations (rotators, databases outside roll, AWS roles and IAM users, cloud
+    /// accounts, CAs and SSH CAs), checked on every write, read, issue, rotation and delivery (a
+    /// resource can move to another project).
+    ///
+    /// A person's project (docs/accounts.md) has only what the workspace trusts it for
+    /// ([`roll_workspace::Workspace::trusts`]) and its own registrations: anyone may put any
+    /// resource on their own canvas, and a link reaches a resource as the operator.
     pub(crate) fn members(&self, project: &str) -> Result<BTreeSet<(String, String)>> {
         let p = self.workspace.get(roll_workspace::Scope::All, project).map_err(|e| Error::Internal(e.to_string()))?;
         let mut out: BTreeSet<(String, String)> = p.resources.iter().filter(|r| self.workspace.trusts(&p, r.kind, &r.r#ref)).map(|r| (r.kind.as_str().to_string(), r.r#ref.clone())).collect();
@@ -668,7 +669,7 @@ impl Secrets {
     pub(crate) fn not_linkable(&self, project: &str, kind: &str, r#ref: &str) -> String {
         let personal = self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| !p.owner.is_empty() && p.resources.iter().any(|r| r.kind.as_str() == kind && r.r#ref == r#ref));
         if personal {
-            format!("{kind} {ref} is on this project's canvas, but roll can't tell it's yours: links, sinks and syncs reach roll's products only from the operator's projects and an admin's for now (a rotator, an AWS role or a database outside roll that's the project's own works anywhere)", ref = r#ref)
+            format!("{kind} {ref} is on this project's canvas, but roll can't tell it's yours: links, sinks and syncs reach roll's products only from the operator's projects and an admin's for now (the project's own registrations work anywhere: rotators, databases outside roll, AWS roles and IAM users, cloud accounts, CAs and SSH CAs)", ref = r#ref)
         } else {
             format!("{kind} {ref} isn't in this project", ref = r#ref)
         }

@@ -1124,10 +1124,8 @@ roll secrets transit sign NAME | verify NAME SIGNATURE | hmac NAME | public NAME
 roll secrets transit import NAME [--vault-version N]                                # the key on stdin
 roll secrets kubernetes [--name N] [--namespace NS] [--refresh 1h] [--url URL]   # ESO manifests
 roll secrets reach [KEY]                     # who and what can read it
-roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
+roll run [-p project] [-e production] [--path /] [--env-file .env]… [--allow-unresolved] [--watch] [--mask | --no-mask] [--fallback FILE [--fallback-max-age 7d]] -- <command…>
 roll ssh [-p project] [-e production] [--cert SSH_CERT] [--identity SSH_KEY] -- <ssh arguments…>
-roll run [-p project] [-e production] [--path /] [--env-file .env]… [--allow-unresolved] [--watch] -- <command…>
-roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] [--mask | --no-mask] -- <command…>
 roll completions bash|zsh|fish|powershell
 ```
 
@@ -2268,8 +2266,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
-| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&digest=&name=&namespace=&seq=&at=` | | `Values` (with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
-| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
+| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, projects it's shared with, folders that import it, readers in 30 days |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
@@ -2761,6 +2758,16 @@ Merging the stack in order (2026-11-14) found what no single pull request could:
   registries a forgotten project drops lost `cloud_accounts` (#43). Every pull request's added lines
   were checked against the landing branch afterwards; everything else is there or extended.
 - Additive everywhere else: routes, catalogue rows, `Options` fields, types and this document.
+
+A fourteenth independent review (2026-11-14, of the landing merges) found no lost behaviour in the
+store, the providers, the values route or the catalogue; it found where features meet: a workload
+identity's `roll run --fallback --watch` started through an outage never logging in again (#35 with
+#56: the login is now pending until rolld answers, and a failing or timed-out login counts as no
+answer), masking concealing an env file's own plain values (#54 with #49: only values from roll),
+a strict read failing on a required key that is sensitive or dynamic (#55 with #46), a reference to
+a sensitive key reported as unset (#49 with #46), a reference's read with no answer not falling back
+(#35 with #49), and docs and comments merged twice or misplaced: all fixed, tested where a test
+guards behaviour.
 
 The landing branch passes roll-secrets' tests (SQLite and Postgres), roll-cli's, rolld's auth and
 secrets tests, roll-access's, clippy with `-D warnings`, `pnpm typecheck`, the dashboard's 719

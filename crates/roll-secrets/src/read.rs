@@ -383,12 +383,16 @@ impl Secrets {
         let mut problems = vec![];
         let mut withheld = vec![];
         let mut sensitive = vec![];
+        // Set, but not in this answer (withheld, or dynamic under `dynamic=false`): not missing.
+        let mut left_out = vec![];
         for e in &entries {
             if names::sensitive(&e.row.tags) && !caller.runtime {
                 withheld.push(e.row.key.clone());
+                left_out.push(e.row.key.clone());
                 continue;
             }
             if !dynamic && e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic) {
+                left_out.push(e.row.key.clone());
                 continue;
             }
             let (v, problem) = r.entry(e);
@@ -401,7 +405,7 @@ impl Secrets {
             values.insert(e.row.key.clone(), v);
         }
         let leases = r.finish(slug)?;
-        let have: Vec<String> = values.keys().cloned().collect();
+        let have: Vec<String> = values.keys().cloned().chain(left_out).collect();
         for m in self.missing_required(project, &path, &have)? {
             problems.push(Problem { key: m.key, problem: format!("required, but {slug} doesn't set it") });
         }
@@ -828,13 +832,13 @@ impl<'a> Resolver<'a> {
         self.views[&k].get(key).cloned().ok_or_else(|| "doesn't exist".to_string())
     }
 
-    /// An entry's value and the first problem resolving it (the value then keeps the
-    /// unresolved reference's text).
     /// Whether `e`'s value holds a sensitive one (after [`Resolver::entry`]).
     pub(crate) fn tainted(&self, e: &Entry) -> bool {
         self.tainted.contains(&format!("{}:{}:{}", e.row.env_id, e.row.path, e.row.key))
     }
 
+    /// An entry's value and the first problem resolving it (the value then keeps the
+    /// unresolved reference's text).
     pub fn entry(&mut self, e: &Entry) -> (Value, Option<String>) {
         // By the environment's id, not its slug: a folder another project shares may have the same
         // slug and path as one of this project's.

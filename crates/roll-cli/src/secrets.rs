@@ -2802,7 +2802,9 @@ pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String
     let status = res.status();
     let v: Value = res.json().await.unwrap_or(Value::Null);
     if !status.is_success() {
-        bail!("logging in with the workload identity: {}", v["error"].as_str().map(String::from).unwrap_or_else(|| status.to_string()));
+        // Kept as a status: a failing server (5xx) is no answer to `--fallback`, a refusal isn't.
+        let message = format!("logging in with the workload identity: {}", v["error"].as_str().map(String::from).unwrap_or_else(|| status.to_string()));
+        return Err(anyhow::Error::new(crate::ApiStatus { status, message }));
     }
     let token = v["token"].as_str().map(str::to_string).context("the login answered no token")?;
     // Without it every request would log in again: an answer that isn't roll's.
@@ -2866,7 +2868,7 @@ fn now_ms() -> i64 {
 async fn login_within(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
     match tokio::time::timeout(LOGIN_TIMEOUT, identity_login(api, identity)).await {
         Ok(r) => r,
-        Err(_) => anyhow::bail!("no answer in {} s", LOGIN_TIMEOUT.as_secs()),
+        Err(elapsed) => Err(anyhow::Error::new(elapsed).context(format!("no answer in {} s", LOGIN_TIMEOUT.as_secs()))),
     }
 }
 
@@ -2876,12 +2878,21 @@ impl Relogin {
         Ok(Relogin { identity: identity.to_string(), first: token.clone(), held: tokio::sync::Mutex::new(Held::new(token, expires_at)) })
     }
 
+    /// No login yet (`roll run --fallback` started through an outage): the first request logs in,
+    /// and each one after a failure tries again.
+    pub fn pending(identity: &str) -> Relogin {
+        let now = std::time::Instant::now();
+        let held = Held { token: String::new(), renew: now, ends: now, retry: None, renewing: None, generation: 0 };
+        Relogin { identity: identity.to_string(), first: String::new(), held: tokio::sync::Mutex::new(held) }
+    }
+
     pub async fn token(self: &std::sync::Arc<Self>, api: &Api) -> anyhow::Result<String> {
         let mut held = self.held.lock().await;
         let now = std::time::Instant::now();
         if now >= held.ends {
             // Ended (or refused): nothing to go on with. Log in now.
-            let (token, expires_at) = login_within(api, &self.identity).await.map_err(|e| anyhow::anyhow!("logging in again as {} failed ({e:#})", self.identity))?;
+            // The cause is kept: `--fallback` tells no answer from a refusal by it.
+            let (token, expires_at) = login_within(api, &self.identity).await.with_context(|| format!("logging in again as {} failed", self.identity))?;
             held.store(token, expires_at);
         } else if now >= held.renew && held.retry.is_none_or(|r| now >= r) && held.renewing.as_ref().is_none_or(|h| h.is_finished()) {
             let (me, anon) = (self.clone(), Api { base: api.base.clone(), http: api.http.clone(), key: None, headers: api.headers.clone(), login: None });
@@ -3415,7 +3426,7 @@ fn render(tpl: &str, get: impl Fn(&str) -> Option<String>) -> Result<String, Vec
 
 /// The variables `roll run` adds: the environment's resolved values, minus the ones the shell
 /// already sets (unless `--override`). Fails on a problem unless `--allow-unresolved`.
-async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(String, String)>, Vec<String>, Digests)> {
+async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<Var>, Vec<String>, Digests)> {
     let digest = if r.watch { "&digest=1" } else { "" };
     let path = format!("{}/values?{}{digest}", c.env(&at.env), c.q());
     let digest_path = format!("{}/digest?{}", c.env(&at.env), c.q());
@@ -3441,17 +3452,7 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(Strin
                 Ok(Err((_, m))) => m,
                 Ok(Ok(_)) => unreachable!(),
             };
-            let secret = crate::fallback::secret(c.api.key.as_deref())?;
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
-            let (values, h) = crate::fallback::read(file, &secret, &header(0), now, crate::fallback::duration_ms(&r.fallback_max_age)?).with_context(|| format!("{why}; and the fallback didn't do"))?;
-            eprintln!("roll run: {why}; starting from {} (fetched {} minutes ago)", file.display(), (now - h.fetched_at) / 60_000);
-            // The file keeps the env files' references as they resolved, under their `roll://…`
-            // text (no variable's name has `://`).
-            let (kept, values): (Vec<_>, Vec<_>) = values.into_iter().map(|(k, v)| (k, v.as_str().unwrap_or_default().to_string())).partition(|(k, _)| k.starts_with("roll://"));
-            let kept: std::collections::HashMap<String, String> = kept.into_iter().collect();
-            let resolved = refs.iter().map(|rf| kept.get(&rf.text()).map(|v| (rf.clone(), v.clone())).ok_or_else(|| anyhow::anyhow!("{why}; and {} isn't in the fallback (added after its last fetch)", rf.text()))).collect::<anyhow::Result<_>>()?;
-            // A digest no folder has: the first one rolld answers reloads the command (`--watch`).
-            return Ok((with_env_files(values, &files, &resolved, r)?, Vec::new(), Digests::from([(digest_path, "fallback".into())])));
+            return from_fallback(c, r, file, &header(0), &why, &files, &refs, digest_path);
         }
     };
     let problems: Vec<String> = v["problems"].as_array().into_iter().flatten().map(|p| format!("{}: {}", s(&p["key"]), s(&p["problem"]))).collect();
@@ -3460,12 +3461,18 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(Strin
     }
     let values: Vec<(String, String)> = v["values"].as_object().into_iter().flatten().map(|(k, val)| (k.clone(), val.as_str().unwrap_or_default().to_string())).collect();
     let mut leases: Vec<String> = v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(|l| format!("{}/leases/{}", c.base(), enc(l)))).collect();
-    let mut follow = Digests::from([(digest_path, answered(&v))]);
+    let mut follow = Digests::from([(digest_path.clone(), answered(&v))]);
     let withheld: Vec<&str> = v["withheld"].as_array().into_iter().flatten().filter_map(|k| k.as_str()).collect();
     if !withheld.is_empty() {
         eprintln!("roll run: left out {} (sensitive: only roll's runtimes read them)", withheld.join(", "));
     }
-    let (resolved, more_leases, more_follow) = resolve_refs(c, &refs, r.watch).await?;
+    let (resolved, more_leases, more_follow) = match (resolve_refs(c, &refs, r.watch).await, &r.fallback) {
+        (Ok(x), _) => x,
+        // A referenced folder's read got no answer: the whole run starts from the file, as one
+        // consistent fetch (this read's leases end with their time).
+        (Err(e), Some(file)) if no_answer(&e) => return from_fallback(c, r, file, &header(0), &format!("{e:#}"), &files, &refs, digest_path),
+        (Err(e), _) => return Err(e),
+    };
     leases.extend(more_leases);
     follow.extend(more_follow);
     // Only what resolved cleanly is kept for an outage: the values, and the env files' references
@@ -3484,19 +3491,47 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(Strin
     Ok((with_env_files(values, &files, &resolved, r)?, leases, follow))
 }
 
+/// `roll run` started from the fallback file (`why`: what rolld didn't answer): the values kept
+/// for `want`, and the env files' references as they resolved then.
+#[allow(clippy::too_many_arguments)]
+fn from_fallback(c: &Client<'_>, r: &Run, file: &std::path::Path, want: &crate::fallback::Header, why: &str, files: &[Vec<(String, String)>], refs: &[crate::secret_refs::Ref], digest_path: String) -> anyhow::Result<(Vec<Var>, Vec<String>, Digests)> {
+    let secret = crate::fallback::secret(c.api.key.as_deref())?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    let (values, h) = crate::fallback::read(file, &secret, want, now, crate::fallback::duration_ms(&r.fallback_max_age)?).with_context(|| format!("{why}; and the fallback didn't do"))?;
+    eprintln!("roll run: {why}; starting from {} (fetched {} minutes ago)", file.display(), (now - h.fetched_at) / 60_000);
+    // The file keeps the env files' references as they resolved, under their `roll://…` text (no
+    // variable's name has `://`).
+    let (kept, values): (Vec<_>, Vec<_>) = values.into_iter().map(|(k, v)| (k, v.as_str().unwrap_or_default().to_string())).partition(|(k, _)| k.starts_with("roll://"));
+    let kept: std::collections::HashMap<String, String> = kept.into_iter().collect();
+    let resolved = refs.iter().map(|rf| kept.get(&rf.text()).map(|v| (rf.clone(), v.clone())).ok_or_else(|| anyhow::anyhow!("{why}; and {} isn't in the fallback (added after its last fetch)", rf.text()))).collect::<anyhow::Result<_>>()?;
+    // A digest no folder has: the first one rolld answers reloads the command (`--watch`).
+    Ok((with_env_files(values, files, &resolved, r)?, Vec::new(), Digests::from([(digest_path, "fallback".into())])))
+}
+
 /// The variables to set: the environment's values, then the env files' entries over them (plain
 /// values as written, references as `resolved` has them); the shell's own win unless `--override`.
-fn with_env_files(mut env: Vec<(String, String)>, files: &[Vec<(String, String)>], resolved: &std::collections::HashMap<crate::secret_refs::Ref, String>, r: &Run) -> anyhow::Result<Vec<(String, String)>> {
+/// Each says whether its value came from roll (what masking conceals) or is an env file's own.
+fn with_env_files(env: Vec<(String, String)>, files: &[Vec<(String, String)>], resolved: &std::collections::HashMap<crate::secret_refs::Ref, String>, r: &Run) -> anyhow::Result<Vec<Var>> {
+    let mut env: Vec<Var> = env.into_iter().map(|(name, value)| Var { name, value, from_roll: true }).collect();
     for (k, raw) in files.iter().flatten() {
-        let value = match crate::secret_refs::Ref::parse(raw)? {
-            Some(rf) => resolved[&rf].clone(),
-            None => raw.clone(),
+        let (value, from_roll) = match crate::secret_refs::Ref::parse(raw)? {
+            Some(rf) => (resolved[&rf].clone(), true),
+            None => (raw.clone(), false),
         };
-        env.retain(|(have, _)| have != k);
-        env.push((k.clone(), value));
+        env.retain(|v| &v.name != k);
+        env.push(Var { name: k.clone(), value, from_roll });
     }
-    env.retain(|(k, _)| r.override_env || std::env::var_os(k).is_none());
+    env.retain(|v| r.override_env || std::env::var_os(&v.name).is_none());
     Ok(env)
+}
+
+/// A variable `roll run` sets.
+#[derive(Clone)]
+pub(crate) struct Var {
+    pub name: String,
+    pub value: String,
+    /// From the environment or a `roll://` reference, not an env file's plain value.
+    pub from_roll: bool,
 }
 
 /// Resolve `roll://` references: one read per project, environment and folder. Their values,
@@ -3518,7 +3553,13 @@ async fn resolve_refs(c: &Client<'_>, refs: &[crate::secret_refs::Ref], watch: b
         for rf in group {
             let value = v["values"][&rf.key].as_str().ok_or_else(|| {
                 let problem = v["problems"].as_array().into_iter().flatten().find(|p| p["key"] == rf.key.as_str()).map(|p| s(&p["problem"]).to_string());
-                anyhow::anyhow!("roll://{}{}{}/{}: {}", rf.project.as_ref().map(|p| format!("{p}@")).unwrap_or_default(), rf.env, if rf.path == "/" { String::new() } else { rf.path.clone() }, rf.key, problem.unwrap_or_else(|| "not set there".into()))
+                let withheld = v["withheld"].as_array().is_some_and(|w| w.iter().any(|k| k == rf.key.as_str()));
+                let why = match problem {
+                    Some(p) => p,
+                    None if withheld => "sensitive: only roll's runtimes read it".into(),
+                    None => "not set there".into(),
+                };
+                anyhow::anyhow!("{}: {why}", rf.text())
             })?;
             values.insert(rf.clone(), value.to_string());
         }
@@ -3580,7 +3621,7 @@ async fn digests_since(c: &Client<'_>, before: &Digests, follow: &Digests) -> Di
 /// No answer from rolld, or a failing one (a 5xx): what `--fallback` starts through. A refusal
 /// (a 4xx: a revoked token, a customer's key that refused, 423) never is.
 pub(crate) fn no_answer(e: &anyhow::Error) -> bool {
-    e.chain().any(|c| c.downcast_ref::<reqwest::Error>().is_some() || c.downcast_ref::<crate::ApiStatus>().is_some_and(|s| s.status.is_server_error()))
+    e.chain().any(|c| c.downcast_ref::<reqwest::Error>().is_some() || c.downcast_ref::<tokio::time::error::Elapsed>().is_some() || c.downcast_ref::<crate::ApiStatus>().is_some_and(|s| s.status.is_server_error()))
 }
 
 /// `roll run`: resolve, then exec the command with the values in its environment; with
@@ -3604,7 +3645,7 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
         return run_masked(&r, &env, streams).await;
     }
     let mut cmd = std::process::Command::new(&r.command[0]);
-    cmd.args(&r.command[1..]).envs(env);
+    cmd.args(&r.command[1..]).envs(env.into_iter().map(|v| (v.name, v.value)));
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -3679,8 +3720,8 @@ pub async fn ssh_command(api: &Api, a: Ssh) -> anyhow::Result<()> {
 
 /// `roll run` with masked output: the command as a child (roll can't exec it and still read its
 /// output), exiting as it did. Signals are passed on ([`crate::mask::Signals`]).
-async fn run_masked(r: &Run, env: &[(String, String)], streams: crate::mask::Streams) -> anyhow::Result<()> {
-    let mut run = crate::mask::spawn(&r.command, env, streams).with_context(|| format!("running {}", r.command[0]))?;
+async fn run_masked(r: &Run, env: &[Var], streams: crate::mask::Streams) -> anyhow::Result<()> {
+    let mut run = spawn_masked(r, env, streams)?;
     #[cfg(unix)]
     {
         let mut signals = crate::mask::Signals::new()?;
@@ -3706,7 +3747,14 @@ async fn run_masked(r: &Run, env: &[(String, String)], streams: crate::mask::Str
 /// `roll run --watch`: the command as a child, restarted (SIGTERM, then SIGKILL after 10 s) when
 /// the environment changes. A change that doesn't resolve keeps the running command. Signals are
 /// passed on as `roll run`'s are, and it exits as the command did.
-async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>, mut leases: Vec<String>, follow: Digests, streams: crate::mask::Streams) -> anyhow::Result<()> {
+/// The command with `env`, its output masked for the values from roll ([`crate::mask::spawn`]).
+fn spawn_masked(r: &Run, env: &[Var], streams: crate::mask::Streams) -> anyhow::Result<crate::mask::Running> {
+    let pairs: Vec<(String, String)> = env.iter().map(|v| (v.name.clone(), v.value.clone())).collect();
+    let conceal: Vec<&str> = env.iter().filter(|v| v.from_roll).map(|v| v.value.as_str()).collect();
+    crate::mask::spawn(&r.command, &pairs, &conceal, streams).with_context(|| format!("running {}", r.command[0]))
+}
+
+async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: Vec<String>, follow: Digests, streams: crate::mask::Streams) -> anyhow::Result<()> {
     // The environment's digest, and every referenced one's (an env file's `roll://…`), as the
     // first read's answers gave them (started from a fallback: one that reloads at the first
     // answer).
@@ -3718,7 +3766,7 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>,
     #[cfg(unix)]
     let mut signals = crate::mask::Signals::new()?;
     loop {
-        let mut run = crate::mask::spawn(&r.command, &env, streams).with_context(|| format!("running {}", r.command[0]))?;
+        let mut run = spawn_masked(r, &env, streams)?;
         loop {
             #[cfg(unix)]
             let signal = signals.next();
@@ -4048,5 +4096,13 @@ mod relogin_tests {
         *refuse.lock().unwrap() = "Bearer rlst_2".into();
         assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_3");
         assert_eq!(*seen.lock().unwrap(), ["jwt-1", "jwt-2", "jwt-2"]);
+        // Started through an outage (`roll run --fallback`): no login yet. While roll is down a
+        // request is no answer (so the fallback is used), and the first one it answers logs in.
+        let later = Arc::new(Relogin::pending("idn_1"));
+        let api = Api { base: api.base.clone(), http: reqwest::Client::new(), key: None, headers: vec![], login: Some(later) };
+        down.store(true, Ordering::SeqCst);
+        assert!(no_answer(&api.get("/v1/echo").await.unwrap_err()));
+        down.store(false, Ordering::SeqCst);
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_4");
     }
 }

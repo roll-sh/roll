@@ -257,8 +257,9 @@ pub struct Running {
     exited: watch::Sender<bool>,
 }
 
-pub fn spawn(command: &[String], env: &[(String, String)], streams: Streams) -> std::io::Result<Running> {
-    let masker = || Masker::new(env.iter().map(|(_, v)| v.as_str()));
+/// `conceal`: the values roll added (an env file's own plain values aren't secrets).
+pub fn spawn(command: &[String], env: &[(String, String)], conceal: &[&str], streams: Streams) -> std::io::Result<Running> {
+    let masker = || Masker::new(conceal.iter().copied());
     let streams = if masker().is_some() { streams } else { Streams { stdout: false, stderr: false } };
     let mut cmd = tokio::process::Command::new(&command[0]);
     cmd.args(&command[1..]).envs(env.iter().cloned());

@@ -100,6 +100,9 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     std::fs::write(&env_file, "# app\nPORT=7000\nDB=roll://production/DATABASE_URL\nOTHER=roll://shop@production/HOST\n").unwrap();
     let out = ok(&api, &[], &["run", "-p", "shop", "-e", "production", "--env-file", env_file.to_str().unwrap(), "--", "sh", "-c", "echo $DB $OTHER $PORT"], None).await;
     assert_eq!(out.trim(), "postgres://app:s3cret@db.internal:5432/shop db.internal 7000");
+    // Masked, the references are concealed and the file's own plain values aren't.
+    let logged = ok(&api, &[("CI", "true")], &["run", "-p", "shop", "-e", "production", "--env-file", env_file.to_str().unwrap(), "--", "sh", "-c", "echo $DB $OTHER $PORT"], None).await;
+    assert_eq!(logged.trim(), "<concealed by roll> <concealed by roll> 7000");
     std::fs::write(&env_file, "MISSING=roll://production/NOPE\n").unwrap();
     let refused = roll(&api, &[], &["run", "-p", "shop", "-e", "production", "--env-file", env_file.to_str().unwrap(), "--", "true"], None).await;
     assert!(refused.code != Some(0) && refused.stderr.contains("roll://production/NOPE"), "{}", refused.stderr);

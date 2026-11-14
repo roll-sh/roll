@@ -818,6 +818,8 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     // A reader that can't renew (External Secrets Operator) asks for none: the key is left out
     // (named in `dynamic`), no lease. With `strict`, a key that doesn't resolve fails the whole
     // read, so the reader keeps what it had instead of writing an empty value.
+    // A required key left out that way is still set: not a problem.
+    api.ok(Method::PUT, "/required", Some(json!([{ "key": "TEMP_KEY" }]))).await;
     let pulled = api.ok(Method::GET, "/environments/staging/values?dynamic=false&strict=1", None).await;
     assert!(pulled["values"].get("TEMP_KEY").is_none() && pulled["dynamic"] == json!(["TEMP_KEY"]), "{pulled}");
     assert_eq!((pulled["leases"].as_array().map(Vec::len), api.fake.live_keys.lock().unwrap().len()), (Some(0), 3));
