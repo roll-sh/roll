@@ -1074,6 +1074,8 @@ impl Apps {
             env: build_env,
             env_hash,
             no_cache,
+            // A stage of the tree's own Dockerfile; a generated one's are roll's.
+            target: svc.build.target.clone().filter(|_| plan.provider == apps_build::Provider::Dockerfile),
             layers,
         };
         log.line(format!("building with {}", self.deps.builder.name()));

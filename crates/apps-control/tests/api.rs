@@ -395,6 +395,7 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     assert_eq!((rb["status"].as_str(), rb["rollback_of"].as_str(), rb["image"].clone()), (Some("active"), Some(first.as_str()), d1["image"].clone()));
     assert_eq!(Fake::count(&w.fake.counts.builds), builds);
     // Watching web/: a push elsewhere in the monorepo isn't deployed, one into web/ is.
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"build": {"target": "--no-cache"}}))).await.0, StatusCode::BAD_REQUEST, "a stage's name, never a flag");
     let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"build": {"watch": ["web/**"]}}))).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let count = || async { call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys"), None).await.1.as_array().unwrap().len() };

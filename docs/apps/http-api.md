@@ -156,6 +156,7 @@ type Build = {
    *  the repo's root, as CODEOWNERS; at most 50). roll.toml `[app] watch` wins over it. */
   watch?: string[];
   spa?: boolean;            // a single-page app (a page path with no file answers index.html); unset: detected
+  target?: string;          // the tree's own Dockerfile's stage to build (--target): letters, digits, _ - . (64 at most)
 };
 
 type Run = {

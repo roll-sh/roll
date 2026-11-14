@@ -693,3 +693,37 @@ async fn an_app_on_loopback_fails_its_deploy_saying_so() {
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
 }
 
+/// A multi-stage Dockerfile whose last stage isn't what runs: `build.target` builds its stage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dockerfiles_stage_is_built_by_its_target() {
+    let Some(w) = docker_world().await else { return };
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "staged", "source": {"kind": "upload"}, "build": {"builder": "dockerfile", "target": "web"}, "run": {"memory_mb": 256, "cpu": 0.5, "health_timeout_s": 30} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let tree = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tree.path().join("Dockerfile"),
+        "FROM busybox:1.37 AS web\nRUN mkdir /site && echo '<h1>the web stage</h1>' > /site/index.html\nCMD [\"sh\", \"-c\", \"httpd -f -p $PORT -h /site\"]\n\nFROM busybox:1.37\nCMD [\"false\"]\n",
+    )
+    .unwrap();
+    let mut bundle = Vec::new();
+    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+    let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), None, "application/gzip", Some(bundle)).await;
+    let dep = d["id"].as_str().unwrap().to_string();
+    let mut x = Value::Null;
+    for _ in 0..1200 {
+        x = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}"), None, "application/json", None).await.1;
+        if ["failed", "active"].contains(&x["status"].as_str().unwrap_or("")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(x["status"], "active", "the last stage would exit at once: {x}");
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
+    let host = env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
+    let resp = w.public.clone().oneshot(Request::get("/").header("host", host.as_str()).body(Body::empty()).unwrap()).await.unwrap();
+    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(body.contains("the web stage"), "{body}");
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+}
+

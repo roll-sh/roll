@@ -300,6 +300,10 @@ pub struct Build {
     /// detected; unset: detected (a static build with a client-side router).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spa: Option<bool>,
+    /// The tree's own Dockerfile's stage to build (`--target`), for a multi-stage one whose last
+    /// stage isn't what runs (Fly's and Render's).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,6 +328,12 @@ impl Build {
             && (w.len() > 50 || w.iter().any(|p| p.trim().is_empty() || p.len() > 200 || p.contains('\0')))
         {
             return Err(Error::BadRequest("build.watch is at most 50 path patterns of at most 200 characters".into()));
+        }
+        // A stage's name, as a Dockerfile's `FROM … AS <name>` has it (one argv word).
+        if let Some(t) = &self.target
+            && (t.is_empty() || t.len() > 64 || !t.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')) || t.starts_with('-'))
+        {
+            return Err(Error::BadRequest("build.target is a Dockerfile stage's name: letters, digits, _, - and . (at most 64)".into()));
         }
         Ok(())
     }

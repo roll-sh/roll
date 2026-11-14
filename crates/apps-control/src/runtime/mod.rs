@@ -263,6 +263,8 @@ pub struct BuildJob {
     pub own_dockerfile: bool,
     /// Use no cached layer and pull base images again (`--no-cache --pull`).
     pub no_cache: bool,
+    /// The Dockerfile's stage to build (`--target`; checked to be a stage's name).
+    pub target: Option<String>,
     /// [`apps_build::LAYERS_ARG`]'s value on a builder that shares caches: a secret per service
     /// that keeps its `RUN` steps' cached layers its own. Never in argv or a log.
     pub layers: Option<String>,
@@ -369,6 +371,7 @@ mod tests {
             env_hash: String::new(),
             own_dockerfile: true,
             no_cache: false,
+            target: None,
             layers: None,
         };
         assert_eq!(build_args(&job), ["NPM_TOKEN", "A"]);

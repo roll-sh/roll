@@ -1,6 +1,6 @@
 import { HorizonMark } from "@roll/brand";
 import { useNavigate } from "@tanstack/react-router";
-import { ArrowLeft, ExternalLink, Moon, Play, RotateCw, Rocket, Sun } from "lucide-react";
+import { ArrowLeft, ChevronDown, ExternalLink, Moon, Play, RotateCw, Rocket, Sun } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "@/components/link";
 import {
@@ -13,6 +13,7 @@ import {
   sourceLabel,
   type Deployment,
   type Environment,
+  type NewDeploy,
   type Overview,
   type Service,
 } from "@/lib/apps-api";
@@ -197,6 +198,12 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
   const runner = useRunner(refresh);
   const [overview, setOverview] = useState<Overview | null>(null);
   const [adding, setAdding] = useState(false);
+  // Deploy's options: a revision (Render's deploy a specific commit), no traffic (Vercel's
+  // preview, then promote), without the cache.
+  const [opts, setOpts] = useState(false);
+  const [rev, setRev] = useState("");
+  const [noTraffic, setNoTraffic] = useState(false);
+  const [noCache, setNoCache] = useState(false);
   useEffect(() => {
     appsApi.overview().then(setOverview, () => {});
   }, []);
@@ -259,7 +266,8 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
   const st = env?.state ?? "none";
   const asleep = st === "stopped" || st === "suspended";
   const localUrl = env?.port && typeof window !== "undefined" ? `http://${window.location.hostname}:${env.port}` : null;
-  const deploy = () => runner.run("deploy", () => appsApi.deploy(service.id, envName));
+  const deploy = (body: NewDeploy = {}) => runner.run("deploy", () => appsApi.deploy(service.id, envName, body));
+
   const redeploy = () => runner.run("redeploy", () => appsApi.redeploy(service.id, envName));
   const upload = service.source.kind === "upload";
   // What a crash's "Roll back" goes to: the newest deployment that was live before this one.
@@ -293,9 +301,14 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
               <Rocket className="size-3.5" /> Redeploy
             </button>
           ) : (
-            <button className={`${primary} !py-1 !text-[12px]`} disabled={busy} onClick={deploy} title="Build the source and roll it out">
-              <Rocket className="size-3.5" /> Deploy
-            </button>
+            <span className="inline-flex">
+              <button className={`${primary} !rounded-r-none !py-1 !text-[12px]`} disabled={busy} onClick={() => deploy()} title="Build the source and roll it out">
+                <Rocket className="size-3.5" /> Deploy
+              </button>
+              <button className={`${primary} !rounded-l-none border-l border-bg/20 !px-1.5 !py-1 !text-[12px]`} disabled={busy} aria-expanded={opts} aria-label="Deploy options" title="A revision, no traffic, without the cache" onClick={() => setOpts((o) => !o)}>
+                <ChevronDown className="size-3.5" />
+              </button>
+            </span>
           )}
         </>
       }
@@ -355,6 +368,40 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           </select>
         </label>
       </div>
+      {opts && !upload && (
+        <form
+          className="rise mt-3 flex flex-wrap items-end gap-3 rounded-xl border border-line bg-panel px-4 py-3"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            const body: NewDeploy = { ...(rev.trim() ? { revision: rev.trim() } : {}), ...(noTraffic ? { no_traffic: true } : {}), ...(noCache ? { no_cache: true } : {}) };
+            if (await deploy(body)) {
+              setOpts(false);
+              setRev("");
+            }
+          }}
+        >
+          {service.source.kind === "repo" && (
+            <label className="flex flex-col gap-1 text-[12px] text-muted">
+              Revision
+              <input value={rev} onChange={(e) => setRev(e.target.value)} placeholder="the branch's head" spellCheck={false} className={`${input} w-56 font-mono text-[12px]`} />
+            </label>
+          )}
+          <label className="inline-flex items-center gap-1.5 pb-2 text-[12px] text-muted" title="Built and health-checked at its own URL; put it live from the deployments list">
+            <input type="checkbox" checked={noTraffic} onChange={(e) => setNoTraffic(e.target.checked)} />
+            No traffic (try it first)
+          </label>
+          <label className="inline-flex items-center gap-1.5 pb-2 text-[12px] text-muted" title="No cached layer; base images pulled again">
+            <input type="checkbox" checked={noCache} onChange={(e) => setNoCache(e.target.checked)} />
+            Without the cache
+          </label>
+          <button type="submit" className={primary} disabled={busy}>
+            Deploy
+          </button>
+          <button type="button" className={btn} onClick={() => setOpts(false)}>
+            Cancel
+          </button>
+        </form>
+      )}
       {adding && (
         <NewEnvironment
           repo={service.source.kind === "repo"}

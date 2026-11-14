@@ -54,6 +54,9 @@ export function Deployments({
   runner: Runner;
 }) {
   const [open, setOpen] = useState<string | null>(null);
+  // A rollback brings its variables back as they were (Heroku's, Railway's), unless they're kept
+  // as they are now: after a leaked secret's rotation, the old value must not come back.
+  const [keepVars, setKeepVars] = useState(false);
   // The newest opens by itself, so a deploy that just started shows its build.
   const shown = deploys?.find((d) => d.id === open) ?? deploys?.[0] ?? null;
   const activeId = env.active?.id ?? null;
@@ -72,6 +75,10 @@ export function Deployments({
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
       <section className={`${panel} overflow-hidden`}>
+        <label className="flex items-center gap-1.5 border-b border-line px-4 py-2 text-[12px] text-muted" title="Off: a rollback brings the variables back as they were when it was live">
+          <input type="checkbox" checked={keepVars} onChange={(e) => setKeepVars(e.target.checked)} />
+          Rollbacks keep today's variables
+        </label>
         <ul className="divide-y divide-line">
           {deploys.map((d) => {
             const active = d.id === activeId;
@@ -130,8 +137,8 @@ export function Deployments({
                         className={`${btn} ${d.status === "ready" ? "" : "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 max-md:opacity-100"}`}
                         disabled={runner.busy !== null}
                         sure={d.status === "ready" ? `Sure? Put it live in ${env.name}` : `Sure? Roll ${env.name} back`}
-                        onSure={() => runner.run(`rollback:${d.id}`, () => appsApi.rollback(service, env.name, d.id))}
-                        title={d.status === "ready" ? "Run this deployment's image, without a build" : "Run this deployment's image again, without a build, with its variables as they were then"}
+                        onSure={() => runner.run(`rollback:${d.id}`, () => appsApi.rollback(service, env.name, d.id, keepVars))}
+                        title={d.status === "ready" ? "Run this deployment's image, without a build" : keepVars ? "Run this deployment's image again, without a build, with today's variables" : "Run this deployment's image again, without a build, with its variables as they were then"}
                       >
                         {d.status === "ready" ? (
                           <>

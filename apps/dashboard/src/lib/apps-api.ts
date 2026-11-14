@@ -39,6 +39,8 @@ export interface Build {
   watch?: string[];
   /** A single-page app (a page path with no file answers index.html); unset: detected. */
   spa?: boolean;
+  /** The Dockerfile's stage to build (a multi-stage one whose last stage isn't what runs). */
+  target?: string;
 }
 
 export type ServiceType = "web" | "worker" | "cron";
@@ -376,6 +378,8 @@ export interface NewDeploy {
   message?: string;
   /** Build from scratch: no cached layer, base images pulled again, the cache mounts empty from then on. */
   no_cache?: boolean;
+  /** Built and health-checked, never put live: tried at its own URL first, then put live from the list. */
+  no_traffic?: boolean;
 }
 
 export type DeployTrigger = "push" | "manual" | "rollback" | "upload" | "api" | "settings" | "promote";
@@ -639,7 +643,8 @@ export const appsApi = {
   /** What a repo deployment brings over the live one (for the live one, the one before it). */
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
-  rollback: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`),
+  /** `keepVariables`: its image with the variables as they are now (after a rotated secret), not as they were then. */
+  rollback: (id: string, e: string, d: string, keepVariables = false) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`, keepVariables ? { keep_variables: true } : undefined),
   /** Back to the one live before what runs (the server walks back through rollbacks). */
   rollbackPrevious: (id: string, e: string) => call<Deployment>("POST", `${env(id, e)}/rollback`),
   /** The live image again with the current variables and settings: no build, same revision. */

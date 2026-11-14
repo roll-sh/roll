@@ -990,6 +990,9 @@ impl Builder for DockerBuilder {
             .args(["--tag", &job.tag, "--label", &format!("{LABEL}={}", job.service), "--label", &format!("{LABEL}.deployment={}", job.deployment)])
             // Links (a database) are reached the way instances reach them.
             .args(["--add-host", "host.docker.internal:host-gateway"]);
+        if let Some(t) = &job.target {
+            cmd.args(["--target", t]);
+        }
         for (i, (k, v)) in job.env.iter().enumerate() {
             let file = secrets.path().join(i.to_string());
             write_private(&file, v.as_bytes()).await?;

@@ -22,6 +22,8 @@ interface Form {
   image: string;
   builder: Build["builder"];
   dockerfile: string;
+  /** The Dockerfile's stage to build. */
+  target: string;
   install: string;
   build: string;
   buildStart: string;
@@ -78,6 +80,7 @@ export function formOf(s: Service): Form {
     image: s.source.kind === "image" ? s.source.image : "",
     builder: s.build.builder,
     dockerfile: str(s.build.dockerfile),
+    target: str(s.build.target),
     install: str(s.build.install),
     build: str(s.build.build),
     buildStart: str(s.build.start),
@@ -140,6 +143,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   const build: Reset<Build> = {};
   if (f.builder !== before.builder) build.builder = f.builder;
   if (f.dockerfile !== before.dockerfile) build.dockerfile = text(f.dockerfile);
+  if (f.target !== before.target) build.target = text(f.target);
   if (f.install !== before.install) build.install = text(f.install);
   if (f.build !== before.build) build.build = text(f.build);
   if (f.buildStart !== before.buildStart) build.start = text(f.buildStart);
@@ -293,6 +297,11 @@ export function SettingsTab({
               />
             </Field>
             {form.builder === "dockerfile" && <Field label="Dockerfile">{t("dockerfile", "Dockerfile")}</Field>}
+            {form.builder === "dockerfile" && (
+              <Field label="Stage" hint="a multi-stage Dockerfile's stage to build (--target); empty: its last">
+                {t("target", "its last stage")}
+              </Field>
+            )}
             <Field label="Install command" hint="overrides the detected one">
               {t("install", "detected")}
             </Field>
