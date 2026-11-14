@@ -109,7 +109,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
           ))}
         </select>
         <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder={KINDS.find((k) => k.value === kind)?.placeholder} aria-label="URL" spellCheck={false} autoComplete="off" className={`${input} min-w-0 flex-1 font-mono text-[12px]`} />
-        <div className="flex gap-2 text-[12px] text-muted">
+        <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-muted">
           {EVENTS.map((e) => (
             <label key={e.value} className="inline-flex items-center gap-1">
               <input type="checkbox" checked={events.includes(e.value)} onChange={(x) => setEvents((es) => (x.target.checked ? [...es, e.value] : es.filter((v) => v !== e.value)))} />

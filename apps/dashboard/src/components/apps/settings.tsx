@@ -306,7 +306,7 @@ export function SettingsTab({
               {t("install", "detected")}
             </Field>
             <Field label="Build command">{t("build", "detected")}</Field>
-            <Field label="Start command" hint="baked into the image">
+            <Field label="Image's start command" hint="baked into the image at the build">
               {t("buildStart", "detected")}
             </Field>
             {form.sourceKind === "repo" && (
@@ -344,7 +344,7 @@ export function SettingsTab({
               {t("port", "from the plan, else 8080")}
             </Field>
           )}
-          <Field label="Start command" hint="overrides the image's command">
+          <Field label="Run command" hint="what runs, over the image's own (no rebuild)">
             {t("start", "the image's")}
           </Field>
           {form.type !== "cron" && (
@@ -414,7 +414,7 @@ export function SettingsTab({
               <Field label="CPU target (%)" hint="another instance while they average over it for a minute; empty: requests only">
                 {t("cpuTarget", "70")}
               </Field>
-              <Field label="Protocol" hint="TCP: a port of its own per environment, no HTTP names (a game server, MQTT)">
+              <Field label="HTTP or TCP" hint="TCP: a port of its own per environment, no HTTP names (a game server, MQTT)">
                 <select value={form.tcp ? "tcp" : "http"} onChange={(e) => set("tcp", e.target.value === "tcp")} className={`${input} w-full`}>
                   <option value="http">HTTP</option>
                   <option value="tcp">TCP</option>
@@ -479,7 +479,7 @@ export function SettingsTab({
             </Field>
           )}
           {web && (
-            <Field label="Protocol" hint="h2c: HTTP/2 without TLS, as a gRPC server speaks">
+            <Field label="HTTP version to the app" hint="h2c: HTTP/2 without TLS, as a gRPC server speaks">
               <select value={form.h2c ? "h2c" : "http1"} onChange={(e) => set("h2c", e.target.value === "h2c")} className={`${input} w-full`}>
                 <option value="http1">HTTP/1.1</option>
                 <option value="h2c">HTTP/2 (h2c)</option>

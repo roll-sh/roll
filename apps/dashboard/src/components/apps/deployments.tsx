@@ -85,13 +85,9 @@ export function Deployments({
             const selected = shown?.id === d.id;
             return (
               <li key={d.id}>
-                <div
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => setOpen(d.id)}
-                  onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), setOpen(d.id))}
-                  className={`group flex cursor-pointer items-start gap-3 px-4 py-3 transition-colors outline-none focus-visible:bg-fg/[0.04] ${selected ? "bg-fg/[0.05]" : "hover:bg-fg/[0.03]"}`}
-                >
+                {/* The whole row opens it for a pointer; its message is the button keyboards and screen
+                    readers use (a row holding buttons can't itself be one). */}
+                <div onClick={() => setOpen(d.id)} className={`group flex cursor-pointer items-start gap-3 px-4 py-3 transition-colors focus-within:bg-fg/[0.04] ${selected ? "bg-fg/[0.05]" : "hover:bg-fg/[0.03]"}`}>
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <DeployBadge status={d.status} />
@@ -102,7 +98,9 @@ export function Deployments({
                       </span>
                       {d.revision && <span className="font-mono text-[11.5px] text-muted">{shortSha(d.revision)}</span>}
                     </div>
-                    <p className="mt-1 truncate text-[13px]">{d.message || (d.rollback_of ? `Roll back to ${d.rollback_of}` : <span className="text-muted">No message</span>)}</p>
+                    <button type="button" aria-pressed={selected} onClick={() => setOpen(d.id)} className="mt-1 block w-full truncate text-left text-[13px] outline-none focus-visible:underline">
+                      {d.message || (d.rollback_of ? `Roll back to ${d.rollback_of}` : <span className="text-muted">No message</span>)}
+                    </button>
                     <p className="mt-0.5 flex gap-2 font-mono text-[11px] text-subtle">
                       <span title={clock(d.created_at, true)}>{since(d.created_at, now)}</span>
                       {d.ready_ms != null && <span>ready in {formatMs(d.ready_ms)}</span>}

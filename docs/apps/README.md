@@ -1681,9 +1681,10 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (a second product review of the experience, a product review of what one engineer can close here now, bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **Mobile, keyboard, copy**: the notification form's checkboxes don't wrap and can't pick a
-   service; every service tab is titled "Service"; a deployment row is a button holding buttons;
-   two fields called "Protocol", two "Start command"s.
+1. **The notification form picks services**: done: its checkboxes wrap, a service's tab has its
+   name, a deployment row is no longer a button holding buttons, the two "Protocol" and two "Start
+   command" fields are named apart. Left: the form can't choose services (the API's `services`,
+   the CLI's `--only-service`).
 2. **Settings in sections**: the Run panel's 35 fields split (scaling, health and alerts,
    networking, rollout) with an anchor nav; Notifications, Drains and Spend on the project's own
    settings.

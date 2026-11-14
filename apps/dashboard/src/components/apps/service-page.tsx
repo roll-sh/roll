@@ -17,6 +17,7 @@ import {
   type Overview,
   type Service,
 } from "@/lib/apps-api";
+import { titled } from "@/lib/head";
 import { workspace, useWorkspace } from "@/lib/workspace-store";
 import { AppShell } from "../app-shell";
 import { btn, Connecting, EmptyPanel, input, Offline, primary } from "../ui";
@@ -287,6 +288,11 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
     appsApi.overview().then(setOverview, () => {});
   }, []);
   useDeployMark(data ? [data.service] : null);
+  // Its name in the tab (the route's head only knows "Service" before the service is read).
+  const named = data?.service.name;
+  useEffect(() => {
+    if (named) document.title = titled(named);
+  }, [named]);
 
   const go = (next: { env?: string; tab?: ServiceTab }) => {
     const e = next.env ?? envParam;
