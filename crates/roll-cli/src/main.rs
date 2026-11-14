@@ -258,19 +258,15 @@ impl Api {
     }
 
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
-        let mut req = self.http.request(method, format!("{}{path}", self.base));
-        if let Some(k) = &self.bearer().await? {
-            req = req.bearer_auth(k);
+        let (mut status, mut text) = self.send(method.clone(), path, body.as_ref()).await?;
+        // A workload identity's login the server no longer takes (its clock ran ahead of ours, or
+        // it was revoked): log in again, once.
+        if status == reqwest::StatusCode::UNAUTHORIZED
+            && let Some(l) = &self.login
+        {
+            l.refused().await;
+            (status, text) = self.send(method, path, body.as_ref()).await?;
         }
-        for (k, v) in &self.headers {
-            req = req.header(k, v);
-        }
-        if let Some(b) = body {
-            req = req.json(&b);
-        }
-        let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
-        let status = res.status();
-        let text = res.text().await?;
         if !status.is_success() {
             // Errors are `{"error": ...}`, but whatever answered may not be the roll API at all.
             let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
@@ -286,6 +282,21 @@ impl Api {
             return Ok(Value::Null);
         }
         serde_json::from_str(&text).with_context(|| format!("{} didn't answer with JSON: {}", self.base, text.chars().take(200).collect::<String>()))
+    }
+    async fn send(&self, method: reqwest::Method, path: &str, body: Option<&Value>) -> anyhow::Result<(reqwest::StatusCode, String)> {
+        let mut req = self.http.request(method, format!("{}{path}", self.base));
+        if let Some(k) = &self.bearer().await? {
+            req = req.bearer_auth(k);
+        }
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
+        let status = res.status();
+        Ok((status, res.text().await?))
     }
     /// The token to send: a workload identity's login, logging in again when it's near its end.
     async fn bearer(&self) -> anyhow::Result<Option<String>> {

@@ -1248,7 +1248,9 @@ minutes.
   A login lasts its TTL (5 to 60 minutes). A long-running process (`roll run --watch` in a pod,
   `render --watch`) logs in again by itself a quarter of the way before its login ends (at least
   30 s before), reading `ROLL_OIDC_TOKEN_FILE` again, since Kubernetes rotates a projected token's
-  file: a pod needs no stored secret, as with Vault's Kubernetes auth. The cluster's service
+  file. A login that fails or takes over 30 s leaves the current token in use while it lasts
+  (tried again every 15 s; its lifetime is measured on the process's own clock), and a 401 logs in
+  again at once: a pod needs no stored secret, as with Vault's Kubernetes auth. The cluster's service
   account issuer has to be one roll can fetch keys from (EKS's and GKE's are public URLs):
 
   ```yaml
