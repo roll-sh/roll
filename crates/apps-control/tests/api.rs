@@ -2316,6 +2316,17 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
     assert_eq!((d["status"].as_str(), d["trigger"].as_str()), (Some("active"), Some("settings")), "{d}");
     assert_eq!(call(&w.api, "GET", &format!("{base}/pending"), None).await.1["secrets"], false);
     assert!(w.apps.watch_secrets().await.is_empty(), "nothing moved since");
+    // Back to the first set: a new redeploy (not the first one's, long superseded).
+    VERSION.store(1, std::sync::atomic::Ordering::SeqCst);
+    let again = w.apps.watch_secrets().await;
+    assert!(again.len() == 1 && again[0] != started[0], "{again:?}");
+    let d = settled(&w, svc["id"].as_str().unwrap(), "production", &again[0]).await;
+    assert_eq!(d["status"], "active", "{d}");
+    // And to the second set again: its key once answered the first redeploy; now a new one.
+    VERSION.store(2, std::sync::atomic::Ordering::SeqCst);
+    let third = w.apps.watch_secrets().await;
+    assert!(third.len() == 1 && third[0] != started[0] && third[0] != again[0], "{third:?}");
+    assert_eq!(settled(&w, svc["id"].as_str().unwrap(), "production", &third[0]).await["status"], "active");
     assert_eq!(call(&w.api, "POST", &format!("{base}/shell/sessions"), None).await.0, StatusCode::FORBIDDEN);
     let (_, job) = call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "exit 0"}))).await;
     assert_eq!(call(&w.api, "GET", &format!("{base}/jobs/{}/logs", job["id"].as_str().unwrap()), None).await.0, StatusCode::FORBIDDEN);
