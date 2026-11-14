@@ -2706,6 +2706,11 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
+0. **A Secrets Store CSI Driver provider** (building, on #32): secrets mounted into a pod as files,
+   never a Kubernetes Secret in etcd, as Vault's, AWS', Azure's, GCP's and Infisical's providers
+   do. Each pod logs in with its own service account token through a workload identity (pinned
+   keys, #57, for clusters roll can't reach); strict reads, so a value that doesn't resolve fails
+   the mount instead of writing a partial file.
 1. **Land the stack**: `feature/roll-secrets-landing` is #20 with all 31 pull requests stacked on
    it (#31–#61) merged in order, conflicts resolved and the suites run (see "Landing" below). #30
    isn't in it: it targets `main` and carries roll MCP's #24/#25, which are still moving. Merging
