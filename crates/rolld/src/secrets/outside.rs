@@ -1,13 +1,14 @@
-//! Databases outside roll (roll-secrets' outside.rs), Postgres, MySQL, SQL Server, ClickHouse or Redis by the URL's scheme: the
+//! Databases outside roll (roll-secrets' outside.rs), Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ or Redis by the URL's scheme: the
 //! address is the tenant's, so the host is resolved here, private addresses are refused (unless
 //! rolld allows them for local development), and the connection goes to the address that was
 //! checked. TLS is required off private addresses. Postgres gets a new password as a SCRAM
 //! verifier, so neither the wire nor the server's statement log ever sees it (MySQL: mysql.rs;
-//! SQL Server: mssql.rs; ClickHouse: clickhouse.rs; Redis: redis.rs).
+//! SQL Server: mssql.rs; ClickHouse: clickhouse.rs; RabbitMQ: rabbitmq.rs; Redis: redis.rs).
 
 mod clickhouse;
 mod mssql;
 mod mysql;
+mod rabbitmq;
 mod redis;
 
 use std::net::{IpAddr, SocketAddr};
@@ -40,6 +41,9 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.clickhouse(url)? {
             return self.ch(u, ca, async move |c| clickhouse::check(c, &roles, group.as_deref()).await);
         }
+        if let Some(u) = self.rabbitmq(url)? {
+            return self.rq(u, ca, async move |c| rabbitmq::check(c, &roles, group.as_deref()).await);
+        }
         self.run(url, ca, move |c| {
             Box::pin(async move {
                 let rows = c.query("SELECT rolname FROM pg_roles WHERE rolname = ANY($1) AND rolcanlogin", &[&roles]).await.map_err(db_error)?;
@@ -70,6 +74,9 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.clickhouse(url)? {
             return self.ch(u, ca, async move |c| clickhouse::set_password(c, role, password).await);
         }
+        if let Some(u) = self.rabbitmq(url)? {
+            return self.rq(u, ca, async move |c| rabbitmq::set_password(c, role, password).await);
+        }
         // Checked by roll-secrets (lowercase letters, digits, _), quoted anyway.
         let sql = format!("ALTER ROLE {} PASSWORD '{}'", ident(role), postgres_protocol::password::scram_sha_256(password.as_bytes()));
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
@@ -88,13 +95,16 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.clickhouse(url)? {
             return self.ch(u, ca, async move |c| clickhouse::create_login(c, name, password, group).await);
         }
+        if let Some(u) = self.rabbitmq(url)? {
+            return self.rq(u, ca, async move |c| rabbitmq::create_login(c, name, password, group).await);
+        }
         let sql = format!("CREATE ROLE {} LOGIN PASSWORD '{}' VALID UNTIL '{}' IN ROLE {}", ident(name), postgres_protocol::password::scram_sha_256(password.as_bytes()), stamp(until)?, ident(group));
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
     }
 
     fn extend_login(&self, url: &str, ca: Option<&str>, name: &str, until: i64) -> Result<(), String> {
-        // MySQL, SQL Server, ClickHouse and Redis have no expiry for a login: it lasts until roll ends the lease.
-        if self.mysql(url)?.is_some() || self.mssql(url)?.is_some() || self.clickhouse(url)?.is_some() || self.redis(url)?.is_some() {
+        // MySQL, SQL Server, ClickHouse, RabbitMQ and Redis have no expiry for a login: it lasts until roll ends the lease.
+        if self.mysql(url)?.is_some() || self.mssql(url)?.is_some() || self.clickhouse(url)?.is_some() || self.rabbitmq(url)?.is_some() || self.redis(url)?.is_some() {
             return Ok(());
         }
         let sql = format!("ALTER ROLE {} VALID UNTIL '{}'", ident(name), stamp(until)?);
@@ -113,6 +123,9 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         }
         if let Some(u) = self.clickhouse(url)? {
             return self.ch(u, ca, async move |c| clickhouse::drop_login(c, name).await);
+        }
+        if let Some(u) = self.rabbitmq(url)? {
+            return self.rq(u, ca, async move |c| rabbitmq::drop_login(c, name).await);
         }
         let name = name.to_string();
         self.run(url, ca, move |c| {
@@ -182,6 +195,15 @@ impl Guarded {
 
     fn ch<T>(&self, u: clickhouse::Url, ca: Option<&str>, work: impl AsyncFnOnce(&clickhouse::Conn) -> Result<T, String>) -> Result<T, String> {
         tokio::runtime::Handle::current().block_on(clickhouse::run(u, ca.map(str::to_string), self.allow_private, work))
+    }
+
+    /// A `rabbitmq://` URL's settings; `None` for the others.
+    fn rabbitmq(&self, url: &str) -> Result<Option<rabbitmq::Url>, String> {
+        if url.starts_with("rabbitmq://") { rabbitmq::parse(url).map(Some) } else { Ok(None) }
+    }
+
+    fn rq<T>(&self, u: rabbitmq::Url, ca: Option<&str>, work: impl AsyncFnOnce(&rabbitmq::Conn) -> Result<T, String>) -> Result<T, String> {
+        tokio::runtime::Handle::current().block_on(rabbitmq::run(u, ca.map(str::to_string), self.allow_private, work))
     }
 
     fn run(&self, url: &str, ca: Option<&str>, work: impl FnOnce(tokio_postgres::Client) -> Done + Send + 'static) -> Result<(), String> {
@@ -321,6 +343,9 @@ mod tests {
         // ClickHouse: its HTTPS interface, no settings.
         assert!(g.clickhouse("clickhouse://a:b@ch.example.com:8443/x?ssl=false").err().unwrap().contains("ssl"));
         assert!(g.clickhouse("clickhouse://a:b@ch.example.com/x").unwrap().is_some());
+        // RabbitMQ: the management HTTPS API, a vhost, no settings.
+        assert!(g.rabbitmq("rabbitmq://a:b@mq.example.com:15671/%2F?x=1").err().unwrap().contains("settings"));
+        assert!(g.rabbitmq("rabbitmq://a:b@mq.example.com/").unwrap().is_some());
         assert!(resolve("127.0.0.1", 5432, false).await.unwrap_err().contains("private"));
         assert!(resolve("10.1.2.3", 5432, false).await.unwrap_err().contains("private"));
     }

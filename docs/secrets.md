@@ -563,7 +563,8 @@ does, and issues a login per lease, as Vault's database engine does. A project r
 (`POST …/outside-databases {name, url, roles?, group?, ca?}`, `admin`; `roll secrets databases add
 NAME --role a --role b --group g`, the URL on stdin): `url` is an admin connection
 (`postgres://admin:…@host:5432/db`, `mysql://admin:…@host:3306/db`,
-`sqlserver://admin:…@host:1433/db` or `clickhouse://admin:…@host:8443/db`, a user that may alter both
+`sqlserver://admin:…@host:1433/db`, `clickhouse://admin:…@host:8443/db` or
+`rabbitmq://admin:…@host:15671/vhost`, a user that may alter both
 roles and create roles in the group), sealed with the project's data key like a rotator's (only `host:port` is shown); `roles` are
 two login roles that take turns (managed links); `group` is a role whose grants dynamic logins get;
 one or both. `ca` is the server's CA certificates (PEM) when the system's don't cover it (RDS).
@@ -636,6 +637,19 @@ cluster, keep users in replicated access storage. Checked against ClickHouse 25.
 password refused, the new one taken), a dynamic login that signs in with the role and can't once
 dropped, an untrusted certificate and a wrong admin password refused, and no password in the
 server's query log.
+
+**RabbitMQ** too, as Vault's and Infisical's RabbitMQ engines, through its management HTTPS API
+(`rabbitmq://admin:…@host:15671/vhost`; no vhost is `/`; no settings), with the same guards as
+ClickHouse (the checked address pinned, the certificate verified, no redirects or proxy, answers
+read up to 256 KiB). The admin needs the `administrator` tag (checked at registration, with the
+vhost and the users). Passwords go as RabbitMQ's own salted SHA-256 (`password_hash`), so the
+broker never sees one. Rotation sets a new password on two users that take turns, keeping their
+tags; `group` names a template user whose permissions and topic permissions on the vhost a
+dynamic user copies (no tags). RabbitMQ has no expiry for a user: ending a lease deletes it, then
+closes its connections where the broker has that route (3.11 and later). Checked against RabbitMQ
+4: rotation (tags kept, the old password refused), a dynamic user with the template's permissions
+that's gone once dropped, and an untrusted certificate, a wrong password and a user without the
+administrator tag refused.
 
 **SQL Server** (and Azure SQL Managed Instance) too, as Vault's MSSQL engine (`sqlserver://…`; the
 URL may set `encrypt=true` and nothing else). Everything is encrypted and the certificate verified
@@ -1692,6 +1706,50 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
+A sixth independent review (2026-11-14, of `roll://` references, check-and-set, OCSP, OpenSearch
+links and the grant fix) found no high-severity issue; it found an OCSP route an anonymous caller
+could make sign and cache per request, references whose leases were renewed at the wrong project,
+check-and-set dropped on protected environments, and smaller ones (a provider asked before the
+project check, a project name two owners share, render --watch, env-file errors, restore names,
+public suffixes): all fixed, OCSP re-checked live. The project's tokens now read rules naming it by
+id and show key-scoped ones (#30).
+
+Later: the grid sends check-and-set too (#50), OCSP for project CAs (#44: checked with `openssl
+ocsp`), search links on OpenSearch clusters (#51, agreed with the search thread), and a fix from roll
+MCP's review on #30 (a grant naming the project by id reaches it inside roll secrets too).
+
+Then (2026-11-14, latest): `roll://` references in files (#49: `roll run --env-file`, `render`) and
+check-and-set writes (#50: `if_version`, the dashboard's editor), each its own pull request on #20.
+
+A fifth independent review (2026-11-14, of host and user SSH certificates, ClickHouse,
+certificates ending, `--rotate-due` and the fourth review's fixes) found no high-severity issue; it
+found a CLI that would upload a private key given its path, SSH CAs that could claim a top-level
+domain, best-effort signing audits, a stale-CRL race, ClickHouse's kill-then-drop order, a
+known_hosts order and `--rotate-due --json` that didn't rotate: all fixed. Screenshots of the new
+surfaces are on #44, #45 and #48.
+
+Later still: SSH user certificates for keys people keep (#45: `…/sign-user`, `roll ssh --key`,
+checked with an agent-held key against a real `sshd`) and `roll secrets rotations --rotate-due`
+(#48).
+
+Then (2026-11-14, latest): certificates ending as health findings (#44: `certificate_expiring`)
+and ClickHouse outside roll (#39, merged up into #41 and #42: its HTTPS interface, `sha256_hash`
+passwords, checked live against ClickHouse 25.8).
+
+A fourth independent review (2026-11-14, of the rotations overview, transit signing, HMAC and
+brought keys, CSR signing, revocation and the CRL, SQL Server) found no high-severity issue; it
+found an ended SQL Server lease whose login could stay usable, generated passwords SQL Server's
+policy refuses, deleted CAs undoing their revocations, a public CRL signed per request, P-384 CSRs
+mislabelled, unrevocable serials, a batch failed by one retired version and a restore that forgot
+brought keys: all fixed, tested where a test guards behaviour, and checked live (SQL Server 2022,
+OpenSSL). Then SSH host certificates (#45, checked against a real `sshd`).
+
+Built on 2026-11-14 (later), again without a merge: revoking certificates (#44: a list of what a
+CA signed, `…/revoke`, revocation when a lease ends, a public CRL every certificate names, checked
+with `openssl verify -crl_check`); SQL Server outside roll (#39, merged up into #41 and #42;
+checked live against SQL Server 2022); bringing an encryption key (#47: Vault's `vault:v<n>:`
+ciphertexts decrypt and rewrap, checked against Vault 1.20).
+
 Built on 2026-11-14 from the last ranking, without waiting on a merge: a rotations overview (#48:
 `GET …/rotations`, Health's "Managed credentials", `roll secrets rotations`); signing and HMAC
 with encryption keys (#47: Ed25519 a stock library checks with the exported public key, HMAC
@@ -1723,14 +1781,15 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 Ranked: first what can be built now, without a merge; then what waits on one (merges are the
 user's call).
 
-1. **Revoking certificates** (on #44), as Vault's and Infisical's PKI: a CSR's certificate lives
-   up to the CA's `max_days` with no lease, so a lost device needs one. `…/cas/{id}/revoke
-   {serial}` (audited) and a CRL the CA signs, served without a token (`GET /v1/secrets/cas/{id}/crl`,
-   as the issuer's JWKS is), named in every certificate's CRL distribution point.
-2. **SQL Server outside roll** (on #39), Vault's other common database: two logins take turns, or
-   a login per lease in a role, over verified TLS to a public address, as Postgres and MySQL do.
-3. **Bringing a key** (on #47), as Vault's transit import: an encryption key's version from
-   outside (wrapped to a one-time key roll makes), so data encrypted before roll still opens.
+1. **RabbitMQ outside roll** (on #39), as Vault's and Infisical's RabbitMQ engines: two users take
+   turns, or a user per lease with a template user's vhost permissions, through the management
+   HTTPS API and the same guards; passwords as RabbitMQ's salted SHA-256 hash, so the broker never
+   sees one.
+2. *Waits on the registries reaching #20:* Terraform resources for CAs, SSH CAs, encryption keys
+   and outside databases (#33), and transit in the Go and Python clients (#32).
+3. *Waits on merges:* transit keys scoped by name (#24/#25 meeting #47), a live check of
+   OpenSearch links (#29 and #51 in one build), and splitting the CLI's `secrets.rs` (2,700 lines)
+   by command once the stacked pull requests that touch it have landed.
 4. *Waits on #31 and #46:* `ForApps` sets `SecretVar.sensitive` from `Values.sensitive` (apps
    already seals such variables). One line once both are on #20.
 5. *Waits on #38 and #43:* AWS through roll's issuer (`AssumeRoleWithWebIdentity` with roll's own
@@ -1764,19 +1823,25 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#51, search links on OpenSearch clusters** (after #20): an internal user (`user`,
+  `password`) where the cluster has no API keys; the wrong field for a flavor is refused when linked.
+- **#50, check-and-set writes** (after #20): `if_version` on a set or delete, refused as `stale`
+  when the key moved; the dashboard's editor sends it.
+- **#49, `roll://` references in files** (after #20): `roll run --env-file` and `render` resolve
+  `roll://ENV/KEY` beside plain values, as 1Password's `op://`.
 - **#48, failing rotations in health** (after #20): `rotation_failing` and `revoke_failing`
   findings, with the reason, until roll succeeds; a rotations overview of every managed credential.
 - **#47, encryption keys** (after #20): encryption as a service, as Vault's Transit: named,
   versioned keys that never leave roll; encrypt, decrypt (audited), rewrap, data keys, Ed25519
-  signatures and HMACs.
+  signatures and HMACs; keys brought from outside, Vault's ciphertexts included.
 - **#46, sensitive keys** (after #20): a key tagged `sensitive` reaches only roll's runtimes, syncs
   and workload identities, never a person or a token; the tag is for good.
 - **#45, SSH certificates** (after #44): a project's SSH CA signs short-lived user certificates
   for the logins it allows, and `roll ssh` uses them for one session; OpenSSH's formats, checked
   with `ssh-keygen` and a real `sshd` login.
 - **#44, a project's own certificate authority** (after #20): short-lived TLS certificates for the
-  names its name-constrained CA allows, dynamic or managed, and CSRs it signs; checked with a real
-  TLS handshake.
+  names its name-constrained CA allows, dynamic or managed, and CSRs it signs; revocation and a
+  public CRL; checked with a real TLS handshake and `openssl verify -crl_check`.
 - **#43, dynamic GCP and Azure credentials** (after #20): roll as an OIDC issuer
   (`/v1/secrets/oidc`); GCP's workload identity federation and Azure's federated credentials trust
   its token for one project, checked with a decoy project at registration.
@@ -1785,7 +1850,7 @@ Open pull requests after this one:
   signature checked.
 - **#41, Redis outside roll** (after #39): two ACL users take turns (`#<sha256>` passwords), or a
   user per lease copying a template user's rules; the tenant's replies read by a bounded parser.
-- **#39, Postgres, MySQL, SQL Server and ClickHouse outside roll** (after #20): two login roles take turns (rotation), or a
+- **#39, Postgres, MySQL, SQL Server, ClickHouse and RabbitMQ outside roll** (after #20): two login roles take turns (rotation), or a
   login per lease in a group role (dynamic), over verified TLS to a public address rolld resolved
   itself (Postgres gets a SCRAM verifier, never the password).
 
