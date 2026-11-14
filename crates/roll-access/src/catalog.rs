@@ -432,17 +432,19 @@ pub fn classified(route: &str) -> Option<&'static str> {
     None
 }
 
-/// Whether `route` is decided only by a prefix row (`/v1/previews/{id}/`): no row names it, so it
-/// takes the prefix's action by method, whatever it answers. `rolld/tests/auth.rs` lists these so
-/// a new route under a prefix is looked at once (a `GET` that answers values is reveal, not read).
-pub fn by_prefix_only(route: &str) -> bool {
+/// Whether `method route` is decided by a prefix row: no row of the route's own names that method
+/// (a route with its own `GET` row can still have a `PUT` a prefix decides), and a prefix row
+/// covers it.
+pub fn method_by_prefix(method: &str, route: &str) -> bool {
     let shape = shape(route);
-    !ROWS.iter().any(|r| self::shape(r.route) == shape) && !OPERATOR_ONLY.iter().any(|(r, _)| self::shape(r) == shape) && ROWS.iter().any(|r| r.route.ends_with('/') && shape.starts_with(&self::shape(r.route)))
+    let own = ROWS.iter().any(|r| self::shape(r.route) == shape && (r.method == "*" || r.method == method));
+    !own && !OPERATOR_ONLY.iter().any(|(r, _)| self::shape(r) == shape) && ROWS.iter().any(|r| r.route.ends_with('/') && shape.starts_with(&self::shape(r.route)))
 }
 
-/// The routes decided only by a prefix row that someone looked at (`prefix-reviewed.txt`).
-pub fn prefix_reviewed(route: &str) -> bool {
-    include_str!("prefix-reviewed.txt").lines().map(str::trim).any(|l| l == route)
+/// Whether `method route`, decided by a prefix row, was looked at (`prefix-reviewed.txt`, one
+/// `METHOD route` a line).
+pub fn prefix_reviewed(method: &str, route: &str) -> bool {
+    include_str!("prefix-reviewed.txt").lines().map(str::trim).any(|l| l.split_once(' ').is_some_and(|(m, r)| m == method && r == route))
 }
 
 /// A route listed for a nest (`/v1/storage`, `/v1/storage/`): its rows are matched by path.

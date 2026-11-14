@@ -150,6 +150,7 @@ impl Auth {
     /// route with its access at debug (`RUST_LOG=rolld::auth=debug`).
     pub fn gate(&self, host: &str, router: axum::Router) -> axum::Router {
         let routes = route_patterns(&router);
+        let methods = route_methods(&router);
         let (mut public, mut product, mut credential, mut user, mut operator) = (0, 0, 0, 0, 0);
         for r in &routes {
             let access = self.gate.access(r);
@@ -161,7 +162,8 @@ impl Auth {
                 Access::Operator => operator += 1,
             }
             let scoped = roll_access::catalog::classified(r).unwrap_or("none");
-            debug!(target: "rolld::auth", host = %host, route = %r, scoped = %scoped, access = %access, "route");
+            let m = methods.iter().find(|(p, _)| p == r).map_or("*", |(_, m)| m.as_str());
+            debug!(target: "rolld::auth", host = %host, route = %r, scoped = %scoped, access = %access, methods = %m, "route");
         }
         info!(host = %host, routes = routes.len(), operator, operator_or_credential = credential, user, product, public, "control-plane routes");
         router.layer(axum::middleware::from_fn_with_state(self.gate.clone(), roll_auth::check))
@@ -197,6 +199,42 @@ fn listeners(a: &Args) -> Vec<SocketAddr> {
     l.extend([n.nosql_cql, n.nosql_cql_shard_aware, n.nosql_alternator, n.nosql_rest]);
     l.extend([n.nosql_alternator_https, n.nosql_cql_tls, n.nosql_cql_shard_aware_tls, n.nosql_metrics].into_iter().flatten());
     l
+}
+
+/// The methods each route of `router` serves, from its `Debug` (`allow_header: Bytes(b"GET,HEAD")`):
+/// `(pattern, "GET,POST")`, without `HEAD` (GET's); `*` where it can't tell (a nested service).
+pub fn route_methods(router: &axum::Router) -> Vec<(String, String)> {
+    let text = format!("{router:?}");
+    let routes = text.split("fallback_router:").next().unwrap_or_default();
+    let (routes, paths) = routes.split_once("node: Node { paths:").unwrap_or((routes, ""));
+    let mut allow: Vec<(String, String)> = Vec::new();
+    let mut rest = routes;
+    while let Some(i) = rest.find("RouteId(") {
+        rest = &rest[i + "RouteId(".len()..];
+        let id: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        // This route's entry runs to the next `RouteId(`.
+        let entry = rest.find("RouteId(").map_or(rest, |j| &rest[..j]);
+        let methods = entry
+            .split_once("allow_header: Bytes(b\"")
+            .and_then(|(_, a)| a.split_once('"'))
+            .map(|(a, _)| a.split(',').filter(|m| *m != "HEAD" && !m.is_empty()).collect::<Vec<_>>().join(","))
+            .unwrap_or_else(|| "*".into());
+        allow.push((id, methods));
+    }
+    let mut out = Vec::new();
+    let mut rest = paths;
+    while let Some(i) = rest.find("RouteId(") {
+        rest = &rest[i + "RouteId(".len()..];
+        let id: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        let Some(after) = rest.trim_start_matches(|c: char| c.is_ascii_digit()).strip_prefix("): \"") else { continue };
+        let Some(end) = after.find('"') else { break };
+        let path = &after[..end];
+        if path.starts_with('/') && !path.contains("__private__") {
+            let m = allow.iter().find(|(a, _)| *a == id).map_or("*".to_string(), |(_, m)| if m.is_empty() { "*".into() } else { m.clone() });
+            out.push((path.to_string(), m));
+        }
+    }
+    out
 }
 
 /// The route patterns of `router` (axum has no API for them; its `Debug` lists them).
