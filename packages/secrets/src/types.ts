@@ -164,6 +164,8 @@ export type Token = {
   last_used_at: number | null;
   /** Client addresses (CIDRs) it works from; null: any. */
   allowed_ips: string[] | null;
+  /** Only these encryption keys (`payments,pay-*`), when its rule names some; null: the project. */
+  keys?: string | null;
 };
 /** A one-time share (never its ciphertext): `open` until its last open, expiry or revocation. */
 export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };

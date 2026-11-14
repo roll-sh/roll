@@ -26,7 +26,13 @@ export function grantFor(project: string, t: NewToken, now = Date.now()): NewGra
 
 /** A grant as the Secrets page shows it: what its rule on `project` reaches. */
 export function tokenOf(g: Grant, project: string): Token {
-  const rule = g.rules.find((r) => r.product === "secrets" && r.resources !== "*" && r.resources.some((s) => "project" in s && s.project === project));
+  // The rule on this project: naming it (`{project}`), naming it by id (`{id}`, perhaps only some
+  // encryption keys: `{id, index}`), or everything (`*`), the specific one first.
+  const secrets = g.rules.filter((r) => r.product === "secrets" || r.product === "*");
+  const names = (r: (typeof secrets)[number]) => r.resources !== "*" && r.resources.some((s) => ("project" in s && s.project === project) || ("id" in s && s.id === project));
+  const rule = secrets.find(names) ?? secrets.find((r) => r.resources === "*");
+  const selector = rule && rule.resources !== "*" ? rule.resources.find((s) => "id" in s && s.id === project) : undefined;
+  const keys = selector && "index" in selector && selector.index ? selector.index : null;
   const actions = Object.entries(rule?.actions ?? {})
     .filter(([, e]) => e === "allow")
     .map(([a]) => a as Action);
@@ -41,5 +47,6 @@ export function tokenOf(g: Grant, project: string): Token {
     created_by: g.created_by,
     last_used_at: g.last_used_at,
     allowed_ips: g.ip_allow.length ? g.ip_allow : null,
+    keys,
   };
 }

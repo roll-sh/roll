@@ -15,5 +15,8 @@ describe("a project's tokens as roll-access grants", () => {
     expect(tokenOf(grant, "prj_a")).toMatchObject({ id: "tok_1", environments: ["production"], paths: ["/api"], actions: ["read", "reveal"], allowed_ips: ["203.0.113.0/24"] });
     // A rule on another project (or one only asking) reaches nothing here.
     expect(tokenOf({ ...grant, rules: [{ ...g.rules[0], resources: [{ project: "prj_b" }] }] }, "prj_a").actions).toEqual([]);
+    // Named by id (as the builder writes it), perhaps only some encryption keys; or everything.
+    expect(tokenOf({ ...grant, rules: [{ ...g.rules[0], resources: [{ id: "prj_a", index: "payments" }] }] }, "prj_a")).toMatchObject({ actions: ["read", "reveal"], keys: "payments" });
+    expect(tokenOf({ ...grant, rules: [{ ...g.rules[0], resources: "*" }] }, "prj_a")).toMatchObject({ actions: ["read", "reveal"], keys: null });
   });
 });

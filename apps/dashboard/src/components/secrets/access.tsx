@@ -119,6 +119,7 @@ function Tokens() {
                     {t.environments ? t.environments.join(", ") : "all environments"}
                     {t.paths ? ` · ${t.paths.join(", ")}` : ""}
                     {t.allowed_ips ? ` · from ${t.allowed_ips.join(", ")}` : ""}
+                    {t.keys ? ` · encryption keys ${t.keys}` : ""}
                   </span>
                   <span className="ml-auto text-right text-[11px] text-subtle">
                     {expired ? "expired" : t.expires_at ? `expires ${until(t.expires_at)}` : "no expiry"} · {t.last_used_at ? `used ${ago(t.last_used_at)}` : "never used"}
