@@ -1,4 +1,4 @@
-import { CircleCheck, Dices, FileSearch } from "lucide-react";
+import { CircleCheck, Dices, FileSearch, RotateCw } from "lucide-react";
 import { useState } from "react";
 import { Link } from "@/components/link";
 import { needsApproval, type Finding, type Op, type SecretsApi, type SetSecret } from "@/lib/secrets-api";
@@ -131,7 +131,57 @@ export function HealthView() {
           </Section>
         );
       })}
+      <Rotations />
     </div>
+  );
+}
+
+/** Every managed credential: when it rotates, when it's next due, why its last rotation failed. */
+function Rotations() {
+  const { api } = useSecrets();
+  const list = useLoad(() => api.rotations(), [api]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  if (!list.data?.length) return null;
+  const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  const rotate = async (r: (typeof list.data)[number]) => {
+    const id = `${r.environment}:${r.path}:${r.keys[0]}`;
+    setBusy(id);
+    setError(null);
+    try {
+      await api.rotate(r.environment, r.keys[0], r.path);
+      list.reload();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <Section title="Managed credentials">
+      <p className="mb-2 text-[11.5px] text-muted">Credentials roll issues and rotates. A rotation keeps the old one working for its grace period; one that fails is retried, and the reason shows here.</p>
+      <ErrorNote error={error ?? list.error} onDismiss={error ? () => setError(null) : undefined} className="mb-2" />
+      <div className={`${card} divide-y divide-line`}>
+        {list.data.map((r) => {
+          const id = `${r.environment}:${r.path}:${r.keys[0]}`;
+          return (
+            <div key={`${r.environment}:${r.path}:${r.keys.join(",")}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
+              <span className="rounded border border-line-2 px-1 text-[10.5px] text-subtle">{r.environment}</span>
+              <span className="min-w-0 truncate font-mono text-[12px]">{r.keys.join(", ")}</span>
+              <span className="text-[11.5px] text-muted">
+                {r.name} · {r.kind}
+              </span>
+              <span className={`ml-auto text-[11.5px] ${r.last_error ? "text-danger" : "text-subtle"}`}>
+                {r.last_error ? `rotation failing: ${r.last_error}` : r.rotate_days && r.next_due ? `every ${r.rotate_days} days · next ${day(r.next_due)}` : "rotates by hand"}
+              </span>
+              <button className={`${ghost} h-6`} disabled={!!busy} onClick={() => void rotate(r)} title="Rotate now: a new credential; the old one works through its grace period">
+                <RotateCw className={`size-3.5 ${busy === id ? "motion-safe:animate-spin" : ""}`} /> Rotate
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </Section>
   );
 }
 

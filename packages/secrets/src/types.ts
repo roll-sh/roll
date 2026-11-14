@@ -244,6 +244,8 @@ export type Finding = { issue: "expired" | "rotation_failing" | "revoke_failing"
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
+/** A managed credential and its rotation: its keys, resource, schedule, and why its last scheduled rotation failed. */
+export type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 

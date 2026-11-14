@@ -1008,12 +1008,18 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
     let issues: Vec<&str> = health.as_array().unwrap().iter().filter_map(|f| f["issue"].as_str()).collect();
     assert!(issues.contains(&"rotation_failing") && issues.contains(&"revoke_failing"), "{health}");
     assert!(health.to_string().contains("connection refused"), "the reason: {health}");
+    // The rotations list says it too, per credential.
+    let rot = api.ok(Method::GET, "/rotations", None).await;
+    assert_eq!((rot[0]["keys"].clone(), rot[0]["kind"].as_str(), rot[0]["rotate_days"].as_u64()), (json!(["STRIPE_KEY"]), Some("rotator"), Some(1)), "{rot}");
+    assert!(rot[0]["last_error"].as_str().unwrap().contains("connection refused"), "{rot}");
     api.sent.2.store(false, std::sync::atomic::Ordering::Relaxed);
     let p = api.project.clone();
     api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ? AND revoked_at IS NULL", [p.as_str()])).unwrap();
     sweep().await;
     let health = api.ok(Method::GET, "/health", None).await;
     assert!(!health.to_string().contains("failing"), "both cleared once they succeed: {health}");
+    let rot = api.ok(Method::GET, "/rotations", None).await;
+    assert!(rot[0]["last_error"].is_null() && rot[0]["next_due"].as_i64().unwrap() > rot[0]["issued_at"].as_i64().unwrap(), "{rot}");
 
     // The project goes while the rotator is down: what it issued is still revoked, by the
     // sweeper, which keeps the rotator (and the project's key) until then.

@@ -204,6 +204,10 @@ pub enum Secrets {
         #[arg(long)]
         code: bool,
     },
+    /// Every managed credential roll issues and rotates: its environment, keys, resource,
+    /// schedule, next due date, and why its last scheduled rotation failed. Fails when one is
+    /// failing.
+    Rotations,
     /// Check this machine's setup: the token and who it is, this directory's project and
     /// environment, the folder's keys against `.env.example`, staged files for values. Fails if a
     /// check does.
@@ -979,6 +983,34 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 return print(&v);
             }
             report_health(&v.as_array().cloned().unwrap_or_default(), false)?;
+        }
+        Secrets::Rotations => {
+            let v = c.call(Method::GET, &format!("{}/rotations", c.base()), None).await?;
+            if json_out {
+                return print(&v);
+            }
+            let list = v.as_array().cloned().unwrap_or_default();
+            if list.is_empty() {
+                eprintln!("no managed credentials in this project");
+            }
+            let mut failing = 0;
+            for r in &list {
+                let keys: Vec<&str> = r["keys"].as_array().into_iter().flatten().filter_map(|k| k.as_str()).collect();
+                let path = r["path"].as_str().unwrap_or("/");
+                let at = if path == "/" { String::new() } else { format!(" {path}") };
+                let when = match (r["rotate_days"].as_u64(), r["next_due"].as_i64()) {
+                    (Some(d), Some(n)) => format!("every {d} days, next {}", day(n)),
+                    _ => "by hand".into(),
+                };
+                println!("{:<12} {}{at}  {} ({})  {when}", r["environment"].as_str().unwrap_or(""), keys.join(","), r["name"].as_str().unwrap_or(""), r["kind"].as_str().unwrap_or(""));
+                if let Some(e) = r["last_error"].as_str() {
+                    failing += 1;
+                    println!("             failing since {}: {e}", r["failed_at"].as_i64().map(day).unwrap_or_default());
+                }
+            }
+            if failing > 0 {
+                bail!("{failing} scheduled {} failing", if failing == 1 { "rotation is" } else { "rotations are" });
+            }
         }
         Secrets::Check { template, strict } => {
             let text = std::fs::read_to_string(&template).with_context(|| format!("reading {template}"))?;

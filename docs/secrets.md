@@ -413,7 +413,9 @@ right folder: `expired`, `rotation_failing` (a managed key's scheduled rotation 
 database, vendor, product or rotator refused or didn't answer; the detail says why, the old
 credential keeps working, and the sweeper tries again; cleared by the next rotation that works),
 `revoke_failing` (a credential roll retired, or a lease that ended, that it couldn't revoke yet: it
-still works until roll can; cleared once it does), `missing` (a required key an environment doesn't define, through its
+still works until roll can; cleared once it does; `GET …/rotations`, `roll secrets rotations` and
+the Health view's "Managed credentials" list every managed credential with its schedule and last
+failure), `missing` (a required key an environment doesn't define, through its
 imports and base), `exposed` (a protected value also in an unprotected environment), `weak`,
 `expiring`, `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
 and it's older than that). Each `Finding` names the environment, folder and key where it's set,
@@ -1420,6 +1422,7 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
 | `POST /leaks` | `{candidates: string[]}` (at most 20,000) | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
+| `GET /rotations` | | `Rotation[]`: every managed credential the caller may read (environment, keys, resource, `rotate_days`, `issued_at`, `next_due`, `last_error`) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
@@ -1479,6 +1482,7 @@ type Required = { key: string; path: string; comment: string; type?: "url" | "in
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 type Finding = { issue: "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
+type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };
