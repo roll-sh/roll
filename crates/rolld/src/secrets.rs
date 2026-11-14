@@ -192,7 +192,7 @@ fn links(api: Api) -> Links {
     l.register(Arc::new(Stream(api.clone())));
     l.register(Arc::new(Bucket(api.clone())));
     l.register(Arc::new(Nosql(api.clone())));
-    l.register(Arc::new(Search(api)));
+    l.register(Arc::new(Search(api, Default::default())));
     l
 }
 
@@ -528,7 +528,9 @@ impl LinkProvider for Nosql {
 /// (managed or dynamic) from `POST /v1/search/clusters/{id}/keys`: an API key on an Elasticsearch
 /// cluster, an internal user (`user`, `password`) on an OpenSearch one, which has no API keys.
 /// Never the cluster's own password, which rotating would take from everyone else.
-struct Search(Api);
+/// The product's API, and clusters' flavors as last read (`(when, flavor)`), so naming a
+/// cluster's fields for one request asks roll search once.
+struct Search(Api, std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>);
 
 const SEARCH_FIELDS: &[Field] = &[
     live("url", "URL", false, "ELASTICSEARCH_URL"),
@@ -553,9 +555,20 @@ const OPENSEARCH_FIELDS: &[Field] = &[
 ];
 
 impl Search {
-    /// The cluster's flavor (`elasticsearch`, `opensearch`), when roll search says.
+    /// The cluster's flavor (`elasticsearch`, `opensearch`), when roll search says; kept 30 s.
     fn flavor(&self, r#ref: &str) -> Option<String> {
-        self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(r#ref)), None).ok()?["flavor"].as_str().map(String::from)
+        if let Some((at, f)) = self.1.lock().expect("flavors").get(r#ref)
+            && at.elapsed() < std::time::Duration::from_secs(30)
+        {
+            return Some(f.clone());
+        }
+        let f = self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(r#ref)), None).ok()?["flavor"].as_str().map(String::from)?;
+        let mut m = self.1.lock().expect("flavors");
+        if m.len() > 1_000 {
+            m.retain(|_, (at, _)| at.elapsed() < std::time::Duration::from_secs(30));
+        }
+        m.insert(r#ref.to_string(), (std::time::Instant::now(), f.clone()));
+        Some(f)
     }
 }
 
@@ -573,7 +586,9 @@ impl LinkProvider for Search {
     fn suggested_for(&self, r#ref: &str) -> Vec<(&'static str, Mode)> {
         match self.flavor(r#ref).as_deref() {
             Some("opensearch") => vec![("url", Mode::Live), ("user", Mode::Managed), ("password", Mode::Managed)],
-            _ => self.suggested().to_vec(),
+            Some(_) => self.suggested().to_vec(),
+            // Not known (roll search didn't answer): where it is, never a guess at a credential.
+            None => vec![("url", Mode::Live)],
         }
     }
     fn suggested(&self) -> &[(&'static str, Mode)] {
