@@ -670,7 +670,25 @@ impl Apps {
             RunType::Worker => "rolling out the worker".to_string(),
             RunType::Cron => "the next scheduled run uses this deployment".to_string(),
         });
-        let prepared = live.prepare(&tpl, None).await?;
+        let prepared = match live.prepare(&tpl, None).await {
+            Ok(p) => p,
+            // What the app said before it failed (a stack trace, a missing variable), in the deploy
+            // log and the error: its own lines are otherwise only in the environment's log.
+            Err(e) => {
+                let said: Vec<_> = self.logs.follow(&format!("env:{}/{}", svc.id, env.name), 2000).0.into_iter().filter(|l| l.instance.is_some() && l.deployment.as_deref() == Some(d.id.as_str())).collect();
+                let said = &said[said.len().saturating_sub(40)..];
+                if !said.is_empty() {
+                    log.stream(Stream::System).line("the new instance's output:");
+                    for l in said {
+                        log.stream(l.stream).line(format!("{}: {}", l.instance.as_deref().unwrap_or(""), l.text));
+                    }
+                }
+                return Err(match said.iter().rev().find(|l| !l.text.trim().is_empty()) {
+                    Some(l) => anyhow::anyhow!("{e}; its last output: {}", l.text.trim().chars().take(200).collect::<String>()),
+                    None => e,
+                });
+            }
+        };
         let (made, took) = (prepared.made.clone(), prepared.took);
         // Canceled meanwhile, or the service moved to another node (its lease lost): nothing
         // of this rollout may stay.
@@ -1059,7 +1077,18 @@ impl Apps {
             layers,
         };
         log.line(format!("building with {}", self.deps.builder.name()));
-        let image = self.deps.builder.build(&job, log, cancel).await?;
+        let image = match self.deps.builder.build(&job, log, cancel.clone()).await {
+            Ok(i) => i,
+            // What failed, as BuildKit said it (the step, its last words), not only its exit code.
+            Err(e) if !cancel.is_cancelled() => {
+                let lines: Vec<String> = self.logs.follow(&format!("build:{}", d.id), 400).0.into_iter().map(|l| l.text).collect();
+                return Err(match build_failure(&lines) {
+                    Some(why) if !e.to_string().contains(&why) => anyhow::anyhow!("{e}: {why}"),
+                    _ => e,
+                });
+            }
+            Err(e) => return Err(e),
+        };
         let (id, img, r) = (d.id.clone(), image.clone(), run.clone());
         self.db(move |s| s.set_built(&id, &img, Some(&plan_json), Some(&r))).await?;
         Ok((image, run))
@@ -1875,5 +1904,67 @@ fn judge(new: crate::live::Served, old: crate::live::Served, error_pct: u8) -> O
         new.error_pct(),
         old.error_pct()
     ))
+}
+
+/// Why a build failed, from BuildKit's plain output (Docker's and CodeBuild's alike): its last
+/// `ERROR:` (the step and how it ended), and that step's last line of output before it.
+fn build_failure(lines: &[String]) -> Option<String> {
+    let err = lines.iter().rev().find(|l| l.contains("ERROR:"))?;
+    let what = err.split_once("ERROR:").map_or(err.as_str(), |(_, w)| w).trim();
+    let what = what.strip_prefix("failed to solve:").unwrap_or(what).trim();
+    // The failing step (the last `#12 ERROR: …`; BuildKit's summary has no number), and its own
+    // output before it: `#12 0.531 npm ERR! …` (its number, then seconds).
+    let step = lines.iter().enumerate().rev().find_map(|(i, l)| {
+        let (n, rest) = l.strip_prefix('#')?.split_once(' ')?;
+        (n.bytes().all(|b| b.is_ascii_digit()) && rest.starts_with("ERROR:")).then(|| (i, format!("#{n} ")))
+    });
+    let said = step.and_then(|(at, p)| {
+        lines[..at].iter().rev().filter_map(|l| l.strip_prefix(p.as_str())).find_map(|r| {
+            let (secs, text) = r.split_once(' ')?;
+            (secs.parse::<f64>().is_ok() && !text.trim().is_empty()).then(|| text.trim().to_string())
+        })
+    });
+    let what: String = what.chars().take(300).collect();
+    Some(match said {
+        Some(s) => format!("{what} (its last output: {})", s.chars().take(200).collect::<String>()),
+        None => what,
+    })
+}
+
+#[cfg(test)]
+mod build_failure_tests {
+    use super::build_failure;
+
+    fn lines(s: &str) -> Vec<String> {
+        s.lines().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn names_the_failing_step_and_what_it_said() {
+        let log = lines(
+            "#11 [build 4/6] RUN npm ci
+#11 0.412 npm ERR! code ENOTFOUND
+#11 0.413 npm ERR! network request to https://registry.npmjs.org/left-pad failed
+#11 ERROR: process \"/bin/sh -c npm ci\" did not complete successfully: exit code: 1
+------
+ > [build 4/6] RUN npm ci:
+------
+ERROR: failed to solve: process \"/bin/sh -c npm ci\" did not complete successfully: exit code: 1",
+        );
+        // The last ERROR is the summary (no step number): the step's own output is still found.
+        let why = build_failure(&log).unwrap();
+        assert!(why.starts_with("process \"/bin/sh -c npm ci\" did not complete successfully: exit code: 1") && why.ends_with("left-pad failed)"), "{why}");
+        let log2 = lines(
+            "#11 [build 4/6] RUN npm ci
+#11 0.413 npm ERR! network request to https://registry.npmjs.org/left-pad failed
+#11 ERROR: process \"/bin/sh -c npm ci\" did not complete successfully: exit code: 1",
+        );
+        assert_eq!(
+            build_failure(&log2).unwrap(),
+            "process \"/bin/sh -c npm ci\" did not complete successfully: exit code: 1 (its last output: npm ERR! network request to https://registry.npmjs.org/left-pad failed)"
+        );
+        assert_eq!(build_failure(&lines("#2 DONE")), None);
+        assert_eq!(build_failure(&lines("ERROR: failed to read dockerfile: open Dockerfile: no such file or directory")).unwrap(), "failed to read dockerfile: open Dockerfile: no such file or directory");
+    }
 }
 

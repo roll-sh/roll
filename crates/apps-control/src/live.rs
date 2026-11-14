@@ -571,6 +571,7 @@ impl EnvLive {
         *inst.started_at.lock() = Some(now_ms());
         inst.health_fails.store(0, Ordering::SeqCst);
         *inst.cpu_seen.lock() = None;
+        let (mut looked, mut hint) = (Instant::now(), None);
         match (run.kind, addr) {
             (RunType::Web, Some(a)) => loop {
                 // A TCP service is up when its port accepts; anything else answers HTTP.
@@ -582,9 +583,25 @@ impl EnvLive {
                 if up {
                     break;
                 }
+                // Not answering for a while: where it listens instead, if anywhere (the most common
+                // first-deploy mistake). On its port but only on loopback can never be reached.
+                if looked.elapsed() >= Duration::from_secs(2) {
+                    looked = Instant::now();
+                    match self.port_hint(&inst.name, run).await {
+                        Some((why, true)) => {
+                            self.crashed(inst, &why);
+                            return Err(WakeError::Failed(why));
+                        }
+                        Some((why, false)) => hint = Some(why),
+                        None => {}
+                    }
+                }
                 if Instant::now() >= deadline {
                     self.crashed(inst, "it didn't answer in time");
-                    return Err(WakeError::Timeout(self.cfg.wake_timeout));
+                    return Err(match hint {
+                        Some(h) => WakeError::Failed(format!("it didn't answer in time: {h}")),
+                        None => WakeError::Timeout(self.cfg.wake_timeout),
+                    });
                 }
                 if !self.runtime.running(&inst.name).await {
                     let why = format!("the process exited before it answered: {}", self.exit_reason(&inst.name, run).await);
@@ -608,6 +625,20 @@ impl EnvLive {
         let (rt, name) = (self.runtime.clone(), inst.name.clone());
         tokio::spawn(async move { rt.settle(&name).await });
         Ok(addr)
+    }
+
+    /// Why `name` may not answer, from where it listens: (what to tell, whether it never can).
+    async fn port_hint(&self, name: &str, run: &Run) -> Option<(String, bool)> {
+        let port = run.port.unwrap_or(8080);
+        let at = self.runtime.listeners(name).await?;
+        if at.is_empty() || at.iter().any(|a| a.port() == port && !a.ip().is_loopback()) {
+            return None;
+        }
+        if at.iter().any(|a| a.port() == port) {
+            return Some((format!("the app listens on {} only, which nothing outside its container reaches: listen on 0.0.0.0:{port} (or [::]:{port})", at.iter().filter(|a| a.port() == port).map(|a| a.to_string()).collect::<Vec<_>>().join(", ")), true));
+        }
+        let list = at.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
+        Some((format!("the app listens on {list}, not on port {port}: listen on $PORT ({port}), or set the service's port"), false))
     }
 
     /// A running instance of `deployment` with room under `concurrency` (the least busy), leased.

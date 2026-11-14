@@ -18,6 +18,7 @@ const CLOSE_WAIT: u8 = 0x08;
 
 #[derive(Debug, PartialEq)]
 struct Socket {
+    local: IpAddr,
     port: u16,
     peer: IpAddr,
     state: u8,
@@ -31,7 +32,7 @@ fn sockets(table: &str) -> impl Iterator<Item = Socket> + '_ {
         let remote = f.next()?;
         let state = u8::from_str_radix(f.next()?, 16).ok()?;
         let port = u16::from_str_radix(local.rsplit(':').next()?, 16).ok()?;
-        Some(Socket { port, peer: address(remote.split(':').next()?)?, state })
+        Some(Socket { local: address(local.split(':').next()?)?, port, peer: address(remote.split(':').next()?)?, state })
     })
 }
 
@@ -55,6 +56,14 @@ fn address(hex: &str) -> Option<IpAddr> {
 /// Whether something listens on `port` (the app, or the waker while the app is stopped).
 pub fn listening(tcp: &str, tcp6: &str, port: u16) -> bool {
     sockets(tcp).chain(sockets(tcp6)).any(|s| s.port == port && s.state == LISTEN)
+}
+
+/// Every address something listens on (what an app that doesn't answer bound instead).
+pub fn listeners(tcp: &str, tcp6: &str) -> Vec<std::net::SocketAddr> {
+    let mut v: Vec<_> = sockets(tcp).chain(sockets(tcp6)).filter(|s| s.state == LISTEN).map(|s| std::net::SocketAddr::new(s.local, s.port)).collect();
+    v.sort();
+    v.dedup();
+    v
 }
 
 /// The connections the namespace has accepted (TCP `PassiveOpens` in its `snmp`).
@@ -95,6 +104,8 @@ mod tests {
         let other = format!("{HEAD}{listen}{}{}", from("050012AC"), from("060012AC"));
         assert_eq!(private_peers(&other, HEAD, 8080, &[gw]), 2);
         assert!(listening(&other, HEAD, 8080) && !listening(&other, HEAD, 9000));
+        let loopback = format!("{HEAD}   0: 0100007F:0BB8 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1 1 0 100 0 0 10 0\n");
+        assert_eq!(listeners(&loopback, HEAD), vec!["127.0.0.1:3000".parse().unwrap()]);
         // An IPv4-mapped IPv6 row (busybox listens on `::`).
         let tcp6 = format!("{HEAD}   0: 00000000000000000000000000000000:2328 00000000000000000000000000000000:0000 0A 00000000:00000001 00:00000000 00000000     0        0 2245507849 2 000000009a288b5b 100 0 0 10 0\n");
         assert!(listening(HEAD, &tcp6, 9000));

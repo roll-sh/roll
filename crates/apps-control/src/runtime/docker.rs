@@ -610,6 +610,12 @@ impl Runtime for Docker {
         (!tcp.is_empty() || !tcp6.is_empty()).then(|| super::netns::private_peers(&tcp, &tcp6, sb.port, &sb.host))
     }
 
+    async fn listeners(&self, name: &str) -> Option<Vec<SocketAddr>> {
+        let sb = self.sandbox(name).await?;
+        let (tcp, tcp6) = sb.tables();
+        (!tcp.is_empty() || !tcp6.is_empty()).then(|| super::netns::listeners(&tcp, &tcp6))
+    }
+
     async fn wait(&self, name: &str) -> anyhow::Result<i32> {
         if let Some(e) = &self.engine {
             return e.wait(name).await;

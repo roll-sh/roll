@@ -663,3 +663,33 @@ async fn a_restart_keeps_the_running_container() {
     assert_eq!(started(name.clone()).await, before, "thawed, not started again");
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
 }
+
+/// An app bound to loopback in its container (a framework's dev default) fails its deploy at once
+/// saying so, read from its sandbox's sockets, not after the whole health timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_app_on_loopback_fails_its_deploy_saying_so() {
+    let Some(w) = docker_world().await else { return };
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "loopback", "source": {"kind": "upload"}, "build": {"start": "httpd -f -p 127.0.0.1:$PORT -h /site"}, "run": {"memory_mb": 256, "cpu": 0.5, "health_timeout_s": 30} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let tree = tempfile::tempdir().unwrap();
+    std::fs::write(tree.path().join("index.html"), "<h1>hi</h1>").unwrap();
+    let mut bundle = Vec::new();
+    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+    let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), None, "application/gzip", Some(bundle)).await;
+    let dep = d["id"].as_str().unwrap().to_string();
+    let mut x = Value::Null;
+    for _ in 0..1200 {
+        x = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}"), None, "application/json", None).await.1;
+        if ["failed", "active"].contains(&x["status"].as_str().unwrap_or("")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(x["status"], "failed", "{x}");
+    assert!(x["error"].as_str().unwrap_or("").contains("only, which nothing outside its container reaches"), "{x}");
+    let took = x["finished_at"].as_i64().unwrap() - x["steps"].as_array().unwrap().iter().find(|s| s["step"] == "rollout").and_then(|s| s["at"].as_i64()).unwrap();
+    assert!(took < 15_000, "not the whole 30 s health timeout: {took} ms");
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+}
+

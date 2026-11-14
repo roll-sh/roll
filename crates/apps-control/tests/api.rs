@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tower::ServiceExt;
 
 /// A roll code with one repo whose `main` moves when a test pushes.
@@ -458,6 +458,30 @@ async fn old_deployments_are_pruned_past_what_an_environment_keeps() {
     assert_eq!(w.fake.removed.lock().len(), removed.len());
 }
 
+/// An app that doesn't answer on its port says where it listens instead: on its port but only on
+/// loopback fails at once (nothing can ever reach it); on another port, the timeout says which.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deploy_whose_app_listens_elsewhere_says_where() {
+    let w = world().await;
+    let deploy = |name: &'static str, listen: &'static str| {
+        let w = &w;
+        async move {
+            let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 8080, "min_instances": 1, "health_timeout_s": 4}, "variables": {"FAKE_LISTEN": listen} }))).await;
+            assert_eq!(st, StatusCode::CREATED, "{svc}");
+            let t = Instant::now();
+            let d = settled(w, svc["id"].as_str().unwrap(), "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+            (d, t.elapsed())
+        }
+    };
+    let (d, took) = deploy("local", "127.0.0.1:8080").await;
+    assert_eq!(d["status"], "failed", "{d}");
+    assert!(d["error"].as_str().unwrap().contains("listens on 127.0.0.1:8080 only") && d["error"].as_str().unwrap().contains("0.0.0.0:8080"), "{d}");
+    assert!(took < Duration::from_secs(4), "not the whole health timeout: {took:?}");
+    let (d, _) = deploy("other", "0.0.0.0:3000").await;
+    assert_eq!(d["status"], "failed", "{d}");
+    assert!(d["error"].as_str().unwrap().contains("listens on 0.0.0.0:3000, not on port 8080"), "{d}");
+}
+
 /// A GET that finds its instance gone (killed: nothing listens, and roll doesn't know yet) goes
 /// to a fresh instance instead of a 503; a request with a body isn't sent twice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -547,6 +571,10 @@ async fn a_deploy_that_fails_its_health_check_leaves_the_old_one_serving() {
     let d2 = settled(&w, id, "production", d2["id"].as_str().unwrap()).await;
     assert_eq!(d2["status"], "failed", "{d2}");
     assert!(d2["error"].as_str().unwrap().contains("health check"), "{d2}");
+    // What the new instance said is in the deploy's log and its error, not only the environment's.
+    assert!(d2["error"].as_str().unwrap().contains("its last output: listening on"), "{d2}");
+    let (_, dlog) = call(&w.api, "GET", &format!("{base}/deploys/{}/logs", d2["id"].as_str().unwrap()), None).await;
+    assert!(dlog.as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap_or("").contains(": listening on")), "{dlog}");
     let (_, env) = call(&w.api, "GET", &base, None).await;
     assert_eq!(env["active"]["id"], d1["id"]);
     let (st, body) = visit(&w, &host(&env["url"]), "/").await;

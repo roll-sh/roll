@@ -320,6 +320,11 @@ impl Runtime for Fake {
             return Ok(None);
         }
         let addr = match spec.port {
+            // An app that binds elsewhere (`FAKE_LISTEN=127.0.0.1:3000`): nothing on its port.
+            Some(_) if var(&spec, "FAKE_LISTEN").is_some() => {
+                let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+                Some(l.local_addr()?)
+            }
             Some(_) => {
                 let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
                 let addr = l.local_addr()?;
@@ -383,6 +388,12 @@ impl Runtime for Fake {
                 s.abort();
             }
         }
+    }
+
+    async fn listeners(&self, name: &str) -> Option<Vec<SocketAddr>> {
+        let m = self.instances.lock();
+        let at = var(&m.get(name)?.spec, "FAKE_LISTEN")?.to_string();
+        Some(at.split(',').filter_map(|a| a.trim().parse().ok()).collect())
     }
 
     async fn wait(&self, name: &str) -> anyhow::Result<i32> {
