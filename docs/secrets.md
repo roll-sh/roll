@@ -583,7 +583,7 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
-roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
+roll run [-p project] [-e production] [--path /] [--env-file .env]… [--allow-unresolved] [--watch] -- <command…>
 ```
 
 - The project is `-p`/`ROLL_PROJECT` (a name or id), the environment `-e`/`ROLL_ENV`, the path
@@ -815,6 +815,27 @@ as a warning, by name. Disaster recovery, and moving a project between roll serv
 included, by name only: it reads no value, so `read` is enough. It lists each `missing` key and each
 `extra` one, and fails when one is missing (with `--strict`, also when there's an extra), so a CI
 step catches a variable the code started reading before an environment has it.
+
+### References in files
+
+As 1Password's `op://`: a file committed to the repository holds `roll://` references where values
+would go, so it carries the shape of the configuration and no value.
+
+- `roll://ENV/KEY` is a key in this project's environment, `roll://ENV/folder/sub/KEY` one in a
+  folder, `roll://PROJECT@ENV/KEY` one in another project (its name, or its `prj_…` id with a
+  scoped token). Segments are letters, digits, `-`, `_` and `.` (never `.` or `..`).
+- `roll run --env-file .env` (repeatable) adds a dotenv file's entries to the environment's:
+  plain values as written, references resolved, and the file's entries win over the environment's
+  (the shell's own variables still win over both unless `--override`). A file such as
+  `DB_URL=roll://production/DATABASE_URL` and `PORT=8080` runs with production's value and 8080.
+- `roll secrets render` resolves references in a template where they stand (a reference runs to
+  the first space, quote, bracket or comma) and fills `${KEY}` around them; neither kind of value is
+  read again as a template.
+- Each environment and folder is one read through the same audited `values` route, under the
+  caller's own access: a reference to an environment the token can't read fails, naming it, and so
+  does one to a key that isn't set or doesn't resolve. Nothing new runs on the server.
+- `roll run --watch` follows every environment a file references too (their digests), restarting
+  the command when any of them changes.
 
 ### Templates
 

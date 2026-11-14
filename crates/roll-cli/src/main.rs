@@ -17,6 +17,7 @@ mod search;
 mod storage;
 mod redis;
 mod seal;
+mod secret_refs;
 mod secrets;
 mod apps;
 

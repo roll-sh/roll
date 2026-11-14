@@ -644,6 +644,11 @@ pub struct Run {
     pub watch: bool,
     #[arg(long, default_value_t = 5, requires = "watch")]
     pub interval: u64,
+    /// A dotenv file whose entries join the environment's (and win over them): plain values as
+    /// written, `roll://ENV/KEY` references resolved (repeatable; docs/secrets.md, "References
+    /// in files").
+    #[arg(long = "env-file", value_name = "FILE")]
+    pub env_files: Vec<String>,
     /// The command and its arguments.
     #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
@@ -2047,11 +2052,27 @@ async fn setup_dir(api: &Api, args: &AtArgs, show: bool, clear: bool) -> anyhow:
 async fn render_env(c: &Client<'_>, env: &str, file: &str, tpl: &str) -> anyhow::Result<(String, Vec<String>)> {
     let v = c.call(Method::GET, &format!("{env}/values?{}", c.q()), None).await?;
     let unresolved: std::collections::BTreeMap<String, String> = v["problems"].as_array().into_iter().flatten().map(|p| (s(&p["key"]), s(&p["problem"]))).collect();
-    let text = render(tpl, |k| v["values"][k].as_str().map(String::from)).map_err(|missing| {
-        let why: Vec<String> = missing.iter().map(|k| unresolved.get(k).map_or_else(|| format!("{k} isn't set in {}:{}", c.at.env, c.at.path), |p| format!("{k}: {p}"))).collect();
-        anyhow::anyhow!("{file} names keys that have no value:\n  {}", why.join("\n  "))
-    })?;
-    let leases = v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)).collect();
+    // `roll://…` references are resolved where they stand; `${KEY}` is filled only around them,
+    // so neither kind of value is read again as a template.
+    let spans = crate::secret_refs::find_in_text(tpl);
+    let refs: Vec<crate::secret_refs::Ref> = spans.iter().map(|(a, b)| crate::secret_refs::Ref::parse(&tpl[*a..*b])).filter_map(Result::transpose).collect::<anyhow::Result<_>>()?;
+    let (resolved, mut leases, _) = resolve_refs(c, &refs).await?;
+    let fill = |part: &str| {
+        render(part, |k| v["values"][k].as_str().map(String::from)).map_err(|missing| {
+            let why: Vec<String> = missing.iter().map(|k| unresolved.get(k).map_or_else(|| format!("{k} isn't set in {}:{}", c.at.env, c.at.path), |p| format!("{k}: {p}"))).collect();
+            anyhow::anyhow!("{file} names keys that have no value:\n  {}", why.join("\n  "))
+        })
+    };
+    let mut text = String::with_capacity(tpl.len());
+    let mut at = 0;
+    for (a, b) in &spans {
+        text.push_str(&fill(&tpl[at..*a])?);
+        let rf = crate::secret_refs::Ref::parse(&tpl[*a..*b])?.expect("a found reference parses");
+        text.push_str(&resolved[&rf]);
+        at = *b;
+    }
+    text.push_str(&fill(&tpl[at..])?);
+    leases.extend(v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)));
     Ok((text, leases))
 }
 
@@ -2355,21 +2376,74 @@ fn render(tpl: &str, get: impl Fn(&str) -> Option<String>) -> Result<String, Vec
 
 /// The variables `roll run` adds: the environment's resolved values, minus the ones the shell
 /// already sets (unless `--override`). Fails on a problem unless `--allow-unresolved`.
-async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(String, String)>, Vec<String>)> {
+async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(String, String)>, Vec<String>, Vec<String>)> {
     let v = c.call(Method::GET, &format!("{}/values?{}", c.env(&at.env), c.q()), None).await?;
     let problems: Vec<String> = v["problems"].as_array().into_iter().flatten().map(|p| format!("{}: {}", s(&p["key"]), s(&p["problem"]))).collect();
     if !problems.is_empty() && !r.allow_unresolved {
         bail!("{} of {}:{} didn't resolve (pass --allow-unresolved to run anyway):\n  {}", problems.len(), at.env, at.path, problems.join("\n  "));
     }
-    let env = v["values"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter(|(k, _)| r.override_env || std::env::var_os(k).is_none())
-        .map(|(k, val)| (k.clone(), val.as_str().unwrap_or_default().to_string()))
-        .collect();
-    let leases = v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)).collect();
-    Ok((env, leases))
+    let mut env: Vec<(String, String)> = v["values"].as_object().into_iter().flatten().map(|(k, val)| (k.clone(), val.as_str().unwrap_or_default().to_string())).collect();
+    let mut leases: Vec<String> = v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)).collect();
+    let mut follow = vec![format!("{}/digest?{}", c.env(&at.env), c.q())];
+    // Env files: plain values as written, references resolved; theirs win over the environment's.
+    for file in &r.env_files {
+        let text = std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
+        let entries = crate::secret_refs::parse_env_file(&text, file)?;
+        let refs: Vec<crate::secret_refs::Ref> = entries.iter().filter_map(|(_, v)| crate::secret_refs::Ref::parse(v).transpose()).collect::<anyhow::Result<_>>()?;
+        let (resolved, more_leases, more_follow) = resolve_refs(c, &refs).await?;
+        leases.extend(more_leases);
+        follow.extend(more_follow);
+        for (k, raw) in entries {
+            let value = match crate::secret_refs::Ref::parse(&raw)? {
+                Some(rf) => resolved[&rf].clone(),
+                None => raw,
+            };
+            env.retain(|(have, _)| have != &k);
+            env.push((k, value));
+        }
+    }
+    env.retain(|(k, _)| r.override_env || std::env::var_os(k).is_none());
+    follow.sort();
+    follow.dedup();
+    Ok((env, leases, follow))
+}
+
+/// Resolve `roll://` references: one read per project, environment and folder. Their values,
+/// the leases those hold, and the digests to follow (`--watch`).
+async fn resolve_refs(c: &Client<'_>, refs: &[crate::secret_refs::Ref]) -> anyhow::Result<(std::collections::HashMap<crate::secret_refs::Ref, String>, Vec<String>, Vec<String>)> {
+    let mut groups: std::collections::BTreeMap<(Option<String>, String, String), Vec<&crate::secret_refs::Ref>> = Default::default();
+    for rf in refs {
+        groups.entry((rf.project.clone(), rf.env.clone(), rf.path.clone())).or_default().push(rf);
+    }
+    let (mut values, mut leases, mut follow) = (std::collections::HashMap::new(), vec![], vec![]);
+    for ((named, env, path), group) in groups {
+        let id = match &named {
+            None => c.project.clone(),
+            Some(p) => project(c.api, Some(p)).await?,
+        };
+        let base = format!("/v1/secrets/projects/{}/environments/{}", enc(&id), enc(&env));
+        let v = c.call(Method::GET, &format!("{base}/values?path={}", enc(&path)), None).await.with_context(|| format!("reading roll://{}{env}{}", named.as_ref().map(|p| format!("{p}@")).unwrap_or_default(), if path == "/" { String::new() } else { path.clone() }))?;
+        for rf in group {
+            let value = v["values"][&rf.key].as_str().ok_or_else(|| {
+                let problem = v["problems"].as_array().into_iter().flatten().find(|p| p["key"] == rf.key.as_str()).map(|p| s(&p["problem"]).to_string());
+                anyhow::anyhow!("roll://{}{}{}/{}: {}", rf.project.as_ref().map(|p| format!("{p}@")).unwrap_or_default(), rf.env, if rf.path == "/" { String::new() } else { rf.path.clone() }, rf.key, problem.unwrap_or_else(|| "not set there".into()))
+            })?;
+            values.insert(rf.clone(), value.to_string());
+        }
+        leases.extend(v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)));
+        follow.push(format!("{base}/digest?path={}", enc(&path)));
+    }
+    Ok((values, leases, follow))
+}
+
+/// Every followed digest, as one: any of them moving moves it.
+async fn digests(c: &Client<'_>, follow: &[String]) -> anyhow::Result<String> {
+    let mut all = String::new();
+    for p in follow {
+        all.push_str(&s(&c.call(Method::GET, p, None).await?["digest"]).to_string());
+        all.push(';');
+    }
+    Ok(all)
 }
 
 /// `roll run`: resolve, then exec the command with the values in its environment; with
@@ -2378,9 +2452,9 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     let at = r.at.resolve();
     let project = project(api, at.project.as_deref()).await?;
     let c = Client { project, api, at: at.clone() };
-    let (env, leases) = run_env(&c, &at, &r).await?;
+    let (env, leases, follow) = run_env(&c, &at, &r).await?;
     if r.watch {
-        return watch(&c, &at, &r, env, leases).await;
+        return watch(&c, &at, &r, env, leases, follow).await;
     }
     let mut cmd = std::process::Command::new(&r.command[0]);
     cmd.args(&r.command[1..]).envs(env);
@@ -2400,9 +2474,9 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
 /// `roll run --watch`: the command as a child, restarted (SIGTERM, then SIGKILL after 10 s) when
 /// the environment changes. A change that doesn't resolve keeps the running command. Exits with
 /// the command's own code when it exits by itself.
-async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>, mut leases: Vec<String>) -> anyhow::Result<()> {
-    let digest_path = format!("{}/digest?{}", c.env(&at.env), c.q());
-    let mut last = c.call(Method::GET, &digest_path, None).await?["digest"].clone();
+async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>, mut leases: Vec<String>, mut follow: Vec<String>) -> anyhow::Result<()> {
+    // The environment's digest, and every referenced one's (an env file's `roll://…`).
+    let mut last = digests(c, &follow).await?;
     let every = std::time::Duration::from_secs(r.interval.max(1));
     // Dynamic credentials outlive their first lease: renewed every 10 minutes while it runs.
     let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
@@ -2423,8 +2497,8 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>,
                     }
                 }
                 _ = tokio::time::sleep(every) => {
-                    let now = match c.call(Method::GET, &digest_path, None).await {
-                        Ok(v) => v["digest"].clone(),
+                    let now = match digests(c, &follow).await {
+                        Ok(d) => d,
                         Err(e) => {
                             eprintln!("roll run: couldn't check {} ({e}); still running", at.env);
                             continue;
@@ -2435,10 +2509,11 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>,
                     }
                     last = now;
                     match run_env(c, at, r).await {
-                        Ok((next, next_leases)) => {
+                        Ok((next, next_leases, next_follow)) => {
                             eprintln!("roll run: {}:{} changed, restarting {}", at.env, at.path, r.command[0]);
                             env = next;
                             leases = next_leases;
+                            follow = next_follow;
                             stop(&mut child).await;
                             break;
                         }
