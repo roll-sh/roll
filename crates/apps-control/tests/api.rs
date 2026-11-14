@@ -1182,7 +1182,10 @@ async fn an_environment_is_cloned_and_a_live_image_promoted_to_it() {
     let (_, vals) = call(&w.api, "GET", &format!("{base}/staging/variables/values"), None).await;
     assert_eq!(vals["API_KEY"], "k1", "{vals}");
     let pulls = Fake::count(&w.fake.counts.pulls);
-    let (st, p) = call(&w.api, "POST", &format!("{base}/staging/promote"), Some(json!({"from": "production"}))).await;
+    // Only what was looked at: a deployment that isn't production's live one is refused.
+    let (st, v) = call(&w.api, "POST", &format!("{base}/staging/promote"), Some(json!({"from": "production", "expect": "dep_somethingelse"}))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    let (st, p) = call(&w.api, "POST", &format!("{base}/staging/promote"), Some(json!({"from": "production", "expect": d["id"]}))).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{p}");
     let p = settled(&w, &id, "staging", p["id"].as_str().unwrap()).await;
     assert_eq!((p["status"].as_str(), p["trigger"].as_str(), &p["image"]), (Some("active"), Some("promote"), &d["image"]), "{p}");

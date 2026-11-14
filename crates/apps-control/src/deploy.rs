@@ -245,9 +245,15 @@ impl Apps {
         self.refuse_capped(service)?;
         self.refuse_paused(service, env).await?;
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["from", "message"].contains(&k.as_str())) {
+        if let Some(k) = o.keys().find(|k| !["from", "message", "expect"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
+        // What the caller looked at (roll previews' sheet, a reviewer): that deployment or nothing.
+        let expect = match o.get("expect") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(e)) => Some(e.clone()),
+            Some(_) => return Err(Error::BadRequest("expect is a deployment id".into())),
+        };
         let from = o.get("from").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("from (the environment to promote) is required".into()))?;
         if from == env {
             return Err(Error::BadRequest("from is another environment".into()));
@@ -256,6 +262,13 @@ impl Apps {
         let (sid, e, f) = (service.to_string(), env.to_string(), from.to_string());
         let (svc, _, source) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?, s.environment(&sid, &f)?))).await?;
         let active = source.active.clone().ok_or_else(|| Error::Conflict(format!("nothing is deployed in {from} yet")))?;
+        // Checked against the read this promotion is made from (its image is `active`'s, whatever
+        // `from` runs a moment later): what goes live is what was looked at.
+        if let Some(e) = &expect
+            && *e != active
+        {
+            return Err(Error::Conflict(format!("{from} runs {active} now, not {e}: look at it again before promoting")));
+        }
         let old = self.deployment(service, from, &active).await?;
         let image = old.image.clone().ok_or_else(|| Error::Conflict(format!("{active} has no image")))?;
         let mut run = self.run_for(&svc, &old, env).await;

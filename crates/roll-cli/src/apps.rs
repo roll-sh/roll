@@ -499,6 +499,9 @@ pub enum AppsCmd {
         /// The environment whose live deployment is promoted.
         #[arg(long)]
         from: String,
+        /// Only this deployment (the one you tested): refused if `--from` runs another now.
+        #[arg(long, value_name = "DEPLOYMENT")]
+        expect: Option<String>,
         #[command(flatten)]
         target: Target,
     },
@@ -2404,9 +2407,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Promote { from, target } => {
+        AppsCmd::Promote { from, expect, target } => {
             let svc = service(api, &target).await?;
-            let dep = api.post(&format!("{}/promote", env_path(&svc, &target.env)), json!({ "from": from })).await?;
+            let dep = api.post(&format!("{}/promote", env_path(&svc, &target.env)), json!({ "from": from, "expect": expect })).await?;
             if !json_out {
                 return watch(api, &svc, &target.env, &dep).await;
             }
