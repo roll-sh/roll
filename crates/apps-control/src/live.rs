@@ -10,6 +10,7 @@
 use crate::logs::{LogSink, Stream};
 use crate::metrics::Meter;
 use crate::model::{InstanceState, Restart, Run, RunType};
+use crate::runtime::Adopted;
 use crate::runtime::{InstanceSpec, Runtime};
 use parking_lot::Mutex;
 use std::net::SocketAddr;
@@ -507,6 +508,17 @@ impl EnvLive {
     fn name_for(&self, tpl: &Template) -> String {
         let n = self.seq.fetch_add(1, Ordering::SeqCst);
         format!("{}{n}", instance_prefix(&self.service, &self.env, &tpl.deployment))
+    }
+
+    /// A cron run's or a job's container: `…-run<n>`, never one of the service's instances (a
+    /// takeover never keeps it as one).
+    async fn make_run(&self, tpl: &Template) -> anyhow::Result<Arc<Inst>> {
+        anyhow::ensure!(!self.closed.load(Ordering::SeqCst), "this environment was torn down");
+        let n = self.seq.fetch_add(1, Ordering::SeqCst);
+        let mut spec = tpl.spec.clone();
+        spec.name = format!("{}run{n}", instance_prefix(&self.service, &self.env, &tpl.deployment));
+        self.runtime.create(&spec).await?;
+        Ok(Inst::new(spec.name, tpl.deployment.clone()))
     }
 
     async fn make(&self, tpl: &Template) -> anyhow::Result<Arc<Inst>> {
@@ -1264,48 +1276,63 @@ impl EnvLive {
             return;
         }
         *self.template.lock() = Some(tpl.clone());
-        if tpl.site.is_some() || !self.insts.lock().is_empty() {
+        if tpl.site.is_some() {
             return;
         }
         // The live deployment's instances the previous owner ran, still running on the shared
         // runtime (a node died, its containers or tasks didn't): kept, so its death costs
-        // visitors no cold start. One that doesn't answer is left for the reaper's sweep.
+        // visitors no cold start; one that can't be kept goes.
         let kept = self.keep_running(&tpl).await;
         if kept == 0
             && tpl.run.kind == RunType::Web
+            && self.insts.lock().is_empty()
             && let Ok(i) = self.make(&tpl).await
         {
             self.insts.lock().push(i);
         }
     }
 
-    /// [`Self::adopt`]'s instances still running: how many it kept.
+    /// [`Self::adopt`]'s instances still running: how many it kept. Only a web service's or a
+    /// worker's (a cron run or a job is named `…-run<n>` and never kept); those already here
+    /// stay as they are; the rest of the deployment's go.
     async fn keep_running(&self, tpl: &Template) -> usize {
         let prefix = instance_prefix(&self.service, &self.env, &tpl.deployment);
+        let here: Vec<String> = self.insts.lock().iter().map(|i| i.name.clone()).collect();
         let mut kept = 0;
         for name in self.runtime.list(Some(&self.service)).await {
             let Some(n) = name.strip_prefix(&prefix).and_then(|n| n.parse::<u64>().ok()) else { continue };
-            let mut spec = tpl.spec.clone();
-            spec.name = name.clone();
-            let addr = self.runtime.adopt(&spec, self.log.instance(&name, &tpl.deployment)).await;
-            let up = match (tpl.run.kind, addr) {
-                (_, None) => false,
-                (RunType::Web, Some(Some(a))) => self.answers(a, None, tpl.run.h2c).await,
-                (RunType::Web, Some(None)) => false,
-                _ => true,
-            };
-            if !up {
-                // Not one to keep (stopped, or it doesn't answer): it goes, as the rest did.
+            // New names after every one seen, kept or not (the old owner may still be removing it).
+            self.seq.fetch_max(n + 1, Ordering::SeqCst);
+            if here.contains(&name) {
+                continue;
+            }
+            if !matches!(tpl.run.kind, RunType::Web | RunType::Worker) {
                 self.runtime.remove(&name).await;
                 continue;
             }
-            let addr = addr.flatten();
+            let mut spec = tpl.spec.clone();
+            spec.name = name.clone();
+            let found = self.runtime.adopt(&spec, self.log.instance(&name, &tpl.deployment)).await;
+            let phase = match (tpl.run.kind, found) {
+                (_, None) => None,
+                // Asleep and frozen: kept so, nothing asked of it (a frozen process answers nothing).
+                (_, Some(a)) if a.paused => Some(Phase::Suspended(a.addr)),
+                (RunType::Web, Some(Adopted { addr: Some(a), .. })) => {
+                    let up = if tpl.run.tcp { tcp_answers(a).await } else { self.answers(a, None, tpl.run.h2c).await };
+                    up.then_some(Phase::Running(Some(a)))
+                }
+                (RunType::Web, Some(_)) => None,
+                (_, Some(a)) => Some(Phase::Running(a.addr)),
+            };
+            let Some(phase) = phase else {
+                // Not one to keep (stopped, or it doesn't answer): it goes, as the rest did.
+                self.runtime.remove(&name).await;
+                continue;
+            };
             let i = Inst::new(name.clone(), tpl.deployment.clone());
-            *i.phase.lock() = Phase::Running(addr);
+            *i.phase.lock() = phase;
             *i.started_at.lock() = Some(now_ms());
             self.insts.lock().push(i);
-            // New names after the ones kept.
-            self.seq.fetch_max(n + 1, Ordering::SeqCst);
             kept += 1;
         }
         if kept > 0 {
@@ -1396,6 +1423,18 @@ impl EnvLive {
     }
 
     /// Remove every instance (an environment's teardown, or the service leaving this node).
+    /// Give the environment up without touching what runs (a runtime the nodes share: the next
+    /// owner keeps the live deployment's instances, [`Self::adopt`], and removes the rest):
+    /// nothing here sends to, wakes or stops them any more.
+    pub async fn let_go(&self) {
+        let _g = self.wake.lock().await;
+        self.closed.store(true, Ordering::SeqCst);
+        *self.canary.lock() = None;
+        self.viewed.lock().clear();
+        self.insts.lock().clear();
+        *self.template.lock() = None;
+    }
+
     pub async fn shutdown(&self) {
         let _g = self.wake.lock().await;
         self.closed.store(true, Ordering::SeqCst);
@@ -1853,7 +1892,7 @@ impl EnvLive {
             tpl.spec.aliases.clear();
         }
         tpl.spec.vars.extend(vars.iter().cloned());
-        let inst = self.make(&tpl).await?;
+        let inst = self.make_run(&tpl).await?;
         made(&inst.name);
         let log = log.unwrap_or_else(|| self.log.instance(&inst.name, &inst.deployment));
         let began = Instant::now();

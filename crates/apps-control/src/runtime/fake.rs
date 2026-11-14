@@ -53,6 +53,8 @@ pub struct Counts {
 
 #[derive(Default)]
 pub struct Fake {
+    /// One runtime for several nodes (as Fargate is): `shares_instances`.
+    pub shared: std::sync::atomic::AtomicBool,
     instances: Mutex<HashMap<String, FakeInstance>>,
     networks: Mutex<Vec<String>>,
     pub counts: Counts,
@@ -410,10 +412,18 @@ impl Runtime for Fake {
         matches!(self.state(name), Some(FakeState::Running | FakeState::Paused))
     }
 
-    async fn adopt(&self, spec: &InstanceSpec, _log: LogSink) -> Option<Option<SocketAddr>> {
+    async fn adopt(&self, spec: &InstanceSpec, _log: LogSink) -> Option<super::Adopted> {
         let m = self.instances.lock();
-        let i = m.get(&spec.name)?;
-        (i.state == FakeState::Running).then_some(i.addr)
+        let i = m.get(&spec.name).filter(|i| i.spec.deployment == spec.deployment)?;
+        match i.state {
+            FakeState::Running => Some(super::Adopted { addr: i.addr, paused: false }),
+            FakeState::Paused => Some(super::Adopted { addr: i.addr, paused: true }),
+            _ => None,
+        }
+    }
+
+    fn shares_instances(&self) -> bool {
+        self.shared.load(Ordering::SeqCst)
     }
 
     async fn exited(&self, name: &str) -> Option<super::Exit> {

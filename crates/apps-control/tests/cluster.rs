@@ -54,6 +54,9 @@ async fn fleet(n: usize) -> Fleet {
 }
 
 async fn fleet_on(n: usize, shared: Option<Arc<Fake>>) -> Fleet {
+    if let Some(f) = &shared {
+        f.shared.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     let dir = tempfile::tempdir().unwrap();
     let ws = Arc::new(roll_workspace::Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
     let project = ws.create("", "acme", "", None).unwrap().id;
@@ -523,4 +526,43 @@ async fn a_takeover_keeps_the_instances_the_dead_owner_ran() {
     assert_eq!(after["instance"], before["instance"], "the same instance answers: {after}");
     assert_eq!((Fake::count(&shared.counts.creates), Fake::count(&shared.counts.starts)), (creates, starts), "nothing made or started again: {:?}", shared.instances(&id));
     drop(dead);
+}
+
+/// On a runtime the nodes share, a handoff (a node joining) moves services with their
+/// instances: the old owner lets them go, the new one keeps them, nothing new is made and no
+/// request fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_handoff_on_a_shared_runtime_keeps_the_instances() {
+    let shared = Fake::new();
+    let mut f = fleet_on(1, Some(shared.clone())).await;
+    let mut svcs = Vec::new();
+    for i in 0..12 {
+        svcs.push(f.image_service(&f.nodes[0], &format!("web{i}")).await);
+    }
+    // Each awake (one instance each).
+    for (_, h) in &svcs {
+        let req = Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap();
+        assert_eq!(f.nodes[0].public.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+    }
+    let made = Fake::count(&shared.counts.creates);
+    f.join("n1").await;
+    let mut failed = Vec::new();
+    let mut moved = Vec::new();
+    for round in 0..600 {
+        for (id, h) in &svcs {
+            let req = Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap();
+            let st = f.nodes[round % 2].public.clone().oneshot(req).await.unwrap().status();
+            if st != StatusCode::OK {
+                failed.push((round, id.clone(), st));
+            }
+        }
+        moved = svcs.iter().filter(|(id, _)| f.nodes[1].apps.deps.cluster.owns(&apps_control::lease_key(id))).map(|(id, _)| id.clone()).collect();
+        if !moved.is_empty() && round > 40 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!moved.is_empty(), "the new node took at least one service");
+    assert!(failed.is_empty(), "requests failed during the handoff: {failed:?}");
+    assert_eq!(Fake::count(&shared.counts.creates), made, "the moved services kept their instances: {:?}", moved.iter().map(|m| shared.instances(m)).collect::<Vec<_>>());
 }

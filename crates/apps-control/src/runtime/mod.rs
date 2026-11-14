@@ -158,11 +158,17 @@ pub trait Runtime: Send + Sync {
     async fn wait(&self, name: &str) -> anyhow::Result<i32>;
     async fn running(&self, name: &str) -> bool;
     /// Take on `spec.name`, still running from another process (a node that died, rolld before
-    /// a restart), as this process's own, its output followed into `log` from now: where it
-    /// answers (None for a worker). None: not running here, or a runtime that can't (it's
-    /// removed, and a fresh one made). For [`crate::live::EnvLive::adopt`].
-    async fn adopt(&self, _spec: &InstanceSpec, _log: LogSink) -> Option<Option<SocketAddr>> {
+    /// a restart) and of `spec.deployment` (its label or tag says so), as this process's own,
+    /// its output followed into `log` from now. None: not running here, another deployment's,
+    /// or a runtime that can't (it's removed, and a fresh one made). For
+    /// [`crate::live::EnvLive::adopt`].
+    async fn adopt(&self, _spec: &InstanceSpec, _log: LogSink) -> Option<Adopted> {
         None
+    }
+    /// Whether what one node made, another can see and run (Fargate; not one host's Docker per
+    /// node): a node giving a service up then leaves its instances for the next to keep.
+    fn shares_instances(&self) -> bool {
+        false
     }
     /// How a stopped instance ended, when the runtime can say: its exit code, and whether it
     /// was killed for running out of memory.
@@ -291,6 +297,14 @@ pub fn declared_args(dockerfile: &str) -> std::collections::HashSet<&str> {
         .map(|t| t.split('=').next().unwrap_or(t))
         .filter(|n| !n.is_empty() && n != &"\\")
         .collect()
+}
+
+/// An instance [`Runtime::adopt`] took on: where it answers (None for a worker), and whether
+/// it's frozen (suspended, asleep).
+#[derive(Clone, Copy, Debug)]
+pub struct Adopted {
+    pub addr: Option<SocketAddr>,
+    pub paused: bool,
 }
 
 #[async_trait]

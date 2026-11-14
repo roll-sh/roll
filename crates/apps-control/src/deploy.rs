@@ -1187,6 +1187,16 @@ impl Apps {
         for e in envs {
             if let Err(err) = self.load_live(service, &e.name).await {
                 warn!(service, env = %e.name, error = %err, "apps: loading an environment failed");
+                // Nothing will keep what the previous owner ran of it: it goes, as before.
+                if let Some(a) = &e.active {
+                    let prefix = crate::live::instance_prefix(service, &e.name, a);
+                    for name in self.deps.runtime.list(Some(service)).await {
+                        let owner = name.strip_suffix("-net").or_else(|| name.strip_suffix("-wake")).unwrap_or(&name);
+                        if owner.starts_with(&prefix) {
+                            self.deps.runtime.remove(&name).await;
+                        }
+                    }
+                }
             }
             // A deploy a lost node had started runs again from the start.
             let (sid, en) = (service.to_string(), e.name.clone());
@@ -1221,10 +1231,18 @@ impl Apps {
                 }
             }
         }
+        // On a runtime the nodes share, what runs stays for the next owner to keep (stopping it
+        // here could stop what it just kept: a handoff's release can come after its take);
+        // otherwise it stops, as nobody else can reach it.
         let lives: Vec<_> = self.lives().into_iter().filter(|l| l.service == service).collect();
+        let shared = self.deps.runtime.shares_instances();
         for l in lives {
             self.lives.lock().remove(&crate::env_key(&l.service, &l.env));
-            l.shutdown().await;
+            if shared {
+                l.let_go().await;
+            } else {
+                l.shutdown().await;
+            }
         }
     }
 

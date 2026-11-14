@@ -700,9 +700,17 @@ The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`,
   restart costs visitors no cold start. Docker checks the container runs and reads its port;
   Fargate takes a task `list` found from another process (its newest RUNNING one, its private
   address; any other task of that name stops), so a sleep or a scale-in stops it as any other.
-  Anything else of the service's (older deployments, jobs, one that doesn't answer) is removed
-  (`a_takeover_keeps_the_instances_the_dead_owner_ran`, two nodes on one runtime;
-  `fargate.rs::a_restart_keeps_the_running_task`, on the fake ECS). Deploys in flight on a lost
+  Only a web service's or a worker's, of the deployment its label or tag names (a cron run's or
+  a job's container is `…-run<n>`, never kept); a frozen one is kept asleep with nothing asked of
+  it, a TCP service is checked by its port accepting, an HTTP one by an answer; new names start
+  past every one seen. Anything else of the service's (older deployments, jobs, one that doesn't
+  answer) is removed, and so is all of it if the environment can't be loaded. On a runtime the
+  nodes share (Fargate), a node giving a service up (a handoff, or fenced) lets its instances go
+  untouched (`EnvLive::let_go`), so it never stops what the next owner just kept
+  (`a_takeover_keeps_the_instances_the_dead_owner_ran` and
+  `a_handoff_on_a_shared_runtime_keeps_the_instances`, two nodes on one runtime;
+  `fargate.rs::a_restart_keeps_the_running_task`, on the fake ECS; an independent review found
+  the job, handoff, TCP-probe and naming cases). Deploys in flight on a lost
   node fail and are retried once by the new owner (builds are idempotent: same revision, same
   image tag).
 - Every catalog write that belongs to a service is a `code_sql` write closure; the switch of an

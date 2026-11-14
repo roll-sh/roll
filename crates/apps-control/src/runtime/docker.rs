@@ -495,13 +495,18 @@ impl Runtime for Docker {
         Ok(port.map(|p| SocketAddr::from(([127, 0, 0, 1], p))))
     }
 
-    async fn adopt(&self, spec: &InstanceSpec, log: LogSink) -> Option<Option<SocketAddr>> {
-        if !self.running(&spec.name).await {
+    async fn adopt(&self, spec: &InstanceSpec, log: LogSink) -> Option<super::Adopted> {
+        // Running (or frozen), and of the deployment its name says.
+        let fmt = format!("{{{{.State.Running}}}} {{{{.State.Paused}}}} {{{{index .Config.Labels \"{LABEL}.deployment\"}}}}");
+        let out = docker(&["inspect", "-f", &fmt, &spec.name]).await.ok()?;
+        let mut f = out.split_whitespace();
+        let (running, paused, deployment) = (f.next()? == "true", f.next()? == "true", f.next().unwrap_or(""));
+        if !running || deployment != spec.deployment {
             return None;
         }
         let (_, port) = self.id_and_port(&spec.name).await.ok()?;
         self.follow_logs(&spec.name, chrono::Utc::now(), log.stream(Stream::Stdout), log.stream(Stream::Stderr));
-        Some(port.map(|p| SocketAddr::from(([127, 0, 0, 1], p))))
+        Some(super::Adopted { addr: port.map(|p| SocketAddr::from(([127, 0, 0, 1], p))), paused })
     }
 
     async fn settle(&self, name: &str) {

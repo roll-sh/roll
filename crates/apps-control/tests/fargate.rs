@@ -294,6 +294,10 @@ async fn execute(f: Fake, arn: String, n: u32, req: Value) {
     // The port nodes reach: the one mapped (the guard's, which forwards to the app; this fake
     // serves it directly).
     let port = def["containerDefinitions"].as_array().unwrap().iter().find_map(|c| c["portMappings"][0]["containerPort"].as_u64());
+    // Unique in the process (worlds run at once, each counting its own tasks from 1).
+    static ADDRS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let _ = n;
+    let n = ADDRS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let ip = format!("127.{}.{}.{}", 64 + (std::process::id() % 60), n / 250, 1 + n % 250);
     set(&f, &arn, |t| {
         t["lastStatus"] = json!("RUNNING");

@@ -643,13 +643,15 @@ impl Runtime for Fargate {
 
     /// A task `list` found from another process (a node that died): its newest one that's
     /// RUNNING becomes this instance's, its log followed from now; the rest of its tasks stop.
-    async fn adopt(&self, spec: &InstanceSpec, log: LogSink) -> Option<Option<SocketAddr>> {
+    async fn adopt(&self, spec: &InstanceSpec, log: LogSink) -> Option<super::Adopted> {
         let arns = self.found.lock().get(&spec.name).cloned()?;
+        // The newest RUNNING one of the deployment its name says.
         let mut keep: Option<(String, Task)> = None;
         for arn in &arns {
             if let Ok(Some(t)) = self.describe(arn).await
                 && t.last_status() == Some("RUNNING")
-                && keep.is_none()
+                && tag(&t, "sh.roll.apps.deployment") == Some(spec.deployment.as_str())
+                && keep.as_ref().is_none_or(|(_, k)| t.started_at() > k.started_at())
             {
                 keep = Some((arn.clone(), t));
             }
@@ -669,7 +671,11 @@ impl Runtime for Fargate {
         if let Some(me) = self.me.upgrade() {
             tokio::spawn(me.follow(arn, log, drained_tx));
         }
-        Some(addr)
+        Some(super::Adopted { addr, paused: false })
+    }
+
+    fn shares_instances(&self) -> bool {
+        true
     }
 
     async fn running(&self, name: &str) -> bool {
