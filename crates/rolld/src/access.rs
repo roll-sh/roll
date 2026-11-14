@@ -76,6 +76,21 @@ pub fn api_url(args: &crate::Args) -> String {
     args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())).trim_end_matches('/').to_string()
 }
 
+/// `ROLL_TRUSTED_PROXIES`: CIDRs or addresses (a /32 or /128), comma separated. A wrong entry
+/// stops rolld, so a typo never quietly means "trust nobody's header" or worse.
+fn trusted_proxies() -> anyhow::Result<Vec<ipnet::IpNet>> {
+    let Ok(v) = std::env::var("ROLL_TRUSTED_PROXIES") else { return Ok(Vec::new()) };
+    let mut out = Vec::new();
+    for entry in v.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let net = entry.parse::<ipnet::IpNet>().or_else(|_| entry.parse::<std::net::IpAddr>().map(ipnet::IpNet::from)).map_err(|_| anyhow::anyhow!("ROLL_TRUSTED_PROXIES: {entry:?} isn't an address or a CIDR"))?;
+        out.push(net);
+    }
+    if !out.is_empty() && !crate::auth::edge() {
+        tracing::warn!("ROLL_TRUSTED_PROXIES is set without ROLL_EDGE: X-Forwarded-For isn't read, so it has no effect");
+    }
+    Ok(out)
+}
+
 pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth, products: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> anyhow::Result<Arc<Access>> {
     let target = match args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty()) {
         Some(url) => code_sql::Target::Postgres { url: url.to_string(), schema: "access".into() },
@@ -89,7 +104,7 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
         audit_days: std::env::var("ROLL_ACCESS_AUDIT_DAYS").ok().and_then(|d| d.parse().ok()).filter(|d| *d > 0).unwrap_or(90),
         trust_forwarded_for: crate::auth::edge(),
         // The edge's own addresses (the load balancer's subnets): X-Forwarded-For only from them.
-        trusted_proxies: std::env::var("ROLL_TRUSTED_PROXIES").ok().map(|v| v.split(',').filter_map(|c| c.trim().parse().ok()).collect()).unwrap_or_default(),
+        trusted_proxies: trusted_proxies()?,
         metadata_allow_private: std::env::var("ROLL_ACCESS_METADATA_ALLOW_PRIVATE").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes")),
         ..Default::default()
     };

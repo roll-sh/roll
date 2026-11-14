@@ -278,12 +278,9 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     }
     // The client's address as the gate sees it (behind roll's edge, the forwarded one): tool
     // calls carry it, for IP allowlists and the audit log.
-    let trust = m.config.access.as_ref().is_some_and(|a| a.config.trust_forwarded_for);
-    let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.split(',').next()).and_then(|v| v.trim().parse().ok());
-    let ip = match (trust, forwarded) {
-        (true, Some(ip)) => Some(ip),
-        _ => ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip()),
-    };
+    // The gate worked it out (trusted proxies, the edge) and left it on a token's request; the
+    // operator's is the connection's own (behind the edge, the client's).
+    let ip = ext.get::<roll_auth::ClientIp>().map(|c| c.0).or_else(|| ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_canonical()));
     // A user's own token (the gate signed them in): only the products their account reaches.
     let as_user = ext.get::<roll_auth::SignedIn>().is_some_and(|u| !u.admin);
     // Whether the client opens URLs for elicitation: from `initialize` in this message, else the
