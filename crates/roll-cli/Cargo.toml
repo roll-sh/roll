@@ -32,6 +32,7 @@ chrono.workspace = true
 chrono-tz.workspace = true
 getrandom.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 nosql-engine = { workspace = true, optional = true }
 nosql-proto = { workspace = true, features = ["client"] }
 nosql-server = { workspace = true, optional = true }
