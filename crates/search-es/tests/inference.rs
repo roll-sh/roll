@@ -41,7 +41,10 @@ fn answer(path: &str, body: &Value) -> (u16, String, String) {
             .iter()
             .enumerate()
             .map(|(i, t)| {
-                let floats = [t.len() as f32, 0.5, -0.25];
+                // Unit length, as OpenAI's are (its endpoints default to `dot_product`).
+                let raw = [t.len() as f32, 0.5, -0.25];
+                let norm = raw.iter().map(|v| v * v).sum::<f32>().sqrt();
+                let floats = raw.map(|v| v / norm);
                 let raw: Vec<u8> = floats.iter().flat_map(|f| f.to_le_bytes()).collect();
                 format!(r#"{{"object":"embedding","index":{i},"embedding":"{}"}}"#, base64::engine::general_purpose::STANDARD.encode(raw))
             })
@@ -166,7 +169,10 @@ async fn openai_endpoints_embed_complete_and_stream_without_showing_their_key() 
 
     let (s, v, _) = call(&c, "POST", "/_inference/text_embedding/emb", r#"{"input":["ab","abcd"]}"#).await;
     assert_eq!(s, 200);
-    assert_eq!(v.to_json(), r#"{"text_embedding":[{"embedding":[2.0,0.5,-0.25]},{"embedding":[4.0,0.5,-0.25]}]}"#);
+    let first = v.pointer(&["text_embedding"]).and_then(|a| a.as_array()).map(|a| a.len());
+    assert_eq!(first, Some(2), "{v:?}");
+    let e = v.pointer(&["text_embedding"]).unwrap().as_array().unwrap()[0].get("embedding").unwrap().as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect::<Vec<_>>();
+    assert!((e[0] - 0.96308684).abs() < 1e-6 && e.len() == 3, "{e:?}");
     seen(&log);
 
     let put = format!(r#"{{"service":"openai","service_settings":{{"api_key":"sk-2","model_id":"gpt","url":"{m}/v1/chat/completions"}}}}"#);
@@ -247,4 +253,66 @@ async fn the_test_plugin_services_exist_only_on_test_clusters() {
     // rounds all five to the same float).
     let (_, v, _) = call(&c, "POST", "/_inference/sparse", r#"{"input":"hello"}"#).await;
     assert_eq!(v.pointer(&["sparse_embedding"]).unwrap().to_json(), r#"[{"is_truncated":false,"embedding":{"feature_0":9.916232E7,"feature_1":9.916232E7,"feature_2":9.916232E7,"feature_3":9.916232E7,"feature_4":9.916232E7}}]"#);
+}
+
+async fn call_as(c: &Cluster, auth: &str, method: &str, uri: &str, body: &str) -> (u16, Value, String) {
+    let mut r = if body.is_empty() { EsRequest::new(method, uri) } else { EsRequest::json(method, uri, body.to_string()) };
+    if body.contains('\n') {
+        r.headers = vec![("content-type".into(), "application/x-ndjson".into())];
+    }
+    r.headers.push(("authorization".into(), format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(auth))));
+    let resp = search_es::handle(c, r).await;
+    let text = String::from_utf8_lossy(&resp.body).into_owned();
+    (resp.status, resp.body_json(), text)
+}
+
+/// A writer with only index privileges embeds and searches `semantic_text` fields (the cluster
+/// calls the endpoint, as Elasticsearch's inference filter and semantic query do), while the
+/// inference API itself stays closed to it. A bulk request embeds all its documents in one call;
+/// an update re-embeds only text it changed.
+#[tokio::test]
+async fn semantic_text_is_embedded_in_batches_and_searchable_by_a_writer_without_inference_privileges() {
+    let (m, log) = mock().await;
+    let c = cluster(&m, &[]).await;
+    let put = format!(r#"{{"service":"openai","service_settings":{{"api_key":"sk","model_id":"emb","url":"{m}/v1/embeddings"}}}}"#);
+    assert_eq!(call(&c, "PUT", "/_inference/text_embedding/emb", &put).await.0, 200);
+    assert_eq!(call(&c, "PUT", "/docs", r#"{"mappings":{"properties":{"body":{"type":"semantic_text","inference_id":"emb"},"tag":{"type":"keyword"}}}}"#).await.0, 200);
+    let role = r#"{"indices":[{"names":["docs"],"privileges":["read","write"]}]}"#;
+    assert_eq!(call(&c, "PUT", "/_security/role/docs_writer", role).await.0, 200);
+    assert_eq!(call(&c, "PUT", "/_security/user/w", r#"{"password":"writer-pass-1","roles":["docs_writer"]}"#).await.0, 200);
+    seen(&log);
+    let w = "w:writer-pass-1";
+
+    let bulk = "{\"index\":{\"_index\":\"docs\",\"_id\":\"1\"}}\n{\"body\":\"ab\",\"tag\":\"x\"}\n{\"index\":{\"_index\":\"docs\",\"_id\":\"2\"}}\n{\"body\":\"abcd\",\"tag\":\"y\"}\n";
+    let (s, v, _) = call_as(&c, w, "POST", "/_bulk?refresh=true", bulk).await;
+    assert_eq!((s, v.get("errors").and_then(Value::as_bool)), (200, Some(false)), "{v:?}");
+    let calls = seen(&log);
+    assert_eq!(calls.len(), 1, "one call for the whole bulk");
+    assert_eq!(calls[0].body.get("input").map(Value::to_json).as_deref(), Some(r#"["ab","abcd"]"#));
+
+    // Embeddings are left out of `_source` unless asked for.
+    let (_, v, _) = call_as(&c, w, "GET", "/docs/_doc/1", "").await;
+    assert!(v.pointer(&["_source", "_inference_fields"]).is_none(), "{v:?}");
+    let (_, v, _) = call_as(&c, w, "POST", "/docs/_search", r#"{"_source":{"exclude_vectors":false},"query":{"ids":{"values":["1"]}}}"#).await;
+    let chunk = v.pointer(&["hits", "hits"]).and_then(|h| h.as_array()).and_then(|h| h.first()).and_then(|h| h.pointer(&["_source", "_inference_fields", "body", "inference", "chunks", "body"]));
+    let chunk = chunk.and_then(Value::as_array).and_then(|c| c.first()).unwrap();
+    assert_eq!((chunk.get("start_offset").and_then(Value::as_i64), chunk.get("end_offset").and_then(Value::as_i64)), (Some(0), Some(2)));
+    assert_eq!(chunk.get("embeddings").and_then(Value::as_array).map(Vec::len), Some(3));
+
+    // The query text is embedded once; the closer document ranks first.
+    let (s, v, _) = call_as(&c, w, "POST", "/docs/_search", r#"{"query":{"semantic":{"field":"body","query":"wxyz"}}}"#).await;
+    assert_eq!(s, 200, "{v:?}");
+    let ids: Vec<String> = v.pointer(&["hits", "hits"]).and_then(|h| h.as_array()).unwrap().iter().map(|h| h.get("_id").unwrap().to_es_string()).collect();
+    assert_eq!(ids, vec!["2", "1"]);
+    assert_eq!(seen(&log).len(), 1);
+
+    // An update that keeps the text keeps its embeddings; one that changes it re-embeds.
+    assert_eq!(call_as(&c, w, "POST", "/docs/_update/1", r#"{"doc":{"tag":"z"}}"#).await.0, 200);
+    assert!(seen(&log).is_empty());
+    assert_eq!(call_as(&c, w, "POST", "/docs/_update/1", r#"{"doc":{"body":"abc"}}"#).await.0, 200);
+    assert_eq!(seen(&log).len(), 1);
+
+    // The inference API needs its own privileges.
+    let (s, _, _) = call_as(&c, w, "POST", "/_inference/emb", r#"{"input":"hi"}"#).await;
+    assert_eq!(s, 403);
 }
