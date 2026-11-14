@@ -387,7 +387,7 @@ export interface PreviewEnvironment {
     required: boolean;
     head?: string;
     /** Each page that differs (`path` `""`: the first page) and who accepted it at this head. */
-    pages?: { path: string; percent: number; by: string | null }[];
+    pages?: { path: string; percent: number; by: string | null; unstable?: boolean }[];
   };
   /** What a screen reader can't name on that page. */
   page_links?: { checked: number; broken: { path: string; status: number }[] };

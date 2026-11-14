@@ -164,7 +164,7 @@ impl CodeSource {
                     by: v.by.clone(),
                     required: v.required,
                     head: Some(v.head.clone()).filter(|h| !h.is_empty()),
-                    pages: v.pages.iter().map(|p| code_control::model::PreviewPageReview { path: p.path.clone(), percent: (p.percent * 10.0).round() / 10.0, by: p.by.clone() }).collect(),
+                    pages: v.pages.iter().map(|p| code_control::model::PreviewPageReview { path: p.path.clone(), percent: (p.percent * 10.0).round() / 10.0, by: p.by.clone(), unstable: p.unstable }).collect(),
                 }),
                 page_a11y: p.page_a11y.as_ref().map(|a| code_control::model::PreviewPageA11y {
                     issues: a.issues.iter().map(|i| code_control::model::PreviewA11yIssue { kind: i.kind.clone(), count: i.count, first: i.first.clone(), impact: i.impact.clone(), help: i.help.clone() }).collect(),

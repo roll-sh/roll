@@ -292,6 +292,15 @@ const still = async (sessionId) => {
   await send("Runtime.evaluate", { expression: STILL }, sessionId).catch(() => null);
   await sleep(100);
 };
+// Whether the page moves by itself (Argos's and Chromatic's flake detection): a second capture a
+// second after the first, stilled as it was. Chrome encodes the same pixels the same way, so
+// different data is a page that changed with nobody touching it (a clock, a carousel, an
+// animation `hide` didn't name), and a visual change there may be only that.
+const moves = async (sessionId, first) => {
+  await sleep(1000);
+  const again = await send("Page.captureScreenshot", { format: "png" }, sessionId).catch(() => null);
+  return !!again && again.data !== first.data;
+};
 (async () => {
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
@@ -313,6 +322,7 @@ const still = async (sessionId) => {
   try {
     report = JSON.parse(speed?.result?.value || "{}");
   } catch {}
+  report.unstable = await moves(sessionId, shot);
   // Copies: what's caught later (the link check's own requests, other pages) isn't this page's.
   report.errors = errors.slice();
   report.failed = failed.slice();
@@ -367,7 +377,7 @@ const still = async (sessionId) => {
       await still(sessionId);
       const shot = await send("Page.captureScreenshot", { format: "png" }, sessionId);
       fs.writeFileSync(`${process.env.OUT}.${n}.png`, Buffer.from(shot.data, "base64"));
-      const page = { path, errors: errors.length + failed.length - before };
+      const page = { path, errors: errors.length + failed.length - before, unstable: await moves(sessionId, shot) };
       // The same checks as the first page's, each bounded in time.
       const value = async (expression, wait) => {
         const r = await Promise.race([check({ expression, awaitPromise: !!wait, returnByValue: true }, sessionId), sleep(wait || 5000).then(() => null)]);

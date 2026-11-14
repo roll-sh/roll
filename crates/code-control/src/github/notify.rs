@@ -466,13 +466,24 @@ fn review_line(v: &crate::model::PreviewVisualReview, dashboard: Option<&str>) -
     let link = dashboard.filter(|u| (u.starts_with("https://") || u.starts_with("http://")) && !u.contains([')', ' ', '\n'])).map(|u| format!(" [Review it in roll]({u})")).unwrap_or_default();
     match v.state.as_str() {
         "changed" => Some(format!(
-            "**Visual review:** its pages differ from `{branch}` by {:.1}%{}{}.{link}\n\n",
+            "**Visual review:** its pages differ from `{branch}` by {:.1}%{}{}.{link}\n\n{}",
             v.percent.max(0.1),
             v.partly().map(|(done, all)| format!(" ({done} of {all} accepted)")).unwrap_or_default(),
-            if v.required { ", and it can't land until someone accepts them" } else { "" }
+            if v.required { ", and it can't land until someone accepts them" } else { "" },
+            unstable_line(v),
         )),
         "accepted" => Some(format!("Visual review: accepted by {by}.\n\n")),
         _ => None,
+    }
+}
+
+/// The pages under review that move by themselves (Argos's flaky screenshots): their difference
+/// may be only that, and `github.hide` can name what moves.
+fn unstable_line(v: &crate::model::PreviewVisualReview) -> String {
+    let moving: Vec<String> = v.pages.iter().filter(|p| p.unstable && p.by.is_none()).map(|p| if p.path.is_empty() { "the first page".to_string() } else { format!("`{}`", p.path.replace('`', "'")) }).collect();
+    match moving.len() {
+        0 => String::new(),
+        _ => format!("{} moves by itself (two captures a second apart differ), so the difference may be only that: `github.hide` can blank what moves.\n\n", moving.join(", ")),
     }
 }
 
@@ -1005,8 +1016,9 @@ mod preview_tests {
         let review = |state: &str, by: Option<&str>| crate::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.04, by: by.map(Into::into), required: false, head: None, pages: Vec::new() };
         assert_eq!(visual_status(&review("changed", None)), ("pending", "Differs from main by 8.0%: accept it in roll".into()));
         let mut partly = review("changed", None);
-        partly.pages = [("", Some("ada")), ("/pricing", None)].map(|(path, by)| crate::model::PreviewPageReview { path: path.into(), percent: 8.0, by: by.map(Into::into) }).to_vec();
+        partly.pages = [("", Some("ada")), ("/pricing", None)].map(|(path, by)| crate::model::PreviewPageReview { path: path.into(), percent: 8.0, by: by.map(Into::into), unstable: path == "/pricing" }).to_vec();
         assert_eq!(visual_status(&partly), ("pending", "Differs from main by 8.0%: 1 of 2 pages accepted, accept the rest in roll".into()));
+        assert!(review_line(&partly, None).unwrap().ends_with("`/pricing` moves by itself (two captures a second apart differ), so the difference may be only that: `github.hide` can blank what moves.\n\n"), "a page that moves is said to");
         assert_eq!(visual_status(&review("accepted", Some("ada"))), ("success", "Accepted by ada: differs from main by 8.0%".into()));
         assert_eq!(visual_status(&review("unchanged", None)).0, "success");
         assert_eq!(

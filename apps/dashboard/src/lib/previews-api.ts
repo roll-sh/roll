@@ -112,7 +112,7 @@ export interface Preview {
     required: boolean;
     head: string;
     /** Each page that differs (`path` `""`: the first page) and who accepted it at this head: the change is accepted once every one is. */
-    pages: { path: string; percent: number; by: string | null; at: number | null }[];
+    pages: { path: string; percent: number; by: string | null; at: number | null; unstable?: boolean }[];
   } | null;
   /** It also has a phone-width screenshot. */
   phone_screenshot?: boolean;
