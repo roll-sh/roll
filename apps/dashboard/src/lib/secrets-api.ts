@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, Finding, ProjectFindings, SyncPreview, FileDiff } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, FolderPolicy, Finding, ProjectFindings, SyncPreview, FileDiff } from "@roll/secrets/types";
 import { withSession } from "./code-token";
 import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 
@@ -105,6 +105,9 @@ export function secretsApi(project: string) {
     deleteEnvironment: (env: string, confirm?: string) => req<null>("DELETE", `${E(env)}${qs({ confirm })}`),
     /** `notify_url`: where opened change requests are announced (null stops it, absent keeps it). */
     policy: (env: string, p: { protected: boolean; approvals?: number; approvers?: string[]; notify_url?: string | null }) => req<Environment>("PUT", `${E(env)}/policy`, p),
+    folderPolicies: (env: string) => req<FolderPolicy[]>("GET", `${E(env)}/folder-policies`),
+    setFolderPolicy: (env: string, path: string, p: { approvals?: number; approvers?: string[] } = {}) => req<FolderPolicy>("PUT", `${E(env)}/folder-policies${qs({ path })}`, p),
+    deleteFolderPolicy: (env: string, path: string) => req<null>("DELETE", `${E(env)}/folder-policies${qs({ path })}`),
     /** Destroys older versions' values of a key (all but the current one by default). */
     purge: (env: string, key: string, path = "/", before_version?: number) => req<{ purged: number }>("POST", `${K(env, key)}/purge${qs({ path })}`, before_version ? { before_version } : {}),
     /** How long old values are kept (null: for good). */

@@ -533,6 +533,34 @@ async fn protected_environments_take_change_requests_that_another_principal_appr
     assert_eq!((p["change"].clone(), p["request"]["state"].as_str()), (Value::Null, Some("open")));
     api.ok(Method::POST, &format!("/environments/production/requests/{}/apply", p["request"]["id"].as_str().unwrap()), Some(json!({ "bypass": true }))).await;
     assert_eq!(api.values("production", "/").await["values"]["KEY"], "from-staging");
+    // A folder's own change policy, in an environment that isn't protected: its keys change only
+    // through approved requests; the rest of the environment as before.
+    api.ok(Method::PUT, "/environments/staging/folder-policies?path=/payments", Some(json!({ "approvals": 1 }))).await;
+    let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/STRIPE?path=/payments/eu", Some(json!({ "value": "sk_1" }))).await;
+    assert!(s == StatusCode::CONFLICT && e["code"] == "approval_required" && e["error"].as_str().unwrap().contains("/payments"), "{e}");
+    api.ok(Method::PUT, "/environments/staging/secrets/OTHER", Some(json!({ "value": "free" }))).await;
+    let r = api.ok(Method::POST, "/environments/staging/requests", Some(json!({ "path": "/payments/eu", "ops": [{ "op": "set", "key": "STRIPE", "value": "sk_1" }] }))).await;
+    assert_eq!(r["gates"], json!([{ "path": "/payments", "approvals": 1, "approved": 0 }]));
+    let id = r["id"].as_str().unwrap();
+    let (s, r) = api.req(Method::POST, &format!("/environments/staging/requests/{id}/review"), Some(json!({ "verdict": "approve" })), reviewer["token"].as_str()).await;
+    assert_eq!((s, r["state"].as_str()), (StatusCode::OK, Some("approved")));
+    api.ok(Method::POST, &format!("/environments/staging/requests/{id}/apply"), None).await;
+    assert_eq!(api.values("staging", "/payments/eu").await["values"]["STRIPE"], "sk_1");
+    // Protected as well: an admin of /payments only approves for its folder's gate, never for the
+    // environment's.
+    api.ok(Method::PUT, "/environments/staging/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    let folder_admin = api.ok(Method::POST, "/tokens", Some(json!({ "name": "payments", "environments": ["staging"], "paths": ["/payments"], "actions": ["read", "write", "admin"] }))).await;
+    let r = api.ok(Method::POST, "/environments/staging/requests", Some(json!({ "path": "/payments/eu", "ops": [{ "op": "set", "key": "STRIPE", "value": "sk_2" }] }))).await;
+    let id = r["id"].as_str().unwrap();
+    let (s, r) = api.req(Method::POST, &format!("/environments/staging/requests/{id}/review"), Some(json!({ "verdict": "approve" })), folder_admin["token"].as_str()).await;
+    assert_eq!((s, r["state"].as_str()), (StatusCode::OK, Some("open")), "{r}");
+    assert_eq!(r["gates"].as_array().unwrap().iter().map(|g| g["approved"].as_i64().unwrap()).collect::<Vec<_>>(), [0, 1], "the environment's gate, then /payments'");
+    api.ok(Method::PUT, "/environments/staging/policy", Some(json!({ "protected": false }))).await;
+    // Nor by deleting the folder, or one above it.
+    for folder in ["/payments", "/payments/eu"] {
+        let (s, e) = api.call(Method::DELETE, &format!("/environments/staging/folders?path={folder}"), None).await;
+        assert!(s == StatusCode::CONFLICT && e["code"] == "approval_required", "{folder}: {e}");
+    }
 }
 
 #[tokio::test]

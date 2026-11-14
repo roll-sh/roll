@@ -10,6 +10,7 @@
 //! closure that only touches the database; providers (issuing and revoking credentials) are
 //! called outside it. [`api::router`] serves it under `/v1/secrets`.
 
+pub mod folder_policy;
 pub mod access;
 mod alerts;
 pub mod api;
@@ -350,6 +351,7 @@ impl Secrets {
         db.ensure_schema(shares::SCHEMA)?;
         db.ensure_schema(syncs::SCHEMA)?;
         db.ensure_schema(sinks::SCHEMA)?;
+        db.ensure_schema(folder_policy::SCHEMA)?;
         // The references in a value (`staging.DB_URL`), so listings decrypt nothing; NULL for rows
         // written before it, which are decrypted to find them.
         db.add_column("secrets", "refs", "TEXT")?;
@@ -477,6 +479,7 @@ impl Secrets {
                 c.execute("DELETE FROM folders WHERE env_id = ?", [e])?;
                 c.execute("DELETE FROM imports WHERE env_id = ? OR from_env_id = ?", [e, e])?;
                 c.execute("DELETE FROM exports WHERE env_id = ?", [e])?;
+                c.execute("DELETE FROM folder_policies WHERE env_id = ?", [e])?;
             }
             // What other projects shared with this one goes with it.
             c.execute("DELETE FROM exports WHERE to_project = ?", [project])?;

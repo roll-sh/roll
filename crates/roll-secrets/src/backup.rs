@@ -45,6 +45,9 @@ pub struct ArchivedEnvironment {
     pub max_age_days: Option<i64>,
     #[serde(default)]
     pub folders: Vec<String>,
+    /// Folders' own change policies: (path, approvals, approvers).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folder_policies: Vec<(String, i64, Vec<String>)>,
     /// By folder.
     #[serde(default)]
     pub imports: BTreeMap<String, Vec<Import>>,
@@ -125,6 +128,7 @@ impl Secrets {
                     approvers: e.approvers.clone(),
                     max_age_days: e.max_age_days,
                     folders,
+                    folder_policies: self.db.read(|c| crate::folder_policy::all(c, &e.id))?.into_iter().map(|p| (p.path, p.approvals, p.approvers)).collect(),
                     imports,
                     secrets: out,
                 });
@@ -226,6 +230,14 @@ impl Secrets {
             warnings.push(format!("required keys: {err}"));
         }
         // Protection last: it would turn the writes above into change requests.
+        for e in &order {
+            for (path, approvals, approvers) in &e.folder_policies {
+                let p = crate::folder_policy::SetFolderPolicy { approvals: Some(*approvals), approvers: Some(approvers.clone()) };
+                if let Err(err) = self.set_folder_policy(project, &e.slug, path, p, caller) {
+                    warnings.push(format!("{} {path} policy: {err}", e.slug));
+                }
+            }
+        }
         for e in order.iter().filter(|e| e.protected) {
             let p = envs::Policy { protected: true, approvals: Some(e.approvals), approvers: Some(e.approvers.clone()), notify_url: None };
             if let Err(err) = self.set_policy(project, &e.slug, p, caller) {
