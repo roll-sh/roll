@@ -424,6 +424,9 @@ async fn a_get_to_a_vanished_instance_goes_to_a_fresh_one() {
     let log = || w.apps.logs.follow(&format!("env:{}/production", svc["id"].as_str().unwrap()), 50).0.iter().map(|l| l.text.clone()).collect::<Vec<_>>();
     let (st, body) = visit(&w, &h, "/").await;
     assert_eq!(st, StatusCode::OK, "{body} {:?}", log());
+    // Production is indexed as the app says (roll adds no X-Robots-Tag there).
+    let r = w.public.clone().oneshot(Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap()).await.unwrap();
+    assert!(r.headers().get("x-robots-tag").is_none());
     let first = body["instance"].as_str().unwrap().to_string();
     w.fake.vanish(&first);
     let (st, body) = visit(&w, &h, "/").await;
@@ -631,15 +634,19 @@ async fn a_preview_environment_deploys_a_revision_and_tears_down() {
         }
         w.public.clone().oneshot(r.body(Body::empty()).unwrap())
     };
-    assert_eq!(get("/", None).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    // Never indexed (a public preview, a share link): roll's 401, the link's redirect, the app's.
+    let r = get("/", None).await.unwrap();
+    assert_eq!((r.status(), r.headers().get("x-robots-tag").and_then(|v| v.to_str().ok())), (StatusCode::UNAUTHORIZED, Some("noindex")));
     assert_eq!(get("/?roll_access=wrongwrongwrongwrongwrong", None).await.unwrap().status(), StatusCode::UNAUTHORIZED);
     let r = get(&format!("/pricing?roll_access={token}&plan=pro"), None).await.unwrap();
     assert_eq!(r.status(), StatusCode::FOUND);
+    assert_eq!(r.headers()["x-robots-tag"], "noindex");
     assert_eq!(r.headers()["location"], "/pricing?plan=pro", "the token leaves the URL");
     let set = r.headers()["set-cookie"].to_str().unwrap().to_string();
     assert!(set.starts_with(&format!("roll_access_pr-7={token};")) && set.contains("HttpOnly") && set.contains("SameSite=Lax") && !set.contains("Domain"), "{set}");
     let r = get("/pricing", Some(&format!("theme=dark; roll_access_pr-7={token}"))).await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers()["x-robots-tag"], "noindex");
     let body: Value = serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["cookie"], "theme=dark", "the app never sees the token");
     // An automation's bypass (CI's end-to-end tests): its header lets a request in, no cookie.

@@ -470,6 +470,10 @@ every deployment is immutable with instant rollback.
   (a CI run's end-to-end tests) can be let in with the project's bypass secret, as Vercel's
   protection bypass does: `X-Roll-Preview-Bypass: <secret>` on the request, only its SHA-256
   stored (`bypass_sha256`), the header never reaching the app.
+- **Never indexed**: every answer of a preview's (ephemeral) environment, and of a deployment's
+  own URL, carries `X-Robots-Tag: noindex`, whatever the app sets (Vercel's previews do the
+  same): the app's pages, roll's pages, the 401 and the access link's redirect. Production is
+  left as the app says.
 - **Custom domains**: the user adds `www.example.com`, points a CNAME at the service's
   `up.roll.site` name, and roll verifies it (the CNAME, or a `_roll-challenge.<host>` TXT with the
   domain's token for apex domains behind an ALIAS/flattening provider), checking pending ones

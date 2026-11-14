@@ -761,7 +761,14 @@ fn strip_roll_headers(h: &mut axum::http::HeaderMap) {
 /// answer metered.
 async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, req: Request) -> Response {
     let r = proxy_inner(apps.clone(), service, env, deployment, req).await;
-    their_page(&apps, service, env, r).await
+    let mut r = their_page(&apps, service, env, r).await;
+    // A preview's answers (and a deployment's own URL, a copy of what's live) are never indexed,
+    // whatever the app says (Vercel's): roll's pages, the 401 and the access link's redirect too.
+    let preview = apps.gate(&apps.live(service, env)).await.is_ok_and(|g| g.preview);
+    if deployment.is_some() || preview {
+        r.headers_mut().insert("x-robots-tag", HeaderValue::from_static("noindex"));
+    }
+    r
 }
 
 async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, mut req: Request) -> Response {
