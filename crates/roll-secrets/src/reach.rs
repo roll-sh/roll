@@ -83,7 +83,7 @@ impl Secrets {
             .filter(|t| t.expires_at.is_none_or(|e| e > now))
             .filter_map(|t| {
                 let actions = here(project, &t.environments, &t.paths, &t.actions, slug, &path);
-                (!actions.is_empty()).then(|| Holder { id: t.id, name: t.name, actions, expires_at: t.expires_at, last_used_at: t.last_used_at, created_by: t.created_by })
+                (!actions.is_empty()).then_some(Holder { id: t.id, name: t.name, actions, expires_at: t.expires_at, last_used_at: t.last_used_at, created_by: t.created_by })
             })
             .collect();
         let identities = self
@@ -91,7 +91,7 @@ impl Secrets {
             .into_iter()
             .filter_map(|i| {
                 let actions = here(project, &i.environments, &i.paths, &i.actions, slug, &path);
-                (!actions.is_empty()).then(|| Holder { id: i.id, name: format!("{} ({} {})", i.name, i.issuer, i.subject), actions, expires_at: None, last_used_at: i.last_used_at, created_by: i.created_by })
+                (!actions.is_empty()).then_some(Holder { id: i.id, name: format!("{} ({} {})", i.name, i.issuer, i.subject), actions, expires_at: None, last_used_at: i.last_used_at, created_by: i.created_by })
             })
             .collect();
         let syncs = self
